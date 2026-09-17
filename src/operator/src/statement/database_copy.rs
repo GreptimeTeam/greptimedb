@@ -21,7 +21,7 @@ use common_datasource::object_store::FILE_SCHEMA;
 use common_datasource::object_store::{FS_SCHEMA, parse_url};
 use common_stat::get_total_cpu_cores;
 use session::context::QueryContextRef;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use table::TableRef;
 use table::metadata::TableType;
@@ -59,7 +59,7 @@ pub(super) fn parse_parallelism_from_option_map(options: &HashMap<String, String
         .max(1)
 }
 
-pub(super) fn validate_export_directory(location: &str) -> Result<()> {
+pub(super) fn validate_database_directory(location: &str) -> Result<()> {
     ensure!(
         is_directory_location(location),
         error::InvalidCopyDatabasePathSnafu { value: location }
@@ -130,6 +130,40 @@ impl DatabaseExportFile {
     }
 }
 
+/// Resolve a listed writer key back to its table name and COPY input location.
+pub(super) fn database_import_source(directory: &str, path: &str) -> Result<(String, String)> {
+    let mut filename = path.rsplit('/').next().unwrap_or(path).to_string();
+    let mut location = format!("{directory}{path}");
+    #[cfg(windows)]
+    let literal_path = common_datasource::object_store::handle_windows_path(directory).is_some();
+    #[cfg(not(windows))]
+    let literal_path = false;
+    if !literal_path && let Ok(mut url) = Url::parse(directory) {
+        if url.scheme().eq_ignore_ascii_case(FILE_SCHEMA) {
+            url.path_segments_mut()
+                .map_err(|_| error::InvalidCopyDatabasePathSnafu { value: directory }.build())?
+                .pop_if_empty()
+                .extend(path.split('/'));
+        } else {
+            // Listed object keys already contain the export URL's escaping.
+            url.set_path(&format!("{}{path}", url.path()));
+            filename = percent_encoding::percent_decode_str(&filename)
+                .decode_utf8()
+                .ok()
+                .context(error::InvalidTableNameSnafu { table_name: path })?
+                .into_owned();
+        }
+        location = url.into();
+    }
+    let table_name = filename
+        .rsplit_once('.')
+        .map(|(stem, _)| stem)
+        .filter(|stem| !stem.is_empty())
+        .context(error::InvalidTableNameSnafu { table_name: path })?
+        .to_string();
+    Ok((table_name, location))
+}
+
 impl StatementExecutor {
     /// Capture each selected data table once. Views, temporary and Metric physical
     /// tables do not have data outputs. `None` selects the whole schema.
@@ -186,10 +220,10 @@ mod tests {
             "s3://bucket/fresh#attempt/",
             "file:///copy/fresh",
         ] {
-            assert!(validate_export_directory(location).is_err(), "{location}");
+            assert!(validate_database_directory(location).is_err(), "{location}");
         }
         for location in ["/copy/fresh/", "file:///copy/fresh/", "s3://bucket/fresh/"] {
-            validate_export_directory(location).unwrap();
+            validate_database_directory(location).unwrap();
         }
     }
 
@@ -197,9 +231,9 @@ mod tests {
     #[test]
     fn windows_directory_names_are_literal_paths() {
         for location in ["C:/copy/fresh#1/", r"C:\copy\fresh#1\"] {
-            validate_export_directory(location).unwrap();
+            validate_database_directory(location).unwrap();
         }
-        assert!(validate_export_directory("C:/copy/fresh#1").is_err());
+        assert!(validate_database_directory("C:/copy/fresh#1").is_err());
     }
 
     #[tokio::test]
@@ -229,6 +263,18 @@ mod tests {
                         .await
                         .unwrap();
                 assert_eq!(backend.object_path.as_deref(), Some(file.path.as_str()));
+                let (table_name, input_location) =
+                    database_import_source(&directory, &file.path).unwrap();
+                assert_eq!(table_name, name);
+                assert_eq!(input_location, file.location);
+                let (table_name, nested_location) =
+                    database_import_source(&directory, &format!("nested/{}", file.path)).unwrap();
+                assert_eq!(table_name, name);
+                assert_eq!(
+                    nested_location,
+                    file.location
+                        .replace(&directory, &format!("{directory}nested/"))
+                );
                 if !directory.starts_with("s3:") {
                     backend
                         .object_store

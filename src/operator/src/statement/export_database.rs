@@ -34,7 +34,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
-    DatabaseExportFile, parse_parallelism_from_option_map, validate_export_directory,
+    DatabaseExportFile, parse_parallelism_from_option_map, validate_database_directory,
 };
 use crate::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
 
@@ -68,7 +68,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        validate_export_directory(&req.location)?;
+        validate_database_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(
             matches!(format, Format::Parquet(_)),

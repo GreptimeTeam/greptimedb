@@ -10140,6 +10140,7 @@ dependencies = [
  "object-store",
  "partition",
  "path-slash",
+ "percent-encoding",
  "prometheus 0.14.0",
  "prost 0.14.1",
  "prost-types 0.14.1",

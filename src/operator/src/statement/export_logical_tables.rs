@@ -144,12 +144,6 @@ impl LogicalTableExport {
             let info = table.table_info();
             let name = &info.name;
             ensure!(
-                !name.contains('/') && !name.contains('\\'),
-                InvalidLogicalTableExportSnafu {
-                    reason: "logical table names must not contain path separators"
-                }
-            );
-            ensure!(
                 info.catalog_name == physical_info.catalog_name
                     && info.schema_name == physical_info.schema_name
                     && info.meta.engine == METRIC_ENGINE_NAME

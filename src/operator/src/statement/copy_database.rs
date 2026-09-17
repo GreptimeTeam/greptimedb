@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -26,16 +25,15 @@ use futures::future::try_join_all;
 use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::ResultExt;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
 use tokio::sync::Semaphore;
 
 use crate::error;
-use crate::error::InvalidCopyDatabasePathSnafu;
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
-    DatabaseExportFile, is_directory_location, parse_parallelism_from_option_map,
-    validate_export_directory,
+    DatabaseExportFile, database_import_source, parse_parallelism_from_option_map,
+    validate_database_directory,
 };
 
 pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
@@ -49,7 +47,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        validate_export_directory(&req.location)?;
+        validate_database_directory(&req.location)?;
         build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
@@ -115,13 +113,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        // Location must end with a directory separator.
-        ensure!(
-            is_directory_location(&req.location),
-            InvalidCopyDatabasePathSnafu {
-                value: req.location,
-            }
-        );
+        validate_database_directory(&req.location)?;
 
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
@@ -144,8 +136,8 @@ impl StatementExecutor {
         let semaphore = Arc::new(Semaphore::new(parallelism));
 
         for e in entries {
-            let table_name = match parse_file_name_to_copy(&e) {
-                Ok(table_name) => table_name,
+            let (table_name, location) = match database_import_source(&req.location, e.path()) {
+                Ok(source) => source,
                 Err(err) => {
                     if continue_on_error {
                         error!(err; "Failed to import table from file: {:?}", e);
@@ -160,7 +152,7 @@ impl StatementExecutor {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
                 table_name: table_name.clone(),
-                location: format!("{}{}", req.location, e.path()),
+                location,
                 with: req.with.clone(),
                 connection: req.connection.clone(),
                 pattern: None,
@@ -205,17 +197,6 @@ impl StatementExecutor {
     }
 }
 
-/// Parses table names from files' names.
-fn parse_file_name_to_copy(e: &Entry) -> error::Result<String> {
-    Path::new(e.name())
-        .file_stem()
-        .and_then(|os_str| os_str.to_str())
-        .map(|s| s.to_string())
-        .context(error::InvalidTableNameSnafu {
-            table_name: e.name().to_string(),
-        })
-}
-
 /// Lists all files with expected suffix that can be imported to database.
 async fn list_files_to_copy(
     req: &CopyDatabaseRequest,
@@ -248,7 +229,8 @@ mod tests {
     use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 
-    use crate::statement::copy_database::{list_files_to_copy, parse_file_name_to_copy};
+    use crate::statement::copy_database::list_files_to_copy;
+    use crate::statement::database_copy::database_import_source;
 
     #[tokio::test]
     async fn test_list_files_and_parse_table_name() {
@@ -281,7 +263,11 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|e| parse_file_name_to_copy(&e).unwrap())
+            .map(|e| {
+                database_import_source(&request.location, e.path())
+                    .unwrap()
+                    .0
+            })
             .collect::<HashSet<_>>();
 
         assert_eq!(

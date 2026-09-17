@@ -64,6 +64,7 @@ meter-macros.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 partition.workspace = true
+percent-encoding.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 prost-types = { workspace = true, optional = true }

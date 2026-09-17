@@ -641,7 +641,10 @@ async fn database_export_preserves_valid_table_names() {
         "CREATE VIEW names_view AS SELECT * FROM \"ordinary#b\"",
     )
     .await;
-    let mut outputs = Vec::new();
+    sql(instance, "CREATE DATABASE names_restored").await;
+    for name in &names {
+        sql(instance, &format!("CREATE TABLE names_restored.\"{name}\" (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)")).await;
+    }
     for (attempt, file_url, legacy) in [
         ("plain", false, false),
         ("url", true, false),
@@ -667,7 +670,12 @@ async fn database_export_preserves_valid_table_names() {
             assert!(matches!(output.data, OutputData::AffectedRows(rows) if rows == names.len()));
         } else {
             let summary = instance
-                .export_database_for_test(req, None, &CancellationToken::new(), QueryContext::arc())
+                .export_database_for_test(
+                    req.clone(),
+                    None,
+                    &CancellationToken::new(),
+                    QueryContext::arc(),
+                )
                 .await
                 .unwrap();
             assert_eq!(summary.rows, names.len());
@@ -693,21 +701,31 @@ async fn database_export_preserves_valid_table_names() {
         for name in &names {
             let path = directory.join(format!("{name}.parquet"));
             assert!(path.is_file());
-            outputs.push(url::Url::from_file_path(path).unwrap().to_string());
         }
         assert_eq!(std::fs::read_dir(&directory).unwrap().count(), names.len());
-    }
-    sql(instance, "CREATE TABLE names_restored (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY)").await;
-    for location in outputs {
-        sql(instance, "TRUNCATE TABLE names_restored").await;
-        sql(
+        let output = sql(
             instance,
-            &format!("COPY names_restored FROM '{location}' WITH (FORMAT='parquet')"),
+            &format!(
+                "COPY DATABASE names_restored FROM '{}' WITH (FORMAT='parquet')",
+                req.location
+            ),
         )
         .await;
-        assert_eq!(
-            values(instance, "SELECT * FROM names_restored").await,
-            values(instance, "SELECT * FROM \"ordinary#b\"").await
-        );
+        assert!(matches!(output.data, OutputData::AffectedRows(rows) if rows == names.len()));
+        for name in &names {
+            assert_eq!(
+                values(
+                    instance,
+                    &format!("SELECT * FROM names_restored.\"{name}\"")
+                )
+                .await,
+                values(instance, &format!("SELECT * FROM \"{name}\"")).await,
+            );
+            sql(
+                instance,
+                &format!("TRUNCATE TABLE names_restored.\"{name}\""),
+            )
+            .await;
+        }
     }
 }
