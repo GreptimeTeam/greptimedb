@@ -95,7 +95,7 @@ jobs:
         persist-credentials: false
     - name: Test existing ECS lifecycle helpers
       run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
-    - name: Validate budgets and build warm and lukewarm plans
+    - name: Validate budgets and build warm plan
       id: plan
       env:
         RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
@@ -133,18 +133,11 @@ jobs:
         done
         # The packaged planner owns profile, target and resource-limit validation.
         mkdir -p "$RUNNER_TEMP/vmbench-plans"
-        for policy in warm lukewarm_cold_batch; do
-          query_args=()
-          if [[ "$policy" == lukewarm_cold_batch ]]; then
-            query_args=(--mode serial)
-          fi
-          # Keep the original runner defaults: warm serial 5/1, c1/c4 30s/5s;
-          # lukewarm serial 3/0. Separate plans preserve the existing lifecycle.
-          docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
-            --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$policy" \
-            --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$policy" \
-            --cache-policy "$policy" "${query_args[@]}" > "$RUNNER_TEMP/vmbench-plans/$policy.json"
-        done
+        # Keep the original warm defaults: serial 5/1 and c1/c4 30s/5s.
+        docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
+          --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
     - uses: actions/upload-artifact@v4
       with:
         name: vmbench-plan-${{ github.run_id }}-${{ github.run_attempt }}
@@ -177,7 +170,6 @@ jobs:
         image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
         instance-type: ${{ env.ECS_INSTANCE_TYPE }}
         enable-docker: 'true'
-        enable-host-cache-clear: 'true'
         system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
         ttl-hours: ${{ inputs.janitor_ttl_hours }}
         resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
@@ -217,7 +209,6 @@ jobs:
         test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
         jq --version
         docker info
-        sudo -n -l -- tee /proc/sys/vm/drop_caches
         df -h /tmp /var/lib/docker
         # Fail before generation if either dataset space or Docker storage is too small.
         for path in /tmp /var/lib/docker; do
@@ -233,21 +224,16 @@ jobs:
           docker pull "$reference"
           docker image inspect "$reference" > "$METADATA_ROOT/$target-image.json"
           digest=$(jq -er '.[0].RepoDigests[0]' "$METADATA_ROOT/$target-image.json")
-          for policy in warm lukewarm_cold_batch; do
-            policy_plan="$METADATA_ROOT/$policy.json"
-            jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$policy_plan" > "$policy_plan.tmp"
-            mv "$policy_plan.tmp" "$policy_plan"
-          done
+          jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"
+          mv "$plan.tmp" "$plan"
         done < <(jq -r '.targets[] | [.name, .image] | @tsv' "$plan")
-    - name: Review execution plans
+    - name: Review execution plan
       run: |
         set -euo pipefail
-        for policy in warm lukewarm_cold_batch; do
-          python3 o11ybench/scripts/run_benchmark_plan.py \
-            --plan "$METADATA_ROOT/$policy.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
-            > "$METADATA_ROOT/$policy-execution-plan.json"
-          cat "$METADATA_ROOT/$policy-execution-plan.json"
-        done
+        python3 o11ybench/scripts/run_benchmark_plan.py \
+          --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --dry-run \
+          > "$METADATA_ROOT/warm-execution-plan.json"
+        cat "$METADATA_ROOT/warm-execution-plan.json"
     - name: Warm serial and concurrent benchmarks
       run: |
         set -euo pipefail
@@ -255,19 +241,10 @@ jobs:
           --plan "$METADATA_ROOT/warm.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
           2>&1 | tee "$METADATA_ROOT/warm-execution.log"
         python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-warm"
-    - name: Lukewarm cold-hot benchmark
-      run: |
-        set -euo pipefail
-        python3 -u o11ybench/scripts/run_benchmark_plan.py \
-          --plan "$METADATA_ROOT/lukewarm_cold_batch.json" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --execute \
-          2>&1 | tee "$METADATA_ROOT/lukewarm-execution.log"
-        python3 o11ybench/scripts/check_run_benchmark_plan.py --artifacts "$ARTIFACT_ROOT-lukewarm_cold_batch"
     - name: Clean up owned containers
       if: always()
       run: |
-        for policy in warm lukewarm_cold_batch; do
-          docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-$policy" | xargs -r docker rm -fv
-        done
+        docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
     - name: Upload HTML and results (no dataset or DB files)
       if: always()
       uses: actions/upload-artifact@v4
@@ -276,9 +253,8 @@ jobs:
         path: |
           ${{ env.METADATA_ROOT }}
           ${{ env.ARTIFACT_ROOT }}-warm
-          ${{ env.ARTIFACT_ROOT }}-lukewarm_cold_batch
-          !${{ env.ARTIFACT_ROOT }}-*/data/*.bin
-          !${{ env.ARTIFACT_ROOT }}-*/**/db-data/**
+          !${{ env.ARTIFACT_ROOT }}-warm/data/*.bin
+          !${{ env.ARTIFACT_ROOT }}-warm/**/db-data/**
         if-no-files-found: warn
         retention-days: 14
   teardown:
