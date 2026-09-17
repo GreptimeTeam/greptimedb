@@ -305,7 +305,6 @@ pub(crate) fn validate_source_scan(
         if let LogicalPlan::TableScan(scan) = node {
             let provider = source_as_provider(&scan.source)?;
             let provider = provider
-                .as_any()
                 .downcast_ref::<DfTableProviderAdapter>()
                 .ok_or_else(|| {
                     datafusion::error::DataFusionError::Plan(
