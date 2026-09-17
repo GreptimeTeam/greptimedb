@@ -48,7 +48,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-39fadf81@sha256:3390c7810a14a926870cb132ab97fef4dce3b4dc801e15b3bf8a870bd26eb035
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-8111034e@sha256:ce9dee2abb1e70f907a09ea01854904a91cc97748b0c4ef6f33d9ec34044bec0
         required: true
       ecs_instance_type:
         description: ECS instance type (independent of Query Regression)
