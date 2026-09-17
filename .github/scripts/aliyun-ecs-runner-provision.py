@@ -238,6 +238,8 @@ def github_api(token: str, method: str, path: str, body: dict | None = None) -> 
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
+            if response.status == 204:
+                return {}
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         # GitHub's error body says exactly why (e.g. "Must have admin rights to
