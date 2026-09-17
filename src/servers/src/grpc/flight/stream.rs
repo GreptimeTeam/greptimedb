@@ -144,7 +144,11 @@ struct BatchAccumulator {
 }
 
 impl BatchAccumulator {
-    const MAX_ROWS: usize = 1024;
+    // Sized from the observed upstream batch shape: mito2 commonly emits ~2000-row
+    // batches (~32-94KiB depending on row width), so a 1024-row budget marked every
+    // such batch oversized and coalesced nothing. 4096 lets a few of those batches
+    // group together; the byte budget stays the binding constraint for wide rows.
+    const MAX_ROWS: usize = 4096;
     const MAX_BYTES: usize = 256 * 1024;
     const MAX_BATCHES: usize = 16;
 
@@ -1097,7 +1101,7 @@ mod test {
             items: VecDeque::from([
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1023))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..4095))),
                 ScriptedItem::PersistentPending,
             ]),
             poll_count: poll_count.clone(),
@@ -1128,7 +1132,7 @@ mod test {
         let FlightMessage::RecordBatch(batch) = rx.next().await.unwrap().unwrap() else {
             panic!("expected the exact-cap group");
         };
-        assert_eq!(batch.num_rows(), 1024);
+        assert_eq!(batch.num_rows(), 4096);
         handle.abort();
     }
 
@@ -1145,7 +1149,7 @@ mod test {
             items: VecDeque::from([
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1024))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..4096))),
             ]),
             poll_count: poll_count.clone(),
         }))
@@ -1161,7 +1165,7 @@ mod test {
         // budget on its own, so the tiny accumulated group is flushed first and
         // the at-cap batch is sent as its own singleton instead of being copied
         // into the aggregate. The first batch is always forwarded immediately.
-        assert_eq!(batches, vec![1, 1, 1024]);
+        assert_eq!(batches, vec![1, 1, 4096]);
         // Three fetches, plus the poll that reports end of stream.
         assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
@@ -1182,7 +1186,7 @@ mod test {
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [3]))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1024))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..4096))),
             ]),
             poll_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }))
@@ -1197,7 +1201,7 @@ mod test {
         // [1] is forwarded immediately, [2] + [3] merge into one 2-row group, and
         // the at-cap batch is forwarded separately: the aggregate never contains
         // the over-budget batch, and it is not copied.
-        assert_eq!(batches, vec![1, 2, 1024]);
+        assert_eq!(batches, vec![1, 2, 4096]);
     }
 
     #[tokio::test]
@@ -1212,8 +1216,8 @@ mod test {
             schema: schema.clone(),
             items: VecDeque::from([
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..600))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..600))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..2100))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..2100))),
             ]),
             poll_count: poll_count.clone(),
         }))
@@ -1225,9 +1229,9 @@ mod test {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        // 600 + 600 exceeds the 1024-row budget, but the second batch is appended
-        // before the budget is checked, so the group flushes as one 1200-row batch.
-        assert_eq!(batches, vec![1, 1200]);
+        // 2100 + 2100 exceeds the 4096-row budget, but the second batch is appended
+        // before the budget is checked, so the group flushes as one 4200-row batch.
+        assert_eq!(batches, vec![1, 4200]);
         // Three fetches, plus the poll that reports end of stream.
         assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
@@ -1244,7 +1248,7 @@ mod test {
             schema: schema.clone(),
             items: VecDeque::from([
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
-                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..1024))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), 0..4096))),
                 ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
             ]),
             poll_count: poll_count.clone(),
@@ -1259,7 +1263,7 @@ mod test {
             .collect::<Vec<_>>();
         // The at-cap batch is current when it is fetched, so it passes through as a
         // singleton instead of joining an aggregate.
-        assert_eq!(batches, vec![1, 1024, 1]);
+        assert_eq!(batches, vec![1, 4096, 1]);
         assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 4);
     }
 
@@ -1408,7 +1412,7 @@ mod test {
             ConcreteDataType::int32_datatype(),
             false,
         )]));
-        let oversized = int_batch(schema.clone(), 0..1024);
+        let oversized = int_batch(schema.clone(), 0..4096);
         let mut items = vec![
             ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
             ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
@@ -1437,7 +1441,7 @@ mod test {
         // The at-cap batch is encountered inside a group, so the 1-row group is
         // flushed first and the at-cap batch follows as its own singleton. The 17
         // trailing empty batches split into two empty groups at the 16-batch budget.
-        assert_eq!(batches, vec![1, 1, 1024, 0, 0]);
+        assert_eq!(batches, vec![1, 1, 4096, 0, 0]);
         assert_eq!(poll_count.load(std::sync::atomic::Ordering::Relaxed), 21);
     }
 
