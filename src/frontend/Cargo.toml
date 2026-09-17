@@ -98,5 +98,6 @@ hyper-util = { workspace = true, features = ["tokio"] }
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
+temp-env.workspace = true
 tower.workspace = true
 uuid.workspace = true

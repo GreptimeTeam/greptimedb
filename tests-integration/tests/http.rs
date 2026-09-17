@@ -2306,6 +2306,15 @@ enable = true
 enable = true
 default_merge_mode = "last_non_null"
 
+[pending_rows_batcher]
+protocols = []
+pending_rows_flush_interval = "0s"
+max_batch_rows = 100000
+max_concurrent_flushes = 256
+worker_channel_capacity = 65526
+max_inflight_requests = 3000
+flow_notification_queue_capacity = 1024
+
 [jaeger]
 enable = true
 
