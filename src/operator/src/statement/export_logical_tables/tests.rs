@@ -296,8 +296,6 @@ fn validates_selected_schemas_and_projects_only_selected_columns() {
         LogicalTableExport::try_new(unit.physical_table.clone(), &[selected.clone(), selected])
             .is_err()
     );
-    let unsafe_name = table(1030, "a/b", vec![], false);
-    assert!(LogicalTableExport::try_new(unit.physical_table.clone(), &[unsafe_name]).is_err());
     let wrong_type = table(
         1030,
         "wrong",

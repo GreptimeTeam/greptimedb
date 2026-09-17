@@ -35,6 +35,7 @@ use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::TableRef;
 use table::requests::CopyTableRequest;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_reference::TableReference;
@@ -108,7 +109,18 @@ impl StatementExecutor {
     ) -> Result<usize> {
         let table_ref = TableReference::full(&req.catalog_name, &req.schema_name, &req.table_name);
         let table = self.get_table(&table_ref).await?;
-        let table_id = table.table_info().table_id();
+        self.copy_captured_table_to(table, req, query_ctx).await
+    }
+
+    pub(crate) async fn copy_captured_table_to(
+        &self,
+        table: TableRef,
+        req: CopyTableRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let info = table.table_info();
+        let table_ref = TableReference::full(&info.catalog_name, &info.schema_name, &info.name);
+        let table_id = info.table_id();
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
 
         let df_table_ref = DfTableReference::from(table_ref);

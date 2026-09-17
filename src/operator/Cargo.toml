@@ -64,6 +64,7 @@ meter-macros.workspace = true
 moka = { workspace = true, features = ["future"] }
 object-store.workspace = true
 partition.workspace = true
+percent-encoding.workspace = true
 prometheus.workspace = true
 prost.workspace = true
 prost-types = { workspace = true, optional = true }
@@ -83,6 +84,7 @@ tokio.workspace = true
 tokio-util.workspace = true
 tonic.workspace = true
 tracing.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
@@ -91,4 +93,3 @@ common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 object-store = { workspace = true, features = ["testing"] }
 path-slash = "0.2"
-url.workspace = true

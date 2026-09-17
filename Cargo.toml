@@ -202,6 +202,7 @@ parquet-variant = "=59.2.0"
 parquet-variant-compute = "=59.2.0"
 parquet-variant-json = "=59.2.0"
 paste = "1.0"
+percent-encoding = "2.3"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
