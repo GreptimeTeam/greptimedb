@@ -24,7 +24,7 @@ use async_trait::async_trait;
 use common_procedure::Context as ProcedureContext;
 use common_procedure::local::DynamicKeyLockGuard;
 use common_wal::config::MetasrvWalConfig;
-use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
+use common_wal::options::{KafkaWalOptions, ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use snafu::ensure;
 use store_api::storage::{RegionId, RegionNumber};
@@ -229,6 +229,9 @@ pub enum WalProvider {
     #[default]
     RaftEngine,
     Kafka(KafkaTopicPool),
+    ObjectStore {
+        prefix: String,
+    },
 }
 
 /// Arc wrapper of WalProvider.
@@ -251,7 +254,7 @@ impl WalProvider {
     /// Tries to start the provider.
     pub async fn start(&self) -> Result<()> {
         match self {
-            Self::RaftEngine => Ok(()),
+            Self::RaftEngine | Self::ObjectStore { .. } => Ok(()),
             Self::Kafka(kafka_topic_manager) => kafka_topic_manager.activate().await,
         }
     }
@@ -272,6 +275,12 @@ impl WalProvider {
                     .collect();
                 Ok(options_batch)
             }
+            WalProvider::ObjectStore { prefix } => Ok(vec![
+                WalOptions::ObjectStore(
+                    ObjectStoreWalOptions::new(prefix.clone())
+                );
+                num_regions
+            ]),
         }
     }
 
@@ -532,6 +541,32 @@ mod tests {
             serde_json::to_string(&none).unwrap(),
             r#"{"region_wal_options":null}"#
         );
+    }
+
+    #[tokio::test]
+    async fn test_provider_with_object_store() {
+        let provider = WalProvider::ObjectStore {
+            prefix: "cluster-a/wal".to_string(),
+        };
+        provider.start().await.unwrap();
+
+        let regions = (0..4).collect::<Vec<_>>();
+        let got = provider.allocate(&regions, false).await.unwrap();
+        let expected = regions
+            .iter()
+            .map(|region| {
+                (
+                    *region,
+                    WalOptions::ObjectStore(ObjectStoreWalOptions::new(
+                        "cluster-a/wal".to_string(),
+                    )),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(got, expected);
+
+        let got = provider.allocate(&regions, true).await.unwrap();
+        assert!(got.values().all(|options| options == &WalOptions::Noop));
     }
 
     #[tokio::test]

@@ -136,6 +136,7 @@ metadata_cache_tti = "5m"
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
 ## - `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -192,7 +193,8 @@ broker_endpoints = ["127.0.0.1:9092"]
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
-## **It's only used when the provider is `kafka`**.
+## Defaults to `8MB` when the provider is `experimental_object_store`.
+## **It's only used when the provider is `kafka` or `experimental_object_store`**.
 max_batch_bytes = "1MB"
 
 ## The consumer wait timeout.
@@ -217,6 +219,27 @@ dump_index_interval = "60s"
 ## as the system will skip over missing entries instead of treating
 ## them as critical errors.
 overwrite_entry_start_id = false
+
+## The name of the storage provider that holds the WAL objects, an empty name selects the default object store.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ storage_provider = ""
+
+## The path prefix of the WAL objects inside the storage provider.
+## The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ prefix = "wal"
+
+## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
+## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ flush_interval = "100ms"
+
+## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
+## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
+## - `fail`: the read fails, so the region does not open.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ on_corrupted_segment = "skip"
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
