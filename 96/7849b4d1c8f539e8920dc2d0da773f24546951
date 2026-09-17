@@ -1,0 +1,21 @@
+AGENTS.md
+  s_0516ecc62f5c10::t_76d31806572df3 72,74-75
+docs/style-guide.md
+  s_0516ecc62f5c10::t_0b45b3900afe71 10-11,13,15-16,25-55,68-94,100-110,131-136
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "967849b4d1c8f539e8920dc2d0da773f24546951",
+  "prompts": {},
+  "sessions": {
+    "s_0516ecc62f5c10": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0ae7c-071c-7ca1-88db-30c92fd44bf7",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
