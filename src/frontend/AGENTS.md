@@ -44,6 +44,10 @@ remote datanodes via `operator`/`client`.
   auto-create, partition routing, meter admission) → local `RegionServer`
   (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
   request channel to `Inserter` and check meter admission for each nonempty batch.
+- Finite ingestion requests split internally admit their total rows per database
+  before dispatch (`operator::insert::admit_write` / `admit_row_insert_batches`).
+  The returned context covers chunks and derived writes while preserving WCU
+  accounting and the original protocol channel.
 - Internal gRPC listeners mark requests with `Channel::Internal` in middleware
   (`server.rs`), including requests handled by Enterprise Flight wrappers.
 

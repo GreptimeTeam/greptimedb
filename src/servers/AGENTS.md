@@ -28,6 +28,9 @@ provided through handler traits, mostly implemented by `frontend`.
 - Internal frontend gRPC listeners set `Channel::Internal` in server-owned request
   extensions. Handlers preserve it through query execution and metering; client
   flow metadata does not grant an internal channel.
+- Finite requests split by wire handlers (Prometheus batching and OpenTSDB
+  summary/details) admit all rows before dispatch. Admission is process-local
+  `QueryContext` state; never accept it from headers or serialized contexts.
 - New protocols or externally visible routes also require frontend service and
   configuration wiring.
 
