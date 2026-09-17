@@ -942,12 +942,11 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use cache::build_datanode_cache_registry;
+    use cache::build_datanode_layered_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
-    use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::key::RegionRoleSet;
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
@@ -990,11 +989,10 @@ mod tests {
         mock_region_server.register_engine(mock_region.clone());
 
         let kv_backend = Arc::new(MemoryKvBackend::new());
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        // Use the same layered registry as the datanode of a running instance, so the derived
+        // caches of the test are invalidated after the caches they are derived from.
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
 
         let mut builder = DatanodeBuilder::new(
             DatanodeOptions {
@@ -1036,11 +1034,8 @@ mod tests {
         wal: DatanodeWalConfig,
         kv_backend: KvBackendRef,
     ) -> DatanodeBuilder {
-        let layered_cache_registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(kv_backend.clone()))
-                .build(),
-        );
+        let layered_cache_registry =
+            Arc::new(build_datanode_layered_cache_registry(kv_backend.clone()));
         let mut opts = DatanodeOptions {
             node_id: Some(0),
             wal,

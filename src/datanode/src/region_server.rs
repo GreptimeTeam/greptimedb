@@ -74,6 +74,7 @@ use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
 };
+use session::hints::{QUERY_INTERNAL_STAGE_EXTENSION_KEY, QUERY_INTERNAL_STAGE_EXTENSION_VALUE};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     FILE_ENGINE_NAME, LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME,
@@ -289,11 +290,13 @@ impl RegionServer {
         request: api::v1::region::QueryRequest,
         query_ctx: QueryContextRef,
     ) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
+        // A peer datanode that executes the `MergeScan` nodes of the plan it received queries the
+        // regions of those nodes from this datanode and marks the region query as an execution
+        // stage of its query (see [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`]). Such a stage must not
+        // take a permit of its own: the outer query holds one until its stream is fully consumed
+        // and waits for the stage to return.
+        let internal = is_internal_stage_query(&query_ctx);
+        let permit = acquire_query_permit(&self.inner.parallelism, internal).await?;
 
         let region_id = RegionId::from_u64(request.region_id);
         let catalog_list = Arc::new(NameAwareCatalogList::new(
@@ -327,6 +330,10 @@ impl RegionServer {
                     header: request.header,
                     region_id,
                     plan,
+                    // The stage marker is passed on: the plan of this read is executed as part of
+                    // the stage this remote read was admitted for, so nothing on that path may
+                    // take a permit of its own either.
+                    internal,
                 },
                 query_ctx.clone(),
             )
@@ -347,11 +354,10 @@ impl RegionServer {
     }
 
     async fn handle_read_inner(&self, request: QueryRequest) -> Result<SendableRecordBatchStream> {
-        let permit = if let Some(p) = &self.inner.parallelism {
-            Some(p.acquire().await?)
-        } else {
-            None
-        };
+        // The datanode executes the `MergeScan` nodes of the plan it received by querying regions
+        // from the datanodes hosting them. Those inner region queries are marked as internal
+        // stages of the query that dispatched the plan and must not take a permit of their own.
+        let permit = acquire_query_permit(&self.inner.parallelism, request.internal).await?;
 
         let ctx = request.header.as_ref().map(|h| h.into());
         let query_ctx = Arc::new(ctx.unwrap_or_else(|| QueryContextBuilder::default().build()));
@@ -1082,6 +1088,39 @@ impl RegionServerParallelism {
             .await
             .context(ConcurrentQueryLimiterTimeoutSnafu)?
             .context(ConcurrentQueryLimiterClosedSnafu)
+    }
+}
+
+/// Returns whether the query context of a region query received over the wire marks the query as
+/// an execution stage of another query, instead of an independent query.
+///
+/// The sender of the query sets the [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] extension of the query
+/// context to [`QUERY_INTERNAL_STAGE_EXTENSION_VALUE`] when the query is an execution stage of the
+/// plan it received (see [`QueryRequest::internal`]), i.e. when the query is dispatched by a
+/// datanode for the `MergeScan` nodes of that plan.
+fn is_internal_stage_query(query_ctx: &QueryContextRef) -> bool {
+    query_ctx.extension(QUERY_INTERNAL_STAGE_EXTENSION_KEY)
+        == Some(QUERY_INTERNAL_STAGE_EXTENSION_VALUE)
+}
+
+/// Acquires a concurrency permit for a request that is an independent query, if the limiter is
+/// enabled.
+///
+/// A request that is an execution stage of another query (see [`QueryRequest::internal`]) doesn't
+/// acquire a permit: the query that dispatched it already holds one, holds it until its stream is
+/// fully consumed and waits for the stage to return. Letting the stage acquire a permit of its own
+/// makes the outer query wait for the inner stage while the inner stage waits for the permit held
+/// by the outer query.
+async fn acquire_query_permit(
+    parallelism: &Option<RegionServerParallelism>,
+    internal: bool,
+) -> Result<Option<OwnedSemaphorePermit>> {
+    if internal {
+        return Ok(None);
+    }
+    match parallelism {
+        Some(p) => Ok(Some(p.acquire().await?)),
+        None => Ok(None),
     }
 }
 
@@ -2740,6 +2779,108 @@ mod tests {
         drop(first_query);
         let forth_query = p.acquire().await;
         assert!(forth_query.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_query_skips_concurrency_permit() {
+        let parallelism =
+            Some(RegionServerParallelism::from_opts(1, Duration::from_millis(1)).unwrap());
+
+        // The query that dispatched the nested plan holds the only permit of the server for as
+        // long as its stream is alive.
+        let outer_query = acquire_query_permit(&parallelism, false).await.unwrap();
+        assert!(outer_query.is_some());
+
+        // An inner stage of that query must neither wait for nor consume a permit: it runs while
+        // the outer query waits for it to return.
+        let inner_stage = acquire_query_permit(&parallelism, true).await.unwrap();
+        assert!(inner_stage.is_none());
+
+        // An independent query is still subject to the limiter.
+        assert!(acquire_query_permit(&parallelism, false).await.is_err());
+
+        // The inner stage reserved nothing: the permit goes back to the limiter with the outer
+        // query's stream.
+        drop(outer_query);
+        assert!(
+            acquire_query_permit(&parallelism, false)
+                .await
+                .unwrap()
+                .is_some()
+        );
+
+        // The limiter stays disabled when `max_concurrent_queries` is 0.
+        assert!(acquire_query_permit(&None, false).await.unwrap().is_none());
+    }
+
+    #[test]
+    fn test_internal_stage_extension_keys_match_between_crates() {
+        // `session` can't depend on `common-query`: the sender writes the marker with the constant
+        // of `common-query`, the receiver reads it with the constant of `session`.
+        assert_eq!(
+            QUERY_INTERNAL_STAGE_EXTENSION_KEY,
+            common_query::request::QUERY_INTERNAL_STAGE_EXTENSION_KEY
+        );
+        assert_eq!(
+            QUERY_INTERNAL_STAGE_EXTENSION_VALUE,
+            common_query::request::QUERY_INTERNAL_STAGE_EXTENSION_VALUE
+        );
+    }
+
+    /// Asserts that a region query received over the wire is admitted without a permit only when the
+    /// query context of its header marks it as an execution stage of another query.
+    #[tokio::test]
+    async fn test_internal_stage_query_skips_concurrency_permit() {
+        let parallelism =
+            Some(RegionServerParallelism::from_opts(1, Duration::from_millis(1)).unwrap());
+
+        // A datanode that fans a nested `MergeScan` out to its peer marks the region query it sends
+        // as an execution stage of its own query.
+        let mut extensions = std::collections::HashMap::new();
+        common_query::request::mark_query_internal_stage(&mut extensions);
+        let internal_ctx: QueryContextRef = Arc::new(
+            QueryContextBuilder::default()
+                .extensions(extensions)
+                .build(),
+        );
+        assert!(is_internal_stage_query(&internal_ctx));
+
+        // The query of the peer itself holds the only permit of the server.
+        let outer_query = acquire_query_permit(&parallelism, false).await.unwrap();
+        assert!(outer_query.is_some());
+
+        // The stage is admitted while the outer query waits for it to return.
+        let stage_permit =
+            acquire_query_permit(&parallelism, is_internal_stage_query(&internal_ctx))
+                .await
+                .unwrap();
+        assert!(stage_permit.is_none());
+
+        // A query with no marker, a marker with another value or an empty query context is an
+        // independent query and is subject to the limiter.
+        for query_ctx in [
+            QueryContext::arc(),
+            Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension(
+                        QUERY_INTERNAL_STAGE_EXTENSION_KEY.to_string(),
+                        "false".to_string(),
+                    )
+                    .build(),
+            ),
+            Arc::new(
+                QueryContextBuilder::default()
+                    .set_extension("query.internal_stage.other".to_string(), "true".to_string())
+                    .build(),
+            ),
+        ] {
+            assert!(!is_internal_stage_query(&query_ctx));
+            assert!(
+                acquire_query_permit(&parallelism, is_internal_stage_query(&query_ctx))
+                    .await
+                    .is_err()
+            );
+        }
     }
 
     fn mock_region_metadata(region_id: RegionId) -> RegionMetadata {

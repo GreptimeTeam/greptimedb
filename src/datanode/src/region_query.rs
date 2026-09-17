@@ -74,8 +74,17 @@ impl RegionQueryHandler for DatanodeRegionQueryHandler {
     async fn do_get(
         &self,
         target: &RegionQueryTarget,
-        request: QueryRequest,
+        mut request: QueryRequest,
     ) -> QueryResult<SendableRecordBatchStream> {
+        // A datanode serves the region queries of the `MergeScan` nodes of the plan it received.
+        // Such a region query is an execution stage of that plan, not an independent query, so it
+        // must leave the concurrency permits to the query that dispatched the plan. The marker is
+        // carried to the peer with the request: the client encodes it into the query context of the
+        // header (`common_query::request::QUERY_INTERNAL_STAGE_EXTENSION_KEY`), where the peer reads
+        // it back and admits the stage without a permit of its own (see
+        // `RegionServer::handle_remote_read_inner`).
+        request.internal = true;
+
         self.node_manager
             .datanode(target.peer())
             .await

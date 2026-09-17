@@ -15,6 +15,7 @@
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
@@ -272,6 +273,24 @@ impl DynFilterUpdate {
     }
 }
 
+/// The extension key of the marker that a region query is an execution stage of another query,
+/// instead of an independent query.
+///
+/// The wire format of a region query (`api::v1::region::QueryRequest`) has no field for
+/// [`QueryRequest::internal`], so the marker travels to the peer datanode as an extension of the
+/// query context of the [`RegionRequestHeader`] of the request (the only map-shaped part of the
+/// header that survives the round trip).
+///
+/// The key is reserved (see `session::hints::RESERVED_EXTENSION_KEYS`), so the hint path
+/// (`x-greptime-hints`) can't set it. The marker is trusted on the region query port of a datanode,
+/// like the other extensions of the header and the plan itself.
+pub const QUERY_INTERNAL_STAGE_EXTENSION_KEY: &str = "query.internal_stage";
+
+/// The value of [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] that marks a region query as an execution
+/// stage of another query. Any other value, including an absent one, leaves the query subject to
+/// the concurrency limiter.
+pub const QUERY_INTERNAL_STAGE_EXTENSION_VALUE: &str = "true";
+
 /// The query request to be handled by the RegionServer (Datanode).
 #[derive(Clone, Debug)]
 pub struct QueryRequest {
@@ -283,6 +302,45 @@ pub struct QueryRequest {
 
     /// The form of the query: a logical plan.
     pub plan: LogicalPlan,
+
+    /// Whether this request is an execution stage of another query, instead of an independent
+    /// query.
+    ///
+    /// A datanode executes the `MergeScan` nodes of the plan it received by querying the regions
+    /// of those nodes from the datanodes hosting them. Such an inner region query is a stage of
+    /// the outer query: the outer query waits for it while holding its own concurrency permit, so
+    /// the inner query must not acquire a permit of its own, otherwise the outer query waits for
+    /// the inner stage while the inner stage waits for the permit held by the outer query.
+    ///
+    /// `false` means an ordinary, independent query, which is subject to the concurrency limiter.
+    ///
+    /// A request that crosses the wire carries the marker as the
+    /// [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] extension of the query context of its header (the
+    /// sender sets it, the receiver reads it back into this field), so the marker also survives a
+    /// dispatch to a peer datanode.
+    pub internal: bool,
+}
+
+/// Marks the query context of a region query as an execution stage of another query: sets the
+/// [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] extension to [`QUERY_INTERNAL_STAGE_EXTENSION_VALUE`].
+///
+/// The sender side of a region query uses it to carry [`QueryRequest::internal`] to a peer
+/// datanode; [`is_internal_stage`] reads the marker back on the receiver side.
+pub fn mark_query_internal_stage(extensions: &mut HashMap<String, String>) {
+    extensions.insert(
+        QUERY_INTERNAL_STAGE_EXTENSION_KEY.to_string(),
+        QUERY_INTERNAL_STAGE_EXTENSION_VALUE.to_string(),
+    );
+}
+
+/// Returns whether `extensions` marks a region query as an execution stage of another query, i.e.
+/// whether the sender of the query set [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] to
+/// [`QUERY_INTERNAL_STAGE_EXTENSION_VALUE`].
+pub fn is_internal_stage(extensions: &HashMap<String, String>) -> bool {
+    extensions
+        .get(QUERY_INTERNAL_STAGE_EXTENSION_KEY)
+        .map(String::as_str)
+        == Some(QUERY_INTERNAL_STAGE_EXTENSION_VALUE)
 }
 
 #[cfg(test)]
