@@ -43,6 +43,7 @@ use servers::postgres::PostgresServer;
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use servers::server::{Server, ServerHandlers};
 use servers::tls::{ReloadableTlsServerConfig, maybe_watch_server_tls_config};
+use session::context::Channel;
 use snafu::ResultExt;
 use tonic::Status;
 
@@ -278,10 +279,14 @@ where
             .flight_handler(flight_handler)
             .add_layer(axum::middleware::from_fn_with_state(
                 self.instance.clone(),
-                async move |State(state): State<Arc<Instance>>, request: Request, next: Next| {
+                move |State(state): State<Arc<Instance>>, mut request: Request, next: Next| async move {
                     if state.is_suspended() {
                         let status = Status::from(servers::error::SuspendedSnafu.build());
                         return status.into_http();
+                    }
+                    // The listener owns this marker; clients cannot set request extensions.
+                    if !external {
+                        request.extensions_mut().insert(Channel::Internal);
                     }
                     next.run(request).await
                 },
@@ -610,6 +615,10 @@ mod tests {
             &self,
             request: Request<Ticket>,
         ) -> std::result::Result<Response<TonicStream<FlightData>>, Status> {
+            assert_eq!(
+                request.extensions().get::<Channel>(),
+                Some(&Channel::Internal)
+            );
             self.do_get_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.do_get(request).await
         }
@@ -618,6 +627,10 @@ mod tests {
             &self,
             request: Request<Streaming<FlightData>>,
         ) -> std::result::Result<Response<TonicStream<PutResult>>, Status> {
+            assert_eq!(
+                request.extensions().get::<Channel>(),
+                Some(&Channel::Internal)
+            );
             self.do_put_calls.fetch_add(1, Ordering::SeqCst);
             self.inner.do_put(request).await
         }

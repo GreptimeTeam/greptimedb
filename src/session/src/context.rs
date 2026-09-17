@@ -808,7 +808,7 @@ mod test {
             current_schema: "s1".to_string(),
             timezone: "UTC".to_string(),
             extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
-            channel: Channel::Grpc as u32,
+            channel: Channel::Internal as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: HashMap::from([(1, 100)]),
                 sst_min_sequences: HashMap::from([(1, 90)]),

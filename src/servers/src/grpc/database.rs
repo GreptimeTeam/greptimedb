@@ -21,6 +21,7 @@ use common_query::OutputData;
 use common_telemetry::{debug, warn};
 use futures::StreamExt;
 use prost::Message;
+use session::context::Channel;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
@@ -46,6 +47,11 @@ impl GreptimeDatabase for DatabaseService {
     ) -> TonicResult<Response<GreptimeResponse>> {
         let remote_addr = request.remote_addr();
         let hints = hint_headers::extract_hints(request.metadata());
+        let channel = request
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Grpc);
         debug!(
             "GreptimeDatabase::Handle: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -61,7 +67,7 @@ impl GreptimeDatabase for DatabaseService {
         let handler = self.handler.clone();
         let request_future = async move {
             let request = request.into_inner();
-            let output = handler.handle_request(request, hints).await?;
+            let output = handler.handle_request(request, hints, channel).await?;
             let message = match output.data {
                 OutputData::AffectedRows(rows) => GreptimeResponse {
                     header: Some(ResponseHeader {
@@ -100,6 +106,11 @@ impl GreptimeDatabase for DatabaseService {
     ) -> Result<Response<GreptimeResponse>, Status> {
         let remote_addr = request.remote_addr();
         let hints = hint_headers::extract_hints(request.metadata());
+        let channel = request
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Grpc);
         debug!(
             "GreptimeDatabase::HandleRequests: request from {:?} with hints: {:?}",
             remote_addr, hints
@@ -121,7 +132,9 @@ impl GreptimeDatabase for DatabaseService {
                 } else {
                     None
                 };
-                let output = handler.handle_request(request, hints.clone()).await?;
+                let output = handler
+                    .handle_request(request, hints.clone(), channel)
+                    .await?;
                 match output.data {
                     OutputData::AffectedRows(rows) => affected_rows += rows,
                     OutputData::Stream(_) | OutputData::RecordBatches(_) => {
