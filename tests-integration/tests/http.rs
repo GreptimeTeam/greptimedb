@@ -56,7 +56,9 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
+use pipeline::{
+    GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
+};
 use prost::Message;
 use rstest_reuse::apply;
 use serde_json::{Value, json};
@@ -104,7 +106,12 @@ macro_rules! http_test {
                     async fn [< $test >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
-                            let _ = $crate::http::$test(store_type).await;
+                            // Support both unit tests and fallible tests without discarding errors.
+                            let result = $crate::http::$test(store_type).await;
+                            assert_eq!(
+                                std::process::Termination::report(result),
+                                std::process::ExitCode::SUCCESS,
+                            );
                         }
                     }
                 )*
@@ -171,6 +178,7 @@ macro_rules! http_tests {
                 test_otlp_metrics_resource_info_conflicts,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
+                test_otlp_traces_v2,
                 test_otlp_traces_v1_entity_graph,
                 test_otlp_logs,
                 test_loki_pb_logs,
@@ -7725,6 +7733,123 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     .await;
 
     guard.remove_all().await;
+}
+
+/// Exercises v2 protobuf ingestion and JSON2 paths.
+pub(crate) async fn test_otlp_traces_v2(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    common_telemetry::init_default_ut_logging();
+
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_traces_v2").await;
+    let client = TestClient::new(app).await;
+    let table_name = "trace_v2_spans";
+
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [
+                    make_string_attr("service.name", "frontend"),
+                    make_string_attr("deployment.environment", "production")
+                ]
+            },
+            "scopeSpans": [{
+                "scope": {
+                    "name": "trace-v2-test",
+                    "version": "1.0.0",
+                    "attributes": [make_bool_attr("enabled", true)]
+                },
+                "spans": [{
+                    "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "spanId": "9630f2916e2f7909",
+                    "name": "GET /api",
+                    "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000",
+                    "attributes": [
+                        make_int_attr("http.status_code", 200),
+                        make_string_attr("http.route", "/api"),
+                        {"key": "ratio", "value": {"doubleValue": 1.5}},
+                        make_string_attr("a\"b", "quoted"),
+                        make_string_attr("a\\b", "backslash")
+                    ],
+                    "events": [{
+                        "timeUnixNano": "1736480942444400000",
+                        "name": "cache.hit",
+                        "attributes": [make_int_attr("event.code", 7)]
+                    }],
+                    "links": [{
+                        "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                        "spanId": "8f847259b0f6e1ab",
+                        "attributes": [make_string_attr("link.type", "follows_from")]
+                    }],
+                    "status": { "message": "", "code": 1 }
+                }]
+            }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        }]
+    }))?;
+
+    let response = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static(table_name),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        request.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, response.status());
+
+    validate_data(
+        "otlp_traces_v2_json2",
+        &client,
+        "select service_name, span_attributes.\"http.status_code\"::BIGINT, \
+         resource_attributes.\"deployment.environment\"::STRING, \
+         scope_attributes.enabled::BOOLEAN from trace_v2_spans;",
+        r#"[["frontend",200,"production",true]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_fixed_schema",
+        &client,
+        "select count(*) from information_schema.columns where table_name = 'trace_v2_spans' \
+         and (column_name like 'span_attributes.%' \
+         or column_name in ('span_events', 'span_links'));",
+        "[[0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_escaped_keys",
+        &client,
+        r#"select span_attributes."a""b"::STRING, span_attributes."a\b"::STRING from trace_v2_spans;"#,
+        r#"[["quoted","backslash"]]"#,
+    ).await;
+    validate_data(
+        "otlp_traces_v2_semantics",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'trace_v2_spans' \
+         and create_options like '%table_data_model=greptime_trace_v2%' \
+         and create_options like '%greptime.semantic.pipeline=greptime_trace_v2%';",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+    Ok(())
 }
 
 /// One real OTLP export must come out of `semantic_relationships` as the

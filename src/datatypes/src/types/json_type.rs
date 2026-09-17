@@ -14,7 +14,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::str::FromStr;
 use std::sync::{Arc, LazyLock};
 
 use arrow::datatypes::DataType as ArrowDataType;
@@ -22,13 +21,10 @@ use arrow_schema::{Field, Fields};
 use common_base::bytes::Bytes;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
 
 use crate::Error;
 use crate::data_type::DataType;
-use crate::error::{
-    DeserializeSnafu, InvalidJsonSnafu, InvalidJsonbSnafu, Result, UnsupportedArrowTypeSnafu,
-};
+use crate::error::{InvalidJsonSnafu, InvalidJsonbSnafu, Result, UnsupportedArrowTypeSnafu};
 use crate::prelude::ConcreteDataType;
 use crate::scalars::ScalarVectorBuilder;
 use crate::type_id::LogicalTypeId;
@@ -408,8 +404,7 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
-    let json_string = jsonb_to_string(val)?;
-    serde_json::Value::from_str(&json_string).context(DeserializeSnafu { json: json_string })
+    jsonb::to_serde_json(val).map_err(|error| InvalidJsonbSnafu { error }.build())
 }
 
 /// Normalizes a JSON string by converting Rust-style Unicode escape sequences to JSON-compatible format.
@@ -474,6 +469,16 @@ pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_v2_jsonb_to_serde_json_escaped_keys()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let expected = serde_json::json!({"": 9, "a\"b": {"a\\b": "\u{1f600}\n"}});
+        let input = expected.to_string();
+        let value = jsonb::parse_value(input.as_bytes()).map_err(|e| e.to_string())?;
+        assert_eq!(jsonb_to_serde_json(&value.to_vec())?, expected);
+        Ok(())
+    }
+
     use super::*;
 
     #[test]

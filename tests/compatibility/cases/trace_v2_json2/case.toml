@@ -1,0 +1,8 @@
+name = "trace_v2_json2"
+reason = "Preserve the trace v2 schema, JSON2 attributes and model metadata across restart and upgrade."
+introduced_by = "greptime_trace_v2"
+topologies = ["standalone", "distributed"]
+from_range = [">=v1.3.0-alpha.1"]
+to_range = [">=v1.3.0-alpha.1"]
+features = ["trace", "json2", "table", "metadata", "read"]
+owner = "frontend"

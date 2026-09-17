@@ -1,4 +1,9 @@
 -- json_get functions --
+-- Invalid paths must report errors; a valid path with no match returns NULL.
+SELECT json_get_int(parse_json('{"a": 1}'), '$.a[');
+
+SELECT json_get_int(parse_json('{"a": 1}'), '$.missing');
+
 SELECT json_get_int(parse_json('{"a": {"b": {"c": 1}}}'), 'a.b.c');
 
 SELECT json_get_float(parse_json('{"a": {"b": {"c": 1.234}}}'), 'a:b.c');

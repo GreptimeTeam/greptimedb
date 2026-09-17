@@ -11840,6 +11840,7 @@ dependencies = [
  "greptime-proto",
  "humantime",
  "itertools 0.14.0",
+ "jsonb",
  "lazy_static",
  "log-query",
  "meter-core",
