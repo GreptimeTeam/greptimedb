@@ -274,6 +274,12 @@ pub(super) fn decode_footer(bytes: &[u8], trailer: FixedTrailer) -> Result<Vec<F
 
     let mut reader = Reader::new(bytes);
     let count = reader.u32("footer")? as usize;
+    ensure!(
+        count > 0,
+        CorruptedWalObjectSnafu {
+            reason: "object has no records",
+        }
+    );
     let expected_len = count
         .checked_mul(FOOTER_ENTRY_LEN)
         .and_then(|len| len.checked_add(4))
@@ -431,7 +437,7 @@ pub(super) fn decode_segment(bytes: &[u8], entry: &FooterEntry) -> Result<Vec<Re
     Ok(records)
 }
 
-/// Smallest length of a well-formed object: header, a footer holding only its
+/// Lower bound on the length of an object: header, a footer holding only its
 /// entry count and the trailer.
 pub(super) const MIN_OBJECT_LEN: usize = HEADER_LEN + 4 + TRAILER_LEN;
 
@@ -521,12 +527,6 @@ pub(super) fn decode_object(bytes: &[u8]) -> Result<DecodedObject> {
     let footer_start = footer_range.start;
 
     let footer = decode_footer(&bytes[footer_range], trailer)?;
-    ensure!(
-        !footer.is_empty(),
-        CorruptedWalObjectSnafu {
-            reason: "object has no records",
-        }
-    );
     verify_segment_ranges(&footer, footer_start)?;
 
     let mut records = Vec::new();
@@ -866,6 +866,39 @@ mod tests {
     #[test]
     fn test_format_rejects_empty_object() {
         assert_corrupted(encode_object(header(), &[]), "object has no records");
+    }
+
+    #[test]
+    fn test_format_rejects_checksum_valid_empty_footer() {
+        let mut object = BytesMut::new();
+        encode_header(&header(), &mut object);
+        let footer_offset = object.len();
+        encode_footer(&[], &mut object).unwrap();
+        let footer = object[footer_offset..].to_vec();
+        let trailer = FixedTrailer {
+            footer_offset: footer_offset as u64,
+            footer_len: footer.len() as u64,
+            footer_crc32: crc32fast::hash(&footer),
+            object_crc32: 0,
+        };
+        let trailer = FixedTrailer {
+            object_crc32: object_crc32(&object, trailer),
+            ..trailer
+        };
+        encode_trailer(trailer, &mut object);
+
+        // Every structural check that recovery runs before the footer passes.
+        assert_eq!(header(), decode_header(&object).unwrap());
+        let trailer_start = object.len() - TRAILER_LEN;
+        assert_eq!(trailer, decode_trailer(&object[trailer_start..]).unwrap());
+        assert_eq!(
+            footer_offset..trailer_start,
+            footer_range(trailer, object.len()).unwrap()
+        );
+        verify_segment_ranges(&[], footer_offset).unwrap();
+
+        assert_corrupted(decode_footer(&footer, trailer), "object has no records");
+        assert_corrupted(decode_object(&object), "object has no records");
     }
 
     #[test]
