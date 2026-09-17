@@ -1,0 +1,41 @@
+.github/scripts/ci-slash.py
+  s_df9e453947a510::t_c04579913239f8 1-66
+.github/scripts/tests/test_ci_slash.py
+  s_df9e453947a510::t_7c801cf575d5a2 1-76
+.github/workflows/cargo-lock-check.yml
+  s_df9e453947a510::t_63deec883f0a94 13
+.github/workflows/check-git-deps.yml
+  s_df9e453947a510::t_4decf92280b316 15
+.github/workflows/checks.yml
+  s_df9e453947a510::t_7ceeff9984d0be 17-22,35,50,66,89-90,103,132
+.github/workflows/ci-slash.yml
+  s_df9e453947a510::t_90d12e8d2e1a58 1-52
+.github/workflows/dependency-check.yml
+  s_df9e453947a510::t_02117ed922fc52 10
+.github/workflows/docs.yml
+  s_df9e453947a510::t_cfcf2355027349 27-32,41,51,61
+.github/workflows/grafana.yml
+  s_df9e453947a510::t_7a5345ed303b65 12
+.github/workflows/integration.yml
+  s_df9e453947a510::t_57d845a1470b6d 17-28,41,102,182,252,260,317,429,509,568,628,866
+.github/workflows/rust.yml
+  s_df9e453947a510::t_ed35fa8aec0afa 17-22,35,53,79,106,132,161,172
+.github/workflows/slash-command-dispatch.yml
+  s_df9e453947a510::t_ea55c116fc5348 37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "39d5365e6ee87a366db02b634ae171dc8addad52",
+  "prompts": {},
+  "sessions": {
+    "s_df9e453947a510": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0af78-a749-7050-bc46-aaff23bbf286",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
