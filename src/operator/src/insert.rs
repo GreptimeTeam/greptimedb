@@ -48,6 +48,7 @@ use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
+use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
@@ -387,12 +388,19 @@ impl Inserter {
             },
             instant_requests: RegionInsertRequests::default(),
         };
+        let table_info = table_infos.values().next();
+        let catalog = table_info.map_or(ctx.current_catalog(), |info| info.catalog_name.as_str());
+        let schema =
+            table_info.map_or_else(|| ctx.current_schema(), |info| info.schema_name.clone());
         let write_cost = write_meter!(
-            ctx.current_catalog(),
-            ctx.current_schema(),
+            catalog,
+            &schema,
             metered,
+            ctx.write_rows_to_admit(catalog, &schema, count_insert_rows(&metered)?),
             ctx.channel() as u8
-        );
+        )
+        .await
+        .context(WriteRejectedSnafu)?;
         prepared.retain(|(_, batch)| batch.num_rows() != 0);
         let results = if prepared.is_empty() {
             Vec::new()
@@ -400,8 +408,7 @@ impl Inserter {
             // One original request shares admission across all table submissions.
             let permit = batcher.acquire().await?;
             let submissions = prepared.into_iter().map(|(info, batch)| {
-                // Routing uses the target database; metering above retains the
-                // original request context, including fully qualified SQL writes.
+                // Route to the same target database used for admission above.
                 let mut target_ctx = ctx.fork();
                 target_ctx.set_current_catalog(&info.catalog_name);
                 target_ctx.set_current_schema(&info.schema_name);
@@ -543,6 +550,54 @@ impl Inserter {
     }
 }
 
+/// Admits a finite request before it is split into internal writes.
+/// The returned context preserves accounting while preventing a second row debit.
+pub async fn admit_write(rows: u64, ctx: &QueryContextRef) -> Result<QueryContextRef> {
+    write_meter!(MeterRecord::new(
+        ctx.current_catalog().to_string(),
+        ctx.current_schema(),
+        0,
+        ctx.write_rows_to_admit(ctx.current_catalog(), &ctx.current_schema(), rows),
+        ctx.channel() as u8,
+    ))
+    .await
+    .context(WriteRejectedSnafu)?;
+    Ok(Arc::new(ctx.with_write_admission()))
+}
+
+/// Admits all database totals before dispatching any batch of a finite request.
+/// Each batch keeps its own protocol options and target database.
+pub async fn admit_row_insert_batches(
+    batches: &mut [(QueryContextRef, RowInsertRequests)],
+) -> Result<()> {
+    let mut totals = BTreeMap::<_, (QueryContextRef, u64)>::new();
+    for (ctx, requests) in batches.iter() {
+        let catalog = ctx.current_catalog();
+        let schema = ctx.current_schema();
+        if ctx.write_rows_to_admit(catalog, &schema, 1) == 0 {
+            continue;
+        }
+        let (_, total) = totals
+            .entry((catalog.to_string(), schema.clone()))
+            .or_insert_with(|| (ctx.clone(), 0));
+        for rows in requests.inserts.iter().filter_map(|r| r.rows.as_ref()) {
+            *total =
+                total
+                    .checked_add(rows.rows.len() as u64)
+                    .context(InvalidInsertRequestSnafu {
+                        reason: "Insert row count exceeds u64::MAX",
+                    })?;
+        }
+    }
+    for (ctx, rows) in totals.values() {
+        admit_write(*rows, ctx).await?;
+    }
+    for (ctx, _) in batches {
+        *ctx = Arc::new(ctx.with_write_admission());
+    }
+    Ok(())
+}
+
 fn count_insert_rows(requests: &InstantAndNormalInsertRequests) -> Result<u64> {
     requests
         .normal_requests
@@ -572,11 +627,14 @@ impl Inserter {
         // All tables in a batch resolve to the same database. Qualified SQL
         // inserts may target a different database than the session's current one.
         let table_info = table_infos.values().next();
+        let catalog = table_info.map_or(ctx.current_catalog(), |info| info.catalog_name.as_str());
+        let schema =
+            table_info.map_or_else(|| ctx.current_schema(), |info| info.schema_name.clone());
         let write_cost = write_meter!(
-            table_info.map_or(ctx.current_catalog(), |info| info.catalog_name.as_str()),
-            table_info.map_or_else(|| ctx.current_schema(), |info| info.schema_name.clone()),
+            catalog,
+            schema.clone(),
             requests,
-            count_insert_rows(&requests)?,
+            ctx.write_rows_to_admit(catalog, &schema, count_insert_rows(&requests)?),
             ctx.channel() as u8
         )
         .await
@@ -1744,7 +1802,9 @@ mod tests {
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 
     use crate::insert::*;
-    use crate::test_util::{create_partition_rule_manager, new_test_table_info, prepare_mocked_backend};
+    use crate::test_util::{
+        create_partition_rule_manager, new_test_table_info, prepare_mocked_backend,
+    };
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -2111,6 +2171,40 @@ mod tests {
         }
         meter.attempts.lock().unwrap().clear();
 
+        // Rejection must also precede admission to the table batcher's queue.
+        if enabled {
+            let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+            let rows = Rows {
+                schema: vec![
+                    api::v1::helper::tag_column_schema("a", ColumnDataType::Int32),
+                    time_index_column_schema("ts", ColumnDataType::TimestampMillisecond),
+                    field_column_schema("b", ColumnDataType::Int32),
+                ],
+                rows: vec![api::v1::Row {
+                    values: vec![
+                        api::v1::value::ValueData::I32Value(60).into(),
+                        Value {
+                            value_data: Some(api::v1::value::ValueData::TimestampMillisecondValue(
+                                0,
+                            )),
+                        },
+                        api::v1::value::ValueData::I32Value(0).into(),
+                    ],
+                }],
+            };
+            let error = inserter
+                .submit_table_rows(rows, table_info.clone(), ctx.clone(), &batcher)
+                .await
+                .unwrap_err();
+            assert_eq!(error.status_code(), StatusCode::RateLimited);
+            let mut attempts = meter.attempts.lock().unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0].catalog, CATALOG);
+            assert_eq!(attempts[0].schema, "target_db");
+            assert_eq!(attempts[0].rows, 1);
+            attempts.clear();
+        }
+
         let table = Arc::new(table::Table::new(
             table_info.clone(),
             table::metadata::FilterPushDownType::Unsupported,
@@ -2159,19 +2253,76 @@ mod tests {
                 dispatched.try_recv().unwrap();
             }
         }
-        let attempts = meter.attempts.lock().unwrap();
-        assert_eq!(attempts.len(), if enabled { 3 } else { 0 });
-        for record in attempts.iter() {
-            assert_eq!(record.catalog, CATALOG);
-            assert_eq!(record.schema, "target_db");
-            assert_eq!(
-                (record.rows, record.value, record.source),
-                (2, 0, Channel::Grpc as u8)
-            );
+        {
+            let attempts = meter.attempts.lock().unwrap();
+            assert_eq!(attempts.len(), if enabled { 3 } else { 0 });
+            for record in attempts.iter() {
+                assert_eq!(record.catalog, CATALOG);
+                assert_eq!(record.schema, "target_db");
+                assert_eq!(
+                    (record.rows, record.value, record.source),
+                    (2, 0, Channel::Grpc as u8)
+                );
+            }
         }
         assert_eq!(
             meter.accepted_value.load(Ordering::Relaxed),
             if enabled { 17 } else { 0 }
+        );
+
+        // Aggregate repeated database targets and retain admission across nested
+        // batching without changing the caller's reusable context.
+        meter.attempts.lock().unwrap().clear();
+        let original = Arc::new(QueryContext::with_channel(
+            CATALOG,
+            "a",
+            Channel::Prometheus,
+        ));
+        let mut batches = ["a", "b", "a"].map(|schema| {
+            let ctx = if schema == "a" {
+                original.clone()
+            } else {
+                Arc::new(QueryContext::with_channel(
+                    CATALOG,
+                    schema,
+                    Channel::Prometheus,
+                ))
+            };
+            (
+                ctx,
+                RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: "data".into(),
+                        rows: Some(Rows {
+                            schema: vec![],
+                            rows: vec![api::v1::Row::default(); 2],
+                        }),
+                    }],
+                },
+            )
+        });
+        admit_row_insert_batches(&mut batches).await.unwrap();
+        admit_row_insert_batches(&mut batches).await.unwrap();
+        assert_eq!(original.write_rows_to_admit(CATALOG, "a", 4), 4);
+        for (ctx, _) in &batches {
+            assert_eq!(
+                ctx.write_rows_to_admit(CATALOG, &ctx.current_schema(), 2),
+                0
+            );
+            assert_eq!(ctx.channel(), Channel::Prometheus);
+        }
+        let attempts = meter.attempts.lock().unwrap();
+        let totals = attempts
+            .iter()
+            .map(|r| (r.schema.as_str(), r.rows, r.value))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            totals,
+            if enabled {
+                vec![("a", 4, 0), ("b", 2, 0)]
+            } else {
+                vec![]
+            }
         );
     }
 

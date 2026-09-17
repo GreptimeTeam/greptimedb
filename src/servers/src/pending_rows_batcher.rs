@@ -436,7 +436,11 @@ impl PendingRowsBatcher {
             ctx.current_catalog().to_string(),
             ctx.current_schema(),
             0,
-            total_rows as u64,
+            ctx.write_rows_to_admit(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                total_rows as u64
+            ),
             ctx.channel() as u8,
         ))
         .await

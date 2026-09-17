@@ -68,6 +68,10 @@ The parser in
 [`servers/src/otlp/trace/span.rs`](../../../../servers/src/otlp/trace/span.rs)
 produces one `TraceSpanGroup` per resource/scope pair.
 
+After permission checks, admission counts all spans in the request once per
+database. Chunks, schema retries, and derived lookup-table writes retain that
+admission; their actual writes still contribute WCU accounting.
+
 `ingest_trace_spans` in [`trace_ingest.rs`](trace_ingest.rs) splits the spans in
 each group into owned chunks. `trace_ingest_chunk_size` defaults to 512; setting
 it to 0 disables splitting. The option is defined in
