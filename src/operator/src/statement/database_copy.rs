@@ -32,7 +32,7 @@ use url::Url;
 use crate::error::{self, Result};
 use crate::statement::StatementExecutor;
 
-pub(super) fn is_directory_location(location: &str) -> bool {
+fn is_directory_location(location: &str) -> bool {
     if location.ends_with('/') {
         return true;
     }
@@ -51,7 +51,7 @@ pub(super) fn is_directory_location(location: &str) -> bool {
 }
 
 /// Get parallelism from options, default to total CPU cores.
-pub(super) fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
+pub(crate) fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
     options
         .get("parallelism")
         .and_then(|v| v.parse::<usize>().ok())
@@ -59,7 +59,7 @@ pub(super) fn parse_parallelism_from_option_map(options: &HashMap<String, String
         .max(1)
 }
 
-pub(super) fn validate_database_directory(location: &str) -> Result<()> {
+pub(crate) fn validate_database_directory(location: &str) -> Result<()> {
     ensure!(
         is_directory_location(location),
         error::InvalidCopyDatabasePathSnafu { value: location }
@@ -82,13 +82,13 @@ pub(super) fn validate_database_directory(location: &str) -> Result<()> {
 }
 
 /// The writer key and its externally reported location, resolved together.
-pub(super) struct DatabaseExportFile {
-    pub path: String,
-    pub location: String,
+pub(crate) struct DatabaseExportFile {
+    pub(crate) path: String,
+    pub(crate) location: String,
 }
 
 impl DatabaseExportFile {
-    pub fn new(directory: &str, name: &str, suffix: &str) -> Result<Self> {
+    pub(crate) fn new(directory: &str, name: &str, suffix: &str) -> Result<Self> {
         let filename = format!("{name}{suffix}");
         #[cfg(windows)]
         if common_datasource::object_store::handle_windows_path(directory).is_some() {
@@ -131,7 +131,7 @@ impl DatabaseExportFile {
 }
 
 /// Resolve a listed writer key back to its table name and COPY input location.
-pub(super) fn database_import_source(directory: &str, path: &str) -> Result<(String, String)> {
+pub(crate) fn database_import_source(directory: &str, path: &str) -> Result<(String, String)> {
     let mut filename = path.rsplit('/').next().unwrap_or(path).to_string();
     let mut location = format!("{directory}{path}");
     #[cfg(windows)]

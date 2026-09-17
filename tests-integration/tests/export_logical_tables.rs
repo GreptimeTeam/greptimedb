@@ -229,8 +229,10 @@ fn database_export_request(directory: &std::path::Path) -> table::requests::Copy
 
 async fn database_export_roundtrip(instance: &Arc<Instance>) {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
-    let (a, _, physical) = create_metric_export_source_tables(instance, "db_a", "dense").await;
-    let (b, _, _) = create_metric_export_source_tables(instance, "db_b", "sparse").await;
+    let (first_logical_table_names, _, renamed_physical_table) =
+        create_metric_export_source_tables(instance, "db_a", "dense").await;
+    let (second_logical_table_names, _, _) =
+        create_metric_export_source_tables(instance, "db_b", "sparse").await;
     sql(
         instance,
         "CREATE TABLE audit (host STRING, val DOUBLE, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host))",
@@ -242,9 +244,14 @@ async fn database_export_roundtrip(instance: &Arc<Instance>) {
     )
     .await;
     sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
-    let selected = vec![a[0].clone(), a[2].clone(), b[1].clone(), "audit".into()];
+    let selected = vec![
+        first_logical_table_names[0].clone(),
+        first_logical_table_names[2].clone(),
+        second_logical_table_names[1].clone(),
+        "audit".into(),
+    ];
     let mut names = selected.clone();
-    names.extend([physical, "dashboard".into()]);
+    names.extend([renamed_physical_table, "dashboard".into()]);
     let req = database_export_request(&destination.path().join("data"));
     let executor = instance.statement_executor();
     let captured = executor

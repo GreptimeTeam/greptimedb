@@ -200,7 +200,7 @@ impl StatementExecutor {
         }
         output_files.sort();
         let req = &plan.request;
-        let rows = run_jobs(
+        let rows = run_database_export_jobs(
             plan.jobs,
             parse_parallelism_from_option_map(&req.with),
             cancellation,
@@ -245,7 +245,7 @@ impl StatementExecutor {
     }
 }
 
-async fn run_jobs<J, F: Future<Output = Result<usize>>>(
+async fn run_database_export_jobs<J, F: Future<Output = Result<usize>>>(
     jobs: impl IntoIterator<Item = J>,
     parallelism: usize,
     cancellation: &CancellationToken,
@@ -319,7 +319,7 @@ mod tests {
                 let finish_io = finish_io.clone();
                 let finished = finished.clone();
                 async move {
-                    run_jobs(0..4, 2, &cancellation, |job, token| {
+                    run_database_export_jobs(0..4, 2, &cancellation, |job, token| {
                         let started = started.clone();
                         let start_error = start_error.clone();
                         let finish_io = finish_io.clone();
@@ -379,7 +379,7 @@ mod tests {
     async fn cancellation_before_admission_and_successful_refill() {
         let token = CancellationToken::new();
         token.cancel();
-        let result = run_jobs(0..4, 2, &token, |_, _| async {
+        let result = run_database_export_jobs(0..4, 2, &token, |_, _| async {
             panic!("cancelled job admitted")
         })
         .await;
@@ -388,7 +388,7 @@ mod tests {
             Err(error::Error::DatabaseExportCancelled { .. })
         ));
         let started = AtomicUsize::new(0);
-        let result = run_jobs(0..7, 2, &CancellationToken::new(), |job, _| {
+        let result = run_database_export_jobs(0..7, 2, &CancellationToken::new(), |job, _| {
             started.fetch_add(1, Ordering::SeqCst);
             async move { Ok(job) }
         })

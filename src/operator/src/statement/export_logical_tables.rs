@@ -114,7 +114,7 @@ impl LogicalTableExport {
         Self::try_new_in_directory(physical, tables, "")
     }
 
-    pub(super) fn try_new_in_directory(
+    pub(crate) fn try_new_in_directory(
         physical: TableRef,
         tables: &[TableRef],
         directory: &str,
@@ -219,7 +219,7 @@ impl LogicalTableExport {
         })
     }
 
-    pub(super) fn output_files(&self) -> impl Iterator<Item = &DatabaseExportFile> {
+    pub(crate) fn output_files(&self) -> impl Iterator<Item = &DatabaseExportFile> {
         self.logical_tables.values().map(|table| &table.output)
     }
 
