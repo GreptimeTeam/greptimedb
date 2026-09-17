@@ -89,7 +89,6 @@ tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-temp-env.workspace = true
 arrow-flight.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
@@ -99,5 +98,6 @@ hyper-util = { workspace = true, features = ["tokio"] }
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
+temp-env.workspace = true
 tower.workspace = true
 uuid.workspace = true
