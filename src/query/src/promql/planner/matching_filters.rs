@@ -19,15 +19,13 @@ use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Expr, LabelModifier, VectorMatchCardinality, token,
 };
 
-/// Regular expression that every label value satisfies. [`super::PromPlanner::matchers_to_expr`]
-/// emits no filter for it, so propagating it would only trigger a pointless re-plan.
+/// [`super::PromPlanner::matchers_to_expr`] emits no filter for this, so copying it would only
+/// force a re-plan.
 const MATCH_ALL_REGEX: &str = "^(?:.*)$";
 
-/// Rollup functions that emit at most one output series per input series, carrying the labels
-/// of the matrix selector they wrap.
-///
-/// `absent_over_time` is deliberately absent: it synthesizes a series from the matchers when
-/// the input has none, so filtering its input changes its output.
+/// Rollup functions emitting at most one output series per input series, carrying the labels of
+/// the matrix selector they wrap. `absent_over_time` is excluded: it synthesizes a series from
+/// the matchers when its input has none.
 const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
     "avg_over_time",
     "changes",
@@ -55,36 +53,48 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// non-joining series instead of the join.
 ///
 /// One-to-one arithmetic operands are inner-joined on their matching labels with plain column
-/// equality. A matcher on a matching label is therefore already enforced on both sides for
-/// every surviving pair: it originates on one operand, and the join propagates it to the pairs
-/// it forms. Copying it to the other operand can only drop rows that had no surviving partner,
-/// which holds for every matcher kind, including regular expressions, negations, and empty
-/// values, and for `NULL` label values, which only ever pair with `NULL`.
+/// equality, so a matcher on a matching label already holds for every surviving pair. Copying it
+/// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
+/// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
+/// matching label, so it does not affect a cardinality check such as #9209.
 ///
-/// `left_tags` and `right_tags` are the tag columns of the two already planned operands. A
-/// selector matcher can also constrain a value field, which the parsed expression does not
-/// distinguish from a label, so only names that are tags on both sides are propagated. For an
-/// aggregated operand those tags are its grouping labels, which is what makes filtering the
-/// aggregate's input equivalent to filtering its output.
-///
-/// Returns `None` when the expression is outside this subset or nothing was added.
+/// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
+/// as well constrain a value field, which the parsed expression does not distinguish from a
+/// label. For an aggregated operand they are its grouping labels, which is what makes filtering
+/// its input equivalent to filtering its output.
 pub(super) fn propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
 ) -> Option<BinaryExpr> {
+    match try_propagate(binary, left_tags, right_tags) {
+        Ok(rewritten) => Some(rewritten),
+        Err(reason) => {
+            common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
+            None
+        }
+    }
+}
+
+/// `Err` carries why the rewrite does not apply, for [`propagate`] to log.
+fn try_propagate(
+    binary: &BinaryExpr,
+    left_tags: &[String],
+    right_tags: &[String],
+) -> Result<BinaryExpr, &'static str> {
     if !matches!(
         binary.op.id(),
         token::T_ADD | token::T_SUB | token::T_MUL | token::T_DIV | token::T_MOD | token::T_POW
     ) {
-        return None;
+        return Err("operator is not arithmetic");
     }
-    if binary.modifier.as_ref().is_some_and(|modifier| {
-        !matches!(modifier.card, VectorMatchCardinality::OneToOne)
-            || modifier.fill_values.lhs.is_some()
-            || modifier.fill_values.rhs.is_some()
-    }) {
-        return None;
+    if let Some(modifier) = &binary.modifier {
+        if !matches!(modifier.card, VectorMatchCardinality::OneToOne) {
+            return Err("matching is not one-to-one");
+        }
+        if modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some() {
+            return Err("operand carries a fill modifier");
+        }
     }
     let matching = binary
         .modifier
@@ -92,15 +102,14 @@ pub(super) fn propagate(
         .and_then(|modifier| modifier.matching.as_ref());
 
     let mut rewritten = binary.clone();
-    let left = selector_matchers(&mut rewritten.lhs)?;
-    let right = selector_matchers(&mut rewritten.rhs)?;
+    let left = selector_matchers(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
+    let right = selector_matchers(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
     if !left.or_matchers.is_empty() || !right.or_matchers.is_empty() {
-        return None;
+        return Err("selector has an or matcher group");
     }
 
     let is_matching_label = |name: &String| {
-        // `__name__`, `__field__`, `__schema__` and the metric engine's internal columns are
-        // not joined on, and PromQL reserves the `__` prefix.
+        // PromQL reserves the `__` prefix; none of those names is a join key.
         !name.starts_with("__")
             && left_tags.contains(name)
             && right_tags.contains(name)
@@ -127,20 +136,23 @@ pub(super) fn propagate(
             }
         }
     }
-    changed.then_some(rewritten)
+    if !changed {
+        return Err("operands already carry the same matching-label matchers");
+    }
+    Ok(rewritten)
 }
 
 fn matches_every_value(matcher: &Matcher) -> bool {
     matches!(&matcher.op, MatchOp::Re(re) if re.as_str() == MATCH_ALL_REGEX)
 }
 
-/// Aggregations that partition their input by the grouping labels, so that dropping input
-/// series by a grouping label drops exactly the corresponding output series and leaves the
-/// remaining aggregated values untouched.
+/// Aggregations partitioning their input by the grouping labels, so that dropping input series
+/// by a grouping label drops exactly the matching output series and leaves the remaining
+/// aggregated values untouched.
 ///
-/// `topk`, `bottomk` and `limitk` select series across a group and carry the input labels
-/// through, so filtering their input changes which series they return. `count_values` adds an
-/// output label that does not exist in its input.
+/// `topk`, `bottomk` and `limitk` rank across a group and carry the input labels through, so
+/// filtering before them changes the candidate set. `count_values` adds an output label that
+/// does not exist in its input.
 fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     matches!(
         aggregate.op.id(),
@@ -166,8 +178,7 @@ fn selector_matchers(expr: &mut Expr) -> Option<&mut Matchers> {
             selector_matchers(&mut aggregate.expr)
         }
         Expr::Call(call) if LABEL_PRESERVING_RANGE_FUNCTIONS.contains(&call.func.name) => {
-            // The remaining arguments are scalars, so the sole matrix argument carries the
-            // labels regardless of where the function takes it.
+            // Every other argument is a scalar, so position does not matter.
             let matrix = single_matrix_argument(&call.args.args)?;
             match call.args.args[matrix].as_mut() {
                 Expr::MatrixSelector(selector) => Some(&mut selector.vs.matchers),
@@ -258,8 +269,6 @@ mod tests {
 
     #[test]
     fn propagates_matchers_the_join_enforces_anyway() {
-        // The join compares label values directly, so any predicate on a matching label is
-        // already satisfied by every surviving pair.
         for (query, expected) in [
             (
                 r#"a / b{host=~"x.*"}"#,
@@ -274,7 +283,6 @@ mod tests {
         ] {
             assert_rewrite(query, expected);
         }
-        // `=~".*"` lowers to no filter at all, so copying it would only force a re-plan.
         assert!(rewrite(r#"a / b{host=~".*"}"#).is_none());
     }
 
@@ -292,8 +300,6 @@ mod tests {
 
     #[test]
     fn leaves_selecting_aggregations_alone() {
-        // These carry input labels through, so filtering their input changes which series
-        // they return.
         for query in [
             r#"topk(3, a) / on(host) b{host="x"}"#,
             r#"bottomk(3, a) / on(host) b{host="x"}"#,

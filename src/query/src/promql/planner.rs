@@ -1508,12 +1508,9 @@ impl PromPlanner {
                     .unwrap_or_else(|_| TableReference::bare(""));
                 let mut right_context = self.ctx.clone();
 
-                // Both operands are planned before the rewrite because a selector matcher may
-                // constrain a value field, and only the planned contexts tell tags and fields
-                // apart. The rewrite only adds matchers to a selector, which changes neither
-                // the table reference, the time index, nor the field columns of the operand
-                // that encloses it, so the values captured above stay valid for a re-planned
-                // operand.
+                // Both operands are planned first because only the planned contexts tell a tag
+                // from a value field. The rewrite merely adds matchers to a selector, so the
+                // table reference, time index and field columns captured above stay valid.
                 if let Some(rewritten) = matching_filters::propagate(
                     binary_expr,
                     &left_context.tag_columns,
@@ -13380,8 +13377,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
 
     #[tokio::test]
     async fn binary_matching_label_filter_skips_selecting_aggregations() {
-        // `topk` carries its input labels through, so filtering its input would change which
-        // series it returns.
+        // `topk` ranks its input, so filtering before it changes the candidate set.
         let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
         let plan = build_matching_filter_plan(query).await;
         assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
