@@ -2,34 +2,12 @@ CREATE TABLE application_logs (
     ts TIMESTAMP TIME INDEX,
     attrs JSON2
 ) WITH (
-<<<<<<< HEAD
-    'append_mode' = 'true'
-=======
     'append_mode' = 'true',
     'sst_format' = 'flat'
->>>>>>> c2b50992a3 (feat(sql): support alter syntax for JSON2 columns)
 );
 
 Affected Rows: 0
 
-<<<<<<< HEAD
-ALTER TABLE application_logs
-    MODIFY COLUMN attrs JSON2;
-
-Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2 type
-
-ALTER TABLE application_logs
-    MODIFY COLUMN attrs JSON2 ();
-
-Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2 type
-
-ALTER TABLE application_logs
-    MODIFY COLUMN attrs JSON2 (
-        max_auto_expanded_paths = 2000
-    );
-
-Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2 type
-=======
 INSERT INTO application_logs VALUES
     (1, '{"service":"frontend","duration":12,"trace_id":"before-1"}'),
     (2, '{"service":"ingester","duration":34,"trace_id":"before-2"}');
@@ -99,7 +77,6 @@ ORDER BY ts;
 | 1970-01-01T00:00:00.003 | frontend                                         | 56                                                | after-1                                           |
 | 1970-01-01T00:00:00.004 | compactor                                        | 0                                                 | after-2                                           |
 +-------------------------+--------------------------------------------------+---------------------------------------------------+---------------------------------------------------+
->>>>>>> c2b50992a3 (feat(sql): support alter syntax for JSON2 columns)
 
 ALTER TABLE application_logs
     MODIFY COLUMN attrs JSON2 (
@@ -109,9 +86,6 @@ ALTER TABLE application_logs
         request_id STRING INVERTED INDEX
     );
 
-<<<<<<< HEAD
-Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2 type
-=======
 Affected Rows: 0
 
 INSERT INTO application_logs VALUES
@@ -132,7 +106,6 @@ ORDER BY ts;
 | 1970-01-01T00:00:00.004 | after-2                                           |                                                  |                                                    |                                                     |
 | 1970-01-01T00:00:00.005 | after-3                                           | u1                                               | alice                                              | r1                                                  |
 +-------------------------+---------------------------------------------------+--------------------------------------------------+----------------------------------------------------+-----------------------------------------------------+
->>>>>>> c2b50992a3 (feat(sql): support alter syntax for JSON2 columns)
 
 ALTER TABLE application_logs
     MODIFY COLUMN attrs JSON2 (
@@ -143,9 +116,6 @@ ALTER TABLE application_logs
         request_id STRING INVERTED INDEX
     );
 
-<<<<<<< HEAD
-Error: 1001(Unsupported), Not supported: ALTER TABLE MODIFY COLUMN to JSON2 type
-=======
 Affected Rows: 0
 
 INSERT INTO application_logs VALUES
@@ -175,7 +145,6 @@ ADMIN FLUSH_TABLE('application_logs');
 +---------------------------------------+
 | 0                                     |
 +---------------------------------------+
->>>>>>> c2b50992a3 (feat(sql): support alter syntax for JSON2 columns)
 
 DROP TABLE application_logs;
 

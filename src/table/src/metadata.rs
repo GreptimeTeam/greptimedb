@@ -42,9 +42,9 @@ use crate::error::{self, Result};
 use crate::requests::{
     AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
     ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, REPARTITION_PARTITION_NUM_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption, has_stable_string_form,
-    parse_entity_columns, parse_entity_option_key, validate_and_normalize_annotation,
-    validate_annotation_keys,
+    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, TableOptions, UnsetIndexOption,
+    has_stable_string_form, parse_entity_columns, parse_entity_option_key,
+    validate_and_normalize_annotation, validate_annotation_keys,
 };
 use crate::table_reference::TableReference;
 

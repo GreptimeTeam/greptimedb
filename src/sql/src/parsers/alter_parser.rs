@@ -475,6 +475,7 @@ impl ParserContext<'_> {
                     Ok(AlterTableOperation::ModifyColumnType {
                         column_name,
                         target_type: self.parser.parse_data_type().context(error::SyntaxSnafu)?,
+                        json2_options: None,
                     })
                 }
             }
