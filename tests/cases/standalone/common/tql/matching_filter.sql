@@ -127,6 +127,11 @@ tql eval(0, 5, '5s') counter_metric > on(host, device) gauge_metric{host="host1"
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host) group_left sum by(host)(gauge_metric{host="host1"});
 
+-- `absent()` reports the inner selector's equality matchers as labels, so a copied matcher
+-- must not reach the context an enclosing expression reads.
+-- SQLNESS SORT_RESULT 3 1
+tql eval(0, 5, '5s') absent(counter_metric{host="missing"} / on(host, device) gauge_metric);
+
 drop table gauge_metric;
 
 drop table counter_metric;

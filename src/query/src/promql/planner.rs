@@ -1516,17 +1516,24 @@ impl PromPlanner {
                     &left_context.tag_columns,
                     &right_context.tag_columns,
                 ) {
+                    // A copied matcher belongs to the scan, not to the operand's identity:
+                    // `absent()` turns `selector_matcher` into the labels it reports, so the
+                    // re-planned context keeps the matchers the operand was written with.
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
+                        let selectors = std::mem::take(&mut left_context.selector_matcher);
                         left_input = self
                             .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
                             .await?;
                         left_context = self.ctx.clone();
+                        left_context.selector_matcher = selectors;
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
+                        let selectors = std::mem::take(&mut right_context.selector_matcher);
                         right_input = self
                             .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
                             .await?;
                         right_context = self.ctx.clone();
+                        right_context.selector_matcher = selectors;
                     }
                     // The code below reads `self.ctx` as the right operand's context.
                     self.ctx = right_context.clone();
