@@ -16,7 +16,7 @@ mod matching_filters;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
@@ -88,10 +88,10 @@ use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AggregateExpr, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt, Expr as PromExpr,
-    Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector, NumberLiteral,
-    Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr, VectorMatchCardinality,
-    VectorSelector, token,
+    AggregateExpr, AtModifier, BinModifier, BinaryExpr as PromBinaryExpr, Call, EvalStmt,
+    Expr as PromExpr, Function, FunctionArgs as PromFunctionArgs, LabelModifier, MatrixSelector,
+    NumberLiteral, Offset, ParenExpr, StringLiteral, SubqueryExpr, UnaryExpr,
+    VectorMatchCardinality, VectorSelector, token,
 };
 use regex::{self, Regex};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -106,14 +106,14 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
-    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
-    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    AtModifierTimestampOutOfRangeSnafu, CatalogSnafu, ColumnNotFoundSnafu,
+    CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
+    FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
+    InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -158,6 +158,50 @@ const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
+/// Functions whose result can change with the evaluation timestamp even when all of their
+/// arguments are step-invariant, mirroring Prometheus' `AtModifierUnsafeFunctions`. A call to one
+/// of them is never promoted to a step-invariant subtree; see [`PromPlanner::is_step_invariant`].
+const AT_MODIFIER_UNSAFE_FUNCTIONS: [&str; 15] = [
+    // Step invariant functions: they do not read samples at all.
+    "days_in_month",
+    "day_of_month",
+    "day_of_week",
+    "day_of_year",
+    "end",
+    "hour",
+    "minute",
+    "month",
+    "year",
+    "predict_linear",
+    "range",
+    "start",
+    "step",
+    "time",
+    // Uses the timestamp of the argument for the result, hence unsafe to use with the `@`
+    // modifier, unless the argument is an anchored selector; see
+    // [`PromPlanner::is_step_invariant_call`].
+    "timestamp",
+];
+
+/// Functions whose output is not a row-wise mapping of a single input series, so a call to one of
+/// them cannot be evaluated once for a whole step-invariant subtree and then replayed at every
+/// step: `sort` and friends reorder the whole vector, and the histogram helpers fold the buckets of
+/// every series into new rows. Both gather rows of different series into shared batches, which
+/// [`PromPlanner::replay_over_grid`] cannot report per series.
+///
+/// Skipping the promotion costs no correctness: the selectors below such a call anchor themselves
+/// and are replayed per series, and the call is evaluated at every step over that replayed input.
+///
+/// See [`PromPlanner::is_row_wise_chain`].
+const REPLAY_UNSAFE_FUNCTIONS: [&str; 6] = [
+    "sort",
+    "sort_desc",
+    "sort_by_label",
+    "sort_by_label_desc",
+    "histogram_quantile",
+    "histogram_fraction",
+];
+
 /// Interval 1 hour in millisecond
 const INTERVAL_1H: i64 = 60 * 60 * 1000;
 
@@ -168,6 +212,12 @@ struct PromPlannerContext {
     end: Millisecond,
     interval: Millisecond,
     lookback_delta: Millisecond,
+    /// Evaluation range of the whole statement, which `@ start()` and `@ end()` refer to.
+    ///
+    /// Unlike [`Self::start`] and [`Self::end`], these are never rewritten while planning, so a
+    /// selector inside a subquery still resolves `@ start()` / `@ end()` against the statement.
+    stmt_start: Millisecond,
+    stmt_end: Millisecond,
 
     // planner states
     table_name: Option<String>,
@@ -363,11 +413,15 @@ impl IslandCollectEnv {
 
 impl PromPlannerContext {
     fn from_eval_stmt(stmt: &EvalStmt) -> Self {
+        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
+        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
         Self {
-            start: stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
-            end: stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
+            start,
+            end,
             interval: stmt.interval.as_millis() as _,
             lookback_delta: stmt.lookback_delta.as_millis() as _,
+            stmt_start: start,
+            stmt_end: end,
             ..Default::default()
         }
     }
@@ -462,6 +516,15 @@ impl PromPlanner {
         timestamp_fn: bool,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
+        // A subtree whose samples are all anchored by `@` is step-invariant: evaluate it once, at
+        // the start of the evaluation, and report the result at every step.
+        if let Some(plan) = self
+            .promote_step_invariant_subtree(prom_expr, timestamp_fn, query_engine_state)
+            .await?
+        {
+            return Ok(plan);
+        }
+
         let res = match prom_expr {
             PromExpr::Aggregate(expr) => {
                 self.prom_aggr_expr_to_plan(query_engine_state, expr)
@@ -1956,6 +2019,411 @@ impl PromPlanner {
         Ok(plan)
     }
 
+    /// Resolve the `@` modifier of a vector or matrix selector into the timestamp its sample
+    /// window is anchored at, in milliseconds since the Unix epoch.
+    ///
+    /// Prometheus semantics:
+    /// - `@ <unix_ts>` anchors at the given timestamp,
+    /// - `@ start()` / `@ end()` anchor at the evaluation range of the whole statement,
+    /// - `offset` shifts the anchor backwards: the window ends at `anchor - offset`.
+    ///
+    /// Returns `None` when the selector has no `@` modifier.
+    fn at_ref_time(
+        &self,
+        at: &Option<AtModifier>,
+        offset: &Option<Offset>,
+    ) -> Result<Option<Millisecond>> {
+        let anchor = match at {
+            None => return Ok(None),
+            Some(AtModifier::Start) => self.ctx.stmt_start,
+            Some(AtModifier::End) => self.ctx.stmt_end,
+            Some(AtModifier::At(time)) => Self::system_time_to_millis(time)?,
+        };
+        Ok(Some(anchor.saturating_sub(Self::offset_millis(offset))))
+    }
+
+    /// The offset of a selector in milliseconds. A positive offset selects samples from an earlier
+    /// time and moves them forward into the evaluation timeline.
+    fn offset_millis(offset: &Option<Offset>) -> Millisecond {
+        match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        }
+    }
+
+    /// The offset a selector with an `@` modifier is evaluated with.
+    ///
+    /// Prometheus anchors such a selector by rewriting its offset to `eval_time - anchor`
+    /// (`setOffsetForAtModifier`), so that the selector always selects its samples around `anchor`
+    /// regardless of the step being evaluated. `eval_time` is the start of the evaluation the
+    /// selector belongs to, which is [`Self::start`].
+    ///
+    /// Returns `None` when the selector has no `@` modifier.
+    fn at_modifier_offset(
+        &self,
+        at: &Option<AtModifier>,
+        offset: &Option<Offset>,
+    ) -> Result<Option<Millisecond>> {
+        let Some(anchor) = self.at_ref_time(at, offset)? else {
+            return Ok(None);
+        };
+        Ok(Some(self.ctx.start.saturating_sub(anchor)))
+    }
+
+    /// Whether the value of `expr` is independent of the evaluation step of the enclosing query.
+    ///
+    /// This mirrors Prometheus' `preprocessExprHelper` (`IsStepInvariant`): a subtree reports the
+    /// same value at every step only when *every* selector below it pins its sample window with
+    /// `@`. `@ <timestamp>`, `@ start()` and `@ end()` all resolve to a fixed timestamp for the
+    /// whole statement, so all three count as fixed anchors; a selector without `@` follows the
+    /// evaluation timestamp and makes its enclosing subtree step-dependent.
+    ///
+    /// Subqueries and extensions are never considered step-invariant: this planner does not
+    /// implement `@` / `offset` on subqueries, and an extension wraps an arbitrary inner plan.
+    fn is_step_invariant(expr: &PromExpr) -> bool {
+        match expr {
+            // A selector keeps its sample window only with `@`; see [`Self::at_ref_time`].
+            PromExpr::VectorSelector(VectorSelector { at, .. }) => at.is_some(),
+            // Prometheus does not treat a matrix selector itself as a node to wrap (the enclosing
+            // function is wrapped instead), but its window still has to be anchored.
+            PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => vs.at.is_some(),
+            PromExpr::Paren(ParenExpr { expr }) => Self::is_step_invariant(expr),
+            PromExpr::Unary(UnaryExpr { expr }) => Self::is_step_invariant(expr),
+            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
+                Self::is_step_invariant(lhs) && Self::is_step_invariant(rhs)
+            }
+            // Like Prometheus, only the aggregated expression decides, not the aggregation
+            // parameter (which is a literal for every aggregation that takes one).
+            PromExpr::Aggregate(AggregateExpr { expr, .. }) => Self::is_step_invariant(expr),
+            PromExpr::Call(Call { func, args }) => Self::is_step_invariant_call(func.name, args),
+            // A literal is the same value at every step.
+            PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => true,
+            PromExpr::Subquery(_) | PromExpr::Extension(_) => false,
+        }
+    }
+
+    /// Whether a call to `name` with `args` is step-invariant.
+    ///
+    /// A function is invariant when it is not one of [`AT_MODIFIER_UNSAFE_FUNCTIONS`] and all of
+    /// its arguments are, mirroring Prometheus' `preprocessExprHelper`. `timestamp()` is the one
+    /// function whose invariance depends on the shape of its argument: it reports the timestamp of
+    /// the argument's samples, so it stays invariant only when that argument is a selector anchored
+    /// by `@` (`timestamp(metric @ 1)`), and not when the argument derives new samples
+    /// (`timestamp(abs(metric @ 1))`).
+    ///
+    /// Treating `timestamp(metric @ 1)` as invariant is a deliberate divergence from Prometheus,
+    /// which instead re-selects the anchored selector at every step
+    /// (`rangeEvalTimestampFunctionOverVectorSelector`, reached from `rangeEval` when the argument
+    /// is a vector selector with `@`): each step rewrites the selector's offset to
+    /// `eval_time - anchor` — exactly [`Self::at_modifier_offset`] — and reports the timestamp of the
+    /// sample that window selects. Both select the same window around the anchor at every step, so
+    /// evaluating it once and replaying the result is equivalent, and it is what this planner can
+    /// express.
+    fn is_step_invariant_call(name: &str, args: &PromFunctionArgs) -> bool {
+        if !AT_MODIFIER_UNSAFE_FUNCTIONS.contains(&name) {
+            return args.args.iter().all(|arg| Self::is_step_invariant(arg));
+        }
+        name == "timestamp"
+            && matches!(
+                args.args.as_slice(),
+                [arg] if matches!(arg.as_ref(), PromExpr::VectorSelector(VectorSelector { at: Some(_), .. }))
+            )
+    }
+
+    /// Whether `expr` reads samples, i.e. whether it contains a selector or a subquery.
+    ///
+    /// A subtree without samples (for example `vector(1)` or `time()`) is already reported at
+    /// every step by the plan that builds it, so it needs no promotion; see
+    /// [`Self::promotes_step_invariant_subtree`].
+    fn reads_samples(expr: &PromExpr) -> bool {
+        match expr {
+            PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) | PromExpr::Subquery(_) => {
+                true
+            }
+            PromExpr::Paren(ParenExpr { expr }) => Self::reads_samples(expr),
+            PromExpr::Unary(UnaryExpr { expr }) => Self::reads_samples(expr),
+            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
+                Self::reads_samples(lhs) || Self::reads_samples(rhs)
+            }
+            PromExpr::Aggregate(AggregateExpr { expr, param, .. }) => {
+                Self::reads_samples(expr) || param.as_deref().is_some_and(Self::reads_samples)
+            }
+            PromExpr::Call(Call { args, .. }) => {
+                args.args.iter().any(|arg| Self::reads_samples(arg))
+            }
+            PromExpr::Extension(_) => true,
+            PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => false,
+        }
+    }
+
+    /// Whether `expr` is the root of a subtree that must be evaluated once for the whole grid.
+    ///
+    /// Only a `Call` (and its `Unary` wrapper) can be such a root:
+    ///
+    /// - A selector is never promoted here: it already selects its anchored window once and reports
+    ///   it at every step through [`Self::replay_over_grid`]. A matrix selector is never promoted
+    ///   either, because it is only ever evaluated through the function consuming it, which is the
+    ///   node promoted instead — the same shape as Prometheus, where `preprocessExprHelper` wraps
+    ///   the enclosing call rather than the range selector.
+    /// - An aggregation or a binary expression is not promoted: the selectors below it anchor
+    ///   themselves and are replayed per step, which already gives the correct per-step result for
+    ///   any step-invariant subtree (`sum(m @ 300)`, `m @ 300 + m @ 0`). Promoting them would add
+    ///   no correctness and would report a multi-series result through [`Self::replay_over_grid`],
+    ///   whose [`InstantManipulate`] node takes every batch as one single timeline — an aggregation
+    ///   emits one row per group and a join one row per matched series, and they share batches.
+    /// - A `Call` is promoted only when it is a row-wise function of one `@` anchored selector
+    ///   ([`Self::is_row_wise_chain`]): that is the shape whose result can be replayed, once
+    ///   [`Self::series_divide_plan`] has restored the one-series-per-batch layout the replay needs
+    ///   (the row-wise projections in between do not preserve the batches of the selector). It is
+    ///   also the shape that needs the promotion most, since range functions such as `rate` derive
+    ///   their result from the evaluation timestamp themselves: without the promotion they would
+    ///   fold their window once per step instead of once around the anchor.
+    fn promotes_step_invariant_subtree(expr: &PromExpr) -> bool {
+        matches!(expr, PromExpr::Call(_) | PromExpr::Unary(_))
+            && Self::reads_samples(expr)
+            && Self::is_step_invariant(expr)
+            && Self::is_row_wise_chain(expr)
+    }
+
+    /// Whether `expr` is a chain of row-wise operators over a single selector, i.e. a subtree whose
+    /// rows can be split per series and replayed by [`Self::replay_over_grid`].
+    ///
+    /// [`InstantManipulate`] takes every input batch as one timeline, so the replay needs one
+    /// series per batch; [`Self::series_divide_plan`] restores that layout below the replay. What
+    /// matters here is the opposite direction: the subtree must not gather rows of *different*
+    /// series into one row set whose per-series split no longer describes the function result.
+    ///
+    /// A chain of `Call`s, `Unary`s and literals ending in one `@` anchored selector qualifies:
+    ///
+    /// - an instant selector selects its anchored sample per series, and the value functions above
+    ///   it map the rows of their input one by one;
+    /// - a range function folds the window of one series through [`RangeManipulate`], which (like
+    ///   [`InstantManipulate`]) reads one series per input batch, so its result is per series too;
+    /// - a `Unary` negation projects the field columns.
+    ///
+    /// Everything that merges series into shared rows disqualifies the subtree: an aggregation or a
+    /// binary expression does (`abs(sum(m @ 1))`, `abs(m @ 1 + m @ 0)`), and so do the calls listed
+    /// in [`REPLAY_UNSAFE_FUNCTIONS`]. Those shapes are correct without the promotion, since their
+    /// selectors anchor and replay per series on their own and the operator above them is evaluated
+    /// at every step.
+    fn is_row_wise_chain(expr: &PromExpr) -> bool {
+        match expr {
+            // The selector that establishes the layout, and the literals of the calls above it.
+            PromExpr::VectorSelector(_)
+            | PromExpr::MatrixSelector(_)
+            | PromExpr::NumberLiteral(_)
+            | PromExpr::StringLiteral(_) => true,
+            PromExpr::Paren(ParenExpr { expr }) => Self::is_row_wise_chain(expr),
+            PromExpr::Unary(UnaryExpr { expr }) => Self::is_row_wise_chain(expr),
+            PromExpr::Call(Call { func, args }) => {
+                !REPLAY_UNSAFE_FUNCTIONS.contains(&func.name)
+                    && args.args.iter().all(|arg| Self::is_row_wise_chain(arg))
+            }
+            // These wrap several series, or an arbitrary inner plan, in one output.
+            PromExpr::Aggregate(_)
+            | PromExpr::Binary(_)
+            | PromExpr::Subquery(_)
+            | PromExpr::Extension(_) => false,
+        }
+    }
+
+    /// Plans `prom_expr` as a step-invariant subtree: the whole subtree is planned on a single
+    /// evaluation instant (`grid_start`, the start of the outer evaluation) and its result is then
+    /// reported at every step of `[grid_start, ctx.end]` by [`Self::replay_over_grid`].
+    ///
+    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr`, which the engine
+    /// creates for the largest step-invariant subtree of the query (`preprocessExprHelper`) and
+    /// evaluates once, reusing the value of every step. Evaluating the subtree once matters for
+    /// functions that derive their result from the step being evaluated: `rate(m[5m] @ 300)` folds
+    /// its window around the anchor once, and the extrapolation boundaries of `rate` must be
+    /// derived from that same window at every step instead of following the outer evaluation
+    /// timestamp.
+    ///
+    /// Unlike Prometheus, only a `Call`/`Unary` root over a single selector is promoted (see
+    /// [`Self::promotes_step_invariant_subtree`]): the larger shapes it also wraps (aggregations,
+    /// binary expressions, reordering calls) already produce the right result step by step, and
+    /// their output cannot be replayed per series. The result of the promoted subtree is split into
+    /// one series per batch before it is replayed ([`Self::series_divide_plan`]), because the
+    /// row-wise operators of the subtree do not preserve the batch layout of the selector.
+    ///
+    /// Returns `None` when `prom_expr` is not the root of such a subtree, so that the caller plans
+    /// it as usual. The selectors inside the promoted subtree keep their own `@` anchoring (see
+    /// [`Self::at_modifier_offset`]), and a nested invariant subtree is planned with
+    /// `ctx.end == ctx.start` so that it is not replayed twice.
+    async fn promote_step_invariant_subtree(
+        &mut self,
+        prom_expr: &PromExpr,
+        timestamp_fn: bool,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<Option<LogicalPlan>> {
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
+        // An instant query evaluates a single step, so there is nothing to promote.
+        if grid_start == grid_end || !Self::promotes_step_invariant_subtree(prom_expr) {
+            return Ok(None);
+        }
+
+        // Plan the subtree on a single evaluation instant: every selector below still anchors its
+        // window through `@`, and the functions above them derive their result from that one
+        // instant. The planner is single-use, so `ctx.end` needs no restore-on-error.
+        self.ctx.end = grid_start;
+        let anchored = self
+            .prom_expr_to_plan_inner(prom_expr, timestamp_fn, query_engine_state)
+            .await?;
+        self.ctx.end = grid_end;
+
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
+                })?;
+        // The replay reads one series per batch; see [`Self::series_divide_plan`] for why the
+        // layout of the selector below the promoted call does not survive it.
+        let anchored = self.series_divide_plan(anchored, &time_index_column)?;
+        Ok(Some(self.replay_over_grid(
+            anchored,
+            grid_start,
+            grid_end,
+            time_index_column,
+        )?))
+    }
+
+    /// Convert the timestamp of an `@` modifier into milliseconds since the Unix epoch.
+    fn system_time_to_millis(time: &SystemTime) -> Result<Millisecond> {
+        let (millis, negative) = match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => (duration.as_millis(), false),
+            // The `@` modifier accepts timestamps before the Unix epoch, e.g. `@ -1`.
+            Err(err) => (err.duration().as_millis(), true),
+        };
+        ensure!(
+            millis <= i64::MAX as u128,
+            AtModifierTimestampOutOfRangeSnafu {
+                timestamp: time
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| format!("+{}ms", duration.as_millis()))
+                    .unwrap_or_else(|err| format!("-{}ms", err.duration().as_millis())),
+            }
+        );
+        let millis = millis as Millisecond;
+        Ok(if negative { -millis } else { millis })
+    }
+
+    /// The columns that identify one series, which is the series key expected by the PromQL plan
+    /// nodes that hold exactly one series per input batch.
+    fn series_key_columns(&self) -> Vec<String> {
+        if self.ctx.use_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx.tag_columns.clone()
+        }
+    }
+
+    /// Report the samples of `anchored` at every step of the evaluation grid
+    /// `[grid_start, grid_end]`.
+    ///
+    /// A selector with an `@` modifier is anchored: the sample window is selected once, around the
+    /// anchor timestamp, and every evaluation step reports that same window. Prometheus does this
+    /// by rewriting the selector's offset to `eval_time - anchor` and only fetching the samples on
+    /// the first step (`setOffsetForAtModifier` plus the `refetch` shortcut in `rangeEval`).
+    ///
+    /// The expansion reuses [`InstantManipulate`] with a lookback that spans the whole grid: every
+    /// step then picks the same sample (or the same already computed value, when `anchored` ends
+    /// with a function call such as `rate`) and stamps it with the step's timestamp.
+    ///
+    /// Every input batch of `anchored` must hold exactly one series, because [`InstantManipulate`]
+    /// takes a batch as one timeline. A leaf-level replay (`m @ 300`) consumes the [`SeriesDivide`]
+    /// of its selector directly. A promoted subtree is guaranteed that layout by
+    /// [`Self::series_divide_plan`], which is why [`Self::promote_step_invariant_subtree`] splits
+    /// its result before calling this method.
+    fn replay_over_grid(
+        &self,
+        anchored: LogicalPlan,
+        grid_start: Millisecond,
+        grid_end: Millisecond,
+        time_index_column: String,
+    ) -> Result<LogicalPlan> {
+        if grid_start == grid_end {
+            // A single evaluation step: `anchored` is already stamped with that timestamp.
+            return Ok(anchored);
+        }
+
+        let replayed = InstantManipulate::new(
+            grid_start,
+            grid_end,
+            // The lookback must keep the single anchored sample eligible for every step.
+            grid_end - grid_start + 1,
+            self.ctx.interval,
+            0,
+            time_index_column,
+            self.series_key_columns(),
+            self.ctx.field_columns.first().cloned(),
+            anchored,
+        );
+        Ok(LogicalPlan::Extension(Extension {
+            node: Arc::new(replayed),
+        }))
+    }
+
+    /// Sorts `input` by its series key and time index and splits it into one batch per series.
+    ///
+    /// [`InstantManipulate`] reads every input batch as one series (it takes the timeline of the
+    /// batch and reports the row selected at every step), so a batch holding several series would
+    /// lose all but one of them. A selector establishes that layout with its own [`SeriesDivide`],
+    /// but the per-series distribution requirement does not reach a promoted subtree above it:
+    /// the row-wise projection of a call sits in between, so the batch boundaries of the selector
+    /// are not preserved — in a distributed plan the promoted result can be delivered as one batch
+    /// holding every series. Sorting and dividing here restores the layout, exactly like
+    /// [`Self::prom_matrix_selector_to_plan`] does for the input of a range function.
+    ///
+    /// Series keys that are not present in `input` are dropped, since `ctx.tag_columns` may have
+    /// drifted from the actual output schema. A plan without any series key column is returned
+    /// unchanged: there is nothing to divide by.
+    fn series_divide_plan(
+        &self,
+        input: LogicalPlan,
+        time_index_column: &str,
+    ) -> Result<LogicalPlan> {
+        let input_schema = input.schema();
+        let input_has_tsid = input_schema.fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        });
+        let series_key_columns = if input_has_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx
+                .tag_columns
+                .iter()
+                .filter(|name| input_schema.has_column_with_unqualified_name(name))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if series_key_columns.is_empty() {
+            return Ok(input);
+        }
+
+        let mut sort_exprs = series_key_columns
+            .iter()
+            .map(|name| DfExpr::Column(Column::from_name(name)).sort(true, true))
+            .collect::<Vec<_>>();
+        sort_exprs.push(DfExpr::Column(Column::from_name(time_index_column)).sort(true, true));
+        let sort_plan = LogicalPlanBuilder::from(input)
+            .sort(sort_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        Ok(LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                series_key_columns,
+                time_index_column.to_string(),
+                sort_plan,
+            )),
+        }))
+    }
+
     async fn prom_vector_selector_to_plan(
         &mut self,
         vector_selector: &VectorSelector,
@@ -1965,20 +2433,37 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            at: _,
+            at,
         } = vector_selector;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
+        let offset_ms = Self::offset_millis(offset);
+        // `@` anchors the sample window at a fixed timestamp: the selector selects its samples
+        // around the anchor once, instead of following the outer evaluation grid. See
+        // [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
+        let normalize = match at_offset {
+            Some(at_offset) => {
+                // Select the anchored samples at the start of the evaluation, with the offset that
+                // re-anchors the selector.
+                // The planner is single-use (one `EvalStmt` produces one plan), so an error
+                // below aborts the whole planning and `ctx.end` needs no restore-on-error.
+                self.ctx.end = grid_start;
+                let plan = self
+                    .selector_to_series_normalize_plan(at_offset, matchers, false)
+                    .await?;
+                self.ctx.end = grid_end;
+                plan
+            }
+            None => {
+                self.selector_to_series_normalize_plan(offset_ms, matchers, false)
+                    .await?
+            }
         };
-        let normalize = self
-            .selector_to_series_normalize_plan(offset, matchers, false)
-            .await?;
         let time_index_column =
             self.ctx
                 .time_index_column
@@ -2060,24 +2545,47 @@ impl PromPlanner {
         };
 
         let field_column = self.ctx.field_columns.first().cloned();
-        let manipulate = InstantManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.lookback_delta,
-            self.ctx.interval,
-            offset_ms,
-            time_index_column,
-            if self.ctx.use_tsid {
-                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
-            } else {
-                self.ctx.tag_columns.clone()
-            },
-            field_column,
-            normalize,
-        );
-        let manipulate = LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        });
+        let series_key_columns = self.series_key_columns();
+        let manipulate = match at_offset {
+            Some(_) => {
+                // Select the anchored sample once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let at_offset = at_offset.expect("checked Some above");
+                let anchored = InstantManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    at_offset,
+                    time_index_column.clone(),
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                );
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )?
+            }
+            None => LogicalPlan::Extension(Extension {
+                node: Arc::new(InstantManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    offset_ms,
+                    time_index_column,
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                )),
+            }),
+        };
         if let Some(timestamp_value_column) = timestamp_value_column {
             self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
         } else {
@@ -2135,46 +2643,99 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            ..
+            at,
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
+        let offset_ms = Self::offset_millis(offset);
+
+        // `@` anchors the range selector's window at a fixed timestamp, so the same window is fed
+        // to the enclosing function at every evaluation step. See [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
-        let normalize = match self.setup_context().await? {
-            Some(empty_plan) => empty_plan,
+        let (normalize, at_offset) = match self.setup_context().await? {
+            // An empty metric does not contain any sample, so anchoring cannot change the result.
+            Some(empty_plan) => (empty_plan, None),
             None => {
-                self.selector_to_series_normalize_plan(offset, matchers, true)
-                    .await?
+                let normalize = match at_offset {
+                    Some(at_offset) => {
+                        // Fold the anchored window once, at the start of the evaluation.
+                        // Single-use planner: an error below aborts planning, so `ctx.end`
+                        // needs no restore-on-error.
+                        self.ctx.end = grid_start;
+                        let plan = self
+                            .selector_to_series_normalize_plan(at_offset, matchers, true)
+                            .await?;
+                        self.ctx.end = grid_end;
+                        plan
+                    }
+                    None => {
+                        self.selector_to_series_normalize_plan(offset_ms, matchers, true)
+                            .await?
+                    }
+                };
+                (normalize, at_offset)
             }
         };
-        let manipulate = RangeManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.interval,
-            offset_ms,
-            // TODO(ruihang): convert via Timestamp datatypes to support different time units
-            range_ms,
-            self.ctx
-                .time_index_column
-                .clone()
-                .expect("time index should be set in `setup_context`"),
-            self.ctx.field_columns.clone(),
-            normalize,
-        )
-        .context(DataFusionPlanningSnafu)?;
+        let time_index_column = self
+            .ctx
+            .time_index_column
+            .clone()
+            .expect("time index should be set in `setup_context`");
+        let manipulate = match at_offset {
+            Some(_) => {
+                // Fold the anchored window once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let at_offset = at_offset.expect("checked Some above");
+                let anchored = RangeManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.interval,
+                    at_offset,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column.clone(),
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )?
+            }
+            None => {
+                let manipulate = RangeManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.interval,
+                    offset_ms,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column,
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
 
-        Ok(LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        }))
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
+            }
+        };
+
+        Ok(manipulate)
     }
 
     async fn prom_call_expr_to_plan(
@@ -2410,7 +2971,7 @@ impl PromPlanner {
 
     async fn selector_to_series_normalize_plan(
         &mut self,
-        offset: &Option<Offset>,
+        offset_duration: Millisecond,
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
@@ -2420,11 +2981,6 @@ impl PromPlanner {
         let table_schema = table_scan.schema();
 
         // make filter exprs
-        let offset_duration = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
         if let Some(time_index_filter) =
             self.build_time_index_filter(offset_duration, table_schema)?
@@ -9205,6 +9761,363 @@ mod test {
             .unwrap(),
         ))));
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
+    }
+
+    async fn build_at_modifier_plan(query: &str, start_secs: u64, end_secs: u64) -> LogicalPlan {
+        let eval_stmt = build_at_modifier_eval_stmt(query, start_secs, end_secs);
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap()
+    }
+
+    fn build_at_modifier_eval_stmt(query: &str, start_secs: u64, end_secs: u64) -> EvalStmt {
+        EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH
+                .checked_add(Duration::from_secs(start_secs))
+                .unwrap(),
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(end_secs))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
+    }
+
+    /// Every selector of an `@` anchored query must scan around the anchor only, instead of the
+    /// whole evaluation range.
+    #[tokio::test]
+    async fn at_modifier_anchors_selector_scan_window() {
+        // `@ 100` anchors at t=100s; the lookback delta is 1s, so the scan covers (99s, 100s].
+        let plan = build_at_modifier_plan("some_metric @ 100", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(99001, None) AND some_metric.timestamp <= TimestampMillisecond(100000, None)"
+            ),
+            "{plan_str}"
+        );
+        // The result is reported at the evaluation timestamps, not at the anchor.
+        assert!(plan_str.contains("range=[0..1000000]"), "{plan_str}");
+
+        // `@ start()` / `@ end()` resolve to the evaluation range of the statement.
+        let plan = build_at_modifier_plan("some_metric @ start()", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(0, None)"
+            ),
+            "{plan_str}"
+        );
+
+        let plan = build_at_modifier_plan("some_metric @ end()", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(999001, None) AND some_metric.timestamp <= TimestampMillisecond(1000000, None)"
+            ),
+            "{plan_str}"
+        );
+
+        // `offset` moves the anchor backwards and is not applied twice.
+        let plan = build_at_modifier_plan("some_metric @ 200 offset 50s", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(149001, None) AND some_metric.timestamp <= TimestampMillisecond(150000, None)"
+            ),
+            "{plan_str}"
+        );
+
+        // A timestamp before the Unix epoch is accepted, as in Prometheus.
+        let plan = build_at_modifier_plan("some_metric @ -1", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(-1999, None) AND some_metric.timestamp <= TimestampMillisecond(-1000, None)"
+            ),
+            "{plan_str}"
+        );
+    }
+
+    /// A range selector with `@` folds its window once, at the start of the evaluation.
+    #[tokio::test]
+    async fn at_modifier_anchors_range_selector_window() {
+        let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The scan is limited to the anchored window (offset by `eval_start - anchor`).
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(1, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+            ),
+            "{plan_str}"
+        );
+        // Both the fold and the replay exist: the window is folded at the anchor and then
+        // reported at every step.
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{plan_str}"
+        );
+    }
+
+    /// A call whose argument is one selector anchored by `@` is step-invariant: the whole call is
+    /// evaluated once, at the start of the evaluation, and its result is reported at every step.
+    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr` wrapper.
+    #[tokio::test]
+    async fn at_modifier_promotes_step_invariant_subtree() {
+        let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // A single fold, at the anchor...
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        // ... never a fold per step of the outer grid.
+        assert!(
+            !plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+            "{plan_str}"
+        );
+        // A single replay of the function result over the whole grid...
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{plan_str}"
+        );
+        // ... so `rate` itself is evaluated below that replay node, on the single evaluation
+        // instant of the anchored subtree, instead of once per step.
+        let replay = plan_str
+            .find("PromInstantManipulate")
+            .expect("instant manipulate node");
+        let rate = plan_str.find("prom_rate(").expect("rate projection");
+        assert!(
+            replay < rate,
+            "`rate` must be evaluated below the replay node:\n{plan_str}"
+        );
+    }
+
+    /// `@ start()` and `@ end()` are fixed anchors for the whole statement, so a call using them
+    /// is step-invariant as well.
+    #[tokio::test]
+    async fn at_modifier_promotes_start_and_end_anchored_subtree() {
+        for query in [
+            "rate(some_metric[5m] @ start())",
+            "rate(some_metric[5m] @ end())",
+            // Nested calls over one anchored range selector form one promoted subtree: the inner
+            // call is planned on the same single instant, not replayed on its own.
+            "abs(max_over_time(some_metric[5m] @ end()))",
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert_eq!(
+                plan_str
+                    .matches("PromRangeManipulate: req range=[0..0]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            assert!(
+                plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+                "{query}:\n{plan_str}"
+            );
+        }
+
+        // An aggregation above the promoted call stays outside the promoted subtree: `sum`
+        // aggregates the replayed per-series rows at every step, instead of aggregating the single
+        // anchored instant and replaying the aggregation — which would also have to replay rows of
+        // several groups through the one-series-per-batch `InstantManipulate`.
+        let plan = build_at_modifier_plan("sum(rate(some_metric[5m] @ start()))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        // A single replay, and it sits below the aggregation node: `sum` aggregates the replayed
+        // per-series rows at every step.
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{plan_str}"
+        );
+        let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            aggregate < replay,
+            "the aggregation must stay above the replay of the promoted call:\n{plan_str}"
+        );
+
+        // Without `@` nothing is promoted: the function keeps folding one window per step.
+        let plan = build_at_modifier_plan("rate(some_metric[5m])", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("lookback=[1000001]"), "{plan_str}");
+    }
+
+    /// `anchored + plain`: only the anchored operand is step-invariant, so only that side is
+    /// promoted and the plain side keeps following the evaluation step.
+    #[tokio::test]
+    async fn at_modifier_promotes_only_anchored_binary_operand() {
+        let plan =
+            build_at_modifier_plan("rate(some_metric[5m] @ 300) + some_metric", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The anchored operand is folded once and its result replayed over the whole grid.
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{plan_str}"
+        );
+        // The plain operand still selects one sample per step with the default lookback.
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000]"),
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
+            "{plan_str}"
+        );
+
+        // Both operands anchored: the binary expression is not promoted as a whole, because a join
+        // emits the rows of several series in shared batches and the replay needs one series per
+        // batch. Each operand anchors and replays on its own instead, and the join runs at every
+        // step over those per-series results.
+        let plan = build_at_modifier_plan("some_metric @ 300 + some_metric @ 0", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // One anchoring node and one replay per operand...
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            4,
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+        // ... and the two operands are anchored at different timestamps, so both select their own
+        // sample.
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+    }
+
+    /// Only a call over one anchored selector is promoted: a call whose argument merges series (an
+    /// aggregation or a join) or whose own output reorders the whole vector (`sort*`, the histogram
+    /// folds) is left to the leaf-level anchoring path, which replays every selector on its own and
+    /// keeps the one-series-per-batch layout the replay needs.
+    #[tokio::test]
+    async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
+        // A call over one anchored selector, and a unary above one, are still promoted: their
+        // output keeps the layout of the selector.
+        for query in ["abs(some_metric @ 300)", "-some_metric @ 300"] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(
+                plan_str.starts_with("PromInstantManipulate"),
+                "{query}:\n{plan_str}"
+            );
+        }
+
+        // An aggregation below the call emits one row per group in shared batches, so the call is
+        // not promoted: the replay of the anchored selector stays below the aggregate.
+        let plan = build_at_modifier_plan("abs(sum(some_metric @ 300))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            aggregate < replay,
+            "the aggregation must stay above the replay:\n{plan_str}"
+        );
+
+        // A join of two anchored selectors below the call: neither the join nor the call is
+        // promoted, so each operand is replayed on its own.
+        let plan =
+            build_at_modifier_plan("abs(some_metric @ 300 + some_metric @ 0)", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+
+        // A call that reorders the whole vector keeps its sort above the per-series replay.
+        let plan =
+            build_at_modifier_plan("sort_by_label(some_metric @ 300, \"tag_0\")", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.starts_with("Sort:"), "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+    }
+
+    /// `@` before the first representable millisecond is rejected instead of silently wrapping.
+    #[tokio::test]
+    async fn at_modifier_rejects_unrepresentable_timestamp() {
+        let eval_stmt = build_eval_stmt("some_metric @ 1e16");
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let err =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Timestamp out of range for the `@` modifier"),
+            "{err}"
+        );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
     }
 
     #[tokio::test]
