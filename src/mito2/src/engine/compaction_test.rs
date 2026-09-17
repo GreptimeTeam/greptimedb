@@ -743,6 +743,168 @@ async fn test_compaction_unit_failed_dependency_group_keeps_input_and_cleans_out
     );
 }
 
+#[rstest::rstest]
+#[tokio::test]
+async fn test_compaction_unit_applied_sibling_survives_failure_and_reopen(
+    #[values(false, true)] flat_format: bool,
+) {
+    let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let finalized = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let count = remaining.clone();
+    let written = finalized.clone();
+    let layer = object_store::layers::mock::MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            if path.ends_with(".parquet") {
+                Box::new(FailingUnitSstWriter {
+                    inner,
+                    path: path.to_string(),
+                    remaining: count.clone(),
+                    finalized: written.clone(),
+                })
+            } else {
+                inner
+            }
+        }))
+        .build()
+        .unwrap();
+    let gate = Arc::new(UnitVisibilityGate {
+        first: std::sync::atomic::AtomicU64::new(u64::MAX),
+        at_commit: false,
+        entered: Notify::new(),
+        resume: Semaphore::new(0),
+        applied: Notify::new(),
+        cancel_requested: Notify::new(),
+    });
+    let guard = UnitVisibilityGuard(gate.clone());
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        max_background_compactions: 2,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env
+        .create_engine_with(config.clone(), None, Some(gate.clone()), None)
+        .await;
+    let region_id = RegionId::new(48, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    let columns = crate::test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    // Disjoint input SSTs produce two independent units, not one dependency group.
+    put_and_flush(&engine, region_id, &columns, 0..2).await;
+    put_and_flush(&engine, region_id, &columns, 120..122).await;
+    let original: HashSet<_> = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .file_ids()
+        .into_iter()
+        .collect();
+    assert_eq!(2, original.len());
+    remaining.store(2, Ordering::SeqCst);
+    let compact_engine = engine.clone();
+    let compact = tokio::spawn(async move {
+        compact_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow { window_seconds: 60 },
+                    ),
+                    parallelism: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    // B is held before merge until A's manifest edit has been committed and applied.
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("unit B did not reach the merge gate");
+    tokio::time::timeout(Duration::from_secs(10), gate.applied.notified())
+        .await
+        .expect("unit A did not apply independently of B");
+    assert!(!compact.is_finished(), "request must still wait for B");
+    assert_eq!(1, remaining.load(Ordering::SeqCst));
+    let applied = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let applied_ids: HashSet<_> = applied.file_ids().into_iter().collect();
+    assert_eq!(2, applied_ids.len());
+    assert_eq!(1, applied_ids.intersection(&original).count());
+    assert_eq!(1, applied_ids.difference(&original).count());
+    let expected = vec![0, 1000, 120_000, 121_000];
+    assert_eq!(
+        expected,
+        collect_stream_ts(applied.scan().await.unwrap()).await
+    );
+
+    drop(guard);
+    let error = tokio::time::timeout(Duration::from_secs(10), compact)
+        .await
+        .expect("compaction did not finish after B failed")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(StatusCode::StorageUnavailable, error.status_code());
+    assert_eq!(0, remaining.load(Ordering::SeqCst));
+    let failed = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        applied_ids,
+        failed.file_ids().into_iter().collect::<HashSet<_>>(),
+        "B's failure must retain A's output and B's original input"
+    );
+    assert_eq!(
+        expected,
+        collect_stream_ts(failed.scan().await.unwrap()).await
+    );
+    assert!(
+        engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .all(|file| !file.compacting())
+    );
+    let paths = finalized.lock().unwrap().clone();
+    assert_eq!(1, paths.len());
+    assert!(
+        env.get_object_store()
+            .unwrap()
+            .exists(&paths[0])
+            .await
+            .unwrap()
+    );
+
+    let engine = tokio::time::timeout(Duration::from_secs(10), env.reopen_engine(engine, config))
+        .await
+        .expect("engine shutdown must not wait for a failed unit");
+    crate::test_util::reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let reopened = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        applied_ids,
+        reopened.file_ids().into_iter().collect::<HashSet<_>>(),
+        "recovery must preserve the partial-success file set"
+    );
+    assert_eq!(
+        expected,
+        collect_stream_ts(reopened.scan().await.unwrap()).await
+    );
+}
+
 impl UnitVisibilityGate {
     /// Blocks only the first arriving unit, leaving its siblings free to progress.
     async fn block_first(&self, id: u64) {
