@@ -1,0 +1,23 @@
+.github/scripts/aliyun-ecs-runner-provision.py
+  s_6d34f78fa90b16::t_f3322a75419045 241-242
+.github/workflows/agent-observability.yml
+  s_6d34f78fa90b16::t_ceaa1f0392f3f6 5-19,49,51-52,59,61,76,81,91,103-104,118-121,126-132,137-138,145-146,148-152,154-155,182,192,194-195,227,230,238
+tests/perf/test_aliyun_ecs_runner_scripts.py
+  s_6d34f78fa90b16::t_aa182f26b03a05 51-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "0c58435199f5f8c909d488b29ae6efde3fade897",
+  "prompts": {},
+  "sessions": {
+    "s_6d34f78fa90b16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ef3-09f3-7a80-8f06-aaef49cd7108",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
