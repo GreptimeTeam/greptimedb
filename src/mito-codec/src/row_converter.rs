@@ -134,6 +134,11 @@ pub trait PrimaryKeyCodec: Send + Sync + Debug {
     /// Returns the encoding type of the primary key.
     fn encoding(&self) -> PrimaryKeyEncoding;
 
+    /// Returns the dense codec for schema-aware positional access, if applicable.
+    fn as_dense(&self) -> Option<&DensePrimaryKeyCodec> {
+        None
+    }
+
     /// Decodes the primary key from the given bytes.
     ///
     /// Returns a [`CompositeValues`] that follows the primary key ordering.

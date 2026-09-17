@@ -46,7 +46,7 @@ use mito_codec::row_converter::sparse::{
     RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
 };
 use mito_codec::row_converter::{
-    CompositeValues, PrimaryKeyCodec, SparseOffsetsCache, build_primary_key_codec,
+    DensePrimaryKeyCodec, PrimaryKeyCodec, SparseOffsetsCache, build_primary_key_codec,
 };
 use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -676,8 +676,9 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
 /// Decodes primary keys from a batch and returns decoded primary key information.
 ///
 /// The batch must contain a primary key column at the expected index.
-/// Sparse primary keys stay encoded: tag values are extracted lazily per column
+/// Primary keys stay encoded: tag values are extracted lazily per column
 /// in [`DecodedPrimaryKeys::get_tag_column`] without decoding every label.
+/// The codec must describe the source key's field order and types.
 pub fn decode_primary_keys(
     codec: &dyn PrimaryKeyCodec,
     batch: &RecordBatch,
@@ -729,15 +730,17 @@ pub fn decode_primary_keys(
             values: pk_values_array.clone(),
             distinct_keys,
         },
-        PrimaryKeyEncoding::Dense => {
-            let mut decoded_pk_values = Vec::with_capacity(distinct_keys.len());
-            for key in &distinct_keys {
-                let pk_bytes = pk_values_array.value(*key as usize);
-                let decoded_value = codec.decode(pk_bytes).context(DecodeSnafu)?;
-                decoded_pk_values.push(decoded_value);
-            }
-            DecodedKeysInner::Dense(decoded_pk_values)
-        }
+        PrimaryKeyEncoding::Dense => DecodedKeysInner::Dense {
+            codec: codec
+                .as_dense()
+                .context(InvalidRecordBatchSnafu {
+                    reason: "expected dense primary key codec",
+                })?
+                .clone(),
+            offsets: vec![Vec::new(); distinct_keys.len()],
+            values: pk_values_array.clone(),
+            distinct_keys,
+        },
     };
 
     Ok(DecodedPrimaryKeys {
@@ -748,10 +751,15 @@ pub fn decode_primary_keys(
     })
 }
 
-/// Eagerly decoded dense primary keys or lazily extracted sparse primary keys.
+/// Encoded primary keys and encoding-specific lookup state.
 enum DecodedKeysInner {
-    /// Dense primary keys are decoded once and shared by all tag columns.
-    Dense(Vec<CompositeValues>),
+    /// Dense keys share positional offsets across projected tag columns.
+    Dense {
+        codec: DensePrimaryKeyCodec,
+        values: BinaryArray,
+        distinct_keys: Vec<u32>,
+        offsets: Vec<Vec<usize>>,
+    },
     /// Sparse primary keys stay encoded; each tag column extracts only its own
     /// values from the raw keys.
     Sparse {
@@ -811,7 +819,7 @@ impl DecodedPrimaryKeys {
     /// Gets a tag column array by column id and data type.
     ///
     /// For sparse encoding, extracts the column lazily from the encoded keys.
-    /// For dense encoding, uses pk_index to get values from the decoded keys.
+    /// For dense encoding, uses pk_index to decode only the requested field.
     pub fn get_tag_column(
         &mut self,
         column_id: ColumnId,
@@ -827,18 +835,22 @@ impl DecodedPrimaryKeys {
 
         // Gets values from the primary key.
         let values_vector = match inner {
-            DecodedKeysInner::Dense(decoded_pk_values) => {
-                let mut builder = column_type.create_mutable_vector(decoded_pk_values.len());
-                for decoded in decoded_pk_values {
-                    let CompositeValues::Dense(dense) = decoded else {
-                        return InvalidRecordBatchSnafu {
-                            reason: "expected dense primary key values",
-                        }
-                        .fail();
-                    };
-                    let pk_idx = pk_index.expect("pk_index required for dense encoding");
-                    if pk_idx < dense.len() {
-                        builder.push_value_ref(&dense[pk_idx].1.as_value_ref());
+            DecodedKeysInner::Dense {
+                codec,
+                values,
+                distinct_keys,
+                offsets,
+            } => {
+                let pk_idx = pk_index.context(InvalidRecordBatchSnafu {
+                    reason: "pk_index required for dense encoding",
+                })?;
+                let mut builder = column_type.create_mutable_vector(distinct_keys.len());
+                for (&key, offsets) in distinct_keys.iter().zip(offsets) {
+                    if pk_idx < codec.num_fields() {
+                        let value = codec
+                            .decode_value_at(values.value(key as usize), pk_idx, offsets)
+                            .context(DecodeSnafu)?;
+                        builder.push_value_ref(&value.as_value_ref());
                     } else {
                         builder.push_null();
                     }
@@ -1085,6 +1097,85 @@ mod tests {
         FlatSchemaOptions, PARQUET_FIELD_ID_KEY, PRIMARY_KEY_PARQUET_FIELD_ID,
         flat_sst_arrow_schema_column_num, override_pk_field_to_binary, to_flat_sst_arrow_schema,
     };
+
+    #[test]
+    fn dense_tag_columns_match_eager_decoding() {
+        use datatypes::arrow::datatypes::UInt32Type;
+        use datatypes::value::Value;
+        use datatypes::vectors::Helper;
+        use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+
+        let columns = [
+            (17, ConcreteDataType::string_datatype()),
+            (9, ConcreteDataType::int64_datatype()),
+            (2, ConcreteDataType::binary_datatype()),
+        ];
+        let codec = DensePrimaryKeyCodec::with_fields(
+            columns
+                .iter()
+                .map(|(id, ty)| (*id, SortField::new(ty.clone())))
+                .collect(),
+        );
+        let rows = [
+            vec![
+                Value::from("中文\0abcdefgh"),
+                Value::Int64(-42),
+                Value::Binary(vec![0, 1, 255].into()),
+            ],
+            vec![Value::from(""), Value::Null, Value::Binary(vec![].into())],
+            vec![Value::Null, Value::Int64(i64::MAX), Value::Null],
+        ];
+        let mut encoded: Vec<_> = rows
+            .iter()
+            .map(|row| codec.encode(row.iter().map(Value::as_value_ref)).unwrap())
+            .collect();
+        // Unreferenced dictionary entries must not be inspected.
+        encoded.push(vec![255]);
+        let row_keys = [2, 2, 0, 1, 0, 0];
+        let pk = DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(row_keys.to_vec()),
+            Arc::new(BinaryArray::from_iter_values(&encoded)),
+        );
+        let batch = RecordBatch::try_from_iter([
+            (
+                "ts",
+                Arc::new(TimestampMillisecondArray::from_iter_values(0..6)) as ArrayRef,
+            ),
+            ("__primary_key", Arc::new(pk) as ArrayRef),
+            (
+                "__sequence",
+                Arc::new(UInt64Array::from(vec![1; 6])) as ArrayRef,
+            ),
+            (
+                "__op_type",
+                Arc::new(UInt8Array::from(vec![1; 6])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        for (offset, len) in [(0, 6), (1, 4), (3, 0)] {
+            let mut decoded = decode_primary_keys(&codec, &batch.slice(offset, len)).unwrap();
+            // Out-of-order and repeated projections share the same key offsets.
+            for pos in [2, 0, 1, 0] {
+                let array = decoded
+                    .get_tag_column(columns[pos].0, Some(pos), &columns[pos].1)
+                    .unwrap();
+                let actual = Helper::try_into_vector(array).unwrap();
+                for (row, &key) in row_keys[offset..offset + len].iter().enumerate() {
+                    let eager = codec
+                        .decode_dense_without_column_id(&encoded[key as usize])
+                        .unwrap();
+                    assert_eq!(actual.get(row), eager[pos]);
+                }
+            }
+            // A position beyond the source schema remains NULL, never decoded
+            // with a newer schema's field order or type.
+            let missing = decoded
+                .get_tag_column(99, Some(3), &ConcreteDataType::int64_datatype())
+                .unwrap();
+            assert_eq!(missing.null_count(), len);
+            assert!(decoded.get_tag_column(17, None, &columns[0].1).is_err());
+        }
+    }
 
     /// Builds a `RegionMetadata` with the given number of tags and fields.
     fn build_metadata(

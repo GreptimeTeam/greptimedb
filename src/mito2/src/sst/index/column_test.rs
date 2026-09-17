@@ -29,7 +29,9 @@ use index::bitmap::{Bitmap, BitmapType};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use mito_codec::index::IndexValueCodec;
-use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+use mito_codec::row_converter::{
+    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField,
+};
 use object_store::ObjectStore;
 use object_store::services::Memory;
 use prost::Message;
@@ -201,13 +203,13 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
         vector_index_config: Default::default(),
     };
     let mut expected = None;
-    // The legacy Batch path is an independent whole-PK decode/owned-encoding oracle.
+    // Explicit full decoding is the oracle for lazy encoded-only Batch inputs.
     // One-row slices disable run merging; a tag-only projection also exercises the no-PK fallback.
-    for mode in ["legacy", "runs", "single_rows", "no_pk"] {
+    for mode in ["eager", "legacy", "runs", "single_rows", "no_pk"] {
         let file = RegionFileId::new(metadata.region_id, FileId::random());
         let mut indexer = builder.build(file, 0, None).await;
         match mode {
-            "legacy" => {
+            "eager" | "legacy" => {
                 for (row, key) in encoded.iter().enumerate() {
                     let mut old = BatchBuilder::new(key.clone());
                     old.push_field_array(2, batch.column(2).slice(row, 1))
@@ -215,7 +217,13 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
                     old.timestamps_array(batch.column(3).slice(row, 1)).unwrap();
                     old.sequences_array(batch.column(5).slice(row, 1)).unwrap();
                     old.op_types_array(batch.column(6).slice(row, 1)).unwrap();
-                    indexer.update(&mut old.build().unwrap()).await;
+                    let mut old = old.build().unwrap();
+                    if mode == "eager" {
+                        old.set_pk_values(
+                            DensePrimaryKeyCodec::new(&metadata).decode(key).unwrap(),
+                        );
+                    }
+                    indexer.update(&mut old).await;
                 }
             }
             "single_rows" => {
