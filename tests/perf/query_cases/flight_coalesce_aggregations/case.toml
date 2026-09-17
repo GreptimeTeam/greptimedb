@@ -1,0 +1,33 @@
+# A regression case for greptimedb query performance
+# Author: discord9
+
+[[direct_readable_sst]]
+table_name = "flight_coalesce_metrics"
+tags = ["host", "instance"]
+field_columns = ["cpu_user", "cpu_sys", "mem_used", "disk_io"]
+time_index = "ts"
+sst_count = 32
+rows_per_sst = 32768
+tag_cardinality = [16, 4096]
+timestamp_major = true
+
+[queries]
+aggregation = '''
+SELECT host, instance, avg(cpu_user), max(mem_used), count(*)
+FROM flight_coalesce_metrics
+GROUP BY host, instance
+ORDER BY host, instance
+'''
+topk = '''
+SELECT instance, max(cpu_user)
+FROM flight_coalesce_metrics
+GROUP BY instance
+ORDER BY max DESC
+LIMIT 100
+'''
+count = '''
+SELECT host, count(*)
+FROM flight_coalesce_metrics
+GROUP BY host
+ORDER BY host
+'''
