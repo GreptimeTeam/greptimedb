@@ -409,9 +409,6 @@ impl Inserter {
             future::join_all(submissions).await
         };
         let affected_rows = results.into_iter().sum::<Result<usize>>()?;
-        crate::metrics::DIST_INGEST_ROW_COUNT
-            .with_label_values(&[ctx.get_db_string().as_str()])
-            .inc_by(affected_rows as u64);
         Ok(Output::new(
             OutputData::AffectedRows(affected_rows),
             OutputMeta::new_with_cost(write_cost as _),
