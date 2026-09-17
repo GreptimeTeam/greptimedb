@@ -34,6 +34,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
+use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::RegionInfo;
@@ -402,16 +403,27 @@ impl Context {
         let datanode_table_value =
             get_datanode_table_value(&self.table_metadata_manager, table_id, datanode_id).await?;
 
-        let RegionInfo {
-            region_options,
-            region_wal_options,
-            ..
-        } = &datanode_table_value.region_info;
+        let RegionInfo { region_options, .. } = &datanode_table_value.region_info;
+
+        let mut region_wal_options = get_region_wal_options(
+            &self.table_metadata_manager,
+            current_table_route_value,
+            table_id,
+        )
+        .await
+        .context(error::TableMetadataManagerSnafu)?;
+        // Legacy regions without a persisted WAL option use RaftEngine. Only
+        // existing routes get this default; allocated regions must supply one.
+        for route in current_table_route_value.region_routes().unwrap() {
+            region_wal_options
+                .entry(route.region.id.region_number())
+                .or_default();
+        }
 
         // Merge and validate the new region wal options.
         let validated_region_wal_options =
             crate::procedure::repartition::utils::merge_and_validate_region_wal_options(
-                region_wal_options,
+                &region_wal_options,
                 new_region_wal_options,
                 &new_region_routes,
                 table_id,

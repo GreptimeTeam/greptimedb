@@ -510,6 +510,7 @@ impl BatchingTask {
             debug!("Generate new query: {}", new_query.plan);
             let res = self
                 .execute_logical_plan_unlocked(
+                    engine,
                     frontend_client,
                     &new_query.plan,
                     &new_query.dirty_restore,
@@ -640,6 +641,7 @@ impl BatchingTask {
     /// Executes the insert plan. Caller must reach this through the serialized path.
     async fn execute_logical_plan_unlocked(
         &self,
+        engine: &QueryEngineRef,
         frontend_client: &Arc<FrontendClient>,
         plan: &LogicalPlan,
         dirty_restore: &DirtyRestore,
@@ -676,7 +678,7 @@ impl BatchingTask {
         // For incremental-mode SQL queries, attempt to rewrite the delta aggregate
         // plan into a safe delta-LEFT-JOIN-sink form before deciding on extensions.
         let incremental_plan = if coverage.is_incremental_delta() {
-            self.prepare_plan_for_incremental(&plan).await?
+            self.prepare_plan_for_incremental(engine, &plan).await?
         } else {
             None
         };

@@ -567,7 +567,23 @@ mod tests {
         // returns `None`; in these cases no request can wait for a pending-row
         // flush, so the timeout must not be raised.
         type KnobMutator = fn(&mut FrontendOptions);
-        let cases: [(&str, KnobMutator); 4] = [
+        let cases: [(&str, KnobMutator); 9] = [
+            ("oversized flush concurrency", |opts| {
+                opts.prom_store.max_concurrent_flushes = usize::MAX
+            }),
+            ("oversized worker channel", |opts| {
+                opts.prom_store.worker_channel_capacity = usize::MAX
+            }),
+            ("oversized inflight limit", |opts| {
+                opts.prom_store.max_inflight_requests = usize::MAX
+            }),
+            ("oversized flow queue", |opts| {
+                opts.prom_store.flow_notification_queue_capacity =
+                    std::num::NonZeroUsize::new(usize::MAX).unwrap()
+            }),
+            ("unrepresentable deadline", |opts| {
+                opts.prom_store.pending_rows_flush_interval = Duration::MAX
+            }),
             ("zero max_batch_rows", |opts| {
                 opts.prom_store.max_batch_rows = 0
             }),
