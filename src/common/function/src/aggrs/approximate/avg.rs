@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::sync::Arc;
-
 use datafusion::arrow::array::{ArrayRef, Float64Array};
 use datafusion::arrow::compute::sum;
 use datafusion::common::cast::{as_binary_array, as_primitive_array};
 use datafusion::common::not_impl_err;
 use datafusion::error::{DataFusionError, Result as DfResult};
 use datafusion::logical_expr::function::AccumulatorArgs;
-use datafusion::logical_expr::{Accumulator as DfAccumulator, AggregateUDF, Volatility};
-use datafusion::prelude::create_udaf;
+use datafusion::logical_expr::{
+    Accumulator as DfAccumulator, AggregateUDF, AggregateUDFImpl, Signature,
+};
 use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType, Float64Type};
 
@@ -92,7 +91,53 @@ fn count_overflow() -> DataFusionError {
     DataFusionError::Execution("AVG count overflow".to_string())
 }
 
-#[derive(Debug, Clone, Copy)]
+/// The `avg_state` / `avg_merge` aggregate UDF.
+///
+/// Declares a canonical AVG1 empty state as `default_value` so window frames
+/// without rows observe the same contract as the accumulator's `evaluate`.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+struct AvgUdaf {
+    name: &'static str,
+    signature: Signature,
+    input: InputKind,
+}
+
+impl AggregateUDFImpl for AvgUdaf {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> DfResult<DataType> {
+        Ok(DataType::Binary)
+    }
+
+    fn accumulator(&self, acc_args: AccumulatorArgs) -> DfResult<Box<dyn DfAccumulator>> {
+        if acc_args.is_distinct {
+            return not_impl_err!("AVG DISTINCT aggregations are not available");
+        }
+        let input = match acc_args.exprs[0].data_type(acc_args.schema)? {
+            DataType::Float64 => InputKind::Float64,
+            DataType::Binary => InputKind::Binary,
+            data_type => return not_impl_err!("AVG functions do not support {data_type:?}"),
+        };
+        Ok(Box::new(AvgAccumulator {
+            state: AvgState::default(),
+            input,
+        }))
+    }
+
+    fn default_value(&self, _data_type: &DataType) -> DfResult<ScalarValue> {
+        Ok(ScalarValue::Binary(Some(
+            AvgState::default().encode().to_vec(),
+        )))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 enum InputKind {
     Float64,
     Binary,
@@ -116,40 +161,25 @@ impl Default for AvgAccumulator {
 
 impl AvgAccumulator {
     pub fn state_udf_impl() -> AggregateUDF {
-        create_udaf(
-            AVG_STATE_NAME,
-            vec![DataType::Float64],
-            Arc::new(DataType::Binary),
-            Volatility::Immutable,
-            Arc::new(Self::create_accumulator),
-            Arc::new(vec![DataType::Binary]),
-        )
+        AggregateUDF::new_from_impl(AvgUdaf {
+            name: AVG_STATE_NAME,
+            signature: Signature::exact(
+                vec![DataType::Float64],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
+            input: InputKind::Float64,
+        })
     }
 
     pub fn merge_udf_impl() -> AggregateUDF {
-        create_udaf(
-            AVG_MERGE_NAME,
-            vec![DataType::Binary],
-            Arc::new(DataType::Binary),
-            Volatility::Immutable,
-            Arc::new(Self::create_accumulator),
-            Arc::new(vec![DataType::Binary]),
-        )
-    }
-
-    fn create_accumulator(args: AccumulatorArgs) -> DfResult<Box<dyn DfAccumulator>> {
-        if args.is_distinct {
-            return not_impl_err!("AVG DISTINCT aggregations are not available");
-        }
-        let input = match args.exprs[0].data_type(args.schema)? {
-            DataType::Float64 => InputKind::Float64,
-            DataType::Binary => InputKind::Binary,
-            data_type => return not_impl_err!("AVG functions do not support {data_type:?}"),
-        };
-        Ok(Box::new(Self {
-            state: AvgState::default(),
-            input,
-        }))
+        AggregateUDF::new_from_impl(AvgUdaf {
+            name: AVG_MERGE_NAME,
+            signature: Signature::exact(
+                vec![DataType::Binary],
+                datafusion::logical_expr::Volatility::Immutable,
+            ),
+            input: InputKind::Binary,
+        })
     }
 
     fn update_float64(&mut self, array: &ArrayRef) -> DfResult<()> {
@@ -344,6 +374,25 @@ mod tests {
             .unwrap();
         assert_eq!(accumulator.state.count(), 3);
         assert_eq!(accumulator.state.average(), Some(4.0));
+    }
+
+    #[test]
+    fn default_value_matches_empty_accumulator_evaluate() {
+        for udf in [
+            AvgAccumulator::state_udf_impl(),
+            AvgAccumulator::merge_udf_impl(),
+        ] {
+            let default = udf.default_value(&DataType::Binary).unwrap();
+            let expected = ScalarValue::Binary(Some(AvgState::default().encode().to_vec()));
+            assert_eq!(default, expected);
+            let mut empty = AvgAccumulator::default();
+            assert_eq!(
+                default,
+                empty.evaluate().unwrap(),
+                "{} default_value must equal the empty accumulator evaluate",
+                udf.name()
+            );
+        }
     }
 
     #[test]

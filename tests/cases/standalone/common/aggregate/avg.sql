@@ -56,6 +56,15 @@ SELECT avg_calc(avg_state(CAST(i AS DOUBLE))) FROM integers WHERE i > 100;
 SELECT avg_calc(avg_state(NULL::DOUBLE));
 SELECT avg_calc(NULL::BYTEA);
 
+-- Empty window frames return the canonical AVG1 state, not SQL NULL.
+SELECT
+    i,
+    avg_state(CAST(i AS DOUBLE)) OVER (
+        ORDER BY i
+        ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+    ) AS state
+FROM integers;
+
 -- Invalid AVG1 state propagates an error.
 SELECT avg_calc(X'00');
 
