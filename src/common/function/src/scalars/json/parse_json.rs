@@ -20,6 +20,7 @@ use datafusion_common::arrow::array::{Array, AsArray, BinaryViewBuilder};
 use datafusion_common::arrow::compute;
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
+use datatypes::types::validate_json_integer_range;
 
 use crate::function::{Function, extract_args};
 
@@ -67,6 +68,9 @@ impl Function for ParseJsonFunction {
             let s = json_strings.is_valid(i).then(|| json_strings.value(i));
             let result = s
                 .map(|s| {
+                    validate_json_integer_range(s).map_err(|e| {
+                        DataFusionError::Execution(format!("cannot parse '{s}': {e}"))
+                    })?;
                     jsonb::parse_value(s.as_bytes())
                         .map(|x| x.to_vec())
                         .map_err(|e| DataFusionError::Execution(format!("cannot parse '{s}': {e}")))
