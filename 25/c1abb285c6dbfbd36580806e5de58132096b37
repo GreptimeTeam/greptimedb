@@ -1,0 +1,19 @@
+src/frontend/Cargo.toml
+  s_5bcaf68390e7c4::t_a4e6fb0cc3ce67 101
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "25c1abb285c6dbfbd36580806e5de58132096b37",
+  "prompts": {},
+  "sessions": {
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
