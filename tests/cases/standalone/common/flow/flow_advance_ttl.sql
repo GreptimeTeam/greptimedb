@@ -6,7 +6,7 @@ CREATE TABLE distinct_basic (
     TIME INDEX(ts)
 )WITH ('ttl' = 'instant');
 
--- should fallback to streaming mode when there is no EVAL INTERVAL
+-- request-local DISTINCT is supported in streaming mode
 -- SQLNESS REPLACE id=\d+ id=REDACTED
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic AS
 SELECT
@@ -14,8 +14,16 @@ SELECT
 FROM
     distinct_basic;
 
+-- instant-TTL sources reject non-stateless LIMIT plans
+CREATE FLOW test_limit_instant_rejected SINK TO out_limit_instant_rejected AS
+SELECT
+    number
+FROM
+    distinct_basic
+LIMIT 1;
+
 -- flow_options should have a flow_type:streaming
--- since source table's ttl=instant
+-- since source table's ttl=instant and DISTINCT is request-local
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 SHOW CREATE TABLE distinct_basic;
@@ -44,9 +52,17 @@ SELECT number FROM distinct_basic;
 -- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
+-- Recover the persisted streaming DISTINCT flow, then replan its first write
+-- against an extended source schema without recreating the flow.
+-- SQLNESS ARG restart=true
+SELECT 1;
+
+ALTER TABLE distinct_basic ADD COLUMN extra INT NULL;
+
 INSERT INTO
-    distinct_basic
+    distinct_basic (number, ts)
 VALUES
+    (23, "2021-07-01 00:00:01.600"),
     (23, "2021-07-01 00:00:01.600");
 
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
@@ -84,13 +100,22 @@ SELECT count(*) FROM INFORMATION_SCHEMA.FLOWS WHERE flow_name = 'test_distinct_b
 
 DROP TABLE distinct_basic;
 
--- test ttl = 5s
+-- test ttl = 5s (DISTINCT remains batching for persisted sources)
 CREATE TABLE distinct_basic (
     "number" INT,
     ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY(number),
     TIME INDEX(ts)
 )WITH ('ttl' = '5s');
+
+-- Without a schedule, persisted DISTINCT must reach batching validation,
+-- not silently become request-local streaming.
+CREATE FLOW test_distinct_persisted_unscheduled
+SINK TO out_distinct_persisted_unscheduled AS
+SELECT DISTINCT number AS dis FROM distinct_basic;
+
+DROP FLOW IF EXISTS test_distinct_persisted_unscheduled;
+DROP TABLE IF EXISTS out_distinct_persisted_unscheduled;
 
 CREATE FLOW test_distinct_basic SINK TO out_distinct_basic EVAL INTERVAL '1m' AS
 SELECT
@@ -99,7 +124,7 @@ FROM
     distinct_basic;
 
 -- flow_options should have a flow_type:batching
--- since source table's ttl=instant
+-- persisted-source DISTINCT retains batching semantics
 SELECT flow_name, options FROM INFORMATION_SCHEMA.FLOWS;
 
 -- SQLNESS ARG restart=true
