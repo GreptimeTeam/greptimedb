@@ -148,6 +148,50 @@ impl JsonArray<'_> {
         Ok(builder.to_vector().to_arrow_array())
     }
 
+    /// Rewrites a JSON2 array into the specified v2 physical layout and returns
+    /// the rows successfully encoded with the logical settings.
+    ///
+    /// Invalid JSON settings values are represented as nulls in the rewritten
+    /// array so callers can discard the corresponding complete record batch rows.
+    /// Errors while decoding the source array or constructing the Arrow array are
+    /// returned to the caller.
+    pub fn rewrite_to_v2_discard_invalid(
+        &self,
+        field: &Field,
+        logical_settings: &JsonSettings,
+        target_layout: &JsonSettings,
+    ) -> Result<(ArrayRef, Vec<bool>)> {
+        let is_v2 = json2_remainder_field(field)?.is_some();
+        let values = if is_v2 {
+            self.json2_values()?
+        } else {
+            (0..self.inner.len())
+                .map(|i| self.try_get_value(i))
+                .collect::<Result<Vec<_>>>()?
+        };
+        let mut builder = JsonVectorBuilder::with_settings(target_layout, values.len());
+        let mut valid_rows = Vec::with_capacity(values.len());
+        for value in values {
+            if value.is_null() {
+                builder.push_null();
+                valid_rows.push(true);
+                continue;
+            }
+
+            match logical_settings.encode(value) {
+                Ok(value) => {
+                    builder.try_push_value_ref(&value.as_value_ref())?;
+                    valid_rows.push(true);
+                }
+                Err(_) => {
+                    builder.push_null();
+                    valid_rows.push(false);
+                }
+            }
+        }
+        Ok((builder.to_vector().to_arrow_array(), valid_rows))
+    }
+
     fn json2_values(&self) -> Result<Vec<Value>> {
         let structs = self.inner.as_struct_opt().context(AlignJsonArraySnafu {
             reason: "JSON2 layout v2 root array must be a struct",

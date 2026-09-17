@@ -1,0 +1,67 @@
+CREATE TABLE json2_compaction_discard_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_compaction_discard_invalid VALUES
+    (1, '{"kind":"valid"}'),
+    (2, '{"kind":1}');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json2_compaction_discard_invalid');
+
++-------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_compaction_discard_invalid') |
++-------------------------------------------------------+
+| 0                                                     |
++-------------------------------------------------------+
+
+ALTER TABLE json2_compaction_discard_invalid
+    MODIFY COLUMN attrs JSON2 (
+        kind STRING
+    );
+
+Affected Rows: 0
+
+INSERT INTO json2_compaction_discard_invalid VALUES
+    (3, '{"kind":"new"}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_compaction_discard_invalid');
+
++-------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_compaction_discard_invalid') |
++-------------------------------------------------------+
+| 0                                                     |
++-------------------------------------------------------+
+
+ADMIN COMPACT_TABLE('json2_compaction_discard_invalid', 'swcs', '86400');
+
++--------------------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_compaction_discard_invalid', 'swcs', '86400') |
++--------------------------------------------------------------------------+
+| 0                                                                        |
++--------------------------------------------------------------------------+
+
+SELECT ts, attrs.kind
+FROM json2_compaction_discard_invalid
+ORDER BY ts;
+
++-------------------------+---------------------------------------------------------------+
+| ts                      | json_get(json2_compaction_discard_invalid.attrs,Utf8("kind")) |
++-------------------------+---------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | valid                                                         |
+| 1970-01-01T00:00:00.003 | new                                                           |
++-------------------------+---------------------------------------------------------------+
+
+DROP TABLE json2_compaction_discard_invalid;
+
+Affected Rows: 0
+
