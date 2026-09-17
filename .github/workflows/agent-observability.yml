@@ -111,7 +111,9 @@ jobs:
           path: greptimedb
           persist-credentials: false
       - name: Test ECS lifecycle helpers
-        run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+        run: |
+          python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+          python3 greptimedb/tests/perf/test_agent_observability_summary.py
       - name: Validate requested benchmark
         id: inputs
         shell: bash
@@ -267,7 +269,7 @@ jobs:
       - name: Generate dataset once
         id: generate
         run: |-
-          bash o11ybench/scripts/run-agent-observability.sh --stage generate --execute \
+          GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage generate --execute \
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" \
             --root "$ARTIFACT_ROOT" --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           cp "$MANIFEST_PATH" "$ARTIFACT_ROOT/run-manifest.json"
@@ -275,7 +277,7 @@ jobs:
         id: greptimedb
         if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
         run: |-
-          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+          GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
             --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
             --target greptimedb --image "$GREPTIMEDB_IMAGE" \
@@ -284,7 +286,7 @@ jobs:
         id: clickhouse
         if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.clickhouse == 'true' }}
         run: |-
-          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+          GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
             --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
             --target clickhouse --image "$CLICKHOUSE_IMAGE" \
@@ -293,7 +295,7 @@ jobs:
         id: victorialogs
         if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.victorialogs == 'true' }}
         run: |-
-          bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+          GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT" \
             --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
             --target victorialogs --image "$VICTORIALOGS_IMAGE" \
@@ -313,9 +315,19 @@ jobs:
         if: always()
         run: |-
           if [[ -f o11ybench/scripts/run-agent-observability.sh ]]; then
-            bash o11ybench/scripts/run-agent-observability.sh --stage cleanup --execute \
+            GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage cleanup --execute \
               --owner "$OWNER" --root "$ARTIFACT_ROOT"
           fi
+      - name: Benchmark summary
+        if: always()
+        run: |
+          python3 greptimedb/.github/scripts/agent-observability-summary.py \
+            --root "$ARTIFACT_ROOT" --targets "$TARGETS" --section benchmark >> "$GITHUB_STEP_SUMMARY"
+      - name: Load / lifecycle summary
+        if: always()
+        run: |
+          python3 greptimedb/.github/scripts/agent-observability-summary.py \
+            --root "$ARTIFACT_ROOT" --targets "$TARGETS" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
       - name: Upload results (no dataset)
         if: always()
         uses: actions/upload-artifact@v4
