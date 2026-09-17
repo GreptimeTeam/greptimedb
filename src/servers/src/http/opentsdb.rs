@@ -101,13 +101,9 @@ pub async fn put(
     }
 
     let response = if !summary && !details {
-        if let Err(e) = opentsdb_handler.exec_batch(data_points, ctx.clone()).await {
-            // Not debugging purpose, failed fast.
-            return error::InternalSnafu {
-                err_msg: e.to_string(),
-            }
-            .fail();
-        }
+        opentsdb_handler
+            .exec_batch(data_points, ctx.clone())
+            .await?;
         (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
     } else {
         let mut response = OpentsdbDebuggingResponse {
