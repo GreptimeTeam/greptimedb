@@ -99,6 +99,10 @@ impl Memtable for EmptyMemtable {
         MemtableStats::default().with_time_range(self.time_range)
     }
 
+    fn min_sequence(&self) -> SequenceNumber {
+        0
+    }
+
     fn fork(&self, id: MemtableId, _metadata: &RegionMetadataRef) -> MemtableRef {
         Arc::new(EmptyMemtable::new(id))
     }

@@ -12,8 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-mod kv_backend;
-mod partition_manager;
+//! Protocol-independent building blocks for timing-based batching.
+//!
+//! Payload preparation, grouping keys, write execution and request completion
+//! remain the caller's responsibility.
 
-pub(crate) use kv_backend::prepare_mocked_backend;
-pub(crate) use partition_manager::{create_partition_rule_manager, new_test_table_info};
+pub mod flush_limiter;
+pub mod flush_policy;
+pub mod flush_timer;
+pub mod notifier;
+pub mod pending_batch;
+pub mod pending_worker;
+pub mod request_limiter;
+pub mod worker_registry;

@@ -20,23 +20,106 @@ use api::v1::region::{
     BulkInsertRequest, RegionRequest, RegionRequestHeader, bulk_insert_request, region_request,
 };
 use api::v1::{ArrowIpc, PartitionExprVersion};
-use arrow::array::Array;
+use arrow::compute::filter_record_batch;
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
 use common_base::AffectedRows;
+use common_error::ext::BoxedError;
 use common_grpc::FlightData;
-use common_grpc::flight::{FlightEncoder, FlightMessage};
+use common_grpc::flight::{FlightEncoder, FlightMessage, record_batch_to_ipc};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
-use snafu::{OptionExt, ResultExt, ensure};
+use futures::future::{join_all, try_join_all};
+use session::context::QueryContextRef;
+use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
 use table::metadata::TableInfoRef;
 
+use crate::error::Result;
 use crate::insert::Inserter;
+use crate::req_convert::insert::extract_timestamps;
 use crate::{error, metrics};
 
 impl Inserter {
+    /// Routes and writes a prepared table batch, returning the affected row count.
+    ///
+    /// Callers must exclude instant-TTL tables and handle Flow notifications after
+    /// successful writes. This execution helper does not perform either step.
+    pub async fn flush_bulk_batch(
+        &self,
+        table_info: TableInfoRef,
+        batch: RecordBatch,
+        ctx: QueryContextRef,
+    ) -> Result<AffectedRows> {
+        let (rule, versions) = self
+            .partition_manager
+            .find_table_partition_rule(&table_info)
+            .await
+            .context(error::InvalidPartitionSnafu)?;
+        let masks = rule
+            .split_record_batch(&batch)
+            .context(error::SplitInsertSnafu)?;
+        let mut writes = Vec::with_capacity(masks.len());
+        for (region_number, mask) in masks {
+            if mask.select_none() {
+                continue;
+            }
+            let region_id = RegionId::new(table_info.table_id(), region_number);
+            let selected = if mask.select_all() {
+                batch.clone()
+            } else {
+                filter_record_batch(&batch, mask.array()).context(error::ComputeArrowSnafu)?
+            };
+            let (schema, data_header, payload) = record_batch_to_ipc(selected)
+                .map_err(BoxedError::new)
+                .context(error::ExternalSnafu)?;
+            let peer = self
+                .partition_manager
+                .find_region_leader(region_id)
+                .await
+                .context(error::FindRegionLeaderSnafu)?;
+            let request = RegionRequest {
+                header: Some(RegionRequestHeader {
+                    dbname: ctx.get_db_string(),
+                    tracing_context: TracingContext::from_current_span().to_w3c(),
+                    ..Default::default()
+                }),
+                body: Some(region_request::Body::BulkInsert(BulkInsertRequest {
+                    skip_wal: ctx.skip_wal(),
+                    region_id: region_id.as_u64(),
+                    partition_expr_version: versions
+                        .get(&region_number)
+                        .copied()
+                        .flatten()
+                        .map(|value| PartitionExprVersion { value }),
+                    // Let the datanode revalidate against its current schema.
+                    aligned_schema_version: None,
+                    body: Some(bulk_insert_request::Body::ArrowIpc(ArrowIpc {
+                        schema,
+                        data_header,
+                        payload,
+                    })),
+                })),
+            };
+            writes.push((peer, request));
+        }
+        let results = join_all(writes.into_iter().map(|(peer, request)| async move {
+            self.node_manager
+                .datanode(&peer)
+                .await
+                .handle(request)
+                .await
+                .context(error::RequestInsertsSnafu)
+        }))
+        .await;
+        let affected_rows = results
+            .into_iter()
+            .map(|result| result.map(|response| response.affected_rows))
+            .sum::<Result<usize>>()?;
+        Ok(affected_rows)
+    }
+
     /// Handle bulk insert request.
     pub async fn handle_bulk_insert(
         &self,
@@ -45,7 +128,7 @@ impl Inserter {
         record_batch: RecordBatch,
         schema_bytes: Bytes,
         skip_wal: bool,
-    ) -> error::Result<AffectedRows> {
+    ) -> Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
         let db_name = table_info.get_db_string();
@@ -175,7 +258,7 @@ impl Inserter {
                 } else {
                     None
                 };
-                let handle: common_runtime::JoinHandle<error::Result<api::region::RegionResponse>> =
+                let handle: common_runtime::JoinHandle<Result<api::region::RegionResponse>> =
                     common_runtime::spawn_global(async move {
                         let (header, payload) = if mask.select_all() {
                             // SAFETY: raw data must be present, we can avoid re-encoding.
@@ -184,7 +267,7 @@ impl Inserter {
                             let filter_timer = metrics::HANDLE_BULK_INSERT_ELAPSED
                                 .with_label_values(&["filter"])
                                 .start_timer();
-                            let batch = arrow::compute::filter_record_batch(&rb, mask.array())
+                            let batch = filter_record_batch(&rb, mask.array())
                                 .context(error::ComputeArrowSnafu)?;
                             filter_timer.observe_duration();
                             metrics::BULK_REQUEST_ROWS
@@ -243,9 +326,7 @@ impl Inserter {
             }
         }
 
-        let region_responses = futures::future::try_join_all(handles)
-            .await
-            .context(error::JoinTaskSnafu)?;
+        let region_responses = try_join_all(handles).await.context(error::JoinTaskSnafu)?;
         wait_all_datanode_timer.observe_duration();
         let mut rows_inserted: usize = 0;
         for res in region_responses {
@@ -318,23 +399,4 @@ impl Inserter {
             }
         });
     }
-}
-
-/// Calculate the timestamp range of record batch. Return `None` if record batch is empty.
-fn extract_timestamps(rb: &RecordBatch, timestamp_index_name: &str) -> error::Result<Vec<i64>> {
-    let ts_col = rb
-        .column_by_name(timestamp_index_name)
-        .context(error::ColumnNotFoundSnafu {
-            msg: timestamp_index_name,
-        })?;
-    if rb.num_rows() == 0 {
-        return Ok(vec![]);
-    }
-    let (primitive, _) =
-        datatypes::timestamp::timestamp_array_to_primitive(ts_col).with_context(|| {
-            error::InvalidTimeIndexTypeSnafu {
-                ty: ts_col.data_type().clone(),
-            }
-        })?;
-    Ok(primitive.iter().flatten().collect())
 }

@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
 use crate::memtable::time_partition::TimePartitionsRef;
@@ -61,6 +62,16 @@ impl MemtableVersion {
         self.mutable.list_memtables(&mut mems);
         mems.extend_from_slice(&self.immutables);
         mems
+    }
+
+    /// Returns a sequence lower bound covering mutable and immutable memtables.
+    /// Empty memtables impose no compaction barrier, including newly forked ones.
+    pub(crate) fn min_sequence(&self) -> Option<SequenceNumber> {
+        self.list_memtables()
+            .iter()
+            .filter(|mem| !mem.is_empty())
+            .map(|mem| mem.min_sequence())
+            .min()
     }
 
     /// Returns a new [MemtableVersion] which switches the old mutable memtable to immutable
