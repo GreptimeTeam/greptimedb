@@ -155,7 +155,12 @@ impl MergeScanAwareSerializer {
     /// catalog. Decoding the payload with the catalog list of a region aware request used to make
     /// that pair irrelevant (that list resolves every catalog and schema to the region); a catalog
     /// that resolves the tables of the cluster needs it.
-    fn payload_state(&self, catalog_list: Arc<dyn CatalogProviderList>) -> SessionState {
+    ///
+    /// The functions of the state are registered once more after it is built, see
+    /// [`register_greptime_functions`]: building a state may bind a function back to a built-in
+    /// DataFusion function of the same name or alias, so the payload has to be decoded with a state
+    /// that holds the GreptimeDB functions, like the state that decodes the enclosing plan.
+    fn payload_state(&self, catalog_list: Arc<dyn CatalogProviderList>) -> Result<SessionState> {
         let query_ctx = self.query_ctx();
         let mut config = self.session_state.config().clone();
         {
@@ -164,14 +169,17 @@ impl MergeScanAwareSerializer {
             catalog_options.default_schema = query_ctx.current_schema();
         }
 
-        SessionStateBuilder::new_from_existing(self.session_state.clone())
+        let mut state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_config(config)
             .with_serializer_registry(Arc::new(Self {
                 session_state: self.session_state.clone(),
                 catalog_manager: self.catalog_manager.clone(),
             }))
             .with_catalog_list(catalog_list)
-            .build()
+            .build();
+        register_greptime_functions(&mut state, &query_ctx).map_err(DataFusionError::from)?;
+
+        Ok(state)
     }
 
     /// Decodes `payload`, the plan embedded in a `MergeScan`.
@@ -204,12 +212,12 @@ impl MergeScanAwareSerializer {
                     self.query_ctx(),
                 ),
             );
-            return decode_sub_plan(payload, self.payload_state(engine_catalog));
+            return decode_sub_plan(payload, self.payload_state(engine_catalog)?);
         }
 
         decode_sub_plan(
             payload,
-            self.payload_state(self.session_state.catalog_list().clone()),
+            self.payload_state(self.session_state.catalog_list().clone())?,
         )
     }
 }
@@ -328,6 +336,123 @@ impl DefaultPlanDecoder {
     }
 }
 
+/// Registers every function of GreptimeDB into `session_state`, overwriting any built-in
+/// function of the same name or alias.
+///
+/// The sub strait decoder looks the functions of a plan up in the session state, and some of the
+/// GreptimeDB functions collide with a built-in DataFusion function or one of its aliases: the
+/// built-in `to_char` declares `date_format` as an alias, while GreptimeDB has a `date_format`
+/// function of its own.
+///
+/// That is why the functions have to be registered *after* the session state is built. Building a
+/// state re-registers the functions of the state it was given — `SessionStateBuilder::build`
+/// takes them from `new_from_existing`, which turns the function maps into vectors — in the
+/// unspecified order in which a hash map yields them, and registering a function inserts its
+/// aliases *before* its own name. A state that holds both the built-in `to_char` and the GreptimeDB
+/// `date_format` therefore binds `date_format` back to the built-in `to_char` whenever it
+/// re-registers `to_char` last.
+///
+/// The query context must be passed to the functions to set the timezone. This function is
+/// idempotent, and it must be applied to the state that actually decodes a plan, i.e. after *every*
+/// `SessionStateBuilder::build`.
+fn register_greptime_functions(
+    session_state: &mut SessionState,
+    query_ctx: &QueryContextRef,
+) -> common_query::error::Result<()> {
+    for func in FUNCTION_REGISTRY.scalar_functions() {
+        let udf = func.provide(FunctionContext {
+            query_ctx: query_ctx.clone(),
+            state: Default::default(),
+        });
+        session_state
+            .register_udf(Arc::new(udf))
+            .context(RegisterUdfSnafu { name: func.name() })?;
+    }
+
+    for func in FUNCTION_REGISTRY.aggregate_functions() {
+        let name = func.name().to_string();
+        session_state
+            .register_udaf(Arc::new(func))
+            .context(RegisterUdfSnafu { name })?;
+    }
+
+    let _ = session_state.register_udaf(quantile_udaf());
+
+    let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
+    let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
+    let double_exponential_smoothing_udf =
+        DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
+    let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
+
+    for udf in [
+        NativeHistogramAbsentOverTime::scalar_udf(),
+        NativeHistogramAdd::scalar_udf(),
+        NativeHistogramAvg::scalar_udf(),
+        NativeHistogramAvgOverTime::scalar_udf(),
+        NativeHistogramChanges::scalar_udf(),
+        NativeHistogramCount::scalar_udf(),
+        NativeHistogramCountOverTime::scalar_udf(),
+        NativeHistogramDelta::scalar_udf(),
+        NativeHistogramDivScalar::scalar_udf(),
+        NativeHistogramDrop::bool_false_udf(String::new(), None),
+        NativeHistogramDrop::bool_true_udf(String::new(), None),
+        NativeHistogramDrop::float_null_udf(String::new(), None),
+        NativeHistogramEq::scalar_udf(),
+        NativeHistogramFraction::scalar_udf(),
+        NativeHistogramIDelta::scalar_udf(),
+        NativeHistogramIRate::scalar_udf(),
+        NativeHistogramIncrease::scalar_udf(),
+        NativeHistogramLastOverTime::scalar_udf(),
+        MixedRange::float_udf(None),
+        MixedRange::histogram_udf(None),
+        NativeHistogramMulScalar::scalar_udf(),
+        NativeHistogramNeg::scalar_udf(),
+        NativeHistogramNotEq::scalar_udf(),
+        NativeHistogramPresentOverTime::scalar_udf(),
+        NativeHistogramQuantile::scalar_udf(),
+        NativeHistogramRate::scalar_udf(),
+        NativeHistogramResets::scalar_udf(),
+        NativeHistogramScalarMul::scalar_udf(),
+        NativeHistogramStddev::scalar_udf(),
+        NativeHistogramStdvar::scalar_udf(),
+        NativeHistogramSub::scalar_udf(),
+        NativeHistogramSum::scalar_udf(),
+        NativeHistogramSumOverTime::scalar_udf(),
+        NativeHistogramToString::scalar_udf(),
+        PromqlFloatToString::scalar_udf(),
+    ] {
+        let _ = session_state.register_udf(Arc::new(udf));
+    }
+
+    for udaf in [
+        NativeHistogramAggAvg::aggregate_udf(),
+        NativeHistogramAggSum::aggregate_udf(),
+    ] {
+        let _ = session_state.register_udaf(Arc::new(udaf));
+    }
+
+    Ok(())
+}
+
 #[async_trait::async_trait]
 impl SubstraitPlanDecoder for DefaultPlanDecoder {
     async fn decode(
@@ -341,105 +466,10 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_catalog_list(catalog_list)
             .build();
-        // Substrait decoder will look up the UDFs in SessionState, so we need to register them
-        // Note: the query context must be passed to set the timezone
-        // We MUST register the UDFs after we build the session state, otherwise the UDFs will be lost
-        // if they have the same name as the default UDFs or their alias.
-        // e.g. The default UDF `to_char()` has an alias `date_format()`, if we register a UDF with the name `date_format()`
-        // before we build the session state, the UDF will be lost.
-        for func in FUNCTION_REGISTRY.scalar_functions() {
-            let udf = func.provide(FunctionContext {
-                query_ctx: self.query_ctx.clone(),
-                state: Default::default(),
-            });
-            session_state
-                .register_udf(Arc::new(udf))
-                .context(RegisterUdfSnafu { name: func.name() })?;
-        }
-
-        for func in FUNCTION_REGISTRY.aggregate_functions() {
-            let name = func.name().to_string();
-            session_state
-                .register_udaf(Arc::new(func))
-                .context(RegisterUdfSnafu { name })?;
-        }
-
-        let _ = session_state.register_udaf(quantile_udaf());
-
-        let _ = session_state.register_udf(Arc::new(IDelta::<false>::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(IDelta::<true>::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Rate::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Increase::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Delta::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Resets::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(SumOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(CountOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(LastOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(AbsentOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(PresentOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(StddevOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(StdvarOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(QuantileOverTime::scalar_udf()));
-        let _ = session_state.register_udf(Arc::new(PredictLinear::scalar_udf()));
-        let double_exponential_smoothing_udf =
-            DoubleExponentialSmoothing::scalar_udf().with_aliases(["prom_holt_winters"]);
-        let _ = session_state.register_udf(Arc::new(double_exponential_smoothing_udf));
-
-        for udf in [
-            NativeHistogramAbsentOverTime::scalar_udf(),
-            NativeHistogramAdd::scalar_udf(),
-            NativeHistogramAvg::scalar_udf(),
-            NativeHistogramAvgOverTime::scalar_udf(),
-            NativeHistogramChanges::scalar_udf(),
-            NativeHistogramCount::scalar_udf(),
-            NativeHistogramCountOverTime::scalar_udf(),
-            NativeHistogramDelta::scalar_udf(),
-            NativeHistogramDivScalar::scalar_udf(),
-            NativeHistogramDrop::bool_false_udf(String::new(), None),
-            NativeHistogramDrop::bool_true_udf(String::new(), None),
-            NativeHistogramDrop::float_null_udf(String::new(), None),
-            NativeHistogramEq::scalar_udf(),
-            NativeHistogramFraction::scalar_udf(),
-            NativeHistogramIDelta::scalar_udf(),
-            NativeHistogramIRate::scalar_udf(),
-            NativeHistogramIncrease::scalar_udf(),
-            NativeHistogramLastOverTime::scalar_udf(),
-            MixedRange::float_udf(None),
-            MixedRange::histogram_udf(None),
-            NativeHistogramMulScalar::scalar_udf(),
-            NativeHistogramNeg::scalar_udf(),
-            NativeHistogramNotEq::scalar_udf(),
-            NativeHistogramPresentOverTime::scalar_udf(),
-            NativeHistogramQuantile::scalar_udf(),
-            NativeHistogramRate::scalar_udf(),
-            NativeHistogramResets::scalar_udf(),
-            NativeHistogramScalarMul::scalar_udf(),
-            NativeHistogramStddev::scalar_udf(),
-            NativeHistogramStdvar::scalar_udf(),
-            NativeHistogramSub::scalar_udf(),
-            NativeHistogramSum::scalar_udf(),
-            NativeHistogramSumOverTime::scalar_udf(),
-            NativeHistogramToString::scalar_udf(),
-            PromqlFloatToString::scalar_udf(),
-        ] {
-            let _ = session_state.register_udf(Arc::new(udf));
-        }
-        for udaf in [
-            NativeHistogramAggAvg::aggregate_udf(),
-            NativeHistogramAggSum::aggregate_udf(),
-        ] {
-            let _ = session_state.register_udaf(Arc::new(udaf));
-        }
+        register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
         // Install a registry that is also able to decode `MergeScan` nodes (the plans sent to a
-        // datanode may contain one) after all the functions above are registered, so that the
-        // sub-plans of a `MergeScan` see the same functions.
+        // datanode may contain one), so that the sub-plans of a `MergeScan` see the same functions.
         //
         // The registry resolves the tables of a `MergeScan` payload with the catalog of the query
         // engine, which it retrieves from the engine state the query engine leaves in the session
@@ -450,12 +480,17 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
             .config()
             .get_extension::<QueryEngineState>()
             .map(|engine_state| engine_state.catalog_manager().clone());
-        let session_state = SessionStateBuilder::new_from_existing(session_state.clone())
+        let mut session_state = SessionStateBuilder::new_from_existing(session_state.clone())
             .with_serializer_registry(Arc::new(MergeScanAwareSerializer {
                 session_state,
                 catalog_manager,
             }))
             .build();
+        // Building the state above re-registered the functions of the previous state in hash order,
+        // which can bind a function back to a built-in DataFusion function of the same name or
+        // alias: register the GreptimeDB functions once more, so that the state that decodes the
+        // plan below holds the GreptimeDB bindings.
+        register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
         let logical_plan = DFLogicalSubstraitConvertor
             .decode(message, session_state)
@@ -478,11 +513,13 @@ mod tests {
     use catalog::RegisterTableRequest;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_query::native_histogram::native_histogram_value_type;
+    use common_time::Timezone;
     use datafusion::catalog::TableProvider;
     use datafusion::datasource::MemTable;
+    use datafusion::functions::datetime::to_char::ToCharFunc;
     use datafusion::logical_expr::Extension;
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, col, lit};
+    use datafusion_expr::expr::{Cast, ScalarFunction};
+    use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, ScalarUDF, col, lit};
     use datatypes::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit,
     };
@@ -950,5 +987,235 @@ mod tests {
         assert_eq!(decoded.to_string(), plan.to_string());
         // Both levels are `MergeScan` nodes.
         assert_eq!(decoded.to_string().matches("MergeScan [").count(), 2);
+    }
+
+    /// Returns the `date_format` implementation of GreptimeDB: the implementation a decoded plan
+    /// has to use.
+    fn greptime_date_format_udf(query_ctx: &QueryContextRef) -> Arc<ScalarUDF> {
+        FUNCTION_REGISTRY
+            .get_function("date_format")
+            .expect("`date_format` is a function of GreptimeDB")
+            .provide(FunctionContext {
+                query_ctx: query_ctx.clone(),
+                state: Default::default(),
+            })
+            .into()
+    }
+
+    /// The query context of the tests below: the timezone is not the default one, so that the
+    /// implementation bound to `date_format` is observable (only the GreptimeDB implementation
+    /// formats in the timezone of the query context).
+    fn date_format_query_ctx() -> QueryContextRef {
+        let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        query_ctx.set_timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap());
+        Arc::new(query_ctx)
+    }
+
+    /// A `date_format(timestamp, format)` expression that uses the GreptimeDB implementation.
+    fn greptime_date_format_expr(query_ctx: &QueryContextRef, timestamp: Expr) -> Expr {
+        Expr::ScalarFunction(ScalarFunction {
+            func: greptime_date_format_udf(query_ctx),
+            args: vec![timestamp, lit("%Y-%m-%d %H:%i:%S")],
+        })
+    }
+
+    /// Returns the scalar functions of every expression of `plan`, including the expressions of its
+    /// inputs and the ones of the plan embedded in a `MergeScan` (the payload of a `MergeScan` is
+    /// not an input of the node, see `MergeScanLogicalPlan::inputs`).
+    fn scalar_functions_of(plan: &LogicalPlan) -> Vec<Arc<ScalarUDF>> {
+        use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
+
+        let mut udfs = Vec::new();
+        for expr in plan.expressions() {
+            expr.apply(|expr| {
+                if let Expr::ScalarFunction(func) = expr {
+                    udfs.push(Arc::clone(&func.func));
+                }
+                Ok(TreeNodeRecursion::Continue)
+            })
+            .unwrap();
+        }
+
+        if let LogicalPlan::Extension(extension) = plan
+            && let Some(merge_scan) = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+        {
+            udfs.extend(scalar_functions_of(merge_scan.input()));
+        }
+
+        for input in plan.inputs() {
+            udfs.extend(scalar_functions_of(input));
+        }
+
+        udfs
+    }
+
+    /// Asserts that the only function of `plan` is the `date_format` of GreptimeDB.
+    ///
+    /// The built-in `to_char` of DataFusion declares `date_format` as an alias, so a plan where
+    /// `date_format` was bound to it holds a `to_char` function, which the substrait encoder
+    /// renders as `to_char(...) AS date_format(...)`: the binding itself is asserted here, and not
+    /// the way the expression is printed.
+    fn assert_only_function_is_greptime_date_format(
+        plan: &LogicalPlan,
+        query_ctx: &QueryContextRef,
+    ) {
+        let udfs = scalar_functions_of(plan);
+        assert_eq!(udfs.len(), 1, "expected one function in: {plan}");
+
+        let udf = &udfs[0];
+        assert_eq!(udf.name(), "date_format", "got: {plan}");
+        assert!(
+            udf.inner().as_any().downcast_ref::<ToCharFunc>().is_none(),
+            "`date_format` is bound to the built-in `to_char` of DataFusion: {plan}"
+        );
+        assert_eq!(
+            udf.as_ref(),
+            greptime_date_format_udf(query_ctx).as_ref(),
+            "`date_format` is not bound to the implementation of GreptimeDB: {plan}"
+        );
+    }
+
+    /// The built-in `to_char` of DataFusion declares `date_format` as an alias, and
+    /// [`SessionStateBuilder`] re-registers the functions of a state in the (unspecified) order in
+    /// which a hash map yields them, so building the session state can bind `date_format` back to
+    /// the built-in `to_char` instead of the GreptimeDB implementation. Decoding a plan has to keep
+    /// the GreptimeDB binding, on the plain path (no `MergeScan` to decode) as well.
+    #[tokio::test]
+    async fn test_serializer_decode_keeps_greptime_date_format() {
+        // The functions of a session state are collected from a hash map, and the map order differs
+        // between the states (and between the decodings, which rebuild the state): decode the same
+        // plan several times, with a fresh engine each time, so that an order dependent binding is
+        // caught whatever the order of a single state is.
+        for _ in 0..8 {
+            let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+            let factory = QueryEngineFactory::new(
+                catalog_list,
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            );
+            let engine = factory.query_engine();
+
+            let table_provider = Arc::new(mock_table_provider(1.into()));
+            let query_ctx = date_format_query_ctx();
+            let plan = LogicalPlanBuilder::scan(
+                "devices",
+                Arc::new(LogicalTableSource::new(table_provider.schema().clone())),
+                None,
+            )
+            .unwrap()
+            .project(vec![greptime_date_format_expr(&query_ctx, col("ts"))])
+            .unwrap()
+            .build()
+            .unwrap();
+
+            let bytes = DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .unwrap();
+            let plan_decoder = engine
+                .engine_context(query_ctx.clone())
+                .new_plan_decoder()
+                .unwrap();
+            let decoded = plan_decoder
+                .decode(
+                    bytes,
+                    Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                    false,
+                )
+                .await
+                .unwrap();
+
+            assert_only_function_is_greptime_date_format(&decoded, &query_ctx);
+        }
+    }
+
+    /// Same as [`test_serializer_decode_keeps_greptime_date_format`], for a `date_format` inside the
+    /// payload of a `MergeScan`: the payload is decoded with the session state built by
+    /// [`MergeScanAwareSerializer::payload_state`], which is rebuilt as well and thus has to keep
+    /// the GreptimeDB functions too.
+    #[tokio::test]
+    async fn test_serializer_decode_merge_scan_payload_keeps_greptime_date_format() {
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        // The payload scans `numbers`, which is resolved through the catalog of the query engine.
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+
+        for _ in 0..8 {
+            let factory = QueryEngineFactory::new(
+                catalog_manager.clone(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            );
+            let engine = factory.query_engine();
+            let query_ctx = date_format_query_ctx();
+
+            // `numbers` has a single `number` column of type `u32`: cast it to a timestamp, which
+            // is what `date_format` formats.
+            let input = LogicalPlanBuilder::scan(
+                NUMBERS_TABLE_NAME,
+                Arc::new(LogicalTableSource::new(
+                    NumbersTable::schema().arrow_schema().clone(),
+                )),
+                None,
+            )
+            .unwrap()
+            .project(vec![greptime_date_format_expr(
+                &query_ctx,
+                Expr::Cast(Cast::new(
+                    Box::new(col("number")),
+                    ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                )),
+            )])
+            .unwrap()
+            .build()
+            .unwrap();
+            let plan =
+                MergeScanLogicalPlan::new(input, false, Default::default()).into_logical_plan();
+
+            let bytes = DFLogicalSubstraitConvertor
+                .encode(&plan, DefaultSerializer)
+                .unwrap();
+            let plan_decoder = engine
+                .engine_context(query_ctx.clone())
+                .new_plan_decoder()
+                .unwrap();
+            // The catalog list of the request is deliberately unrelated to the payload.
+            let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+                mock_table_provider(1.into()),
+            )));
+
+            let decoded = plan_decoder
+                .decode(bytes, catalog_list, false)
+                .await
+                .unwrap();
+
+            let LogicalPlan::Extension(extension) = &decoded else {
+                panic!("Expect a MergeScan plan, got: {decoded}");
+            };
+            let merge_scan = extension
+                .node
+                .as_any()
+                .downcast_ref::<MergeScanLogicalPlan>()
+                .expect("Expect a MergeScan plan node");
+
+            assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
+        }
     }
 }
