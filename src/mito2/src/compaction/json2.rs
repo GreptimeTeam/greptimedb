@@ -280,8 +280,6 @@ fn select_dynamic_hints(
         .map(|(path, stat)| JsonTypeHint {
             path: path.iter().map(|x| (*x).to_owned()).collect(),
             data_type: ConcreteDataType::from_arrow_type(&stat.data_type.as_arrow_type()),
-            nullable: true,
-            default_constraint: None,
             inverted_index: false,
         })
         .collect()
@@ -372,8 +370,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["hint".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(2),
@@ -430,8 +426,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -486,8 +480,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -508,15 +500,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["source_only".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -583,8 +571,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -594,15 +580,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["promoted".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],

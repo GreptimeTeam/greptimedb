@@ -423,7 +423,7 @@ show create table json2_finite_paths;
 |                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
 |                    |   "j" JSON2(                                      |
 |                    |     max_auto_expanded_paths = 1,                  |
-|                    |     "hint" STRING NULL                            |
+|                    |     "hint" STRING                                 |
 |                    |   ) NULL,                                         |
 |                    |   TIME INDEX ("ts")                               |
 |                    | )                                                 |
