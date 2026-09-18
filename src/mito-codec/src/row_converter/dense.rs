@@ -359,6 +359,31 @@ impl SortField {
         }
         Ok(to_skip)
     }
+
+    /// Decodes primitive fields straight into a reference value for column
+    /// builders, avoiding owned Value construction and conversion. The caller has
+    /// already checked the encoded boundary.
+    fn deserialize_primitive_ref<B: Buf>(
+        data_type: &ConcreteDataType,
+        deserializer: &mut Deserializer<B>,
+    ) -> Option<Result<ValueRef<'static>>> {
+        macro_rules! decode_primitive {
+            ($($variant:ident, $native:ty),* $(,)?) => {
+                match data_type {
+                    $(ConcreteDataType::$variant(_) => Some(
+                        Option::<$native>::deserialize(deserializer)
+                            .map(ValueRef::from)
+                            .context(error::DeserializeFieldSnafu)
+                    ),)*
+                    _ => None,
+                }
+            };
+        }
+        decode_primitive!(
+            Boolean, bool, Int8, i8, Int16, i16, Int32, i32, Int64, i64, UInt8, u8, UInt16, u16,
+            UInt32, u32, UInt64, u64, Float32, f32, Float64, f64,
+        )
+    }
 }
 
 /// Finds the checked boundary of an Option<String>, shared by Dense and Sparse.
@@ -496,6 +521,73 @@ impl DensePrimaryKeyCodec {
             values.push(value);
         }
         Ok(values)
+    }
+
+    /// Iterates over all source PK fields in schema order, checking each field's
+    /// encoded boundary before deserializing it. Stops after the first error.
+    ///
+    /// Unlike positional access, this requires no offsets or value cache. Callers
+    /// can consume each value immediately instead of retaining the entire key.
+    pub fn decode_dense_iter<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = Result<(ColumnId, Value)>> + 'a {
+        self.ordered_primary_key_columns.iter().scan(
+            Some(Deserializer::new(bytes)),
+            move |state, (id, field)| {
+                let deserializer = state.as_mut()?;
+                let remaining = &bytes[deserializer.position()..];
+                let decoded = SortField::encoded_length(field.encode_data_type(), remaining)
+                    .and_then(|_| field.deserialize(deserializer).map(|value| (*id, value)));
+                if decoded.is_err() {
+                    *state = None;
+                }
+                Some(decoded)
+            },
+        )
+    }
+
+    /// Returns the column ids and sort fields in encoded primary-key order.
+    pub fn fields(&self) -> &[(ColumnId, SortField)] {
+        &self.ordered_primary_key_columns
+    }
+
+    /// Decodes all fields in source order into a consumer, checking boundaries.
+    /// Strings borrow the reusable buffer for the duration of each callback, so
+    /// materializing them into column builders needs no per-value owned string.
+    pub fn decode_dense_with(
+        &self,
+        bytes: &[u8],
+        value_buf: &mut Vec<u8>,
+        mut consume: impl FnMut(usize, ValueRef<'_>),
+    ) -> Result<()> {
+        let mut deserializer = Deserializer::new(bytes);
+        for (pos, (_, field)) in self.ordered_primary_key_columns.iter().enumerate() {
+            let data_type = field.encode_data_type();
+            let remaining = &bytes[deserializer.position()..];
+            SortField::encoded_length(data_type, remaining)?;
+            if data_type.is_string() && remaining[0] != 0 {
+                deserializer.advance(1);
+                deserializer
+                    .read_bytes_into(value_buf)
+                    .context(error::DeserializeFieldSnafu)?;
+                let value = std::str::from_utf8(value_buf).map_err(|err| {
+                    error::InvalidDensePrimaryKeySnafu {
+                        reason: format!("string is not valid UTF-8: {err}"),
+                    }
+                    .build()
+                })?;
+                consume(pos, ValueRef::String(value));
+            } else if let Some(value) =
+                SortField::deserialize_primitive_ref(data_type, &mut deserializer)
+            {
+                consume(pos, value?);
+            } else {
+                let value = field.deserialize(&mut deserializer)?;
+                consume(pos, value.as_value_ref());
+            }
+        }
+        Ok(())
     }
 
     /// Returns the field at `pos`.
@@ -700,6 +792,39 @@ mod tests {
         }
         let decoded = encoder.decode(&result).unwrap().into_dense();
         assert_eq!(decoded, row);
+        let mut value_buf = Vec::new();
+        let mut borrowed = Vec::new();
+        encoder
+            .decode_dense_with(&result, &mut value_buf, |_, value| {
+                borrowed.push(Value::from(value))
+            })
+            .unwrap();
+        assert_eq!(borrowed, row);
+        let sequential = encoder
+            .decode_dense_iter(&result)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            sequential
+                .iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+            row.iter().collect::<Vec<_>>()
+        );
+        for end in 0..result.len() {
+            assert!(
+                encoder
+                    .decode_dense_with(&result[..end], &mut value_buf, |_, _| {})
+                    .is_err()
+            );
+            assert!(
+                encoder
+                    .decode_dense_iter(&result[..end])
+                    .collect::<Result<Vec<_>>>()
+                    .is_err(),
+                "truncated at {end}"
+            );
+        }
         // Every supported type must have the same boundaries in positional and
         // full decoding. Exercise every truncation both at the requested field
         // and while skipping it to reach a later field.
@@ -976,6 +1101,17 @@ mod tests {
                 );
                 assert!(codec.decode_value_at(&bytes, pos, &mut Vec::new()).is_err());
             }
+            assert!(
+                codec
+                    .decode_dense_iter(&bytes)
+                    .collect::<Result<Vec<_>>>()
+                    .is_err()
+            );
+            assert!(
+                codec
+                    .decode_dense_with(&bytes, &mut Vec::new(), |_, _| {})
+                    .is_err()
+            );
         }
         let codec = DensePrimaryKeyCodec::with_fields(vec![
             (0, SortField::new(ConcreteDataType::string_datatype())),
@@ -1008,6 +1144,17 @@ mod tests {
         }
         let mut invalid_utf8 = bytes;
         invalid_utf8[2] = 0xff;
+        assert!(
+            codec
+                .decode_dense_with(&invalid_utf8, &mut Vec::new(), |_, _| {})
+                .is_err()
+        );
+        assert!(
+            codec
+                .decode_dense_iter(&invalid_utf8)
+                .collect::<Result<Vec<_>>>()
+                .is_err()
+        );
         assert!(
             codec
                 .decode_value_at(&invalid_utf8, 0, &mut Vec::new())

@@ -21,6 +21,7 @@ use api::v1::value::ValueData;
 use api::v1::{Row, Rows, SemanticType};
 use datafusion_common::Column;
 use datafusion_expr::{Expr, lit};
+use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -30,7 +31,7 @@ use rand::seq::IndexedRandom;
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
-use store_api::storage::RegionId;
+use store_api::storage::{ColumnId, RegionId};
 use table::predicate::Predicate;
 
 use crate::memtable::KeyValues;
@@ -41,6 +42,23 @@ use crate::sst::parquet::file_range::{PreFilterMode, RangeBase};
 use crate::sst::parquet::flat_format::FlatReadFormat;
 use crate::sst::parquet::reader::SimpleFilterContext;
 use crate::test_util::memtable_util::region_metadata_to_row_schema;
+
+/// Builds the actual encoded-PK-to-flat conversion used by the SST reader.
+pub fn pk_materializer_for_bench(
+    metadata: RegionMetadataRef,
+    columns: Vec<ColumnId>,
+    file_schema: SchemaRef,
+) -> impl Fn(RecordBatch) -> crate::error::Result<RecordBatch> {
+    let format = FlatReadFormat::new(
+        metadata,
+        ReadColumns::new(columns),
+        Some(file_schema),
+        "bench",
+        false,
+    )
+    .unwrap();
+    move |batch| format.convert_batch(batch, None)
+}
 
 /// Builds a precise-filter benchmark with tags left encoded in the primary key.
 pub fn tag_filter_for_bench(

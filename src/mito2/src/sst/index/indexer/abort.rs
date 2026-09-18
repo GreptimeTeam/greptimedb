@@ -20,6 +20,7 @@ use crate::sst::index::Indexer;
 
 impl Indexer {
     pub(crate) async fn do_abort(&mut self) {
+        self.dense_pk_decoder = None;
         self.do_abort_inverted_index().await;
         self.do_abort_fulltext_index().await;
         self.do_abort_bloom_filter().await;

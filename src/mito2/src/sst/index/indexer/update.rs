@@ -24,6 +24,11 @@ impl Indexer {
             return;
         }
 
+        if !self.do_prepare_primary_key(batch) {
+            self.do_abort().await;
+            return;
+        }
+
         if !self.do_update_inverted_index(batch).await {
             self.do_abort().await;
         }
@@ -37,6 +42,23 @@ impl Indexer {
         if !self.do_update_vector_index(batch).await {
             self.do_abort().await;
         }
+    }
+
+    /// Handles decode errors before entering asynchronous cleanup, following the
+    /// creators' update policy without carrying a decode error across an await.
+    fn do_prepare_primary_key(&self, batch: &mut Batch) -> bool {
+        let Err(err) = self.prepare_primary_key(batch) else {
+            return true;
+        };
+        if cfg!(any(test, feature = "test")) {
+            panic!(
+                "Failed to decode primary key for indexes, region_id: {}, file_id: {}, err: {:?}",
+                self.region_id, self.file_id, err
+            );
+        } else {
+            warn!(err; "Failed to decode primary key for indexes, region_id: {}, file_id: {}", self.region_id, self.file_id);
+        }
+        false
     }
 
     /// Returns false if the update failed.

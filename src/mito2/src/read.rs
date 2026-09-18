@@ -65,7 +65,7 @@ use datatypes::vectors::{
 };
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, DensePrimaryKeyCodec, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -786,6 +786,21 @@ impl Batch {
         ))
     }
 
+    /// Prepares a shared full-key cache when all Dense PK columns are needed.
+    /// Explicitly supplied decoded/defaulted values take precedence.
+    pub(crate) fn decode_dense_pk(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
+        if self.pk_values.is_none() {
+            // A fallible iterator has no nonzero lower size hint. Reserve the
+            // known field count instead of growing its collected Vec per key.
+            let mut values = Vec::with_capacity(codec.num_fields());
+            for value in codec.decode_dense_iter(&self.primary_key) {
+                values.push(value.context(DecodeSnafu)?);
+            }
+            self.set_pk_values(CompositeValues::Dense(values));
+        }
+        Ok(())
+    }
+
     /// Returns the value of the column in the primary key.
     ///
     /// Reuses predecoded values when available. Otherwise Dense keys decode only
@@ -1348,12 +1363,14 @@ mod tests {
 
         // Schema compatibility may supply already decoded/defaulted values.
         batch.set_pk_values(CompositeValues::Dense(vec![(7, Value::from("default"))]));
+        batch.decode_dense_pk(&codec).unwrap();
         assert_eq!(
             batch.pk_col_value(&codec, 0, 7).unwrap(),
             Some(&Value::from("default"))
         );
         assert!(batch.pk_col_value(&codec, 1, 3).unwrap().is_none());
         batch.remove_pk_values();
+        batch.decode_dense_pk(&codec).unwrap();
         assert_eq!(
             batch.pk_col_value(&codec, 1, 3).unwrap(),
             Some(&Value::Int64(8))
