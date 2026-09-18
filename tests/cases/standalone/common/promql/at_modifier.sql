@@ -216,6 +216,32 @@ TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (100, 400, '100s') abs(at_modifier_gauge @ 300);
 
+-- 10. `predict_linear` over an anchored range selector: the regression is centered on the
+-- evaluation instant of the step, not on the last sample of the window. The anchored window
+-- `[0s, 300s]` of host 'a' rises by 1.0 per minute, so each step predicts 60s ahead of the trend
+-- read at its own instant: 6.0 at 300s and 7.0 at 360s, not the same value twice.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 360, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 300, 60);
+
+-- The anchor and the start of the evaluation differ here, so the window is `[0s, 240s]` shifted
+-- by `at_offset` = 300s - 240s = 60s. Every step must follow the evaluation grid (6.0 to 11.0);
+-- a window folded for the wrong instant reports 5.0 at every step, which is the value at the
+-- window's last sample 240s, and shows up as a constant here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 600, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 240, 60);
+
+-- Control: without `@` every step folds its own window, whose last sample is up to a step older
+-- than the evaluation instant. Reading the regression off that sample reports 6.0 / 7.0 instead
+-- of 6.5 / 7.5 here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m], 60);
+
+-- The same holds with an `offset`, which shifts the whole window backwards without moving the
+-- evaluation instants: the window of step `T` is `[T - 1m - 5m, T - 1m]`, and the trend is read
+-- at `T`, i.e. one minute past its newest sample.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset 1m, 60);
+
 DROP TABLE at_modifier_gauge;
 
 DROP TABLE at_modifier_counter_total;

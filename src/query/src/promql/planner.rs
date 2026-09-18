@@ -235,6 +235,13 @@ struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+    /// The offset in milliseconds the window of the last planned range selector is folded with.
+    ///
+    /// [`Self::start`] and the sample timestamps are compared on the shifted timeline: a range
+    /// payload carries `sample_timestamp + offset`, while the time index column of a folded row
+    /// stays the evaluation timestamp of its step. `None` (or a stale value) only matters for
+    /// functions that read it right after their input plan is built, like `predict_linear`.
+    range_fold_offset: Option<Millisecond>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -435,6 +442,7 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
+        self.range_fold_offset = None;
     }
 
     /// Reset table name and schema to empty
@@ -656,6 +664,9 @@ impl PromPlanner {
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
+        // A subquery always folds with offset 0, so its payload timestamps are already on the
+        // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(0);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
@@ -2620,6 +2631,13 @@ impl PromPlanner {
         // `@` anchors the range selector's window at a fixed timestamp, so the same window is fed
         // to the enclosing function at every evaluation step. See [`Self::at_modifier_offset`].
         let at_offset = self.at_modifier_offset(at, offset)?;
+        // Samples are shifted onto the evaluation timeline with the very same offset while the
+        // window is folded. Record it so that the function above the selector can recover the
+        // evaluation instant of the folded window; see [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(match at_offset {
+            Some(at_offset) => at_offset,
+            None => offset_ms,
+        });
         let grid_start = self.ctx.start;
         let grid_end = self.ctx.end;
 
@@ -2727,6 +2745,9 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
+        // The input plan below records the fold offset of a range selector it is built from, which
+        // is only meaningful for that input; drop whatever an earlier argument left behind.
+        self.ctx.range_fold_offset = None;
         let input = if let Some(prom_expr) = &args.input {
             self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", query_engine_state)
                 .await?
@@ -3977,6 +3998,9 @@ impl PromPlanner {
                 Box::new(other_input_exprs[0].clone()),
                 ArrowDataType::Int64,
             ));
+            // Same evaluation instant as in the non-mixed path; it follows the other inputs so the
+            // float UDF below is called as `predict_linear(ts_range, value_range, t, eval_ts)`.
+            other_input_exprs.push_back(self.create_range_eval_ts_expr(input_schema)?);
         }
 
         let timestamp_range = DfExpr::Column(Column::from_name(
@@ -4266,6 +4290,11 @@ impl PromPlanner {
                         Box::new(other_input_exprs[0].clone()),
                         ArrowDataType::Int64,
                     ));
+                    // The prediction starts at the evaluation instant of the step, which the
+                    // window's fold offset recovers from the row's time index; see
+                    // [`Self::create_range_eval_ts_expr`]. It is appended last, so the UDF is
+                    // called as `predict_linear(ts_range, value_range, t, eval_ts)`.
+                    other_input_exprs.push_back(self.create_range_eval_ts_expr(input_schema)?);
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -4905,6 +4934,43 @@ impl PromPlanner {
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
+    }
+
+    /// Builds the evaluation instant the window of the last planned range selector is folded for,
+    /// as a `Timestamp(Millisecond)` expression.
+    ///
+    /// The timestamp payload of a folded window is shifted onto the evaluation timeline by the
+    /// offset the window is folded with ([`PromPlannerContext::range_fold_offset`]), while the
+    /// time index column of a folded row keeps the evaluation timestamp of its step. Adding the
+    /// offset back yields the evaluation instant on the payload timeline, which is where the
+    /// regression of `predict_linear` is centered: neither a plain window (which may end before
+    /// the step, and is additionally shifted by `offset` on the payload timeline) nor an
+    /// `@`-anchored one (whose end is the anchor, while the payload is shifted by
+    /// `at_offset`) ends at the step it is evaluated at.
+    ///
+    /// The sum is computed on the millisecond representation and cast back, so that the result
+    /// keeps the `Timestamp(Millisecond)` type the range functions declare for it.
+    fn create_range_eval_ts_expr(&self, input_schema: &DFSchemaRef) -> Result<DfExpr> {
+        let offset = self.ctx.range_fold_offset.unwrap_or_default();
+        let eval_ts = self
+            .create_time_index_column_expr()?
+            .cast_to(
+                &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                input_schema,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Int64, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(eval_ts),
+            op: Operator::Plus,
+            right: Box::new(lit(offset)),
+        })
+        .cast_to(
+            &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            input_schema,
+        )
+        .context(DataFusionPlanningSnafu)
     }
 
     fn create_tag_column_exprs(&self) -> Result<Vec<DfExpr>> {
@@ -11613,6 +11679,13 @@ mod test {
     }
 
     async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
+        let plan_str = indie_query_plan(query).await;
+
+        assert_eq!(plan_str, expected.as_ref());
+    }
+
+    /// Plans `query` over the shared test table provider and renders it.
+    async fn indie_query_plan(query: &str) -> String {
         let prom_expr = parser::parse(query).unwrap();
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -11641,7 +11714,7 @@ mod test {
                 .await
                 .unwrap();
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected.as_ref());
+        plan.display_indent_schema().to_string()
     }
 
     #[tokio::test]
@@ -11727,6 +11800,49 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn predict_linear_injects_the_eval_timestamp() {
+        // The fourth argument is the evaluation instant of each row, which the fold offset
+        // recovers from the row's time index (here: no `@` and no `offset`, so the step itself).
+        let query = "predict_linear(some_metric[5m], 60)";
+        let expected = String::from(
+            "Filter: prom_predict_linear(timestamp_range,field_0,Float64(60),timestamp + Int64(0)) IS NOT NULL [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60),timestamp + Int64(0)):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_predict_linear(timestamp_range, field_0, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms))) AS prom_predict_linear(timestamp_range,field_0,Float64(60),timestamp + Int64(0)), some_metric.tag_0 [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60),timestamp + Int64(0)):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-299999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        );
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    /// The evaluation instant follows the selector's fold offset, not the projection's: an
+    /// `@`-anchored selector is folded with `at_offset`, which is what the window's timestamps were
+    /// shifted by. The evaluation starts at 0s here, so `@ 100` anchors 100s in the future and
+    /// yields `at_offset` = -100000ms.
+    #[tokio::test]
+    async fn predict_linear_eval_ts_follows_the_fold_offset() {
+        for (query, expected_offset) in [
+            (
+                "predict_linear(some_metric[5m] @ 100, 60)",
+                "Int64(-100000)",
+            ),
+            (
+                "predict_linear(some_metric[5m] offset 2m, 60)",
+                "Int64(120000)",
+            ),
+        ] {
+            let plan = indie_query_plan(query).await;
+            assert!(
+                plan.contains(&format!("timestamp + {expected_offset}")),
+                "{query}\n{plan}"
+            );
+        }
     }
 
     async fn native_histogram_plan(query: &str) -> String {
@@ -12409,6 +12525,31 @@ mod test {
                       Filter: some_metric.timestamp >= TimestampMillisecond(-839999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(Int32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(Int32), "count_i64": Int64, "zero_count_i64": Int64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]
                         TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), greptime_native_histogram:Struct("schema": Int32, "zero_threshold": Float64, "sum": Float64, "reset_hint": Int32, "start_timestamp": Timestamp(ms), "custom_values": List(Float64), "positive_span_offsets": List(Int32), "positive_span_lengths": List(Int32), "negative_span_offsets": List(Int32), "negative_span_lengths": List(Int32), "count_i64": Int64, "zero_count_i64": Int64, "positive_buckets_i64": List(Int64), "negative_buckets_i64": List(Int64), "count_f64": Float64, "zero_count_f64": Float64, "positive_buckets_f64": List(Float64), "negative_buckets_f64": List(Float64));N, greptime_value:Float64;N]"#;
         assert_eq!(plan, expected);
+    }
+
+    /// The mixed float/histogram path forwards the extra arguments of a range function after the
+    /// three shared range inputs (`args[4..]`), so `predict_linear` must append its evaluation
+    /// instant there, after `t`, exactly like the plain path above.
+    #[tokio::test]
+    async fn mixed_native_histogram_predict_linear_forwards_the_eval_timestamp() {
+        let query = "predict_linear(some_metric[5m], 60)";
+        let plan = PromPlanner::stmt_to_plan(
+            build_test_mixed_native_histogram_table_provider("some_metric").await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap()
+        .display_indent_schema()
+        .to_string();
+
+        assert!(plan.contains("prom_mixed_range_float"), "{query}\n{plan}");
+        assert!(
+            plan.contains(
+                "prom_mixed_range_float(Utf8(\"predict_linear\"), timestamp_range, greptime_value, greptime_native_histogram, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms)))"
+            ),
+            "{query}\n{plan}"
+        );
     }
 
     #[tokio::test]

@@ -547,6 +547,64 @@ TQL EVAL (100, 400, '100s') abs(at_modifier_gauge @ 300);
 | 1970-01-01T00:06:40 | 5.0      | a    |
 +---------------------+----------+------+
 
+-- 10. `predict_linear` over an anchored range selector: the regression is centered on the
+-- evaluation instant of the step, not on the last sample of the window. The anchored window
+-- `[0s, 300s]` of host 'a' rises by 1.0 per minute, so each step predicts 60s ahead of the trend
+-- read at its own instant: 6.0 at 300s and 7.0 at 360s, not the same value twice.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 360, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 300, 60);
+
++---------------------+-------------------------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(0)) | host |
++---------------------+-------------------------------------------------------------+------+
+| 1970-01-01T00:05:00 | 6.0                                                         | a    |
+| 1970-01-01T00:06:00 | 7.0                                                         | a    |
++---------------------+-------------------------------------------------------------+------+
+
+-- The anchor and the start of the evaluation differ here, so the window is `[0s, 240s]` shifted
+-- by `at_offset` = 300s - 240s = 60s. Every step must follow the evaluation grid (6.0 to 11.0);
+-- a window folded for the wrong instant reports 5.0 at every step, which is the value at the
+-- window's last sample 240s, and shows up as a constant here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 600, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 240, 60);
+
++---------------------+-----------------------------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(60000)) | host |
++---------------------+-----------------------------------------------------------------+------+
+| 1970-01-01T00:05:00 | 6.0                                                             | a    |
+| 1970-01-01T00:06:00 | 7.0                                                             | a    |
+| 1970-01-01T00:07:00 | 8.0                                                             | a    |
+| 1970-01-01T00:08:00 | 9.0                                                             | a    |
+| 1970-01-01T00:09:00 | 10.0                                                            | a    |
+| 1970-01-01T00:10:00 | 11.0                                                            | a    |
++---------------------+-----------------------------------------------------------------+------+
+
+-- Control: without `@` every step folds its own window, whose last sample is up to a step older
+-- than the evaluation instant. Reading the regression off that sample reports 6.0 / 7.0 instead
+-- of 6.5 / 7.5 here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m], 60);
+
++---------------------+-------------------------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(0)) | host |
++---------------------+-------------------------------------------------------------+------+
+| 1970-01-01T00:05:30 | 6.5                                                         | a    |
+| 1970-01-01T00:06:30 | 7.5                                                         | a    |
++---------------------+-------------------------------------------------------------+------+
+
+-- The same holds with an `offset`, which shifts the whole window backwards without moving the
+-- evaluation instants: the window of step `T` is `[T - 1m - 5m, T - 1m]`, and the trend is read
+-- at `T`, i.e. one minute past its newest sample.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset 1m, 60);
+
++---------------------+-----------------------------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(60000)) | host |
++---------------------+-----------------------------------------------------------------+------+
+| 1970-01-01T00:05:30 | 6.5                                                             | a    |
+| 1970-01-01T00:06:30 | 7.5                                                             | a    |
++---------------------+-----------------------------------------------------------------+------+
+
 DROP TABLE at_modifier_gauge;
 
 Affected Rows: 0
