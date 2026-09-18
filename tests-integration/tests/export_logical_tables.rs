@@ -1124,26 +1124,73 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
 async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force() {
     use axum::http::StatusCode;
     use serde_json::json;
-    for (status, rows) in [
+    let column = json!({"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"});
+    let records = |rows, columns| {
+        json!({"records": {
+            "schema": {"column_schemas": columns},
+            "rows": rows
+        }})
+    };
+    let valid = records(json!([["true"]]), json!([column.clone()]));
+    let mut responses = [
         (StatusCode::BAD_REQUEST, json!([])),
         (StatusCode::OK, json!([])),
         (StatusCode::OK, json!([[true]])),
         (StatusCode::OK, json!([["true", "extra"]])),
         (StatusCode::OK, json!([["true"], ["true"]])),
-    ] {
-        let app = axum::Router::new().route(
-            "/v1/sql",
-            axum::routing::post(move |axum::Form(form): axum::Form<std::collections::HashMap<String, String>>| async move {
-                assert_eq!(form["sql"], "SHOW VARIABLES experimental_metric_export");
-                (status, axum::Json(json!({
-                    "execution_time_ms": 0,
-                    "output": [{"records": {
-                        "schema": {"column_schemas": [{"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"}]},
-                        "rows": rows
-                    }}]
-                })))
-            }),
-        );
+    ]
+    .map(|(status, rows)| (status, json!([records(rows, json!([column.clone()]))])))
+    .to_vec();
+    responses.extend([
+        (
+            StatusCode::OK,
+            json!([
+                valid.clone(),
+                records(json!([["false"]]), json!([column.clone()]))
+            ]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(json!([["true"]]), json!([]))]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(json!([["true"]]), json!([column.clone(), column]))]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(
+                json!([["true"]]),
+                json!([{"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "Boolean"}])
+            )]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(
+                json!([["true"]]),
+                json!([{"name": "OTHER", "data_type": "String"}])
+            )]),
+        ),
+    ]);
+    for (status, output) in responses {
+        let app =
+            axum::Router::new().route(
+                "/v1/sql",
+                axum::routing::post(
+                    move |axum::Form(form): axum::Form<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
+                        assert_eq!(form["sql"], "SHOW VARIABLES experimental_metric_export");
+                        (
+                            status,
+                            axum::Json(json!({
+                                "execution_time_ms": 0,
+                                "output": output
+                            })),
+                        )
+                    },
+                ),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
