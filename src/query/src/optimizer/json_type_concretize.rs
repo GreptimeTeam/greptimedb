@@ -409,7 +409,7 @@ mod tests {
             );
         }
         Ok(())
- f  }
+    }
 
     #[test]
     fn test_json_type_concretize_rule_conflict_to_variant() -> Result<()> {
