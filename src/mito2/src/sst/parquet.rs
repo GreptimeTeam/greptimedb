@@ -150,8 +150,8 @@ pub struct SstInfo {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-    use std::sync::Arc;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
 
     use api::v1::{OpType, SemanticType};
     use bytes::Bytes;
@@ -174,6 +174,7 @@ mod tests {
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{FulltextAnalyzer, FulltextBackend, FulltextOptions};
     use object_store::ObjectStore;
+    use object_store::layers::mock::{self, MockLayerBuilder, oio};
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use parquet::arrow::{ArrowWriter, AsyncArrowWriter};
     use parquet::basic::{Compression, Encoding, ZstdLevel};
@@ -901,12 +902,53 @@ mod tests {
         .await;
     }
 
+    struct ChunkRecordingWriter {
+        inner: oio::Writer,
+        path: String,
+        chunk_sizes: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+    }
+
+    impl oio::Write for ChunkRecordingWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            let size = buffer.len();
+            self.inner.write(buffer).await?;
+            self.chunk_sizes
+                .lock()
+                .unwrap()
+                .entry(self.path.clone())
+                .or_default()
+                .push(size);
+            Ok(())
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[rstest::rstest]
     #[tokio::test]
-    async fn test_write_multiple_files() {
+    async fn test_write_multiple_files(#[values(1024, 4096)] write_buffer_size: usize) {
         common_telemetry::init_default_ut_logging();
         // create test env
         let mut env = TestEnv::new().await;
-        let object_store = env.init_object_store_manager();
+        let chunk_sizes = Arc::new(Mutex::new(HashMap::new()));
+        let recorded_chunks = chunk_sizes.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                Box::new(ChunkRecordingWriter {
+                    inner,
+                    path: path.to_string(),
+                    chunk_sizes: recorded_chunks.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        let object_store = env.init_object_store_manager().layer(layer);
         let metadata = Arc::new(sst_region_metadata());
         let batches = vec![
             new_record_batch_by_range(&["a", "a"], 0, 1000),
@@ -921,6 +963,7 @@ mod tests {
 
         let source = new_flat_source_from_record_batches(batches);
         let write_opts = WriteOptions {
+            write_buffer_size: ReadableSize(write_buffer_size as u64),
             row_group_size: 50,
             max_file_size: Some(1024 * 16),
             ..Default::default()
@@ -946,6 +989,16 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(2, files.len());
+
+        // The configured buffer size must reach every writer, including split files.
+        let recorded_chunks = chunk_sizes.lock().unwrap().clone();
+        assert_eq!(files.len(), recorded_chunks.len());
+        for chunks in recorded_chunks.values() {
+            assert!(chunks.len() > 1);
+            let (last, full_chunks) = chunks.split_last().unwrap();
+            assert!(full_chunks.iter().all(|&size| size == write_buffer_size));
+            assert!(*last > 0 && *last <= write_buffer_size);
+        }
 
         let mut rows_read = 0;
         for f in &files {

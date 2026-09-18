@@ -244,6 +244,7 @@ impl AccessLayer {
         }
 
         let attempted_files = file_ids.to_vec();
+        // Deleter does not normalize leading slashes like Operator::delete does.
         let paths: Vec<_> = file_ids
             .iter()
             .map(|file_id| {
@@ -252,6 +253,8 @@ impl AccessLayer {
                     RegionFileId::new(region_id, *file_id),
                     self.path_type,
                 )
+                .trim_start_matches('/')
+                .to_string()
             })
             .collect();
 
@@ -264,7 +267,7 @@ impl AccessLayer {
                 file_ids: attempted_files.clone(),
             })?;
         deleter
-            .delete_iter(paths.iter().map(String::as_str))
+            .delete_iter(paths)
             .await
             .with_context(|_| DeleteSstsSnafu {
                 region_id,
@@ -292,7 +295,11 @@ impl AccessLayer {
             .collect();
         let paths: Vec<_> = index_ids
             .iter()
-            .map(|index_id| location::index_file_path(&self.table_dir, *index_id, self.path_type))
+            .map(|index_id| {
+                location::index_file_path(&self.table_dir, *index_id, self.path_type)
+                    .trim_start_matches('/')
+                    .to_string()
+            })
             .collect();
 
         let mut deleter = self
@@ -303,7 +310,7 @@ impl AccessLayer {
                 file_ids: file_ids.clone(),
             })?;
         deleter
-            .delete_iter(paths.iter().map(String::as_str))
+            .delete_iter(paths)
             .await
             .context(DeleteIndexesSnafu {
                 file_ids: file_ids.clone(),
