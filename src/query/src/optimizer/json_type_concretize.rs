@@ -28,14 +28,13 @@ use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::extension::json::is_json2_extension_type;
-use datatypes::json::JsonSettings;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use jsonb::jsonpath::Path;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
 use crate::optimizer::json_get_type_hint::{
-    collect_json_type_hints, inject_json_get_type_hints, json_get_path, json_type_from_hint,
+    inject_json_get_type_hints, json_get_path, json_type_from_hint,
 };
 
 /// Concretize (deduce) the expected JSON type from query.
@@ -120,8 +119,6 @@ fn apply_json_type_hint(
 
 pub(crate) fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
-    let json_type_hints = collect_json_type_hints(plan)?;
-
     // JSON2 columns in the final output must retain their complete values even when
     // predicates or other expressions access only specific paths.
     // For example, `SELECT j FROM t WHERE json_get(j, 'a') = 1`.
@@ -143,7 +140,7 @@ pub(crate) fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, Js
                 continue;
             }
             expr.apply(|expr| {
-                if let Some((column, json_type)) = deduce_json_type(expr, &json_type_hints)? {
+                if let Some((column, json_type)) = deduce_json_type(expr)? {
                     json_types.entry(column).or_default().merge(&json_type);
                     Ok(TreeNodeRecursion::Jump)
                 } else {
@@ -166,10 +163,7 @@ fn is_same_name_column_projection(expr: &Expr) -> bool {
     }
 }
 
-fn deduce_json_type(
-    expr: &Expr,
-    json_type_hints: &HashMap<String, JsonSettings>,
-) -> Result<Option<(String, JsonNativeType)>> {
+fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     let f = match expr {
         Expr::ScalarFunction(f) if f.name().eq_ignore_ascii_case(JsonGetWithType::NAME) => f,
         Expr::Column(c) => return Ok(Some((c.name.clone(), JsonNativeType::Variant))),
@@ -212,7 +206,6 @@ fn deduce_json_type(
             JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))
         })
         .transpose()?
-        .or_else(|| json_type_from_hint(json_type_hints, &column.name, path))
         .unwrap_or(JsonNativeType::String);
 
     let mut root = with_type;
@@ -244,7 +237,7 @@ mod tests {
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{ExprSchemable, LogicalPlanBuilder, col, lit};
+    use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
     use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
@@ -375,10 +368,11 @@ mod tests {
             [r#"$."a.b"."c.d""#, r#"["a.b"]["c.d"]"#, r#"$."a.b"["c.d"]"#],
         ] {
             let deduce = |path| {
-                deduce_json_type(
-                    &json_get_expr(col("j"), path_expr(path), Some(DataType::Int64))?,
-                    &HashMap::new(),
-                )
+                deduce_json_type(&json_get_expr(
+                    col("j"),
+                    path_expr(path),
+                    Some(DataType::Int64),
+                )?)
             };
             let expected = deduce(paths[0])?;
             assert!(!matches!(expected, Some((_, JsonNativeType::Variant))));
@@ -392,7 +386,7 @@ mod tests {
     #[test]
     fn test_deduce_json_type_invalid_path() -> Result<()> {
         let expr = json_get_expr(col("j"), path_expr("$.a["), Some(DataType::Int64))?;
-        let err = deduce_json_type(&expr, &HashMap::new()).unwrap_err();
+        let err = deduce_json_type(&expr).unwrap_err();
         assert!(err.to_string().contains("Invalid JSONPath"), "{err}");
         Ok(())
     }
@@ -410,12 +404,12 @@ mod tests {
             let expr = json_get_expr(col("j"), path_expr(path), Some(DataType::Int64))?;
             assert_eq!(
                 Some(("j".to_string(), JsonNativeType::Variant)),
-                deduce_json_type(&expr, &HashMap::new())?,
+                deduce_json_type(&expr)?,
                 "{path}"
             );
         }
         Ok(())
-    }
+ f  }
 
     #[test]
     fn test_json_type_concretize_rule_conflict_to_variant() -> Result<()> {
@@ -506,24 +500,7 @@ mod tests {
             .project(vec![json_get_expr(col("j"), path_expr("a"), None)?])?
             .build()?;
 
-        let analyzed = JsonGetTypeHintRule.analyze(plan, &ConfigOptions::default())?;
-        let LogicalPlan::Projection(projection) = &analyzed else {
-            panic!("Expected projection plan");
-        };
-        let expr = match &projection.expr[0] {
-            Expr::Alias(alias) => alias.expr.as_ref(),
-            expr => expr,
-        };
-        let Expr::ScalarFunction(function) = expr else {
-            panic!("Expected json_get expression");
-        };
-        assert_eq!(3, function.args.len());
-        assert_eq!(
-            DataType::Int64,
-            function.args[2].get_type(projection.input.schema())?
-        );
-
-        let rewritten = JsonTypeConcretizeRule.rewrite(analyzed, &OptimizerContext::default())?;
+        let rewritten = JsonTypeConcretizeRule.rewrite(plan, &OptimizerContext::default())?;
         assert!(rewritten.transformed);
         assert_eq!(
             rewritten.data.schema().field(0).data_type(),
@@ -642,7 +619,7 @@ mod tests {
             Some(DataType::Int64),
         )?;
 
-        let err = deduce_json_type(&expr, &HashMap::new()).unwrap_err();
+        let err = deduce_json_type(&expr).unwrap_err();
         assert!(
             err.to_string()
                 .contains("First argument of json_get is expected to be a column expr")
@@ -658,7 +635,7 @@ mod tests {
             Some(DataType::Int64),
         )?;
 
-        let err = deduce_json_type(&expr, &HashMap::new()).unwrap_err();
+        let err = deduce_json_type(&expr).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Second argument of json_get is expected to be a string literal")
@@ -674,7 +651,7 @@ mod tests {
             None,
         )?;
 
-        let deduced = deduce_json_type(&expr, &HashMap::new())?;
+        let deduced = deduce_json_type(&expr)?;
         let expected = JsonNativeType::Object(JsonObjectType::from([(
             "a".to_string(),
             JsonNativeType::Object(JsonObjectType::from([(
