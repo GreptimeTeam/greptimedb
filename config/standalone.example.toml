@@ -11,6 +11,10 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
+## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
+## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
+#+ experimental_metric_export = false
+
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",

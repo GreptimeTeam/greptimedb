@@ -289,6 +289,11 @@ pub struct ExportCreateCommand {
     #[clap(long, value_enum, default_value = "parquet")]
     format: DataFormat,
 
+    /// Use shared Metric physical scans (Parquet only). Resume requires that the previous
+    /// export and storage writes have ended; an HTTP timeout does not establish this.
+    #[clap(long)]
+    experimental_metric_export: bool,
+
     /// Delete existing snapshot and recreate.
     #[clap(long)]
     force: bool,
@@ -379,9 +384,6 @@ impl ExportCreateCommand {
             Some(self.schemas.clone())
         };
 
-        // Build storage
-        let storage = OpenDalStorage::from_uri(&self.to, &self.storage).map_err(BoxedError::new)?;
-
         // Build database client
         let proxy = parse_proxy_opts(self.proxy.clone(), self.no_proxy)?;
         let database_client = DatabaseClient::new(
@@ -393,12 +395,33 @@ impl ExportCreateCommand {
             self.no_proxy,
         );
 
+        // The filesystem storage constructor can create the snapshot root.
+        if self.experimental_metric_export {
+            if self.format != DataFormat::Parquet {
+                return crate::data::export_v2::error::MetricExportUnavailableSnafu
+                    .fail()
+                    .map_err(BoxedError::new);
+            }
+            let capability = database_client
+                .sql_in_public("SHOW VARIABLES experimental_metric_export")
+                .await
+                .context(DatabaseSnafu)
+                .map_err(BoxedError::new)?;
+            if capability != Some(vec![vec![Value::String("true".to_string())]]) {
+                return crate::data::export_v2::error::MetricExportUnavailableSnafu
+                    .fail()
+                    .map_err(BoxedError::new);
+            }
+        }
+        let storage = OpenDalStorage::from_uri(&self.to, &self.storage).map_err(BoxedError::new)?;
+
         Ok(Box::new(ExportCreate {
             config: ExportConfig {
                 catalog: self.catalog.clone(),
                 schemas,
                 schema_only: self.schema_only,
                 format: self.format,
+                experimental_metric_export: self.experimental_metric_export,
                 force: self.force,
                 time_range,
                 chunk_time_window: self.chunk_time_window,
@@ -426,6 +449,7 @@ struct ExportConfig {
     schemas: Option<Vec<String>>,
     schema_only: bool,
     format: DataFormat,
+    experimental_metric_export: bool,
     force: bool,
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
@@ -504,6 +528,8 @@ impl ExportCreate {
                         storage_config: &self.config.storage_config,
                         parallelism: self.config.parallelism,
                         chunk_parallelism: self.config.chunk_parallelism,
+                        experimental_metric_export: self.config.experimental_metric_export,
+                        resume: true,
                     },
                     progress.as_ref(),
                 )
@@ -532,6 +558,14 @@ impl ExportCreate {
             self.config.format,
             self.config.chunk_time_window,
         )?;
+
+        if self.config.experimental_metric_export {
+            for chunk in &manifest.chunks {
+                self.storage
+                    .prepare_export_chunk(&schema_names, chunk.id, false)
+                    .await?;
+            }
+        }
 
         // 4. Write schema files
         self.storage.write_schema(&schema_snapshot).await?;
@@ -566,6 +600,8 @@ impl ExportCreate {
                     storage_config: &self.config.storage_config,
                     parallelism: self.config.parallelism,
                     chunk_parallelism: self.config.chunk_parallelism,
+                    experimental_metric_export: self.config.experimental_metric_export,
+                    resume: false,
                 },
                 progress.as_ref(),
             )
@@ -1744,6 +1780,7 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
+            experimental_metric_export: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1781,6 +1818,7 @@ mod tests {
             ]),
             schema_only: false,
             format: DataFormat::Parquet,
+            experimental_metric_export: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1813,6 +1851,7 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
+            experimental_metric_export: false,
             force: false,
             time_range,
             chunk_time_window: Some(Duration::from_secs(3600)),
@@ -1846,6 +1885,7 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Csv,
+            experimental_metric_export: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1881,6 +1921,7 @@ mod tests {
             schemas: None,
             schema_only: false,
             format: DataFormat::Parquet,
+            experimental_metric_export: false,
             force: false,
             time_range: TimeRange::new(Some(start), Some(start)),
             chunk_time_window: None,
