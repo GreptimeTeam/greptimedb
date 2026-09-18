@@ -198,7 +198,8 @@ jobs:
       ARTIFACT_ROOT: ${{ inputs.benchmark_root }}/o11ybench/o11ybench-${{ needs.validate.outputs.run_id }}
       METADATA_ROOT: ${{ github.workspace }}/vmbench-metadata
       O11YBENCH_DIR: ${{ github.workspace }}/o11ybench
-      TSDG_PARALLELISM: '8'
+      TSDG_PARALLELISM: '4'
+      TSDG_BATCH_SIZE: '100000'
       O11YBENCH_GENERATOR_CPUS: '4'
     steps:
     - name: Checkout matching benchmark tools
