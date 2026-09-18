@@ -14495,11 +14495,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        rows.sort_by(|left, right| {
-            left.0
-                .cmp(&right.0)
-                .then(left.1.partial_cmp(&right.1).unwrap())
-        });
+        rows.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.total_cmp(&right.1)));
         rows
     }
 
