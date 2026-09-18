@@ -20,9 +20,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
+use common_catalog::consts::DEFAULT_SCHEMA_NAME;
 use common_error::ext::BoxedError;
 use common_telemetry::info;
 use serde_json::Value;
+use servers::http::{ColumnSchema, GreptimeQueryOutput, OutputSchema};
 use snafu::{OptionExt, ResultExt};
 
 use crate::Tool;
@@ -403,11 +405,21 @@ impl ExportCreateCommand {
                     .map_err(BoxedError::new);
             }
             let capability = database_client
-                .sql_in_public("SHOW VARIABLES experimental_metric_export")
+                .sql_response(
+                    "SHOW VARIABLES experimental_metric_export",
+                    DEFAULT_SCHEMA_NAME,
+                )
                 .await
                 .context(DatabaseSnafu)
                 .map_err(BoxedError::new)?;
-            if capability != Some(vec![vec![Value::String("true".to_string())]]) {
+            let expected_schema = OutputSchema::new(vec![ColumnSchema::new(
+                "EXPERIMENTAL_METRIC_EXPORT".to_string(),
+                "String".to_string(),
+            )]);
+            if !matches!(capability.output(), [GreptimeQueryOutput::Records(records)]
+                if records.schema() == &expected_schema
+                    && records.rows() == &vec![vec![Value::String("true".to_string())]])
+            {
                 return crate::data::export_v2::error::MetricExportUnavailableSnafu
                     .fail()
                     .map_err(BoxedError::new);
