@@ -15,7 +15,7 @@
 use datatypes::extension::json::JSON2_REMAINDER_FIELD_NAME;
 use datatypes::json::JSON2_MAX_STRUCTURED_DEPTH;
 use snafu::{ResultExt, ensure};
-use sqlparser::ast::{DataType, ExactNumberInfo, Expr, ObjectName, UnaryOperator};
+use sqlparser::ast::{DataType, ExactNumberInfo, ObjectName};
 use sqlparser::dialect::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::Token;
@@ -157,49 +157,22 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
     let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
     let data_type = normalize_json2_type_hint_type(data_type)?;
 
-    let mut nullable = true;
-    let mut nullable_set = false;
-    let mut default = None;
     let mut inverted_index = false;
 
     loop {
-        if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL]) {
-            ensure!(
-                !nullable_set,
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "NULL/NOT NULL option already specified for JSON2 type hint '{}'",
-                        path.join(".")
-                    )
-                }
-            );
-            nullable = false;
-            nullable_set = true;
-        } else if parser.parse_keyword(Keyword::NULL) {
-            ensure!(
-                !nullable_set,
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "NULL/NOT NULL option already specified for JSON2 type hint '{}'",
-                        path.join(".")
-                    )
-                }
-            );
-            nullable = true;
-            nullable_set = true;
+        if parser.parse_keywords(&[Keyword::NOT, Keyword::NULL])
+            || parser.parse_keyword(Keyword::NULL)
+        {
+            return InvalidSqlSnafu {
+                msg: "JSON2 type hint NULL/NOT NULL is not supported; hinted fields are always nullable"
+                    .to_string(),
+            }
+            .fail();
         } else if parser.parse_keyword(Keyword::DEFAULT) {
-            ensure!(
-                default.is_none(),
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "duplicated DEFAULT option for JSON2 type hint '{}'",
-                        path.join(".")
-                    )
-                }
-            );
-            let expr = parser.parse_expr().context(SyntaxSnafu)?;
-            ensure_json2_default_expr_is_literal(&expr)?;
-            default = Some(expr);
+            return InvalidSqlSnafu {
+                msg: "JSON2 type hint DEFAULT is not supported".to_string(),
+            }
+            .fail();
         } else if let Token::Word(word) = parser.peek_token().token
             && word.value.eq_ignore_ascii_case(INVERTED)
         {
@@ -242,8 +215,6 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
     Ok(JsonTypeHint {
         path,
         data_type,
-        nullable,
-        default,
         inverted_index,
     })
 }
@@ -296,24 +267,6 @@ fn normalize_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
     };
 
     Ok(normalized)
-}
-
-fn ensure_json2_default_expr_is_literal(expr: &Expr) -> Result<()> {
-    let is_literal = match expr {
-        Expr::Value(_) => true,
-        Expr::UnaryOp { op, expr } => {
-            matches!(op, UnaryOperator::Plus | UnaryOperator::Minus)
-                && matches!(expr.as_ref(), Expr::Value(_))
-        }
-        _ => false,
-    };
-    ensure!(
-        is_literal,
-        InvalidSqlSnafu {
-            msg: "JSON2 type hint DEFAULT only supports literal values",
-        }
-    );
-    Ok(())
 }
 
 fn ensure_no_path_conflict(hints: &[JsonTypeHint], path: &[String]) -> Result<()> {
@@ -375,10 +328,10 @@ mod tests {
             r#"
 CREATE TABLE traces (
     log_json_data JSON2 (
-        "service.name" STRING NOT NULL DEFAULT 'null' INVERTED INDEX,
-        http.method STRING NOT NULL,
-        status_code INT64 NOT NULL,
-        comment STRING NULL,
+        "service.name" STRING INVERTED INDEX,
+        http.method STRING,
+        status_code INT64,
+        comment STRING,
     ),
     ts TIMESTAMP TIME INDEX,
 )"#,
@@ -393,29 +346,17 @@ CREATE TABLE traces (
 
         assert_eq!(hints[0].path, vec!["service.name"]);
         assert_eq!(hints[0].data_type, DataType::String(None));
-        assert!(!hints[0].nullable);
-        assert_eq!(
-            hints[0]
-                .default
-                .as_ref()
-                .map(|expr| expr.to_string())
-                .as_deref(),
-            Some("'null'")
-        );
         assert!(hints[0].inverted_index);
 
         assert_eq!(hints[1].path, vec!["http", "method"]);
         assert_eq!(hints[1].data_type, DataType::String(None));
-        assert!(!hints[1].nullable);
         assert!(!hints[1].inverted_index);
 
         assert_eq!(hints[2].path, vec!["status_code"]);
         assert_eq!(hints[2].data_type, DataType::BigInt(None));
-        assert!(!hints[2].nullable);
 
         assert_eq!(hints[3].path, vec!["comment"]);
         assert_eq!(hints[3].data_type, DataType::String(None));
-        assert!(hints[3].nullable);
     }
 
     #[test]
@@ -484,7 +425,7 @@ CREATE TABLE traces (
     }
 
     #[test]
-    fn test_parse_json2_type_hint_default_nullable() {
+    fn test_parse_json2_type_hint_defaults_to_nullable() {
         let column = parse_json2_column(
             r#"
 CREATE TABLE traces (
@@ -495,7 +436,7 @@ CREATE TABLE traces (
 
         let hints = column.extensions.json2_options.unwrap().type_hints;
         assert_eq!(hints.len(), 1);
-        assert!(hints[0].nullable);
+        assert_eq!(hints[0].data_type, DataType::String(None));
     }
 
     #[test]
@@ -560,57 +501,19 @@ CREATE TABLE traces (
     }
 
     #[test]
-    fn test_parse_json2_type_hint_default_accepts_signed_literals() {
-        let column = parse_json2_column(
-            r#"
-CREATE TABLE traces (
-    log_json_data JSON2 (
-        negative_int INT64 DEFAULT -5,
-        positive_float FLOAT64 DEFAULT +1.5
-    ),
-    ts TIMESTAMP TIME INDEX,
-)"#,
-        );
-
-        let hints = column.extensions.json2_options.unwrap().type_hints;
-        assert_eq!(hints.len(), 2);
-        assert_eq!(
-            hints[0]
-                .default
-                .as_ref()
-                .map(|expr| expr.to_string())
-                .as_deref(),
-            Some("-5")
-        );
-        assert_eq!(
-            hints[1]
-                .default
-                .as_ref()
-                .map(|expr| expr.to_string())
-                .as_deref(),
-            Some("+1.5")
-        );
-    }
-
-    #[test]
-    fn test_parse_json2_type_hint_default_rejects_function() {
-        let result = ParserContext::create_with_dialect(
-            r#"
-CREATE TABLE traces (
-    log_json_data JSON2 (status_code INT64 DEFAULT abs(-1)),
-    ts TIMESTAMP TIME INDEX,
-)"#,
-            &GreptimeDbDialect {},
-            ParseOptions::default(),
-        );
-
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("DEFAULT only supports literal values")
-        );
+    fn test_parse_json2_type_hint_rejects_default() {
+        for default in ["-5", "abs(-1)"] {
+            let sql = format!(
+                "CREATE TABLE traces (log_json_data JSON2 (status_code INT64 DEFAULT {default}), ts TIMESTAMP TIME INDEX)"
+            );
+            let err = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err();
+            assert!(err.to_string().contains("DEFAULT is not supported"));
+        }
     }
 
     #[test]
@@ -646,7 +549,7 @@ CREATE TABLE traces (
     }
 
     #[test]
-    fn test_parse_json2_type_hint_rejects_duplicated_nullability() {
+    fn test_parse_json2_type_hint_rejects_nullability() {
         for sql in [
             r#"
 CREATE TABLE traces (
@@ -680,7 +583,7 @@ CREATE TABLE traces (
                 result
                     .unwrap_err()
                     .to_string()
-                    .contains("NULL/NOT NULL option already specified")
+                    .contains("NULL/NOT NULL is not supported")
             );
         }
     }
