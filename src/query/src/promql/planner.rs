@@ -4512,9 +4512,10 @@ impl PromPlanner {
     ///
     /// Returns a tuple of `(aggregate_expressions, previous_field_expressions)` where:
     /// - `aggregate_expressions`: Expressions that apply the aggregate function to the original fields
-    /// - `previous_field_expressions`: Original field expressions before aggregation. This is non-empty
-    ///   only when the operation is `count_values`, as this operation requires preserving the original
-    ///   values for grouping.
+    /// - `previous_field_expressions`: Field expressions naming the pre-aggregation values. This is
+    ///   non-empty only when the operation is `count_values`, which groups by the sample value and
+    ///   projects it as the generated label, so these expressions are passed through the same
+    ///   formatting as that label (`prom_float_to_string`).
     ///
     fn create_aggregate_exprs(
         &mut self,
@@ -4558,14 +4559,13 @@ impl PromPlanner {
             .collect::<Result<Vec<_>>>()?;
 
         // if the aggregator is `count_values`, it must be grouped by current fields.
+        //
+        // The grouping key is the *formatted* sample value, i.e. the same expression that
+        // produces the generated label below: PromQL groups by the value, and the label is
+        // that value in Prometheus' textual form (`strconv.FormatFloat(value, 'f', -1, 64)`),
+        // so grouping by the raw value would split samples that render to one label into
+        // several groups, each emitting the same label set for one timestamp.
         let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
-            let prev_field_exprs: Vec<_> = self
-                .ctx
-                .field_columns
-                .iter()
-                .map(|col| DfExpr::Column(Column::from_name(col)))
-                .collect();
-
             ensure!(
                 self.ctx.field_columns.len() == 1,
                 UnsupportedExprSnafu {
@@ -4573,7 +4573,28 @@ impl PromPlanner {
                 }
             );
 
-            prev_field_exprs
+            self.ctx
+                .field_columns
+                .iter()
+                .map(|col| {
+                    let value = DfExpr::Column(Column::from_name(col));
+                    // Normalize non `Float64` inputs the same way the label projection does,
+                    // so both sides agree on the formatted value: `prom_float_to_string`
+                    // formats exactly like Prometheus, while arrow's `Float64 -> Utf8` cast
+                    // would render `1.0`.
+                    let value = if Self::field_column_type(input_plan.schema(), col)
+                        == Some(&ArrowDataType::Float64)
+                    {
+                        value
+                    } else {
+                        DfExpr::Cast(Cast::new(Box::new(value), ArrowDataType::Float64))
+                    };
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: Arc::new(PromqlFloatToString::scalar_udf()),
+                        args: vec![value],
+                    })
+                })
+                .collect()
         } else {
             vec![]
         };
@@ -7320,7 +7341,7 @@ mod test {
     use common_query::test_util::DummyDecoder;
     use common_recordbatch::RecordBatch as GreptimeRecordBatch;
     use datafusion::arrow::array::{
-        Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+        Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
     };
     use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -12764,7 +12785,7 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:
                 .unwrap();
         let expected = "Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
         \n  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value) AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
-        \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
+        \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value)]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), prom_float_to_string(prometheus_tsdb_head_series.greptime_value):Utf8;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
         \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
         \n        PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
         \n          Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
@@ -12813,7 +12834,7 @@ Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:
 Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.series, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, series:Utf8;N, greptime_timestamp:Timestamp(ms)]
   Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]
     Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value) AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]
-      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value)]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), prom_float_to_string(prometheus_tsdb_head_series.greptime_value):Utf8;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
         PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
           PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
             Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
@@ -14373,6 +14394,18 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     async fn build_count_values_table_provider_with_values(
         values: &[f64],
     ) -> DfTableSourceProvider {
+        build_count_values_table_provider_with_value_array(Arc::new(Float64Array::from(
+            values.to_vec(),
+        )))
+        .await
+    }
+
+    /// Like [`build_count_values_table_provider_with_values`], but with a caller provided value
+    /// column, so tests can cover value columns that are not `Float64` (e.g. `BIGINT`).
+    async fn build_count_values_table_provider_with_value_array(
+        values: ArrayRef,
+    ) -> DfTableSourceProvider {
+        let value_data_type = ConcreteDataType::from_arrow_type(values.data_type());
         let catalog_list = MemoryCatalogManager::with_default_setup();
         let columns = vec![
             ColumnSchema::new("k".to_string(), ConcreteDataType::string_datatype(), false),
@@ -14382,11 +14415,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 false,
             )
             .with_time_index(true),
-            ColumnSchema::new(
-                greptime_value().to_string(),
-                ConcreteDataType::float64_datatype(),
-                true,
-            ),
+            ColumnSchema::new(greptime_value().to_string(), value_data_type, true),
         ];
         let schema = Arc::new(Schema::new(columns));
         let table_meta = TableMetaBuilder::empty()
@@ -14413,7 +14442,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                         .collect::<Vec<_>>(),
                 )),
                 Arc::new(TimestampMillisecondArray::from(vec![1_000; values.len()])),
-                Arc::new(Float64Array::from(values.to_vec())),
+                values.clone(),
             ],
         )
         .unwrap();
@@ -14681,11 +14710,14 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         // label, so it must be a string column holding exactly that text: arrow's
         // `Float64 -> Utf8` cast would render `1`/`200`/`1e21` as `1.0`/`200.0`/`1e21`.
         let state = build_query_engine_state();
-        // (PromQL keeps the sign of `-0.0`, but SQL grouping compares `-0.0 == 0.0`, so the
-        // sign is not preserved for a generated label here; `0.0` formats as "0".)
+        // Samples are grouped by that formatted text, exactly like Prometheus groups by the
+        // generated label: `-0.0` and `0.0` are two series (`-0` and `0`), while values that
+        // round to the same text share one group. `0.0` formats as "0".
         let plan = PromPlanner::stmt_to_plan(
-            build_count_values_table_provider_with_values(&[1.0, 0.5, 200.0, 1e21, 1e-7, 2.5])
-                .await,
+            build_count_values_table_provider_with_values(&[
+                -0.0, 0.0, 1.0, 0.5, 200.0, 1e21, 1e-7, 2.5,
+            ])
+            .await,
             &operator_eval_stmt(r#"count_values("v", cv_metric)"#),
             &state,
         )
@@ -14693,6 +14725,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         .unwrap();
 
         let (_, batches) = execute(plan, &state).await;
+        assert_unique_label_set_per_timestamp(&batches, "v");
         let mut labels = count_values_rows(&batches, "v")
             .into_iter()
             .map(|(label, _)| label)
@@ -14701,6 +14734,8 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         assert_eq!(
             labels,
             vec![
+                "-0",
+                "0",
                 "0.0000001",
                 "0.5",
                 "1",
@@ -14708,6 +14743,34 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 "2.5",
                 "200",
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
+        // The grouping key of `count_values` is the formatted sample value, not the raw input
+        // value. Two `BIGINT` values that differ below the `Float64` precision (`2^53` and
+        // `2^53 + 1`) cast and format to the same label, so they must share one group and one
+        // count, exactly like Prometheus, which groups by the generated label text.
+        let state = build_query_engine_state();
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider_with_value_array(Arc::new(Int64Array::from(vec![
+                9_007_199_254_740_992_i64,
+                9_007_199_254_740_993_i64,
+            ])))
+            .await,
+            &operator_eval_stmt(r#"count_values("v", cv_metric)"#),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let (_, batches) = execute(plan, &state).await;
+        // One timestamp must never carry the same label set twice.
+        assert_unique_label_set_per_timestamp(&batches, "v");
+        assert_eq!(
+            count_values_rows(&batches, "v"),
+            vec![("9007199254740992", 2.0)]
         );
     }
 }

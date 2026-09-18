@@ -1006,14 +1006,14 @@ pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
 /// Two shapes are treated as a rename:
 ///
 /// - `expr` references the group by expression itself, e.g. an aggregate output
-///   (`sum(x) AS total`) or a plain column (`host AS h`). This is name based and always
-///   allowed.
-/// - `expr` is a unary computation of a single group by column, e.g. PromQL
-///   `count_values("label", metric)` projects its generated label as
-///   `prom_float_to_string(value) AS label` while the aggregate groups by `value`. Such an
-///   expression is computed from that one group key, so its output is still that group key
-///   under a new name. This shape requires `allow_derived`, see
-///   [`is_unary_expr_of_column`] for the exact boundary.
+///   (`sum(x) AS total`) or a group key column (`host AS h`). This is name based and always
+///   allowed. A PromQL `count_values("label", metric)` plan lands here too: it groups by the
+///   formatted sample value (`prom_float_to_string(value)`) and projects that group key
+///   column as the generated label.
+/// - `expr` is a unary computation of a single group by column (`abs(value) AS v` over
+///   `GROUP BY value`). Such an expression is computed from that one group key, so its
+///   output is still that group key under a new name. This shape requires `allow_derived`,
+///   see [`is_unary_expr_of_column`] for the exact boundary.
 fn is_alias_of_group_expr(group_expr: &Expr, expr: &Expr, allow_derived: bool) -> DfResult<bool> {
     if group_expr.name_for_alias()? == expr.name_for_alias()? {
         return Ok(true);
