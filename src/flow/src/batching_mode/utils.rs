@@ -1000,6 +1000,57 @@ pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
     Ok(sql.to_string())
 }
 
+/// Returns whether `expr` renames the group by expression `group_expr`, i.e. whether the
+/// projection output that aliases `expr` still carries the value of that group key.
+///
+/// Two shapes are treated as a rename:
+///
+/// - `expr` references the group by expression itself, e.g. an aggregate output
+///   (`sum(x) AS total`) or a plain column (`host AS h`). This is name based and always
+///   allowed.
+/// - `expr` is a unary computation of a single group by column, e.g. PromQL
+///   `count_values("label", metric)` projects its generated label as
+///   `prom_float_to_string(value) AS label` while the aggregate groups by `value`. Such an
+///   expression is computed from that one group key, so its output is still that group key
+///   under a new name. This shape requires `allow_derived`, see
+///   [`is_unary_expr_of_column`] for the exact boundary.
+fn is_alias_of_group_expr(group_expr: &Expr, expr: &Expr, allow_derived: bool) -> DfResult<bool> {
+    if group_expr.name_for_alias()? == expr.name_for_alias()? {
+        return Ok(true);
+    }
+    if !allow_derived {
+        return Ok(false);
+    }
+    let Expr::Column(group_column) = group_expr else {
+        return Ok(false);
+    };
+    Ok(is_unary_expr_of_column(expr, &group_column.name))
+}
+
+/// Returns whether `expr` is a unary computation of the column `column_name`.
+///
+/// Only the column itself, scalar function calls whose arguments are all such computations,
+/// and casts of such computations qualify. Anything else — other columns, literals, multi
+/// column expressions (`number + 1`), conditional/case expressions, aggregates, windows or
+/// subqueries — makes the value depend on more than that single column, so it must not be
+/// mistaken for the group key itself (otherwise a computed column would be promoted to a
+/// primary key in place of the group key that produced it).
+fn is_unary_expr_of_column(expr: &Expr, column_name: &str) -> bool {
+    match expr {
+        Expr::Column(column) => column.name == column_name,
+        Expr::ScalarFunction(func) => {
+            !func.args.is_empty()
+                && func
+                    .args
+                    .iter()
+                    .all(|arg| is_unary_expr_of_column(arg, column_name))
+        }
+        Expr::Cast(cast) => is_unary_expr_of_column(cast.expr.as_ref(), column_name),
+        Expr::TryCast(cast) => is_unary_expr_of_column(cast.expr.as_ref(), column_name),
+        _ => false,
+    }
+}
+
 /// Helper to find the innermost group by expr in schema, return None if no group by expr
 #[derive(Debug, Clone, Default)]
 pub struct FindGroupByFinalName {
@@ -1059,21 +1110,27 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
     /// deal with projection when going up with group exprs
     fn f_up(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Projection(projection) = node {
+            // A projection *below* the aggregate (e.g. the subquery it reads from) does not
+            // name the aggregate's group keys, so only projections above it may rename a group
+            // key by deriving its output from a group key column.
+            let allow_derived = has_aggregate(projection.input.as_ref());
             for expr in &projection.expr {
                 let Some(group_exprs) = &mut self.group_exprs else {
                     return Ok(TreeNodeRecursion::Continue);
                 };
                 if let datafusion_expr::Expr::Alias(alias) = expr {
                     // if a alias exist, replace with the new alias
-                    let mut new_group_exprs = group_exprs.clone();
+                    let mut renamed_group_expr = None;
                     for group_expr in group_exprs.iter() {
-                        if group_expr.name_for_alias()? == alias.expr.name_for_alias()? {
-                            new_group_exprs.remove(group_expr);
-                            new_group_exprs.insert(expr.clone());
+                        if is_alias_of_group_expr(group_expr, alias.expr.as_ref(), allow_derived)? {
+                            renamed_group_expr = Some(group_expr.clone());
                             break;
                         }
                     }
-                    *group_exprs = new_group_exprs;
+                    if let Some(group_expr) = renamed_group_expr {
+                        group_exprs.remove(&group_expr);
+                        group_exprs.insert(expr.clone());
+                    }
                 }
             }
         }
