@@ -408,7 +408,10 @@ async fn build_series_partition_range(
         if stream_ctx.is_file_range_index(index) {
             let file = stream_ctx.input.file_from_index(index);
             if matches!(
-                file.primary_key_range()
+                stream_ctx
+                    .input
+                    .primary_key_ranges()
+                    .range(file)
                     .and_then(|(min, max)| { filter.overlaps_encoded_bounds(&codec, &min, &max) }),
                 Some(false)
             ) {

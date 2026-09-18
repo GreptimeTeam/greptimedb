@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use api::v1::SemanticType;
@@ -89,6 +89,7 @@ use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexAp
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
 
 #[cfg(feature = "vector_index")]
 const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
@@ -563,6 +564,7 @@ impl ScanRegion {
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_primary_key_ranges(self.version.ssts.primary_key_ranges())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
@@ -947,6 +949,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Scan-local normalized statistics, shared by parallel range readers.
+    primary_key_ranges: OnceLock<PrimaryKeyRanges>,
     /// Scan-wide hint for rows in an execution batch.
     batch_size: usize,
     /// Cache.
@@ -1034,6 +1038,7 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                primary_key_ranges: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
                 ignore_file_not_found: false,
@@ -1069,6 +1074,15 @@ impl ScanInput {
         self.batch_size
     }
 
+    /// Interprets file statistics using this scan's pinned schema.
+    pub(crate) fn primary_key_ranges(&self) -> &PrimaryKeyRanges {
+        self.primary_key_ranges.get_or_init(|| {
+            PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(
+                self.region_metadata().clone(),
+            )))
+        })
+    }
+
     /// Returns the range implied by the range-cache time filters.
     pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
         self.scan_analysis
@@ -1089,6 +1103,11 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    fn with_primary_key_ranges(mut self, ranges: PrimaryKeyRanges) -> Self {
+        self.input.primary_key_ranges = OnceLock::from(ranges);
+        self
+    }
+
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {

@@ -23,7 +23,7 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::primary_key::PrimaryKeyRangeMapper;
+use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
 
 /// A version of all SSTs in a region.
 #[derive(Debug, Clone)]
@@ -44,16 +44,14 @@ impl SstVersion {
         }
     }
 
-    /// Rebinds only schema views, preserving old snapshots and shared file state.
+    /// Changes the target schema without rebinding physical file handles.
     pub(crate) fn set_metadata(&mut self, metadata: RegionMetadataRef) {
         self.primary_key_mapper = Arc::new(self.primary_key_mapper.with_metadata(metadata));
-        for level in &mut self.levels {
-            for file in level.files.values_mut() {
-                *file = file
-                    .clone()
-                    .with_primary_key_mapper(self.primary_key_mapper.clone());
-            }
-        }
+    }
+
+    /// Creates a comparison cache scoped to a scan or compaction task.
+    pub(crate) fn primary_key_ranges(&self) -> PrimaryKeyRanges {
+        PrimaryKeyRanges::new(self.primary_key_mapper.clone())
     }
 
     /// Returns a slice to metadatas of all levels.
@@ -101,13 +99,11 @@ impl SstVersion {
                         }
                     } else {
                         // include case like old file have no index or index is outdated
-                        *f = FileHandle::new(file.clone(), file_purger.clone())
-                            .with_primary_key_mapper(self.primary_key_mapper.clone());
+                        *f = FileHandle::new(file.clone(), file_purger.clone());
                     }
                 })
                 .or_insert_with(|| {
                     FileHandle::new(file.clone(), file_purger.clone())
-                            .with_primary_key_mapper(self.primary_key_mapper.clone())
                 });
         }
     }

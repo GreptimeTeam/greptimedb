@@ -31,11 +31,12 @@ use crate::compaction::buckets::infer_time_bucket;
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::compaction::run::{
-    Ranged, SortedRun, find_sorted_runs, find_sorted_runs_by_time_range, merge_primary_key_ranges,
-    primary_key_ranges_overlap,
+    Ranged, SortedRun, files_overlap, files_overlap_inclusive, find_sorted_runs,
+    find_sorted_runs_by_time_range, merge_primary_key_ranges, primary_key_ranges_overlap,
 };
 use crate::error::{JoinSnafu, Result};
 use crate::sst::file::{FileHandle, Level, overlaps};
+use crate::sst::primary_key::PrimaryKeyRanges;
 use crate::sst::version::LevelMeta;
 
 const LEVEL_COMPACTED: Level = 1;
@@ -69,12 +70,14 @@ struct WindowPickContext<'a> {
     files: &'a Window,
     windows: &'a BTreeMap<i64, Window>,
     phase: PickPhase,
+    primary_key_ranges: &'a PrimaryKeyRanges,
 }
 
 struct WindowOutputContext {
     active_window: Option<i64>,
     time_window_size: Option<i64>,
     max_outputs: Option<usize>,
+    primary_key_ranges: Arc<PrimaryKeyRanges>,
 }
 
 /// A mixed L0/L1 compaction may rewrite at most this many L1 rows per L0 row.
@@ -135,6 +138,7 @@ impl TwcsPicker {
             active_window,
             time_window_size,
             max_outputs,
+            primary_key_ranges,
         } = context;
         let mut output = vec![];
         let windows = time_windows
@@ -175,6 +179,7 @@ impl TwcsPicker {
                     let picker = self.clone();
                     let time_windows = time_windows.clone();
                     let window = *window;
+                    let primary_key_ranges = primary_key_ranges.clone();
                     handles.push(common_runtime::spawn_blocking_compact(move || {
                         time_windows.get(&window).map(|files| {
                             (
@@ -186,6 +191,7 @@ impl TwcsPicker {
                                         files,
                                         windows: &time_windows,
                                         phase,
+                                        primary_key_ranges: &primary_key_ranges,
                                     },
                                 ),
                             )
@@ -238,6 +244,7 @@ impl TwcsPicker {
             files,
             windows,
             phase,
+            primary_key_ranges,
         } = context;
         let is_active_window = active_window == Some(files.time_window);
         let window = &files.time_window;
@@ -275,13 +282,21 @@ impl TwcsPicker {
         }
         let (inputs, found_runs) = if is_active_window {
             match phase {
-                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => {
-                    pick_candidate_files(l0_files, self.max_output_file_size, pick_count_first)
-                }
+                PickPhase::HasL0 if num_l0_files >= self.trigger_file_num => pick_candidate_files(
+                    l0_files,
+                    self.max_output_file_size,
+                    pick_count_first,
+                    primary_key_ranges,
+                ),
                 PickPhase::L1FileReduction | PickPhase::L1OverlapOnly
                     if num_l1_files >= self.active_window_l1_merge_trigger =>
                 {
-                    pick_l1_candidate_files(l1_files, self.max_output_file_size, phase)
+                    pick_l1_candidate_files(
+                        l1_files,
+                        self.max_output_file_size,
+                        phase,
+                        primary_key_ranges,
+                    )
                 }
                 _ => (vec![], 0),
             }
@@ -293,6 +308,7 @@ impl TwcsPicker {
                     l0_file_num: self.inactive_window_trigger_file_num,
                     l1_file_num: self.inactive_window_l1_merge_trigger,
                     phase,
+                    primary_key_ranges,
                 },
                 self.max_output_file_size,
             )
@@ -303,7 +319,7 @@ impl TwcsPicker {
 
         let filter_deleted = !self.append_mode
             && !window_has_overlap(files, windows)
-            && !selected_overlaps_unselected(&inputs, files);
+            && !selected_overlaps_unselected(&inputs, files, primary_key_ranges);
 
         if inputs.len() > 1 {
             // If we have more than one file to compact.
@@ -336,72 +352,108 @@ impl TwcsPicker {
 ///    The rewrite is bounded by the L0 bytes and leaves large compacted files
 ///    untouched. If nothing qualifies, the window is left as-is.
 #[derive(Debug, Clone, Copy)]
-struct InactiveWindowPick {
+struct InactiveWindowPick<'a> {
     l0_file_num: usize,
     l1_file_num: usize,
     phase: PickPhase,
+    primary_key_ranges: &'a PrimaryKeyRanges,
 }
 
 fn pick_inactive_window_files(
     l0_files: Vec<FileHandle>,
     l1_files: Vec<FileHandle>,
-    pick: InactiveWindowPick,
+    pick: InactiveWindowPick<'_>,
     max_output_file_size: Option<u64>,
 ) -> (Vec<FileHandle>, usize) {
     if !matches!(pick.phase, PickPhase::HasL0) {
         return if l1_files.len() >= pick.l1_file_num {
-            pick_l1_candidate_files(l1_files, max_output_file_size, pick.phase)
+            pick_l1_candidate_files(
+                l1_files,
+                max_output_file_size,
+                pick.phase,
+                pick.primary_key_ranges,
+            )
         } else {
             (vec![], 0)
         };
     }
 
     if l0_files.len() >= pick.l0_file_num {
-        let pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
-        if !pick.0.is_empty() {
-            return pick;
+        let candidate = pick_candidate_files(
+            l0_files.clone(),
+            max_output_file_size,
+            pick_count_first,
+            pick.primary_key_ranges,
+        );
+        if !candidate.0.is_empty() {
+            return candidate;
         }
     }
 
-    let pick = pick_candidate_files(l0_files.clone(), max_output_file_size, pick_count_first);
-    if !pick.0.is_empty() {
-        return pick;
+    let candidate = pick_candidate_files(
+        l0_files.clone(),
+        max_output_file_size,
+        pick_count_first,
+        pick.primary_key_ranges,
+    );
+    if !candidate.0.is_empty() {
+        return candidate;
     }
     let mut all_files = l0_files.clone();
     all_files.extend(l1_files);
-    let pick = pick_candidate_files(all_files, max_output_file_size, pick_mixed_within_budget);
-    if !pick.0.is_empty() {
-        return pick;
+    let candidate = pick_candidate_files(
+        all_files,
+        max_output_file_size,
+        pick_mixed_within_budget,
+        pick.primary_key_ranges,
+    );
+    if !candidate.0.is_empty() {
+        return candidate;
     }
 
-    pick_candidate_files(l0_files, max_output_file_size, pick_unbalanced_count_first)
+    pick_candidate_files(
+        l0_files,
+        max_output_file_size,
+        pick_unbalanced_count_first,
+        pick.primary_key_ranges,
+    )
 }
 
 fn pick_l1_candidate_files(
     l1_files: Vec<FileHandle>,
     max_output_file_size: Option<u64>,
     phase: PickPhase,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> (Vec<FileHandle>, usize) {
     let picker = match phase {
         PickPhase::L1FileReduction => pick_l1_file_reduction,
         PickPhase::L1OverlapOnly => pick_l1_overlap_only,
         PickPhase::HasL0 => return (vec![], 0),
     };
-    pick_candidate_files(l1_files, max_output_file_size, picker)
+    pick_candidate_files(l1_files, max_output_file_size, picker, primary_key_ranges)
 }
+
+type CandidatePicker =
+    fn(Vec<SortedRun<FileHandle>>, Option<u64>, &PrimaryKeyRanges) -> Vec<FileHandle>;
 
 fn pick_candidate_files(
     mut files: Vec<FileHandle>,
     max_output_file_size: Option<u64>,
-    picker: fn(Vec<SortedRun<FileHandle>>, Option<u64>) -> Vec<FileHandle>,
+    picker: CandidatePicker,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> (Vec<FileHandle>, usize) {
     let sorted_runs = if files.len() < 1024 {
-        find_sorted_runs(&mut files)
+        find_sorted_runs(&mut files, |lhs, rhs| {
+            files_overlap(lhs, rhs, primary_key_ranges)
+        })
     } else {
         find_sorted_runs_by_time_range(&mut files)
     };
     let found_runs = sorted_runs.len();
-    (picker(sorted_runs, max_output_file_size), found_runs)
+    (
+        picker(sorted_runs, max_output_file_size, primary_key_ranges),
+        found_runs,
+    )
 }
 
 #[derive(Debug)]
@@ -443,6 +495,7 @@ impl Candidate {
         file: &OrderedFile,
         preceding: &[OrderedFile],
         participations: &mut Vec<bool>,
+        primary_key_ranges: &PrimaryKeyRanges,
     ) {
         self.num_files += 1;
         let file_size = file.file.size() as usize;
@@ -452,7 +505,9 @@ impl Candidate {
 
         let mut participates = false;
         for (offset, other) in preceding.iter().enumerate() {
-            if file.run_id != other.run_id && file.file.overlap_inclusive(other.file) {
+            if file.run_id != other.run_id
+                && files_overlap_inclusive(file.file, other.file, primary_key_ranges)
+            {
                 if !participations[offset] {
                     participations[offset] = true;
                     self.overlap_participants += 1;
@@ -582,38 +637,60 @@ impl CandidateScore {
 fn pick_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, is_balanced_candidate)
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        is_balanced_candidate,
+    )
 }
 
 fn pick_l1_file_reduction(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
-        is_balanced_candidate(candidate) && candidate.file_reduction(max_output_file_size) > 0
-    })
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        |candidate| {
+            is_balanced_candidate(candidate) && candidate.file_reduction(max_output_file_size) > 0
+        },
+    )
 }
 
 fn pick_l1_overlap_only(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
-        is_balanced_candidate(candidate)
-            && candidate.file_reduction(max_output_file_size) == 0
-            && candidate.overlap_participants > 0
-    })
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        |candidate| {
+            is_balanced_candidate(candidate)
+                && candidate.file_reduction(max_output_file_size) == 0
+                && candidate.overlap_participants > 0
+        },
+    )
 }
 
 #[cfg(test)]
 fn pick_mixed_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
-        candidate.has_mixed_levels() && is_balanced_candidate(candidate)
-    })
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        |candidate| candidate.has_mixed_levels() && is_balanced_candidate(candidate),
+    )
 }
 
 /// Mixed-level fallback for inactive windows: bypasses the balance checks but
@@ -621,10 +698,16 @@ fn pick_mixed_count_first(
 fn pick_mixed_within_budget(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |candidate| {
-        candidate.has_mixed_levels() && candidate.within_rewrite_budget(max_output_file_size)
-    })
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        |candidate| {
+            candidate.has_mixed_levels() && candidate.within_rewrite_budget(max_output_file_size)
+        },
+    )
 }
 
 /// Last-resort pick for inactive windows with no balance requirement at all.
@@ -633,8 +716,14 @@ fn pick_mixed_within_budget(
 fn pick_unbalanced_count_first(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> Vec<FileHandle> {
-    pick_count_first_where(sorted_runs, max_output_file_size, |_| true)
+    pick_count_first_where(
+        sorted_runs,
+        max_output_file_size,
+        primary_key_ranges,
+        |_| true,
+    )
 }
 
 fn is_balanced_candidate(candidate: &Candidate) -> bool {
@@ -644,6 +733,7 @@ fn is_balanced_candidate(candidate: &Candidate) -> bool {
 fn pick_count_first_where(
     sorted_runs: Vec<SortedRun<FileHandle>>,
     max_output_file_size: Option<u64>,
+    primary_key_ranges: &PrimaryKeyRanges,
     is_eligible: impl Fn(&Candidate) -> bool,
 ) -> Vec<FileHandle> {
     let files = ordered_files(&sorted_runs);
@@ -654,7 +744,12 @@ fn pick_count_first_where(
         let right_bound = left.saturating_add(*MAX_INPUT_FILES).min(files.len());
         let mut participations: Vec<bool> = Vec::with_capacity(right_bound - left);
         for right in left..right_bound {
-            candidate.absorb(&files[right], &files[left..right], &mut participations);
+            candidate.absorb(
+                &files[right],
+                &files[left..right],
+                &mut participations,
+                primary_key_ranges,
+            );
             if candidate.num_files < 2
                 || !is_eligible(&candidate)
                 || !candidate.makes_progress(max_output_file_size)
@@ -707,7 +802,11 @@ fn ordered_files(sorted_runs: &[SortedRun<FileHandle>]) -> Vec<OrderedFile<'_>> 
     files
 }
 
-fn selected_overlaps_unselected(selected: &[FileHandle], window: &Window) -> bool {
+fn selected_overlaps_unselected(
+    selected: &[FileHandle],
+    window: &Window,
+    primary_key_ranges: &PrimaryKeyRanges,
+) -> bool {
     // The overall time span of the selection: a file outside it cannot overlap any
     // selected file (ranges are inclusive), so it needs no precise overlap check.
     let Some((span_start, span_end)) = selected
@@ -731,7 +830,7 @@ fn selected_overlaps_unselected(selected: &[FileHandle], window: &Window) -> boo
         .any(|unselected| {
             selected
                 .iter()
-                .any(|selected| selected.overlap_inclusive(unselected))
+                .any(|selected| files_overlap_inclusive(selected, unselected, primary_key_ranges))
         })
 }
 
@@ -798,6 +897,9 @@ impl TwcsPicker {
         let region_id = compaction_region.region_id;
         let picker = self.clone();
         let compaction_region = compaction_region.clone();
+        let primary_key_ranges =
+            Arc::new(compaction_region.current_version.ssts.primary_key_ranges());
+        let window_ranges = primary_key_ranges.clone();
         let (expired_ssts, time_window_size, active_window, windows) =
             common_runtime::spawn_blocking_compact(move || {
                 let levels = compaction_region.current_version.ssts.levels();
@@ -835,6 +937,7 @@ impl TwcsPicker {
                         .flat_map(LevelMeta::files)
                         .filter(|file| !expired_file_ids.contains(&file.file_id())),
                     time_window_size,
+                    &window_ranges,
                 );
                 // Compute activity from the candidate files so expired or
                 // compacting files cannot identify a window absent from `windows`.
@@ -865,6 +968,7 @@ impl TwcsPicker {
                     active_window,
                     time_window_size: Some(time_window_size),
                     max_outputs,
+                    primary_key_ranges,
                 },
             )
             .await?;
@@ -898,9 +1002,9 @@ struct Window {
 
 impl Window {
     /// Creates a new [Window] with given file.
-    fn new_with_file(file: FileHandle) -> Self {
+    fn new_with_file(file: FileHandle, primary_key_ranges: &PrimaryKeyRanges) -> Self {
         let (start, end) = file.time_range();
-        let primary_key_range = file.primary_key_range();
+        let primary_key_range = primary_key_ranges.range(&file);
         Self {
             start,
             end,
@@ -916,12 +1020,14 @@ impl Window {
     }
 
     /// Adds a new file to window and updates time range.
-    fn add_file(&mut self, file: FileHandle) {
+    fn add_file(&mut self, file: FileHandle, primary_key_ranges: &PrimaryKeyRanges) {
         let (start, end) = file.time_range();
         self.start = self.start.min(start);
         self.end = self.end.max(end);
-        self.primary_key_range =
-            merge_primary_key_ranges(self.primary_key_range.take(), file.primary_key_range());
+        self.primary_key_range = merge_primary_key_ranges(
+            self.primary_key_range.take(),
+            primary_key_ranges.range(&file),
+        );
         self.files.push(file);
     }
 
@@ -934,6 +1040,7 @@ impl Window {
 fn assign_to_windows<'a>(
     files: impl Iterator<Item = &'a FileHandle>,
     time_window_size: i64,
+    primary_key_ranges: &PrimaryKeyRanges,
 ) -> BTreeMap<i64, Window> {
     let mut windows: HashMap<i64, Window> = HashMap::new();
     // Iterates all files and assign to time windows according to max timestamp
@@ -951,10 +1058,10 @@ fn assign_to_windows<'a>(
 
         match windows.entry(time_window) {
             Entry::Occupied(mut e) => {
-                e.get_mut().add_file(f.clone());
+                e.get_mut().add_file(f.clone(), primary_key_ranges);
             }
             Entry::Vacant(e) => {
-                let mut window = Window::new_with_file(f.clone());
+                let mut window = Window::new_with_file(f.clone(), primary_key_ranges);
                 window.time_window = time_window;
                 e.insert(window);
             }
@@ -1064,7 +1171,6 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use bytes::Bytes;
     use common_base::Plugins;
     use common_time::range::TimestampRange;
     use store_api::storage::FileId;
@@ -1075,7 +1181,8 @@ mod tests {
     use crate::compaction::test_util::{
         compaction_region_with_ssts, new_file_handle, new_file_handle_with_sequence,
         new_file_handle_with_size_and_sequence,
-        new_file_handle_with_size_sequence_and_primary_key_range,
+        new_file_handle_with_size_sequence_and_primary_key_range, pk_range,
+        primary_key_ranges_for_test,
     };
     use crate::config::MitoConfig;
     use crate::region::options::RegionOptions;
@@ -1083,6 +1190,35 @@ mod tests {
     use crate::sst::version::SstVersion;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::scheduler_util::SchedulerEnv;
+
+    fn assign_to_windows<'a>(
+        files: impl Iterator<Item = &'a FileHandle>,
+        time_window_size: i64,
+    ) -> BTreeMap<i64, Window> {
+        super::assign_to_windows(files, time_window_size, &primary_key_ranges_for_test())
+    }
+
+    fn pick_count_first(
+        sorted_runs: Vec<SortedRun<FileHandle>>,
+        max_output_file_size: Option<u64>,
+    ) -> Vec<FileHandle> {
+        super::pick_count_first(
+            sorted_runs,
+            max_output_file_size,
+            &primary_key_ranges_for_test(),
+        )
+    }
+
+    fn pick_mixed_count_first(
+        sorted_runs: Vec<SortedRun<FileHandle>>,
+        max_output_file_size: Option<u64>,
+    ) -> Vec<FileHandle> {
+        super::pick_mixed_count_first(
+            sorted_runs,
+            max_output_file_size,
+            &primary_key_ranges_for_test(),
+        )
+    }
 
     impl TwcsPicker {
         async fn build_output_with_time_range(
@@ -1099,6 +1235,7 @@ mod tests {
                     active_window,
                     time_window_size,
                     max_outputs: self.max_background_tasks,
+                    primary_key_ranges: Arc::new(primary_key_ranges_for_test()),
                 },
             )
             .await
@@ -1143,7 +1280,8 @@ mod tests {
         );
         let old_file = &ssts.levels()[0].files[&old_id];
         let new_file = &ssts.levels()[0].files[&new_id];
-        let windows = assign_to_windows([old_file, new_file].into_iter(), 1);
+        let ranges = ssts.primary_key_ranges();
+        let windows = super::assign_to_windows([old_file, new_file].into_iter(), 1, &ranges);
         assert_eq!(2, windows.len());
         assert!(
             windows
@@ -1151,11 +1289,12 @@ mod tests {
                 .all(|window| window_has_overlap(window, &windows))
         );
 
-        let mut window = Window::new_with_file(old_file.clone());
-        window.add_file(new_file.clone());
+        let mut window = Window::new_with_file(old_file.clone(), &ranges);
+        window.add_file(new_file.clone(), &ranges);
         assert!(selected_overlaps_unselected(
             std::slice::from_ref(new_file),
-            &window
+            &window,
+            &ranges,
         ));
         assert_eq!(
             Some(completed.into()),
@@ -1171,7 +1310,11 @@ mod tests {
         let disjoint_id = old.file_id;
         ssts.add_files(crate::test_util::new_noop_file_purger(), [old].into_iter());
         let files = &ssts.levels()[0].files;
-        assert!(!files[&disjoint_id].overlap_inclusive(&files[&new_id]));
+        assert!(!files_overlap_inclusive(
+            &files[&disjoint_id],
+            &files[&new_id],
+            &ranges
+        ));
     }
 
     #[test]
@@ -1598,10 +1741,6 @@ mod tests {
 
     /// (Window value, overlapping, files' time ranges in window)
     type ExpectedWindowSpec = (i64, bool, Vec<(i64, i64)>);
-
-    fn pk_range(min: &'static [u8], max: &'static [u8]) -> Option<(Bytes, Bytes)> {
-        Some((Bytes::from_static(min), Bytes::from_static(max)))
-    }
 
     fn check_assign_to_windows_with_overlapping(
         file_time_ranges: &[(i64, i64)],
@@ -2623,6 +2762,7 @@ mod tests {
                 l0_file_num: 8,
                 l1_file_num: 2,
                 phase: PickPhase::L1FileReduction,
+                primary_key_ranges: &primary_key_ranges_for_test(),
             },
             None,
         );
@@ -2653,6 +2793,7 @@ mod tests {
                 l0_file_num: 2,
                 l1_file_num: 8,
                 phase: PickPhase::L1FileReduction,
+                primary_key_ranges: &primary_key_ranges_for_test(),
             },
             None,
         );

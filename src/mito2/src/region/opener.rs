@@ -1230,7 +1230,7 @@ async fn preload_parquet_meta_cache_for_files(
             .get_compact_sst_meta_data(file_id, PageIndexPolicy::Optional)
             .await
         {
-            if file_handle.primary_key_range().is_none()
+            if file_handle.raw_primary_key_range().is_none()
                 && let Some(primary_key_range) = extract_primary_key_range(
                     metadata.parquet_metadata().as_ref(),
                     &region_metadata,
@@ -1249,7 +1249,7 @@ async fn preload_parquet_meta_cache_for_files(
                 .await
             {
                 let decoded = metadata.decoded();
-                if file_handle.primary_key_range().is_none()
+                if file_handle.raw_primary_key_range().is_none()
                     && let Some(primary_key_range) = extract_primary_key_range(
                         decoded.parquet_metadata().as_ref(),
                         &region_metadata,
@@ -1694,12 +1694,7 @@ mod tests {
             num_series: 0,
             ..Default::default()
         };
-        let mut metadata = sst_region_metadata();
-        metadata.region_id = region_id;
-        let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger))
-            .with_primary_key_mapper(Arc::new(
-                crate::sst::primary_key::PrimaryKeyRangeMapper::new(Arc::new(metadata)),
-            ));
+        let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
 
         let table_dir = "test_table";
         let path_type = PathType::Bare;
@@ -1749,7 +1744,7 @@ mod tests {
                 .await
                 .is_some()
         );
-        assert!(file_handle.primary_key_range().is_some());
+        assert!(file_handle.raw_primary_key_range().is_some());
     }
 
     #[tokio::test]

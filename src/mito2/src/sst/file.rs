@@ -19,12 +19,12 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::num::NonZeroU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error, warn};
+use common_telemetry::{debug, error};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,6 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
-use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
 fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
@@ -485,9 +484,6 @@ impl FileMeta {
 #[derive(Clone)]
 pub struct FileHandle {
     inner: Arc<FileHandleInner>,
-    /// Version-local schema and cache; physical lifecycle state stays shared.
-    primary_key_mapper: Option<Arc<PrimaryKeyRangeMapper>>,
-    primary_key_range: Arc<OnceLock<Option<(Bytes, Bytes)>>>,
 }
 
 impl fmt::Debug for FileHandle {
@@ -501,14 +497,11 @@ impl fmt::Debug for FileHandle {
 }
 
 impl FileHandle {
-    /// Creates a physical handle. Its comparable PK range is unknown until a
-    /// target schema is bound by the owning SST version.
+    /// Creates a handle sharing the file's physical state and original statistics.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
             inner: Arc::new(FileHandleInner::new(meta, file_purger, pk_range)),
-            primary_key_mapper: None,
-            primary_key_range: Arc::new(OnceLock::new()),
         }
     }
 
@@ -519,13 +512,7 @@ impl FileHandle {
         primary_key_range: Option<(Bytes, Bytes)>,
     ) -> FileHandle {
         FileHandle {
-            inner: Arc::new(FileHandleInner::new(
-                meta,
-                file_purger,
-                primary_key_range.clone(),
-            )),
-            primary_key_mapper: None,
-            primary_key_range: Arc::new(OnceLock::from(primary_key_range)),
+            inner: Arc::new(FileHandleInner::new(meta, file_purger, primary_key_range)),
         }
     }
 
@@ -626,33 +613,11 @@ impl FileHandle {
         self.inner.deleted.load(Ordering::Relaxed)
     }
 
-    /// Returns complete, comparable bounds in this handle's pinned schema.
-    /// Unknown bounds must be treated conservatively by pruning and compaction.
-    /// Invalid bounds are logged once per cached schema view and treated as unknown,
-    /// since unusable pruning statistics alone must not fail reads or compaction.
-    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        if let Some(range) = self.primary_key_range.get() {
-            return range.clone();
-        }
-        let mapper = self.primary_key_mapper.as_ref()?;
-        // Legacy statistics may be loaded later. Do not cache their absence.
-        let raw = self.inner.primary_key_range.read().unwrap().clone()?;
-        self.primary_key_range
-            .get_or_init(|| match mapper.map(self.region_id(), raw) {
-                Ok(range) => range,
-                Err(err) => {
-                    warn!(err; "Invalid SST primary key range; using unknown bounds, region: {}, file: {}, schema version: {}",
-                        self.region_id(), self.file_id(), mapper.schema_version());
-                    None
-                }
-            })
-            .clone()
-    }
-
-    pub(crate) fn with_primary_key_mapper(mut self, mapper: Arc<PrimaryKeyRangeMapper>) -> Self {
-        self.primary_key_mapper = Some(mapper);
-        self.primary_key_range = Arc::new(OnceLock::new());
-        self
+    /// Returns bounds in the SST's original encoding. Comparisons must use
+    /// [`PrimaryKeyRanges`](crate::sst::primary_key::PrimaryKeyRanges) to interpret
+    /// them in the target schema before pruning or aggregating ranges.
+    pub fn raw_primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        self.inner.primary_key_range.read().unwrap().clone()
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {

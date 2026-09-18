@@ -19,6 +19,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use common_base::Plugins;
 use common_time::Timestamp;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::FileId;
 
 use crate::cache::CacheManager;
@@ -26,10 +27,31 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::config::MitoConfig;
 use crate::region::options::RegionOptions;
 use crate::sst::file::{FileHandle, FileMeta, Level};
+use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
 use crate::sst::version::SstVersion;
 use crate::test_util::memtable_util::metadata_for_test;
 use crate::test_util::new_noop_file_purger;
 use crate::test_util::scheduler_util::SchedulerEnv;
+
+pub(crate) fn primary_key_metadata_for_test() -> RegionMetadataRef {
+    let mut metadata = crate::test_util::memtable_util::metadata_with_primary_key(vec![0], false);
+    metadata.region_id = 0.into();
+    Arc::new(metadata)
+}
+
+pub(crate) fn primary_key_ranges_for_test() -> PrimaryKeyRanges {
+    PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(
+        primary_key_metadata_for_test(),
+    )))
+}
+
+/// Encodes the single string tag used by compaction range fixtures.
+pub(crate) fn pk_range(min: &[u8], max: &[u8]) -> Option<(Bytes, Bytes)> {
+    let encode = |key| {
+        crate::test_util::sst_util::new_primary_key(&[std::str::from_utf8(key).unwrap()]).into()
+    };
+    Some((encode(min), encode(max)))
+}
 
 /// Test util to create file handles.
 pub fn new_file_handle(
