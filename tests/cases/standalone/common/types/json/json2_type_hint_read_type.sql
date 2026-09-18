@@ -10,7 +10,7 @@ CREATE TABLE json2_type_hint_read_type (
 );
 
 INSERT INTO json2_type_hint_read_type VALUES
-    (1, '{"a":42,"b":"three"}', 2),
+    (1, '{"a":9007199254740993,"b":"three"}', 2),
     (2, '{"a":7,"b":"7"}', 2);
 
 ADMIN FLUSH_TABLE('json2_type_hint_read_type');
@@ -28,6 +28,11 @@ ORDER BY ts;
 
 -- A matching JSON2 type hint takes precedence over function-context inference.
 SELECT coalesce(j.b, exponent) AS hinted_string
+FROM json2_type_hint_read_type
+ORDER BY ts;
+
+-- A BIGINT type hint must not be widened to Float64 by function-context inference.
+SELECT coalesce(j.a, exponent) AS hinted_bigint
 FROM json2_type_hint_read_type
 ORDER BY ts;
 
