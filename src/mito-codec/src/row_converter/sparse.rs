@@ -310,7 +310,7 @@ impl SparsePrimaryKeyCodec {
     {
         for (tag_column_id, tag_value) in row {
             let value_len = tag_value.len();
-            buffer.reserve(6 + value_len / 8 * 9);
+            buffer.reserve(6 + value_len.div_ceil(8) * 9);
             buffer.put_u32(tag_column_id);
             buffer.put_u8(1);
             buffer.put_u8(!tag_value.is_empty() as u8);
@@ -812,6 +812,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(buffer, buffer_by_raw_encoding);
+    }
+
+    #[test]
+    fn raw_encoding_matches_serde_at_chunk_boundaries() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut actual = Vec::new();
+        for len in [0, 7, 8, 9, 15, 16, 17, 1024] {
+            let label = "x".repeat(len);
+            let mut expected = Vec::new();
+            codec.encode_internal(42, 7, &mut expected).unwrap();
+            codec
+                .encode_to_vec([(1, ValueRef::String(&label))].into_iter(), &mut expected)
+                .unwrap();
+            actual.clear();
+            codec.encode_internal(42, 7, &mut actual).unwrap();
+            codec
+                .encode_raw_tag_value([(1, label.as_bytes())].into_iter(), &mut actual)
+                .unwrap();
+            assert_eq!(actual, expected, "label length {len}");
+        }
     }
 
     #[test]
