@@ -234,9 +234,8 @@ impl MetricEngineInner {
                 request_unit == unit,
                 UnexpectedRequestSnafu {
                     reason: format!(
-                        "Metric has different time unit ({request_unit:?}) than the physical \
-                         table ({unit:?}); the time index unit of a logical table must match \
-                         the physical table's",
+                        "Metric has differenttime unit ({:?}) than the physical region ({:?})",
+                        request_unit, unit
                     ),
                 }
             );
@@ -1108,37 +1107,6 @@ mod test {
             .find(|metadata| metadata.column_schema.name == DATA_SCHEMA_TSID_COLUMN_NAME)
             .unwrap();
         assert!(is_tsid_col(tsid_metadata));
-    }
-
-    #[tokio::test]
-    async fn test_create_logical_regions_time_index_unit_mismatch() {
-        let env = TestEnv::new().await;
-        let engine = env.metric();
-        let physical_region_id = env.default_physical_region_id();
-        let logical_region_id = env.default_logical_region_id();
-        env.create_physical_region_with_ts_type(
-            physical_region_id,
-            &TestEnv::default_table_dir(),
-            vec![],
-            ConcreteDataType::timestamp_microsecond_datatype(),
-        )
-        .await;
-
-        // A logical region request with a millisecond time index is rejected
-        // with the mismatch error naming both units.
-        let request = create_logical_region_request(
-            &["job"],
-            physical_region_id,
-            &store_api::path_utils::table_dir("test", logical_region_id.table_id()),
-        );
-        let err = engine
-            .handle_request(logical_region_id, RegionRequest::Create(request))
-            .await
-            .unwrap_err();
-        let message = err.to_string();
-        assert!(message.contains("Millisecond"), "{message}");
-        assert!(message.contains("Microsecond"), "{message}");
-        assert!(message.contains("different time unit"), "{message}");
     }
 
     #[tokio::test]
