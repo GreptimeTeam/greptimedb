@@ -40,6 +40,7 @@ use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::Value;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
 use mito2::read::{Batch, BatchBuilder};
+use mito2::sst::index::Indexer;
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 use mito2::test_util::bench_util::{BloomFilterIndexer, InvertedIndexer};
@@ -350,7 +351,7 @@ fn bench_dense_index_update(c: &mut Criterion) {
                     let mut elapsed = Duration::ZERO;
                     for _ in 0..iterations {
                         let file_id = FileId::random();
-                        let mut inverted = shape.inverted.then(|| {
+                        let inverted = shape.inverted.then(|| {
                             InvertedIndexer::new(
                                 file_id,
                                 &metadata,
@@ -360,12 +361,13 @@ fn bench_dense_index_update(c: &mut Criterion) {
                                 inverted_columns.clone(),
                             )
                         });
-                        let mut bloom = if shape.bloom {
+                        let bloom = if shape.bloom {
                             BloomFilterIndexer::new(file_id, &metadata, intermediate.clone(), None)
                                 .unwrap()
                         } else {
                             None
                         };
+                        let mut indexer = Indexer::for_bench(&metadata, inverted, bloom);
                         // Fresh caches for each iteration; both creators share each Batch.
                         let mut encoded_batches = encoded_batches.clone();
                         if allocations {
@@ -374,31 +376,16 @@ fn bench_dense_index_update(c: &mut Criterion) {
                         let start = Instant::now();
                         if encoded_only {
                             for batch in &mut encoded_batches {
-                                if let Some(indexer) = &mut inverted {
-                                    indexer.update(batch).await.unwrap();
-                                }
-                                if let Some(indexer) = &mut bloom {
-                                    indexer.update(batch).await.unwrap();
-                                }
+                                indexer.update(batch).await;
                             }
                         } else {
-                            if let Some(indexer) = &mut inverted {
-                                indexer.update_flat(&batch).await.unwrap();
-                            }
-                            if let Some(indexer) = &mut bloom {
-                                indexer.update_flat(&batch).await.unwrap();
-                            }
+                            indexer.update_flat(&batch).await;
                         }
                         elapsed += start.elapsed();
                         if allocations {
                             report_allocations(&name);
                         }
-                        if let Some(indexer) = &mut inverted {
-                            indexer.abort().await.unwrap();
-                        }
-                        if let Some(indexer) = &mut bloom {
-                            indexer.abort().await.unwrap();
-                        }
+                        indexer.abort().await;
                     }
                     elapsed
                 })
