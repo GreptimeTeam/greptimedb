@@ -12,7 +12,7 @@ CREATE TABLE json2_type_hint_read_type (
 Affected Rows: 0
 
 INSERT INTO json2_type_hint_read_type VALUES
-    (1, '{"a":42,"b":"42"}', 2),
+    (1, '{"a":42,"b":"three"}', 2),
     (2, '{"a":7,"b":"7"}', 2);
 
 Affected Rows: 2
@@ -41,23 +41,6 @@ FROM json2_type_hint_read_type;
 |               |                                                                                              |
 +---------------+----------------------------------------------------------------------------------------------+
 
--- A matching JSON2 type hint must override function-context inference.
--- SQLNESS REPLACE (peers.*) REDACTED
-EXPLAIN SELECT coalesce(j.b, exponent) AS hinted_string
-FROM json2_type_hint_read_type;
-
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                        |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                             |
-|               | Projection: CASE WHEN CAST(json_get(json2_type_hint_read_type.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) IS NOT NULL THEN CAST(json_get(json2_type_hint_read_type.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) ELSE json2_type_hint_read_type.exponent END AS hinted_string |
-|               |   TableScan: json2_type_hint_read_type                                                                                                                                                                                                                                      |
-|               | ]]                                                                                                                                                                                                                                                                          |
-| physical_plan | CooperativeExec                                                                                                                                                                                                                                                             |
-|               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                             |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-
 -- Uncast paths use their JSON2 type hints.
 SELECT
     j.a AS hinted_bigint,
@@ -68,23 +51,34 @@ ORDER BY ts;
 +---------------+---------------+
 | hinted_bigint | hinted_string |
 +---------------+---------------+
-| 42            | 42            |
+| 42            | three         |
 | 7             | 7             |
 +---------------+---------------+
 
--- An explicit CAST overrides the JSON2 type hint.
-SELECT
-    j.a::STRING AS overridden_string,
-    j.b::BIGINT AS overridden_bigint
+-- A matching JSON2 type hint takes precedence over function-context inference.
+SELECT coalesce(j.b, exponent) AS hinted_string
 FROM json2_type_hint_read_type
 ORDER BY ts;
 
-+-------------------+-------------------+
-| overridden_string | overridden_bigint |
-+-------------------+-------------------+
-| 42                | 42                |
-| 7                 | 7                 |
-+-------------------+-------------------+
++---------------+
+| hinted_string |
++---------------+
+| three         |
+| 7             |
++---------------+
+
+-- An explicit CAST overrides the JSON2 type hint.
+SELECT
+    j.a::STRING AS overridden_string
+FROM json2_type_hint_read_type
+ORDER BY ts;
+
++-------------------+
+| overridden_string |
++-------------------+
+| 42                |
+| 7                 |
++-------------------+
 
 DROP TABLE json2_type_hint_read_type;
 

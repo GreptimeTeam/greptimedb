@@ -15,11 +15,14 @@
 use std::sync::{Arc, LazyLock};
 
 use arrow_schema::Field;
+use arrow_schema::extension::ExtensionType;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use common_function::scalars::udf::create_udf;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference};
-use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
+use datafusion_common::{
+    Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference, plan_datafusion_err,
+};
+use datafusion_expr::expr::{BinaryExpr, Cast, ScalarFunction};
 use datafusion_expr::planner::{
     ExprPlanner, PlannerResult, RawAggregateExpr, RawBinaryExpr, RawFieldAccessExpr, RawScalarExpr,
     RawWindowExpr,
@@ -28,7 +31,11 @@ use datafusion_expr::type_coercion::functions::{UDFCoercionExt, fields_with_udf}
 use datafusion_expr::{
     Expr, ExprSchemable, GetFieldAccess, Operator, ScalarUDF, WindowFunctionDefinition,
 };
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
+};
+use datatypes::json::JsonSettings;
+use datatypes::types::json_type::JsonNativeType;
 use sqlparser::ast::BinaryOperator;
 
 /// Rewrites JSON-aware SQL expressions into DataFusion expressions.
@@ -59,13 +66,21 @@ impl ExprPlanner for JsonExprPlanner {
             mut right,
         } = expr;
 
-        if !is_untyped_json_get(&left) && !is_untyped_json_get(&right) {
-            return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
-        }
-
         let Some(expr_op) = parse_sql_op(&op) else {
             return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
         };
+
+        if prefer_json_get_hint_type_in_binary(&mut left, &mut right)? {
+            return Ok(PlannerResult::Planned(Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(left),
+                expr_op,
+                Box::new(right),
+            ))));
+        }
+
+        if !is_untyped_json_get(&left) && !is_untyped_json_get(&right) {
+            return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
+        }
 
         let left_type = left.get_type(schema)?;
         let right_type = right.get_type(schema)?;
@@ -142,14 +157,19 @@ impl ExprPlanner for JsonExprPlanner {
             path.push_str(&json_path_field(name)?);
         }
 
+        let mut args = vec![
+            Expr::Column(Column::from((qualifier, field))),
+            Expr::Literal(ScalarValue::Utf8(Some(path)), None),
+        ];
+        if let Some(json_type) = json_type_hint(field, nested_names)? {
+            args.push(Expr::Literal(
+                ScalarValue::try_new_null(&json_type.as_arrow_type())?,
+                None,
+            ));
+        }
+
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
-            ScalarFunction::new_udf(
-                json_get,
-                vec![
-                    Expr::Column(Column::from((qualifier, field))),
-                    Expr::Literal(ScalarValue::Utf8(Some(path)), None),
-                ],
-            ),
+            ScalarFunction::new_udf(json_get, args),
         )))
     }
 
@@ -185,6 +205,64 @@ impl ExprPlanner for JsonExprPlanner {
     }
 }
 
+/// Gives a direct JSON2 type hint precedence over binary-expression inference.
+fn prefer_json_get_hint_type_in_binary(left: &mut Expr, right: &mut Expr) -> Result<bool> {
+    let left_hint = extract_json_get_type(left);
+    let right_hint = extract_json_get_type(right);
+    let Some(hint_type) = left_hint.as_ref().or(right_hint.as_ref()) else {
+        return Ok(false);
+    };
+    if left_hint
+        .as_ref()
+        .zip(right_hint.as_ref())
+        .is_some_and(|(left, right)| left != right)
+    {
+        return Ok(false);
+    }
+
+    let mut changed = false;
+    if left_hint.is_some() && right_hint.is_none() {
+        changed |= cast_or_type_json_get(right, hint_type)?;
+    }
+    if right_hint.is_some() && left_hint.is_none() {
+        changed |= cast_or_type_json_get(left, hint_type)?;
+    }
+    Ok(changed)
+}
+
+/// Sets an untyped `json_get` result type, or casts a non-JSON peer to it.
+fn cast_or_type_json_get(expr: &mut Expr, data_type: &DataType) -> Result<bool> {
+    if is_untyped_json_get(expr) {
+        return push_json_get_type_arg(expr, data_type);
+    }
+    *expr = Expr::Cast(Cast::new(Box::new(expr.clone()), data_type.clone()));
+    Ok(true)
+}
+
+/// Returns the configured native type for an exact JSON2 object path.
+fn json_type_hint(field: &Field, path: &[String]) -> Result<Option<JsonNativeType>> {
+    Ok(json2_settings(field)?.and_then(|settings| {
+        settings
+            .type_hints()
+            .iter()
+            .find(|hint| hint.path == path)
+            .map(|hint| JsonNativeType::from(&hint.data_type))
+    }))
+}
+
+/// Returns JSON2 settings from the field's extension metadata.
+fn json2_settings(field: &Field) -> Result<Option<JsonSettings>> {
+    if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
+        let extension = field
+            .try_extension_type::<Json2ExtensionType>()
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
+        Ok(Some(extension.metadata().json_settings().clone()))
+    } else {
+        parse_legacy_json2_settings(field.metadata())
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))
+    }
+}
+
 /// Quotes field names containing JSONPath punctuation, preserving literal keys.
 fn json_path_field(name: &str) -> Result<String> {
     if !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_') {
@@ -217,6 +295,8 @@ fn push_function_arg_types<F>(func: &F, args: &mut [Expr]) -> Result<()>
 where
     F: UDFCoercionExt,
 {
+    prefer_json_get_hint_type(func, args)?;
+
     if !args.iter().any(is_untyped_json_get) {
         return Ok(());
     }
@@ -237,6 +317,53 @@ where
             for (index, data_type) in types {
                 let _ = push_json_get_type_arg(&mut args[index], &data_type)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Uses a JSON2 type hint as the common type of a compatible function call.
+///
+/// A typed `json_get` is produced only for a matching JSON2 type hint. When a
+/// function accepts all of its arguments as that type, cast its peer arguments
+/// explicitly before DataFusion's default coercion can select a different
+/// common type. For example, this turns `coalesce(j.b, exponent)` with a
+/// `j.b STRING` hint into `coalesce(j.b, CAST(exponent AS STRING))`.
+fn prefer_json_get_hint_type<F>(func: &F, args: &mut [Expr]) -> Result<()>
+where
+    F: UDFCoercionExt,
+{
+    let mut hint_types = args.iter().filter_map(extract_json_get_type);
+    let Some(hint_type) = hint_types.next() else {
+        return Ok(());
+    };
+    if hint_types.any(|data_type| data_type != hint_type) {
+        return Ok(());
+    }
+
+    let fields = args
+        .iter()
+        .map(|_| Arc::new(Field::new("", hint_type.clone(), true)))
+        .collect::<Vec<_>>();
+    let Ok(coerced) = fields_with_udf(&fields, func) else {
+        return Ok(());
+    };
+    let Some(coerced_type) = coerced.first().map(|field| field.data_type()) else {
+        return Ok(());
+    };
+    if coerced
+        .iter()
+        .any(|field| field.data_type() != coerced_type)
+        || (coerced_type != &hint_type && !(coerced_type.is_string() && hint_type.is_string()))
+    {
+        return Ok(());
+    }
+
+    for arg in args {
+        if is_untyped_json_get(arg) {
+            push_json_get_type_arg(arg, &hint_type)?;
+        } else if extract_json_get_type(arg).is_none() {
+            *arg = Expr::Cast(Cast::new(Box::new(arg.clone()), coerced_type.clone()));
         }
     }
     Ok(())
@@ -423,7 +550,9 @@ mod tests {
     use datafusion_expr::WindowFrame;
     use datafusion_functions::core::coalesce;
     use datafusion_functions::math::{abs, power};
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::prelude::ConcreteDataType;
 
     use super::*;
 
@@ -503,6 +632,35 @@ mod tests {
             ),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_binary_op_prefers_json_get_hint_type() -> Result<()> {
+        let mut json_get = json_get_expr(Expr::Column(Column::new_unqualified("j")), "b");
+        let Expr::ScalarFunction(function) = &mut json_get else {
+            unreachable!()
+        };
+        function.args.push(Expr::Literal(
+            ScalarValue::try_new_null(&DataType::Utf8View)?,
+            None,
+        ));
+
+        let PlannerResult::Planned(Expr::BinaryExpr(expr)) = JsonExprPlanner.plan_binary_op(
+            RawBinaryExpr {
+                op: BinaryOperator::Eq,
+                left: json_get,
+                right: Expr::Column(Column::new_unqualified("exponent")),
+            },
+            &DFSchema::empty(),
+        )?
+        else {
+            unreachable!()
+        };
+
+        assert!(
+            matches!(expr.right.as_ref(), Expr::Cast(cast) if cast.field.data_type() == &DataType::Utf8View)
+        );
         Ok(())
     }
 
@@ -639,6 +797,41 @@ mod tests {
     }
 
     #[test]
+    fn test_plan_compound_identifier_applies_json2_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["payload".to_string(), "cpu".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let field = Field::new("labels", DataType::Struct(Fields::empty()), true)
+            .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings,
+            ))));
+
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = JsonExprPlanner
+            .plan_compound_identifier(
+                &field,
+                Some(&TableReference::bare("events")),
+                &["payload".to_string(), "cpu".to_string()],
+            )?
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            Some(DataType::Int64),
+            extract_json_get_type(&Expr::ScalarFunction(func))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_plan_functions() -> Result<()> {
         let planner = JsonExprPlanner;
         let json_get = || json_get_expr(Expr::Column(Column::new_unqualified("j")), "a.b");
@@ -740,6 +933,36 @@ mod tests {
         assert_eq!(
             Some(DataType::Float64),
             extract_json_get_type(&scalar.args[1])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_function_prefers_json_get_hint_type() -> Result<()> {
+        let planner = JsonExprPlanner;
+        let mut json_get = json_get_expr(Expr::Column(Column::new_unqualified("j")), "b");
+        let Expr::ScalarFunction(function) = &mut json_get else {
+            unreachable!()
+        };
+        function.args.push(Expr::Literal(
+            ScalarValue::try_new_null(&DataType::Utf8View)?,
+            None,
+        ));
+
+        let PlannerResult::Original(scalar) = planner.plan_scalar(RawScalarExpr {
+            func: coalesce(),
+            args: vec![json_get, Expr::Column(Column::new_unqualified("exponent"))],
+        })?
+        else {
+            unreachable!();
+        };
+
+        assert_eq!(
+            Some(DataType::Utf8View),
+            extract_json_get_type(&scalar.args[0])
+        );
+        assert!(
+            matches!(scalar.args[1], Expr::Cast(ref cast) if cast.field.data_type() == &DataType::Utf8View)
         );
         Ok(())
     }

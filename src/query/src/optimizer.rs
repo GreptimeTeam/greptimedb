@@ -19,7 +19,6 @@ pub mod count_wildcard;
 pub mod enforce_sorting;
 pub mod global_limit;
 pub(crate) mod insert_assignment;
-pub(crate) mod json_get_type_hint;
 pub(crate) mod json_schema_concretize;
 pub(crate) mod json_type_concretize;
 pub mod parallelize_scan;
