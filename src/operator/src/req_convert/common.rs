@@ -39,7 +39,7 @@ use crate::error::{
 /// Encodes a string value as JSONB binary data if the value is of `StringValue` type.
 fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
     if let ValueData::StringValue(json) = &value_data {
-        let binary = jsonb::parse_value(json.as_bytes())
+        let binary = jsonb::parse_value_standard_mode(json.as_bytes())
             .map_err(|_| InvalidJsonFormatSnafu { json }.build())
             .map(|jsonb| jsonb.to_vec())?;
         Ok(ValueData::BinaryValue(binary))

@@ -4,6 +4,39 @@ SELECT json_get_int(parse_json('{"a": 1}'), '$.a[');
 
 SELECT json_get_int(parse_json('{"a": 1}'), '$.missing');
 
+-- Unterminated quoted fields must return errors without panicking.
+SELECT json_get_int(parse_json('{"a": 1}'), '$."a');
+
+SELECT json_get_object(parse_json('{"a": {}}'), '$["a');
+
+CREATE TABLE jsonpath_unterminated(j JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');
+
+INSERT INTO jsonpath_unterminated VALUES ('{"a": 1}', 1);
+
+SELECT json_get(j, '$."a') FROM jsonpath_unterminated;
+
+SELECT json_get(j, '$."a"')::BIGINT FROM jsonpath_unterminated;
+
+DROP TABLE jsonpath_unterminated;
+
+-- JSON and JSON2 share integer conversion rules.
+CREATE TABLE json_integer_conversion(j JSON, j2 JSON2, ts TIMESTAMP TIME INDEX)
+WITH (append_mode='true');
+
+INSERT INTO json_integer_conversion VALUES
+    ('{"a":1.5}', '{"a":1.5}', 1),
+    ('{"a":-1.5}', '{"a":-1.5}', 2),
+    ('{"a":"1.5"}', '{"a":"1.5"}', 3);
+
+SELECT
+    json_get(j, 'a')::BIGINT AS json_int,
+    json_get(j2, 'a')::BIGINT AS json2_int,
+    json_get_int(j, 'a') AS json_get_int,
+    json_get_int(j2, 'a') AS json2_get_int
+FROM json_integer_conversion ORDER BY ts;
+
+DROP TABLE json_integer_conversion;
+
 SELECT json_get_int(parse_json('{"a": {"b": {"c": 1}}}'), 'a.b.c');
 
 SELECT json_get_float(parse_json('{"a": {"b": {"c": 1.234}}}'), 'a:b.c');

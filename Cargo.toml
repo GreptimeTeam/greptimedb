@@ -172,7 +172,9 @@ hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
 itertools = "0.14"
-jsonb = { version = "0.4.4", default-features = false }
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9de38959328caa7628e81b6b1", default-features = false, features = [
+    "databend",
+] }
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
