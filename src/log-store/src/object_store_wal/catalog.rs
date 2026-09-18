@@ -95,7 +95,7 @@ impl ObjectCatalog {
                 ensure!(
                     previous.max_entry_id < entry.min_entry_id,
                     CorruptedWalObjectSnafu {
-                        reason: out_of_order(
+                        reason: out_of_order_reason(
                             entry.region_id,
                             previous_seq,
                             previous.max_entry_id,
@@ -112,7 +112,7 @@ impl ObjectCatalog {
                 ensure!(
                     entry.max_entry_id < next.min_entry_id,
                     CorruptedWalObjectSnafu {
-                        reason: out_of_order(
+                        reason: out_of_order_reason(
                             entry.region_id,
                             object_seq,
                             entry.max_entry_id,
@@ -213,7 +213,7 @@ impl ObjectCatalog {
     }
 }
 
-fn out_of_order(
+fn out_of_order_reason(
     region_id: RegionId,
     lower_object_seq: u64,
     lower_max_entry_id: u64,
