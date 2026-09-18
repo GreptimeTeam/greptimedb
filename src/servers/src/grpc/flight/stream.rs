@@ -15,6 +15,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -75,16 +76,36 @@ impl<F> FlightRecordBatchStreamInput<F> {
     }
 }
 
-/// Metrics collector for Flight stream with RAII logging pattern
+/// Metrics collector for Flight stream with RAII logging pattern.
+///
+/// The producer task owns the upstream-side values (fetching, coalescing,
+/// backpressure), while encoding happens in
+/// [`FlightRecordBatchStream::poll_next`] on the consumer side. The collector is
+/// therefore shared between both, and the summary is logged once the last handle
+/// is dropped. The lock is never held across an await point.
 struct StreamMetrics {
     send_schema_duration: Duration,
     send_record_batch_duration: Duration,
     send_metrics_duration: Duration,
     fetch_content_duration: Duration,
+    /// Time spent merging the batches of one coalesced group into a single batch.
+    merge_duration: Duration,
+    /// Time spent encoding [`FlightMessage`]s into outgoing [`FlightData`]s.
+    encode_duration: Duration,
     record_batch_count: usize,
+    /// Record batch groups actually sent downstream, one per sent record batch
+    /// message: a merged group counts once, a singleton counts once.
+    groups_sent: usize,
+    /// [`FlightData`] frames produced by encoding, including the schema and
+    /// metrics frames.
+    flight_frames: usize,
     metrics_count: usize,
     total_rows: usize,
+    /// Arrow memory size of the batches read from the upstream stream.
     total_bytes: usize,
+    /// Encoded size of the sent frames, counted as `data_body + app_metadata +
+    /// data_header` per frame.
+    encoded_bytes: usize,
     should_log: bool,
 }
 
@@ -95,12 +116,23 @@ impl StreamMetrics {
             send_record_batch_duration: Duration::ZERO,
             send_metrics_duration: Duration::ZERO,
             fetch_content_duration: Duration::ZERO,
+            merge_duration: Duration::ZERO,
+            encode_duration: Duration::ZERO,
             record_batch_count: 0,
+            groups_sent: 0,
+            flight_frames: 0,
             metrics_count: 0,
             total_rows: 0,
             total_bytes: 0,
+            encoded_bytes: 0,
             should_log,
         }
+    }
+
+    /// Creates the collector shared by the producer task and the output stream.
+    /// Logging is off until the record-batch path sets `should_log`.
+    fn shared() -> Arc<Mutex<Self>> {
+        Arc::new(Mutex::new(Self::new(false)))
     }
 }
 
@@ -113,21 +145,38 @@ impl Drop for StreamMetrics {
                 send_record_batch_duration={:?}, \
                 send_metrics_duration={:?}, \
                 fetch_content_duration={:?}, \
+                merge_duration={:?}, \
+                encode_duration={:?}, \
                 record_batch_count={}, \
+                groups_sent={}, \
+                flight_frames={}, \
                 metrics_count={}, \
                 total_rows={}, \
-                total_bytes={}",
+                total_bytes={}, \
+                encoded_bytes={}",
                 self.send_schema_duration,
                 self.send_record_batch_duration,
                 self.send_metrics_duration,
                 self.fetch_content_duration,
+                self.merge_duration,
+                self.encode_duration,
                 self.record_batch_count,
+                self.groups_sent,
+                self.flight_frames,
                 self.metrics_count,
                 self.total_rows,
-                self.total_bytes
+                self.total_bytes,
+                self.encoded_bytes
             );
         }
     }
+}
+
+/// Encoded size of one outgoing [`FlightData`] frame: payload plus headers,
+/// matching the inbound accounting in `PutRecordBatchRequest` (see
+/// `crate::grpc::flight`), which charges the same three buffers.
+fn encoded_frame_bytes(frame: &FlightData) -> usize {
+    frame.data_body.len() + frame.app_metadata.len() + frame.data_header.len()
 }
 
 /// Coalesces consecutive ready record batches into one outgoing group.
@@ -215,12 +264,12 @@ impl CoalescingBatcher {
         &mut self,
         recordbatches: &mut SendableRecordBatchStream,
         tx: &mut Sender<TonicResult<FlightMessage>>,
-        metrics: &mut StreamMetrics,
+        metrics: &Arc<Mutex<StreamMetrics>>,
     ) -> bool {
         loop {
             let start = Instant::now();
             let batch_or_err = recordbatches.next().in_current_span().await;
-            metrics.fetch_content_duration += start.elapsed();
+            metrics.lock().unwrap().fetch_content_duration += start.elapsed();
             let Some(batch_or_err) = batch_or_err else {
                 break;
             };
@@ -239,9 +288,12 @@ impl CoalescingBatcher {
             };
             let batch_rows = recordbatch.num_rows();
             let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
-            metrics.total_rows += batch_rows;
-            metrics.record_batch_count += 1;
-            metrics.total_bytes += batch_bytes;
+            {
+                let mut metrics = metrics.lock().unwrap();
+                metrics.total_rows += batch_rows;
+                metrics.record_batch_count += 1;
+                metrics.total_bytes += batch_bytes;
+            }
 
             // The first batch is forwarded immediately, and any batch that is
             // already at or over a budget on its own passes through as a
@@ -259,7 +311,11 @@ impl CoalescingBatcher {
                     warn!(e; "stop sending Flight data");
                     return false;
                 }
-                metrics.send_record_batch_duration += start.elapsed();
+                {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.send_record_batch_duration += start.elapsed();
+                    metrics.groups_sent += 1;
+                }
                 self.sent_first_batch = true;
                 continue;
             }
@@ -276,16 +332,19 @@ impl CoalescingBatcher {
             while !should_flush {
                 let start = Instant::now();
                 let next = poll_fn(|cx| Poll::Ready(recordbatches.as_mut().poll_next(cx))).await;
-                metrics.fetch_content_duration += start.elapsed();
+                metrics.lock().unwrap().fetch_content_duration += start.elapsed();
                 match next {
                     Poll::Ready(Some(Ok(recordbatch))) => {
                         // Every fetched batch is counted exactly once here,
                         // including a batch that is held back below.
                         let batch_rows = recordbatch.num_rows();
                         let batch_bytes = recordbatch.df_record_batch().get_array_memory_size();
-                        metrics.total_rows += batch_rows;
-                        metrics.record_batch_count += 1;
-                        metrics.total_bytes += batch_bytes;
+                        {
+                            let mut metrics = metrics.lock().unwrap();
+                            metrics.total_rows += batch_rows;
+                            metrics.record_batch_count += 1;
+                            metrics.total_bytes += batch_bytes;
+                        }
                         if BatchAccumulator::reaches_budget(batch_rows, batch_bytes) {
                             // The batch is at or over a budget on its own: flush
                             // the accumulated group first, then forward it as its
@@ -309,15 +368,20 @@ impl CoalescingBatcher {
             }
 
             let mut batches = self.acc.drain();
-            if batches.len() >= 2
-                && let Ok(merged) = merge_record_batches(self.recordbatch_schema.clone(), &batches)
-            {
-                // Reuse the buffer in place: the source batches are dropped here
-                // (and their memory released) instead of staying alive across the
-                // send loop below, which may block on backpressure.
-                batches.clear();
-                batches.push(merged);
+            if batches.len() >= 2 {
+                let start = Instant::now();
+                if let Ok(merged) = merge_record_batches(self.recordbatch_schema.clone(), &batches)
+                {
+                    // Reuse the buffer in place: the source batches are dropped here
+                    // (and their memory released) instead of staying alive across the
+                    // send loop below, which may block on backpressure.
+                    batches.clear();
+                    batches.push(merged);
+                }
+                metrics.lock().unwrap().merge_duration += start.elapsed();
             }
+            // One message per group: a merged group counts once, and the group is
+            // sent as it is when merging is not applicable.
             for recordbatch in batches {
                 let start = Instant::now();
                 if let Err(e) = tx
@@ -329,7 +393,11 @@ impl CoalescingBatcher {
                     warn!(e; "stop sending Flight data");
                     return false;
                 }
-                metrics.send_record_batch_duration += start.elapsed();
+                {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.send_record_batch_duration += start.elapsed();
+                    metrics.groups_sent += 1;
+                }
             }
             // A batch encountered inside the group that is itself at or over a
             // budget was held back: the accumulated group has been flushed and
@@ -347,7 +415,11 @@ impl CoalescingBatcher {
                     warn!(e; "stop sending Flight data");
                     return false;
                 }
-                metrics.send_record_batch_duration += start.elapsed();
+                {
+                    let mut metrics = metrics.lock().unwrap();
+                    metrics.send_record_batch_duration += start.elapsed();
+                    metrics.groups_sent += 1;
+                }
             }
             if let Some(e) = stream_error {
                 if e.status_code().should_log_error() {
@@ -375,27 +447,30 @@ pub struct FlightRecordBatchStream {
     done: bool,
     encoder: FlightEncoder,
     buffer: VecDeque<FlightData>,
+    /// Collector shared with the producer task: encoding (and thus the
+    /// encoder-side metrics) happens on this side of the channel.
+    metrics: Arc<Mutex<StreamMetrics>>,
 }
 
 impl FlightRecordBatchStream {
     async fn send_metrics(
         tx: &mut Sender<TonicResult<FlightMessage>>,
-        metrics: &mut StreamMetrics,
+        metrics: &Arc<Mutex<StreamMetrics>>,
         metrics_str: String,
     ) -> bool {
-        metrics.metrics_count += 1;
+        metrics.lock().unwrap().metrics_count += 1;
         let start = Instant::now();
         if let Err(e) = tx.send(Ok(FlightMessage::Metrics(metrics_str))).await {
             warn!(e; "stop sending Flight data");
             return false;
         }
-        metrics.send_metrics_duration += start.elapsed();
+        metrics.lock().unwrap().send_metrics_duration += start.elapsed();
         true
     }
 
     async fn send_metrics_if_changed(
         tx: &mut Sender<TonicResult<FlightMessage>>,
-        metrics: &mut StreamMetrics,
+        metrics: &Arc<Mutex<StreamMetrics>>,
         last_metrics_str: &mut Option<String>,
         metrics_str: String,
     ) -> bool {
@@ -427,6 +502,12 @@ impl FlightRecordBatchStream {
             FlightRecordBatchStreamInput::Initializer(_) => "initializer",
         };
         let initializer_tracing_context = tracing_context.clone();
+        // The collector is shared with the producer task so that the summary can
+        // also cover the encoder-side values; it logs once its last handle is
+        // dropped. Logging stays gated on the same verbose flag as before, which
+        // only applies to the record-batch path and is set when that path starts.
+        let metrics = StreamMetrics::shared();
+        let producer_metrics = metrics.clone();
         let join_handle = common_runtime::spawn_global(
             async move {
                 let source = async move {
@@ -459,6 +540,7 @@ impl FlightRecordBatchStream {
                         Self::flight_data_stream(
                             recordbatches,
                             tx,
+                            producer_metrics,
                             should_send_partial_metrics,
                             can_send_metrics_before_batch,
                         )
@@ -487,16 +569,20 @@ impl FlightRecordBatchStream {
             done: false,
             encoder,
             buffer: VecDeque::new(),
+            metrics,
         }
     }
 
     async fn flight_data_stream(
         mut recordbatches: SendableRecordBatchStream,
         mut tx: Sender<TonicResult<FlightMessage>>,
+        metrics: Arc<Mutex<StreamMetrics>>,
         should_send_partial_metrics: bool,
         can_send_metrics_before_batch: bool,
     ) {
-        let mut metrics = StreamMetrics::new(should_send_partial_metrics);
+        // Same logging condition as before the collector was shared: the summary
+        // is emitted only for verbose (per-batch metrics) record-batch responses.
+        metrics.lock().unwrap().should_log = should_send_partial_metrics;
         let mut last_metrics_str = None;
         let recordbatch_schema = recordbatches.schema();
         let schema = recordbatch_schema.arrow_schema().clone();
@@ -505,7 +591,7 @@ impl FlightRecordBatchStream {
             warn!(e; "stop sending Flight data");
             return;
         }
-        metrics.send_schema_duration += start.elapsed();
+        metrics.lock().unwrap().send_schema_duration += start.elapsed();
 
         // Each path reports whether it reached normal EOF. On any error or failed
         // send the path stops early and the final-metrics tail must be skipped:
@@ -514,14 +600,14 @@ impl FlightRecordBatchStream {
             Self::verbose_metrics_stream(
                 &mut recordbatches,
                 &mut tx,
-                &mut metrics,
+                &metrics,
                 &mut last_metrics_str,
                 can_send_metrics_before_batch,
             )
             .await
         } else {
             CoalescingBatcher::new(recordbatch_schema.clone())
-                .run(&mut recordbatches, &mut tx, &mut metrics)
+                .run(&mut recordbatches, &mut tx, &metrics)
                 .await
         };
         if !reached_eof {
@@ -533,7 +619,7 @@ impl FlightRecordBatchStream {
             .metrics()
             .and_then(|m| serde_json::to_string(&m).ok())
         {
-            let _ = Self::send_metrics(&mut tx, &mut metrics, metrics_str).await;
+            let _ = Self::send_metrics(&mut tx, &metrics, metrics_str).await;
         }
     }
 
@@ -544,7 +630,7 @@ impl FlightRecordBatchStream {
     async fn verbose_metrics_stream(
         recordbatches: &mut SendableRecordBatchStream,
         tx: &mut Sender<TonicResult<FlightMessage>>,
-        metrics: &mut StreamMetrics,
+        metrics: &Arc<Mutex<StreamMetrics>>,
         last_metrics_str: &mut Option<String>,
         can_send_metrics_before_batch: bool,
     ) -> bool {
@@ -572,22 +658,26 @@ impl FlightRecordBatchStream {
                         {
                             return false;
                         }
-                        metrics.fetch_content_duration += start.elapsed();
+                        metrics.lock().unwrap().fetch_content_duration += start.elapsed();
                         continue;
                     }
                 }
             } else {
                 recordbatches.next().in_current_span().await
             };
-            metrics.fetch_content_duration += start.elapsed();
+            metrics.lock().unwrap().fetch_content_duration += start.elapsed();
             let Some(batch_or_err) = batch_or_err else {
                 break;
             };
             match batch_or_err {
                 Ok(recordbatch) => {
-                    metrics.total_rows += recordbatch.num_rows();
-                    metrics.record_batch_count += 1;
-                    metrics.total_bytes += recordbatch.df_record_batch().get_array_memory_size();
+                    {
+                        let mut metrics = metrics.lock().unwrap();
+                        metrics.total_rows += recordbatch.num_rows();
+                        metrics.record_batch_count += 1;
+                        metrics.total_bytes +=
+                            recordbatch.df_record_batch().get_array_memory_size();
+                    }
                     let start = Instant::now();
                     if let Err(e) = tx
                         .send(Ok(FlightMessage::RecordBatch(
@@ -598,7 +688,11 @@ impl FlightRecordBatchStream {
                         warn!(e; "stop sending Flight data");
                         return false;
                     }
-                    metrics.send_record_batch_duration += start.elapsed();
+                    {
+                        let mut metrics = metrics.lock().unwrap();
+                        metrics.send_record_batch_duration += start.elapsed();
+                        metrics.groups_sent += 1;
+                    }
                     if let Some(metrics_str) = recordbatches
                         .metrics()
                         .and_then(|m| serde_json::to_string(&m).ok())
@@ -651,7 +745,21 @@ impl Stream for FlightRecordBatchStream {
                 }
                 Poll::Ready(Some(result)) => match result {
                     Ok(flight_message) => {
-                        let mut iter = this.encoder.encode(flight_message).into_iter();
+                        let start = Instant::now();
+                        let frames = this.encoder.encode(flight_message);
+                        let elapsed = start.elapsed();
+                        {
+                            // Encoding runs on the consumer side, so the
+                            // encoder-side values are recorded on the shared
+                            // collector here. The guard is released before the
+                            // frames are handed out and (possibly) buffered.
+                            let mut metrics = this.metrics.lock().unwrap();
+                            metrics.encode_duration += elapsed;
+                            metrics.flight_frames += frames.len();
+                            metrics.encoded_bytes +=
+                                frames.iter().map(encoded_frame_bytes).sum::<usize>();
+                        }
+                        let mut iter = frames.into_iter();
                         let Some(first) = iter.next() else {
                             // Safety: `iter` on a type of `Vec1`, which is guaranteed to have
                             // at least one element.
@@ -944,9 +1052,11 @@ mod test {
         // send, where the upstream poll count is observable (an implementation
         // that polled the source again before sending would have counted 2).
         let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let metrics = StreamMetrics::shared();
         let handle = tokio::spawn(FlightRecordBatchStream::flight_data_stream(
             recordbatches,
             tx,
+            metrics,
             false,
             false,
         ));
@@ -1008,6 +1118,58 @@ mod test {
         assert_eq!(merged.num_rows(), 2);
     }
 
+    /// The coalescing path must report what it actually sent: how many groups
+    /// (one message per group), how many frames were encoded and how many bytes
+    /// those frames carry, plus the time spent merging and encoding.
+    #[tokio::test]
+    async fn test_coalescing_path_reports_groups_frames_and_encoding() {
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        // The first batch is forwarded as a singleton; the two remaining
+        // under-budget batches are coalesced into one group that is merged at EOF.
+        let recordbatches: SendableRecordBatchStream = Box::pin(ScriptedBatchStream {
+            schema: schema.clone(),
+            items: VecDeque::from([
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [1]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [2]))),
+                ScriptedItem::Batch(Ok(int_batch(schema.clone(), [3]))),
+            ]),
+            poll_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        });
+        let mut stream = FlightRecordBatchStream::new(
+            FlightRecordBatchStreamInput::ready(FlightRecordBatchSource::RecordBatches(
+                recordbatches,
+            )),
+            TracingContext::default(),
+            FlightCompression::default(),
+            QueryContext::arc(),
+        );
+
+        let mut frames = 0;
+        while let Some(result) = stream.next().await {
+            result.unwrap();
+            frames += 1;
+        }
+
+        let metrics = stream.metrics.lock().unwrap();
+        assert_eq!(metrics.record_batch_count, 3);
+        assert_eq!(
+            metrics.groups_sent, 2,
+            "the first batch is a singleton, the two other batches form one merged group"
+        );
+        assert_eq!(
+            metrics.flight_frames, frames,
+            "every encoded frame must be counted exactly once"
+        );
+        assert!(metrics.flight_frames >= 3);
+        assert!(metrics.encoded_bytes > 0);
+        assert!(metrics.merge_duration > Duration::ZERO);
+        assert!(metrics.encode_duration > Duration::ZERO);
+    }
+
     /// Regression test: after a successful merge the original source batches are
     /// dropped before the merged group is sent, so their memory is not held across
     /// a backpressured send.
@@ -1052,9 +1214,11 @@ mod test {
             poll_count: poll_count.clone(),
         });
         let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let metrics = StreamMetrics::shared();
         let handle = tokio::spawn(FlightRecordBatchStream::flight_data_stream(
             recordbatches,
             tx,
+            metrics,
             false,
             false,
         ));
@@ -1107,9 +1271,11 @@ mod test {
             poll_count: poll_count.clone(),
         });
         let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(1);
+        let metrics = StreamMetrics::shared();
         let handle = tokio::spawn(FlightRecordBatchStream::flight_data_stream(
             recordbatches,
             tx,
+            metrics,
             false,
             false,
         ));
@@ -1361,7 +1527,8 @@ mod test {
         let (tx, mut rx) = mpsc::channel::<TonicResult<FlightMessage>>(8);
         // should_send_partial_metrics = true selects the verbose path;
         // can_send_metrics_before_batch = false disables the heartbeat arm.
-        FlightRecordBatchStream::flight_data_stream(recordbatches, tx, true, false).await;
+        let metrics = StreamMetrics::shared();
+        FlightRecordBatchStream::flight_data_stream(recordbatches, tx, metrics, true, false).await;
         // Producer fully returned. Exactly one metrics() call (the per-batch one).
         // If the error path fell through to the EOF final-metrics tail, this
         // would be 2.
