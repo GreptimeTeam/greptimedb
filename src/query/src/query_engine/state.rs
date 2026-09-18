@@ -68,7 +68,7 @@ use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
-use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
+use crate::optimizer::json_type_concretize::{JsonTypeConcretizeRule, JsonTypeHintRule};
 use crate::optimizer::parallelize_scan::ParallelizeScan;
 use crate::optimizer::pass_distribution::PassDistribution;
 use crate::optimizer::promql_tsid_narrow_join::PromqlTsidNarrowJoin;
@@ -210,6 +210,7 @@ impl QueryEngineState {
         );
 
         if with_dist_planner {
+            analyzer.rules.push(Arc::new(JsonTypeHintRule));
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
