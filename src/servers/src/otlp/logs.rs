@@ -581,12 +581,28 @@ fn decide_column_schema_and_convert_value(
             key: column_name,
         }
         .fail(),
-        JsonbValue::Binary(_)
-        | JsonbValue::Date(_)
-        | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_)
-        | JsonbValue::Interval(_) => UnsupportedJsonDataTypeForTagSnafu {
-            ty: "JSONB extension".to_string(),
+        JsonbValue::Binary(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Binary".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Date(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Date".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Timestamp(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Timestamp".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::TimestampTz(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "TimestampTz".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Interval(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Interval".to_string(),
             key: column_name,
         }
         .fail(),
@@ -687,12 +703,28 @@ fn jsonb_value_to_log_value_data(
             key: column_name,
         }
         .fail(),
-        JsonbValue::Binary(_)
-        | JsonbValue::Date(_)
-        | JsonbValue::Timestamp(_)
-        | JsonbValue::TimestampTz(_)
-        | JsonbValue::Interval(_) => UnsupportedJsonDataTypeForTagSnafu {
-            ty: "JSONB extension".to_string(),
+        JsonbValue::Binary(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Binary".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Date(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Date".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Timestamp(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Timestamp".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::TimestampTz(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "TimestampTz".to_string(),
+            key: column_name,
+        }
+        .fail(),
+        JsonbValue::Interval(_) => UnsupportedJsonDataTypeForTagSnafu {
+            ty: "Interval".to_string(),
             key: column_name,
         }
         .fail(),
@@ -1518,18 +1550,47 @@ mod tests {
 
     #[test]
     fn test_jsonb_extended_log_values_rejected() {
-        for value in [
-            JsonbValue::Number(JsonbNumber::Decimal64(jsonb::Decimal64 {
-                value: 123,
-                scale: 2,
-            })),
-            JsonbValue::Binary(&[1, 2, 3]),
+        for (value, expected_type) in [
+            (
+                JsonbValue::Number(JsonbNumber::Decimal64(jsonb::Decimal64 {
+                    value: 123,
+                    scale: 2,
+                })),
+                "DECIMAL",
+            ),
+            (JsonbValue::Binary(&[1, 2, 3]), "Binary"),
+            (JsonbValue::Date(jsonb::Date { value: 0 }), "Date"),
+            (
+                JsonbValue::Timestamp(jsonb::Timestamp { value: 0 }),
+                "Timestamp",
+            ),
+            (
+                JsonbValue::TimestampTz(jsonb::TimestampTz {
+                    value: 0,
+                    offset: 0,
+                }),
+                "TimestampTz",
+            ),
+            (
+                JsonbValue::Interval(jsonb::Interval {
+                    months: 0,
+                    days: 0,
+                    micros: 0,
+                }),
+                "Interval",
+            ),
         ] {
-            assert!(
+            let schema_error =
                 decide_column_schema_and_convert_value("attr", value.clone(), None, "logs")
-                    .is_err()
-            );
-            assert!(jsonb_value_to_log_value_data("attr", value, true).is_err());
+                    .expect_err("extended JSONB type must be rejected");
+            let value_error = jsonb_value_to_log_value_data("attr", value, true)
+                .expect_err("extended JSONB type must be rejected");
+            for error in [schema_error, value_error] {
+                assert!(matches!(error,
+                    Error::UnsupportedJsonDataTypeForTag { key, ty, .. }
+                        if key == "attr" && ty == expected_type
+                ));
+            }
         }
     }
 
