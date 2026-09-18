@@ -482,7 +482,7 @@ impl SeriesScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_budget() {
+        if self.stream_ctx.input.uses_scan_memory_limit() {
             return Ok(());
         }
         // Sum the total number of files across all partitions

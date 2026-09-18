@@ -1071,7 +1071,7 @@ async fn test_max_concurrent_scan_files() {
 }
 
 #[tokio::test]
-async fn test_scan_memory_budget_small_files() {
+async fn test_scan_memory_limit_small_legacy_files() {
     test_max_concurrent_scan_files_with_format(false, true).await;
     test_max_concurrent_scan_files_with_format(true, true).await;
 }
@@ -1081,7 +1081,7 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
     let config = MitoConfig {
         default_flat_format: flat_format,
         max_concurrent_scan_files: 2,
-        experimental_scan_memory_budget: if estimated {
+        scan_memory_limit: if estimated {
             common_base::memory_limit::MemoryLimit::Size(ReadableSize::mb(1))
         } else {
             common_base::memory_limit::MemoryLimit::Unlimited
@@ -1112,6 +1112,31 @@ async fn test_max_concurrent_scan_files_with_format(flat_format: bool, estimated
     put_and_flush(0, 4).await;
     put_and_flush(3, 7).await;
     put_and_flush(6, 9).await;
+
+    if estimated {
+        // Simulate SSTs created before the manifest recorded row-group sizes.
+        let region = engine.get_region(region_id).unwrap();
+        let version = region.version_control.current().version;
+        let legacy_files = version
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .map(|file| {
+                let mut meta = file.meta_ref().clone();
+                meta.max_row_group_uncompressed_size = 0;
+                meta
+            })
+            .collect::<Vec<_>>();
+        let version = crate::region::version::VersionBuilder::from_version(version)
+            .clear_files()
+            .add_files(
+                Arc::new(crate::sst::file_purger::NoopFilePurger),
+                legacy_files.into_iter(),
+            )
+            .build();
+        region.version_control.overwrite_current(Arc::new(version));
+    }
 
     let request = ScanRequest::default();
     let scanner = engine.scanner(region_id, request).await.unwrap();

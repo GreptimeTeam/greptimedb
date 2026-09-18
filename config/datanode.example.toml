@@ -621,25 +621,24 @@ manifest_cache_size = "256MB"
 ## Buffer size for SST writing.
 sst_write_buffer_size = "8MB"
 
-## Maximum number of SST files to scan concurrently when estimated memory protection
-## is disabled or selected SSTs lack row-group size metadata.
+## Maximum number of SST files to scan concurrently when the memory limit is disabled
+## or a scan includes extension sources not covered by row-group accounting.
 max_concurrent_scan_files = 384
 
 ## Whether to allow stale WAL entries read during replay.
 allow_stale_entries = false
 
-## Memory limit for table scans across all queries.
-## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
-## Setting it to 0 or "unlimited" disables the limit.
-scan_memory_limit = "unlimited"
-
-## Estimated SST decoding memory budget shared across queries and regions.
+## Memory limit for table scans across all queries and regions.
 ## Defaults to 25% of cgroup memory, or host memory when no cgroup limit is available.
-## Supports absolute sizes (e.g., "2GB") or percentages. Exhaustion fails immediately.
-## Independent of scan_memory_limit and scan_memory_on_exhausted; this is an estimate,
-## not a limit on total process memory. Missing SST metadata uses existing file-count checks.
-## Setting 0 or "unlimited" restores existing file-count checks for all scans.
-experimental_scan_memory_budget = "25%"
+## Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "20%").
+## Setting it to 0 or "unlimited" disables the limit and restores file-count checks.
+scan_memory_limit = "25%"
+
+## Memory accounting mode: "basic" (default) counts projected Parquet columns'
+## uncompressed row-group sizes while decoding, including files from older versions.
+## "extended" also counts cumulative streamed batches until stream drop and live
+## series-merge buffers, all against the same limit. Neither mode measures total process memory.
+scan_memory_mode = "basic"
 
 ## Controls what happens when a scan cannot get memory immediately.
 ## "fail" (default) fails fast and is the recommended option for most users.
@@ -647,6 +646,7 @@ experimental_scan_memory_budget = "25%"
 ## for advanced tuning in bursty workloads where temporary contention is common and
 ## higher latency is acceptable.
 ## "wait" means "wait(10s)", not unlimited waiting.
+## Series-merge buffer allocations always fail immediately when the quota is exhausted.
 scan_memory_on_exhausted = "fail"
 
 ## Minimum time interval between two compactions.
