@@ -400,7 +400,7 @@ pub enum Error {
         location: Location,
     },
 
-    /// Temporary until the object store WAL read and write operations are implemented.
+    /// The requested operation is not implemented by the object store WAL.
     #[snafu(display("Object store WAL operation is not supported yet"))]
     UnsupportedObjectStoreWalOperation {
         #[snafu(implicit)]

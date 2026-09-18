@@ -74,18 +74,25 @@ impl fmt::Debug for ObjectStoreLogStore {
 }
 
 impl ObjectStoreLogStore {
-    /// Builds the store over the objects under the prefix of `config`,
+    /// Builds the store under the node and generation prefix derived from `config`,
     /// recovering the catalog from the objects that already exist. Recovery
     /// fails on the first corrupted or conflicting object.
     pub(crate) async fn try_new(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
+        node_id: u64,
+        generation: u64,
     ) -> Result<Arc<Self>> {
-        let io = ObjectStoreIo::new(object_store, &config.prefix)?;
-        Self::open(Arc::new(io), config).await
+        let prefix = config.node_prefix(node_id, generation);
+        let io = ObjectStoreIo::new(object_store, &prefix)?;
+        Self::open(Arc::new(io), config, prefix).await
     }
 
-    async fn open(io: Arc<dyn WalObjectIo>, config: &ObjectStoreWalConfig) -> Result<Arc<Self>> {
+    async fn open(
+        io: Arc<dyn WalObjectIo>,
+        config: &ObjectStoreWalConfig,
+        prefix: String,
+    ) -> Result<Arc<Self>> {
         ensure!(
             config.flush_interval >= MIN_FLUSH_INTERVAL,
             InvalidWalObjectStoreSnafu {
@@ -112,7 +119,7 @@ impl ObjectStoreLogStore {
         };
         common_runtime::spawn_global(actor.run());
         Ok(Arc::new(Self {
-            prefix: config.prefix.clone(),
+            prefix,
             io,
             catalog,
             terminal_error,
@@ -507,7 +514,7 @@ mod tests {
         FOOTER_ENTRY_LEN, Header, Record, decode_object, encode_object,
     };
 
-    const PREFIX: &str = "datanodes/1/epochs/2";
+    const PREFIX: &str = "wal/datanodes/1/epochs/2";
     const WAIT: Duration = Duration::from_secs(30);
 
     fn memory_store() -> ObjectStore {
@@ -517,7 +524,6 @@ mod tests {
     fn config(flush_interval: Duration, max_batch_bytes: u64) -> ObjectStoreWalConfig {
         ObjectStoreWalConfig {
             storage_provider: String::new(),
-            prefix: PREFIX.to_string(),
             flush_interval,
             max_batch_bytes: ReadableSize(max_batch_bytes),
             ..Default::default()
@@ -532,7 +538,7 @@ mod tests {
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
     ) -> Arc<ObjectStoreLogStore> {
-        ObjectStoreLogStore::try_new(object_store, config)
+        ObjectStoreLogStore::try_new(object_store, config, 1, 2)
             .await
             .unwrap()
     }
@@ -563,7 +569,7 @@ mod tests {
                 ..config(Duration::from_secs(1), 1)
             },
         ] {
-            let error = ObjectStoreLogStore::try_new(memory_store(), &config)
+            let error = ObjectStoreLogStore::try_new(memory_store(), &config, 1, 2)
                 .await
                 .err()
                 .unwrap();
@@ -571,6 +577,67 @@ mod tests {
                 matches!(error, Error::InvalidWalObjectStore { .. }),
                 "unexpected error for {config:?}: {error:?}"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_recovers_only_its_node_and_generation() {
+        let object_store = memory_store();
+        let config = ObjectStoreWalConfig::default();
+        let identities = [(1, 2), (3, 2), (1, 4)];
+        for (index, (node_id, generation)) in identities.iter().enumerate() {
+            let encoded = encode_object(
+                Header {
+                    object_seq: 0,
+                    writer_instance: [0; 16],
+                },
+                &[Record {
+                    region_id: region(1),
+                    entry_id: index as u64 + 1,
+                    payload: Bytes::from_static(b"entry"),
+                }],
+            )
+            .unwrap();
+            ObjectStoreIo::new(
+                object_store.clone(),
+                config.node_prefix(*node_id, *generation),
+            )
+            .unwrap()
+            .put_if_absent(0, encoded.bytes)
+            .await
+            .unwrap();
+        }
+        // A root-level object must not be part of any node's recovery.
+        let root_io = ObjectStoreIo::new(object_store.clone(), &config.prefix).unwrap();
+        root_io
+            .put_if_absent(0, Bytes::from_static(b"invalid"))
+            .await
+            .unwrap();
+        for (index, (node_id, generation)) in identities.iter().enumerate() {
+            let store =
+                ObjectStoreLogStore::try_new(object_store.clone(), &config, *node_id, *generation)
+                    .await
+                    .unwrap();
+            for (other_index, (other_node, other_generation)) in identities.iter().enumerate() {
+                let provider = Provider::object_store_provider(
+                    region(1),
+                    config.node_prefix(*other_node, *other_generation),
+                );
+                if index == other_index {
+                    assert_eq!(store.latest_entry_id(&provider).unwrap(), index as u64 + 1);
+                } else {
+                    assert!(matches!(
+                        store.latest_entry_id(&provider),
+                        Err(Error::MismatchedWalPrefix { .. })
+                    ));
+                }
+            }
+            let root_provider = Provider::object_store_provider(region(1), config.prefix.clone());
+            assert!(matches!(
+                store.latest_entry_id(&root_provider),
+                Err(Error::MismatchedWalPrefix { .. })
+            ));
+            store.stop().await.unwrap();
         }
     }
 
@@ -748,7 +815,7 @@ mod tests {
             let path = object_path(&object_store, 1);
             corrupt_object(&object_store, &path, *corrupt).await;
 
-            let error = ObjectStoreLogStore::try_new(object_store, &eager())
+            let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
                 .await
                 .unwrap_err();
             assert_invalid_object(&error, &path, reason);
@@ -773,7 +840,7 @@ mod tests {
         .unwrap();
         io.put_if_absent(5, encoded.bytes).await.unwrap();
 
-        let error = ObjectStoreLogStore::try_new(object_store, &eager())
+        let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
             .await
             .unwrap_err();
         assert_invalid_object(
@@ -833,7 +900,7 @@ mod tests {
             })
             .await;
 
-            let error = ObjectStoreLogStore::try_new(object_store.clone(), &eager())
+            let error = ObjectStoreLogStore::try_new(object_store.clone(), &eager(), 1, 2)
                 .await
                 .unwrap_err();
             assert_invalid_object(&error, &path, reason);
@@ -965,7 +1032,7 @@ mod tests {
         for (object_seq, entry_id) in [(u64::MAX, 1), (OBJECT_SEQ_LIMIT - 1, 1), (0, u64::MAX)] {
             let object_store = memory_store();
             put_object(&object_store, object_seq, region(1), &[entry_id]).await;
-            let error = ObjectStoreLogStore::try_new(object_store, &eager())
+            let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
                 .await
                 .unwrap_err();
             assert!(
@@ -981,7 +1048,7 @@ mod tests {
             let object_store = memory_store();
             put_object(&object_store, 0, region(1), &[1, 2]).await;
             put_object(&object_store, 1, region(1), &entries).await;
-            let error = ObjectStoreLogStore::try_new(object_store.clone(), &eager())
+            let error = ObjectStoreLogStore::try_new(object_store.clone(), &eager(), 1, 2)
                 .await
                 .unwrap_err();
             assert_invalid_object(&error, &object_path(&object_store, 1), "entry");
@@ -1125,7 +1192,9 @@ mod tests {
         let (io, mut parked) = ParkedIo::over(object_store.clone());
         let fetch = {
             let io = io.clone();
-            tokio::spawn(async move { ObjectStoreLogStore::open(io, &eager()).await })
+            tokio::spawn(async move {
+                ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await
+            })
         };
         let mut wave = Vec::new();
         for _ in 0..RECOVERY_CONCURRENCY {
@@ -1166,7 +1235,9 @@ mod tests {
         corrupt_object(&object_store, &path, |bytes| bytes[HEADER_LEN + 20] ^= 1).await;
         let (io, reads) = RecordingIo::over(object_store);
         let object = io.list().await.unwrap().remove(0);
-        let store = ObjectStoreLogStore::open(io, &eager()).await.unwrap();
+        let store = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+            .await
+            .unwrap();
         assert_eq!(1, latest(&store, region(1)));
         let mut reads = reads.lock().unwrap().clone();
         reads.sort_unstable();
