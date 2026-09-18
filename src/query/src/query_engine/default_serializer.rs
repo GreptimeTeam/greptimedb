@@ -516,7 +516,6 @@ mod tests {
     use common_time::Timezone;
     use datafusion::catalog::TableProvider;
     use datafusion::datasource::MemTable;
-    use datafusion::functions::datetime::to_char::ToCharFunc;
     use datafusion::logical_expr::Extension;
     use datafusion_expr::expr::{Cast, ScalarFunction};
     use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, ScalarUDF, col, lit};
@@ -1067,10 +1066,10 @@ mod tests {
 
         let udf = &udfs[0];
         assert_eq!(udf.name(), "date_format", "got: {plan}");
-        assert!(
-            udf.inner().as_any().downcast_ref::<ToCharFunc>().is_none(),
-            "`date_format` is bound to the built-in `to_char` of DataFusion: {plan}"
-        );
+        // The built-in `to_char` of DataFusion declares `date_format` as an alias, so a plan
+        // where `date_format` was bound to it holds a `to_char` function (rendered
+        // `to_char(...) AS date_format(...)` by the substrait encoder). Its instance can never
+        // equal the implementation of GreptimeDB, which the assertion below checks.
         assert_eq!(
             udf.as_ref(),
             greptime_date_format_udf(query_ctx).as_ref(),
