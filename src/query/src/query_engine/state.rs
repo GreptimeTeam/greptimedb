@@ -67,7 +67,7 @@ use crate::optimizer::count_nest_aggr::CountNestAggrRule;
 use crate::optimizer::count_wildcard::CountWildcardToTimeIndexRule;
 use crate::optimizer::enforce_sorting::EnforceSorting;
 use crate::optimizer::global_limit::EnsureGlobalLimitForFetch;
-use crate::optimizer::json_get_result_type::JsonGetResultTypeRule;
+use crate::optimizer::json_get_type_hint::JsonGetTypeHintRule;
 use crate::optimizer::json_schema_concretize::JsonSchemaConcretizeRule;
 use crate::optimizer::json_type_concretize::JsonTypeConcretizeRule;
 use crate::optimizer::parallelize_scan::ParallelizeScan;
@@ -209,7 +209,7 @@ impl QueryEngineState {
                 FUNCTION_REGISTRY.function_rewrites(),
             )),
         );
-        analyzer.rules.push(Arc::new(JsonGetResultTypeRule));
+        analyzer.rules.push(Arc::new(JsonGetTypeHintRule));
 
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));

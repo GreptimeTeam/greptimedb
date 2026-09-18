@@ -12,16 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Concretizes the result-type argument of JSON2 `json_get` expressions.
+//! Applies JSON2 type hints to `json_get` expressions.
 //!
-//! This rule runs before distributed planning so remote plans carry explicit result types. A
-//! matching JSON2 type hint is used; otherwise it injects `STRING`. Existing explicit result
-//! types are preserved.
+//! This rule runs before distributed planning so remote plans carry matching JSON2 type hints.
+//! Existing explicit result types are preserved.
 
 use std::collections::HashMap;
 
 use arrow_schema::extension::ExtensionType;
-use common_function::scalars::json::json_get::JsonGetWithType;
+use common_function::scalars::json::json_get::{JsonGetWithType, parse_json_get_path};
 use datafusion::config::ConfigOptions;
 use datafusion::datasource::DefaultTableSource;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -34,28 +33,29 @@ use datatypes::extension::json::{
 };
 use datatypes::json::JsonSettings;
 use datatypes::types::json_type::JsonNativeType;
+use jsonb::jsonpath::Path;
 
-/// Makes the result type of untyped JSON2 `json_get` expressions explicit.
+/// Applies JSON2 type hints to untyped `json_get` expressions.
 #[derive(Debug)]
-pub(crate) struct JsonGetResultTypeRule;
+pub(crate) struct JsonGetTypeHintRule;
 
-impl AnalyzerRule for JsonGetResultTypeRule {
+impl AnalyzerRule for JsonGetTypeHintRule {
     fn analyze(&self, plan: LogicalPlan, _config: &ConfigOptions) -> Result<LogicalPlan> {
-        inject_json_get_result_types(plan).map(|transformed| transformed.data)
+        inject_json_get_type_hints(plan).map(|transformed| transformed.data)
     }
 
     fn name(&self) -> &str {
-        "JsonGetResultTypeRule"
+        "JsonGetTypeHintRule"
     }
 }
 
-/// Adds the result-type argument to untyped JSON2 path accesses.
+/// Adds matching JSON2 type hints to untyped path accesses.
 ///
 /// The third `json_get` argument is the expression result type as well as the storage read type.
 /// Never replace an existing argument: it represents an explicit SQL cast (or another prior type
-/// coercion) and must take precedence over a JSON2 type hint. A path without a matching hint uses
-/// `STRING`.
-pub(crate) fn inject_json_get_result_types(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
+/// coercion) and must take precedence over a JSON2 type hint. Paths without a matching hint remain
+/// untyped so expression planning can infer their type from context.
+pub(crate) fn inject_json_get_type_hints(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
     let json_type_hints = collect_json_type_hints(&plan)?;
     plan.transform_up(|plan| {
         let mut changed = false;
@@ -81,11 +81,10 @@ pub(crate) fn inject_json_get_result_types(plan: LogicalPlan) -> Result<Transfor
                     let Some(path) = json_get_path(function) else {
                         return Ok(Transformed::no(expr));
                     };
-                    if !json_type_hints.contains_key(&column.name) {
+                    let Some(json_type) = json_type_from_hint(&json_type_hints, &column.name, path)
+                    else {
                         return Ok(Transformed::no(expr));
-                    }
-                    let json_type = json_type_from_hint(&json_type_hints, &column.name, path)
-                        .unwrap_or(JsonNativeType::String);
+                    };
 
                     let type_arg = ScalarValue::try_new_null(&json_type.as_arrow_type())?;
                     function.args.push(Expr::Literal(type_arg, None));
@@ -154,15 +153,28 @@ pub(crate) fn json_type_from_hint(
     column: &str,
     path: &str,
 ) -> Option<JsonNativeType> {
-    if path.contains('[') {
-        return None;
+    let path = parse_json_get_path(path).ok()?;
+    let mut segments = Vec::with_capacity(path.paths.len());
+    for segment in path.paths {
+        match segment {
+            Path::Root => {}
+            Path::DotField(name) | Path::ColonField(name) | Path::ObjectField(name) => {
+                segments.push(name);
+            }
+            _ => return None,
+        }
     }
 
     json_type_hints.get(column).and_then(|settings| {
         settings
             .type_hints()
             .iter()
-            .find(|hint| hint.path.iter().map(String::as_str).eq(path.split('.')))
+            .find(|hint| {
+                hint.path
+                    .iter()
+                    .map(String::as_str)
+                    .eq(segments.iter().map(AsRef::as_ref))
+            })
             .map(|hint| JsonNativeType::from(&hint.data_type))
     })
 }
