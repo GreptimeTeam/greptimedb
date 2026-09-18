@@ -3,7 +3,8 @@ CREATE TABLE json2_type_hint_read_type (
     j JSON2 (
         a BIGINT,
         b STRING
-    )
+    ),
+    exponent DOUBLE
 ) WITH (
     'append_mode' = 'true'
 );
@@ -11,8 +12,8 @@ CREATE TABLE json2_type_hint_read_type (
 Affected Rows: 0
 
 INSERT INTO json2_type_hint_read_type VALUES
-    (1, '{"a":42,"b":"42"}'),
-    (2, '{"a":7,"b":"7"}');
+    (1, '{"a":42,"b":"42"}', 2),
+    (2, '{"a":7,"b":"7"}', 2);
 
 Affected Rows: 2
 
@@ -39,6 +40,23 @@ FROM json2_type_hint_read_type;
 |               |   MergeScanExec: REDACTED
 |               |                                                                                              |
 +---------------+----------------------------------------------------------------------------------------------+
+
+-- A matching JSON2 type hint must override function-context inference.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT coalesce(j.b, exponent) AS hinted_string
+FROM json2_type_hint_read_type;
+
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                        |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                             |
+|               | Projection: CASE WHEN CAST(json_get(json2_type_hint_read_type.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) IS NOT NULL THEN CAST(json_get(json2_type_hint_read_type.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) ELSE json2_type_hint_read_type.exponent END AS hinted_string |
+|               |   TableScan: json2_type_hint_read_type                                                                                                                                                                                                                                      |
+|               | ]]                                                                                                                                                                                                                                                                          |
+| physical_plan | CooperativeExec                                                                                                                                                                                                                                                             |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                                                             |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Uncast paths use their JSON2 type hints.
 SELECT
