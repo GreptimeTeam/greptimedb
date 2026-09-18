@@ -200,6 +200,11 @@ impl GreptimeDbCluster {
     }
 }
 
+/// Adjusts the options of a datanode of the cluster before the datanode is created, see
+/// [`GreptimeDbClusterBuilder::with_datanode_options_override`]. The first argument is the id of
+/// the datanode, so a test can vary the options per datanode.
+type DatanodeOptionsOverride = Box<dyn Fn(u64, &mut DatanodeOptions) + Send + Sync>;
+
 pub struct GreptimeDbClusterBuilder {
     cluster_name: String,
     kv_backend: KvBackendRef,
@@ -216,6 +221,7 @@ pub struct GreptimeDbClusterBuilder {
     local_file_access: LocalFileAccess,
     event_recorder_options: EventRecorderOptions,
     real_datanode_grpc_addr: bool,
+    datanode_options_override: Option<DatanodeOptionsOverride>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -253,6 +259,7 @@ impl GreptimeDbClusterBuilder {
             local_file_access: LocalFileAccess::default(),
             event_recorder_options: EventRecorderOptions::default(),
             real_datanode_grpc_addr: false,
+            datanode_options_override: None,
         }
     }
 
@@ -343,6 +350,20 @@ impl GreptimeDbClusterBuilder {
     #[must_use]
     pub fn with_real_datanode_grpc_addr(mut self, real_datanode_grpc_addr: bool) -> Self {
         self.real_datanode_grpc_addr = real_datanode_grpc_addr;
+        self
+    }
+
+    /// Adjusts the options of every datanode before the datanode is created, e.g. to set the
+    /// concurrency limit of the region server of the datanode (`max_concurrent_queries`).
+    ///
+    /// The hook runs after the id and the gRPC address of the datanode have been set, and it
+    /// receives the id of the datanode, so a test can vary the options per datanode.
+    #[must_use]
+    pub fn with_datanode_options_override(
+        mut self,
+        override_options: impl Fn(u64, &mut DatanodeOptions) + Send + Sync + 'static,
+    ) -> Self {
+        self.datanode_options_override = Some(Box::new(override_options));
         self
     }
 
@@ -488,6 +509,9 @@ impl GreptimeDbClusterBuilder {
                 let addr = self.choose_datanode_grpc_addr();
                 opts.grpc.bind_addr = addr.clone();
                 opts.grpc.server_addr = addr;
+            }
+            if let Some(override_options) = &self.datanode_options_override {
+                override_options(datanode_id, &mut opts);
             }
 
             options.push(opts);

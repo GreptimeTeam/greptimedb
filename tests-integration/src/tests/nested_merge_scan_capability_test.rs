@@ -21,9 +21,14 @@
 //! on the datanode that owns a region of the probe table while the build side of the join is read
 //! from the datanodes that own the regions of the build table.
 //!
-//! The plans below are built **by hand** and sent to a datanode directly, so these tests exercise
-//! the execution capability of the datanode only: no rewriter, hint or switch of this repository
-//! takes part in producing the plan.
+//! The plans below are built **by hand** and handed to a datanode by calling
+//! `RegionServer::handle_remote_read` in process, so these tests exercise the execution capability
+//! of the datanode only: no rewriter, hint or switch of this repository takes part in producing the
+//! plan, and the outer request itself never goes over the wire. The region queries that the
+//! datanode then issues for the regions of the inner table do: the tests build the cluster with
+//! `GreptimeDbClusterBuilder::with_real_datanode_grpc_addr`, so every datanode is reachable at the
+//! address it registered and the inner `MergeScan` reaches the datanodes that own the regions of
+//! the inner table over a real Flight connection.
 //!
 //! The plan of one probe region is `Join(<probe table scan>, MergeScan(<build table scan>))`:
 //!
@@ -45,10 +50,15 @@
 //!   owns (see [`assert_cross_datanode_region_query`]),
 //! * a nested plan whose inner relation does not exist, and a nested plan with an inner region that
 //!   is not served any more, both make the whole query fail: the datanode never returns the rows of
-//!   the inner regions that happen to succeed.
+//!   the inner regions that happen to succeed,
+//! * with the concurrency limit of every datanode set to a single query, every probe region still
+//!   executes: the inner region queries of the nested plans are admitted as execution stages of the
+//!   outer queries, so they don't wait for the permit that their own query holds (see
+//!   [`test_nested_merge_scan_capability_internal_stage_under_concurrency_limit`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
 use common_query::Output;
@@ -353,6 +363,180 @@ async fn test_nested_merge_scan_capability_inner_failure_fails_query() {
     );
 }
 
+/// The nested plans execute under the concurrency limit of their datanodes: a datanode admits a
+/// single query at a time, the outer query of a probe region holds the only permit of its datanode
+/// until its stream is fully consumed, and the nested plan then queries the regions of the build
+/// table from the datanode itself and from the other datanode.
+///
+/// Every inner region query has to be admitted as an execution stage of the outer query, without a
+/// permit of its own. The marker of the stage travels from the region query handler of the datanode
+/// (`request.internal = true`), through the client that encodes it into the header of the request,
+/// to the region server of the peer that reads it back and skips its limiter. If any one of them is
+/// missing, the inner region query of the *same* datanode waits for the permit held by the outer
+/// query and fails after `concurrent_query_limiter_timeout`, and the inner region query of the
+/// *other* datanode waits for the outer query of that datanode, which waits for its own nested
+/// plan: the consumption of the outer queries below is bounded by a timeout, so both cases fail the
+/// test instead of hanging it.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_merge_scan_capability_internal_stage_under_concurrency_limit() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster_with_query_limit(
+        "test_nested_merge_scan_capability_internal_stage_under_concurrency_limit",
+    )
+    .await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    let build_leaders = region_leaders(&frontend, BUILD_TABLE).await;
+    info!("region leaders of {PROBE_TABLE}: {probe_leaders:?}");
+    info!("region leaders of {BUILD_TABLE}: {build_leaders:?}");
+    // Every table is partitioned into two regions. Both tables span both datanodes, so a nested
+    // plan of a probe region always has to read a region of the build table from the other
+    // datanode, and the two probe regions sit on different datanodes: asking both datanodes for
+    // their probe region exhausts the single permit of every datanode of the cluster.
+    assert_eq!(
+        2,
+        datanodes(&probe_leaders).len(),
+        "expected the regions of {PROBE_TABLE} to be spread over both datanodes, actual region \
+         leaders: {probe_leaders:?}"
+    );
+    assert_eq!(
+        2,
+        datanodes(&build_leaders).len(),
+        "expected the regions of {BUILD_TABLE} to be spread over both datanodes, actual region \
+         leaders: {build_leaders:?}"
+    );
+
+    // The reference: the frontend executes the same join with its default distributed plan.
+    let reference = query_pretty(&frontend, &join_sql(), query_ctx()).await;
+    info!("join result of the frontend:\n{reference}");
+    assert_eq!(
+        expected_join_rows(),
+        multiset(table_cells(&reference)),
+        "unexpected result of the join on the frontend:\n{reference}"
+    );
+
+    let query_ctx = query_ctx();
+    let nested_plan = nested_plan(&frontend, &query_ctx).await;
+    let plan = encode(&nested_plan);
+
+    let expectation = cross_datanode_expectation(&probe_leaders, &build_leaders);
+    let baseline_requests = expectation
+        .remote_datanodes
+        .keys()
+        .map(|datanode| (*datanode, rpc_requests(&cluster, *datanode)))
+        .collect::<BTreeMap<_, _>>();
+
+    // Ask every datanode for its probe region before consuming anything: the region server takes
+    // the permit of the datanode when it admits the request and holds it until the stream of the
+    // request is consumed, so no datanode has a free permit left while the nested plans run.
+    let mut outer_queries = Vec::with_capacity(probe_leaders.len());
+    for (probe_region, (probe_datanode, _)) in &probe_leaders {
+        let stream = region_server(&cluster, *probe_datanode)
+            .handle_remote_read(
+                QueryRequest {
+                    header: Some(region_request_header(&query_ctx)),
+                    region_id: *probe_region,
+                    plan: plan.clone(),
+                },
+                query_ctx.clone(),
+            )
+            .await
+            .unwrap_or_else(|e| {
+                panic!(
+                    "the datanode {probe_datanode} must admit the nested plan of the region \
+                     {probe_region} while it serves a single query at a time: {e}"
+                )
+            });
+        outer_queries.push((*probe_region, *probe_datanode, stream));
+    }
+
+    // Consume the outer queries of both datanodes at the same time, so that every nested plan
+    // queries the regions of the build table while the only permit of every datanode is held by the
+    // outer query of that datanode. An inner region query that misses the stage marker waits for
+    // that permit up to `concurrent_query_limiter_timeout` and fails, or the two outer queries wait
+    // for each other: the timeout turns the second case into a failure instead of a hang.
+    let collected = tokio::time::timeout(
+        Duration::from_secs(30),
+        futures::future::join_all(outer_queries.into_iter().map(
+            |(probe_region, probe_datanode, stream)| async move {
+                (
+                    probe_region,
+                    probe_datanode,
+                    RecordBatches::try_collect(stream).await,
+                )
+            },
+        )),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "the nested plans of the probe regions did not return within the timeout while every \
+             datanode served a single query at a time: an inner region query is waiting for the \
+             concurrency permit held by the outer query that dispatched it, i.e. the stage marker \
+             of the inner region query was lost"
+        )
+    });
+
+    let mut rows = Vec::new();
+    for (probe_region, probe_datanode, result) in collected {
+        let batches = result.unwrap_or_else(|e| {
+            panic!(
+                "the datanode {probe_datanode} must execute the nested plan of the region \
+                 {probe_region} completely while it serves a single query at a time: {e}"
+            )
+        });
+        let actual = batches
+            .pretty_print()
+            .expect("the result of the datanode must be printable");
+        info!("join result of the nested plan of the region {probe_region}:\n{actual}");
+        rows.extend(table_cells(&actual));
+    }
+
+    // The nested plan of a probe region reads that region of the probe table, so the union of the
+    // results of all probe regions is the result of the whole join. Comparing the rows as a
+    // multiset catches both a lost row and a row that was counted twice.
+    assert_eq!(
+        expected_join_rows(),
+        multiset(rows.clone()),
+        "the nested plans of the datanodes returned an unexpected multiset of rows under the \
+         concurrency limit: {rows:?}"
+    );
+    assert_eq!(
+        multiset(table_cells(&reference)),
+        multiset(rows),
+        "the nested plans of the datanodes returned a different multiset of rows than the \
+         frontend:\nfrontend:\n{reference}"
+    );
+
+    assert_cross_datanode_region_query(&cluster, &expectation, &baseline_requests);
+
+    // The nested plan really reached the other datanode over the network: the region query of a
+    // `MergeScan` is a Flight `DoGet` (see `RegionRequester::handle_query`), and the remote
+    // requests of a datanode are counted at the address it registered, so a `DoGet` recorded there
+    // was sent by another datanode of the cluster.
+    for datanode in expectation.remote_datanodes.keys() {
+        let stats = cluster
+            .datanode_rpc_stats(*datanode)
+            .unwrap_or_else(|| panic!("expected the rpc stats of the datanode {datanode}"));
+        info!(
+            "the datanode {datanode} served {} remote gRPC requests, paths: {:?}",
+            stats.requests(),
+            stats.paths()
+        );
+        assert!(
+            stats.paths().iter().any(|path| path.contains("DoGet")),
+            "expected the nested plans of {PROBE_TABLE} to query the datanode {datanode} for the \
+             regions of {BUILD_TABLE} it owns with a Flight `DoGet`, actual remote gRPC paths: \
+             {:?}",
+            stats.paths()
+        );
+    }
+}
+
 async fn build_cluster(test_name: &str) -> GreptimeDbCluster {
     GreptimeDbClusterBuilder::new(test_name)
         .await
@@ -362,6 +546,30 @@ async fn build_cluster(test_name: &str) -> GreptimeDbCluster {
         // the requests of the remote nodes, see [`assert_cross_datanode_region_query`].
         .with_real_datanode_grpc_addr(true)
         .with_datanodes(2)
+        .build(false)
+        .await
+}
+
+/// Same as [`build_cluster`], but every datanode admits a single query at a time.
+///
+/// The outer region query of a probe region holds the only permit of its datanode until its stream
+/// is fully consumed, so a region query that the nested plan of that query issues to the same
+/// datanode can only succeed if it is admitted as an execution stage of the query instead of
+/// taking a permit of its own (see
+/// [`test_nested_merge_scan_capability_internal_stage_under_concurrency_limit`]).
+async fn build_cluster_with_query_limit(test_name: &str) -> GreptimeDbCluster {
+    GreptimeDbClusterBuilder::new(test_name)
+        .await
+        .with_real_datanode_grpc_addr(true)
+        .with_datanodes(2)
+        .with_datanode_options_override(|_, opts| {
+            opts.max_concurrent_queries = 1;
+            // Wider than the default: the test must fail because the stage marker of an inner
+            // region query is lost, not because a slow machine made an admitted query wait for a
+            // permit for too long. The timeout around the consumption of the outer queries is much
+            // larger than this.
+            opts.concurrent_query_limiter_timeout = Duration::from_secs(1);
+        })
         .build(false)
         .await
 }
