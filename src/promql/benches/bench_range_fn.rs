@@ -270,7 +270,7 @@ fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue
 }
 
 fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) = build_sliding_ranges(
+    let (ts_range, val_range, eval_ts) = build_sliding_ranges(
         num_points,
         window_size,
         1,
@@ -282,6 +282,8 @@ fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<Columna
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
         // predict 60s into the future
         ColumnarValue::Scalar(ScalarValue::Int64(Some(60))),
+        // evaluated at the end of each window
+        ColumnarValue::Array(eval_ts),
     ]
 }
 
