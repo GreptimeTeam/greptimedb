@@ -19,7 +19,10 @@ mod test {
     use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
     use datatypes::arrow::array::AsArray;
-    use datatypes::arrow::datatypes::TimestampMicrosecondType;
+    use datatypes::arrow::datatypes::{
+        DataType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+        TimestampNanosecondType, TimestampSecondType,
+    };
     use frontend::instance::Instance;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -896,22 +899,72 @@ WITH(
             .build()
             .await;
 
-        test_otlp_metrics_into_microsecond_physical_table(standalone.fe_instance()).await;
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(6)",
+            TimeUnit::Microsecond,
+            1_704_067_200_123_456,
+        )
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_metrics_into_microsecond_physical_table_on_distributed() {
         let instance = tests::create_distributed_instance("test_otlp_us_physical_dist").await;
 
-        test_otlp_metrics_into_microsecond_physical_table(&instance.frontend()).await;
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            &instance.frontend(),
+            "TIMESTAMP(6)",
+            TimeUnit::Microsecond,
+            1_704_067_200_123_456,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_seconds_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_s_physical")
+            .build()
+            .await;
+
+        // Narrowing truncates: 1704067200123456789ns -> 1704067200s.
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(0)",
+            TimeUnit::Second,
+            1_704_067_200,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_nanoseconds_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_ns_physical")
+            .build()
+            .await;
+
+        // Same unit: the full nanosecond precision is kept verbatim.
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(9)",
+            TimeUnit::Nanosecond,
+            1_704_067_200_123_456_789,
+        )
+        .await;
     }
 
     /// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>:
-    /// a physical metric table pre-created with a TIMESTAMP(6) (microsecond)
-    /// time index accepts OTLP ingestion; nanosecond samples are converted to
-    /// the physical table's unit, keeping microsecond precision.
-    async fn test_otlp_metrics_into_microsecond_physical_table(instance: &Arc<Instance>) {
-        let db = "otlp_us_physical";
+    /// a physical metric table pre-created with a non-millisecond time index
+    /// accepts OTLP ingestion; the nanosecond samples are converted to the
+    /// physical table's unit (kept verbatim for a nanosecond table,
+    /// truncating the sub-unit part for micro/second tables).
+    async fn test_otlp_metrics_into_non_millisecond_physical_table(
+        instance: &Arc<Instance>,
+        sql_ts_type: &str,
+        expected_unit: TimeUnit,
+        expected_value: i64,
+    ) {
+        let db = "otlp_non_ms_physical";
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
         // Route the request to the metric engine, like the OTLP HTTP handler
         // does with the default `prom_store.with_metric_engine = true`.
@@ -934,11 +987,13 @@ WITH(
 
         let mut output = instance
             .do_query(
-                "CREATE TABLE greptime_physical_table (\
-                 greptime_timestamp TIMESTAMP(6) NOT NULL, \
+                &format!(
+                    "CREATE TABLE greptime_physical_table (\
+                 greptime_timestamp {sql_ts_type} NOT NULL, \
                  greptime_value DOUBLE NULL, \
                  TIME INDEX (greptime_timestamp)) \
-                 ENGINE = metric WITH ('physical_metric_table' = 'true')",
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+                ),
                 ctx.clone(),
             )
             .await;
@@ -974,13 +1029,24 @@ WITH(
         };
         let batches = RecordBatches::try_collect(stream).await.unwrap().take();
         assert_eq!(batches[0].num_rows(), 1);
-        // The logical table's time index keeps the physical table's
-        // microsecond unit and precision: 1704067200123456789ns ->
-        // 1704067200123456us.
-        let timestamps = batches[0]
-            .column(0)
-            .as_primitive::<TimestampMicrosecondType>();
-        assert_eq!(timestamps.value(0), 1_704_067_200_123_456);
+        // The logical table's time index keeps the physical table's unit.
+        let ts_column = batches[0].column(0);
+        assert_eq!(
+            ts_column.data_type(),
+            &DataType::Timestamp(expected_unit, None),
+            "unexpected time index type"
+        );
+        let stored = match expected_unit {
+            TimeUnit::Second => ts_column.as_primitive::<TimestampSecondType>().value(0),
+            TimeUnit::Millisecond => ts_column
+                .as_primitive::<TimestampMillisecondType>()
+                .value(0),
+            TimeUnit::Microsecond => ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(0),
+            TimeUnit::Nanosecond => ts_column.as_primitive::<TimestampNanosecondType>().value(0),
+        };
+        assert_eq!(stored, expected_value);
     }
 
     fn build_request() -> ExportMetricsServiceRequest {
