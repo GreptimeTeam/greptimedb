@@ -4,6 +4,21 @@ SELECT json_get_int(parse_json('{"a": 1}'), '$.a[');
 
 SELECT json_get_int(parse_json('{"a": 1}'), '$.missing');
 
+-- Unterminated quoted fields must return errors without panicking.
+SELECT json_get_int(parse_json('{"a": 1}'), '$."a');
+
+SELECT json_get_object(parse_json('{"a": {}}'), '$["a');
+
+CREATE TABLE jsonpath_unterminated(j JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');
+
+INSERT INTO jsonpath_unterminated VALUES ('{"a": 1}', 1);
+
+SELECT json_get(j, '$."a') FROM jsonpath_unterminated;
+
+SELECT json_get(j, '$."a"')::BIGINT FROM jsonpath_unterminated;
+
+DROP TABLE jsonpath_unterminated;
+
 SELECT json_get_int(parse_json('{"a": {"b": {"c": 1}}}'), 'a.b.c');
 
 SELECT json_get_float(parse_json('{"a": {"b": {"c": 1.234}}}'), 'a:b.c');

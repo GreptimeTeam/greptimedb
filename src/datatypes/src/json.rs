@@ -604,7 +604,7 @@ fn decode_primitive_value(value: Value) -> Result<Json> {
         Value::Float32(v) => Ok(Json::from(v.0)),
         Value::Float64(v) => Ok(Json::from(v.0)),
         Value::String(s) => Ok(Json::String(s.as_utf8().to_string())),
-        Value::Binary(b) => serde_json::to_value(b.as_ref()).context(error::SerializeSnafu),
+        Value::Binary(b) => serde_json::to_value(b).context(error::SerializeSnafu),
         Value::Date(v) => Ok(Json::from(v.val())),
         Value::Timestamp(v) => serde_json::to_value(v.value()).context(error::SerializeSnafu),
         Value::Time(v) => serde_json::to_value(v.value()).context(error::SerializeSnafu),

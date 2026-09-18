@@ -40,8 +40,6 @@ pub fn parse_json_get_path(path: &str) -> std::result::Result<JsonPath<'_>, json
             paths: vec![Path::Root],
         });
     }
-    // TODO(LFC): Fix jsonb's unterminated quoted-field panic (e.g. `$."a`) and
-    // update the dependency; malformed paths must return InvalidJsonPath.
     parse_json_path(path.as_bytes())
 }
 
@@ -91,7 +89,8 @@ struct StringResultBuilder {
 
 impl JsonGetResultBuilder for StringResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.inner.append_option(jsonb::to_str(value).ok());
+        self.inner
+            .append_option(jsonb::RawJsonb::new(value).to_str().ok());
         Ok(())
     }
 
@@ -151,7 +150,8 @@ struct IntResultBuilder(Int64Builder);
 
 impl JsonGetResultBuilder for IntResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_i64(value).ok());
+        self.0
+            .append_option(jsonb::RawJsonb::new(value).to_i64().ok());
         Ok(())
     }
 
@@ -196,7 +196,8 @@ struct FloatResultBuilder(Float64Builder);
 
 impl JsonGetResultBuilder for FloatResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_f64(value).ok());
+        self.0
+            .append_option(jsonb::RawJsonb::new(value).to_f64().ok());
         Ok(())
     }
 
@@ -241,7 +242,8 @@ struct BoolResultBuilder(BooleanBuilder);
 
 impl JsonGetResultBuilder for BoolResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_bool(value).ok());
+        self.0
+            .append_option(jsonb::RawJsonb::new(value).to_bool().ok());
         Ok(())
     }
 
@@ -295,14 +297,13 @@ fn jsonb_get(
             builder.append_null();
             continue;
         }
-        let mut value = Vec::new();
-        let mut offsets = Vec::new();
-        jsonb::get_by_path(jsons.value(i), json_path.clone(), &mut value, &mut offsets)
+        let value = jsonb::RawJsonb::new(jsons.value(i))
+            .select_value_by_path(&json_path)
             .map_err(|e| exec_datafusion_err!("Failed to evaluate JSONPath {path:?}: {e}"))?;
-        if value.is_empty() {
-            builder.append_null();
+        if let Some(value) = value {
+            builder.append_value(value.as_ref())?;
         } else {
-            builder.append_value(&value)?;
+            builder.append_null();
         }
     }
     Ok(())
@@ -519,10 +520,14 @@ impl Function for JsonGetObject {
             let path = paths.is_valid(i).then(|| paths.value(i));
             let result = if let (Some(json), Some(path)) = (json, path) {
                 let result = jsonb::jsonpath::parse_json_path(path.as_bytes()).and_then(|path| {
-                    let mut data = Vec::new();
-                    let mut offset = Vec::new();
-                    jsonb::get_by_path(json, path, &mut data, &mut offset)
-                        .map(|()| jsonb::is_object(&data).then_some(data))
+                    let Some(value) = jsonb::RawJsonb::new(json).select_value_by_path(&path)?
+                    else {
+                        return Ok(None);
+                    };
+                    value
+                        .as_raw()
+                        .is_object()
+                        .map(|is_object| is_object.then(|| value.to_vec()))
                 });
                 result.map_err(|e| DataFusionError::Execution(e.to_string()))?
             } else {
@@ -549,6 +554,35 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn test_json_get_int_conversion() -> Result<()> {
+        let cases = [
+            ("1", Some(1)),
+            ("1.0", Some(1)),
+            ("1.5", Some(2)),
+            ("18446744073709551615", None),
+            (r#""42""#, Some(42)),
+            (r#""1.5""#, Some(2)),
+            ("true", Some(1)),
+        ];
+        let mut builder = IntResultBuilder(Int64Builder::with_capacity(cases.len()));
+        for (input, _) in cases {
+            let value = jsonb::parse_value_standard_mode(input.as_bytes())
+                .map_err(|e| exec_datafusion_err!("{e}"))?;
+            builder.append_value(&value.to_vec())?;
+        }
+        let result = builder.build();
+        let actual = result.as_primitive::<Int64Type>();
+        for (i, (input, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                actual.is_valid(i).then(|| actual.value(i)),
+                *expected,
+                "{input}"
+            );
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_parse_json_get_path_expression() -> std::result::Result<(), Box<dyn std::error::Error>>
@@ -592,6 +626,28 @@ mod tests {
         assert!(json_object_path("a[").is_err());
         assert_eq!(json_object_path("$")?, Some(vec![]));
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_json_get_path_unterminated_quotes() {
+        for path in [
+            r#"$."a"#,
+            r#""a"#,
+            r#"$["a"#,
+            r#"$."a\""#,
+            r#"$."a\\"#,
+            r#"$."\u0061"#,
+            r#"$."中文"#,
+            r#"$.a ? (@ == "value"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_json_get_path(path),
+                    Err(jsonb::Error::InvalidJsonPath)
+                ),
+                "{path}",
+            );
+        }
     }
 
     #[test]

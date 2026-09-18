@@ -404,7 +404,9 @@ pub fn jsonb_to_string(val: &[u8]) -> Result<String> {
 
 /// Converts a json type value to serde_json::Value
 pub fn jsonb_to_serde_json(val: &[u8]) -> Result<serde_json::Value> {
-    jsonb::to_serde_json(val).map_err(|error| InvalidJsonbSnafu { error }.build())
+    jsonb::from_slice(val)
+        .map(Into::into)
+        .map_err(|error| InvalidJsonbSnafu { error }.build())
 }
 
 /// Normalizes a JSON string by converting Rust-style Unicode escape sequences to JSON-compatible format.
@@ -462,13 +464,20 @@ fn fix_unicode_point(json: &str) -> Result<String> {
 
 /// Parses a string to a json type value
 pub fn parse_string_to_jsonb(s: &str) -> Result<Vec<u8>> {
-    jsonb::parse_value(s.as_bytes())
+    jsonb::parse_value_standard_mode(s.as_bytes())
         .map_err(|_| InvalidJsonSnafu { value: s }.build())
         .map(|json| json.to_vec())
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn test_parse_json_rejects_extended_syntax() {
+        for input in ["+1", "01", ".5", "[1,,2]", "{'a':1}"] {
+            assert!(parse_string_to_jsonb(input).is_err(), "{input}");
+        }
+    }
+
     #[test]
     fn test_v2_jsonb_to_serde_json_escaped_keys()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
