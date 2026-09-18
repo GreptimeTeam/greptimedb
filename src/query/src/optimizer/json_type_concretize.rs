@@ -12,58 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Applies JSON2 type hints to untyped JSON path accesses and deduces storage read types.
+//! Deduces JSON2 storage read types from query expressions.
 //!
-//! An explicit `json_get` type, injected from a SQL `CAST`, takes precedence over a JSON2 type
-//! hint. Without an explicit type, an exact type-hint path is injected into `json_get`, making it
-//! both the expression result type and storage read type. Unhinted paths retain `STRING`.
+//! The result types of JSON2 `json_get` expressions are concretized by
+//! [`JsonGetResultTypeRule`](crate::optimizer::json_get_result_type::JsonGetResultTypeRule)
+//! before this optimizer collects the storage read layout.
 
 use std::any::Any;
 use std::collections::HashMap;
 
-use arrow_schema::DataType;
-use arrow_schema::extension::ExtensionType;
 use common_function::scalars::json::json_get::{JsonGetWithType, parse_json_get_path};
 use datafusion::datasource::{DefaultTableSource, TableProvider};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
-use datafusion_common::{Result, ScalarValue, plan_datafusion_err, plan_err};
+use datafusion_common::{Result, plan_datafusion_err, plan_err};
 use datafusion_expr::{Expr, LogicalPlan};
-use datafusion_optimizer::analyzer::AnalyzerRule;
-use datafusion_optimizer::utils::NamePreserver;
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
-use datatypes::extension::json::{
-    Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
-};
+use datatypes::extension::json::is_json2_extension_type;
 use datatypes::json::JsonSettings;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
 use jsonb::jsonpath::Path;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
+use crate::optimizer::json_get_result_type::{
+    collect_json_type_hints, inject_json_get_result_types, json_get_path, json_type_from_hint,
+};
 
 /// Concretize (deduce) the expected JSON type from query.
 /// For example, we can concretize a JSON type of `{ a: { b: Number } }` from `select j.a.b::Int64`.
 /// The JSON type will be later set into the scan request, for converting the JSON arrays.
 #[derive(Debug)]
 pub(crate) struct JsonTypeConcretizeRule;
-
-/// Injects JSON2 type hints before distributed planning observes JSON path expressions.
-#[derive(Debug)]
-pub(crate) struct JsonTypeHintRule;
-
-impl AnalyzerRule for JsonTypeHintRule {
-    fn analyze(
-        &self,
-        plan: LogicalPlan,
-        _config: &datafusion::config::ConfigOptions,
-    ) -> Result<LogicalPlan> {
-        inject_json_type_hints(plan).map(|transformed| transformed.data)
-    }
-
-    fn name(&self) -> &str {
-        "JsonTypeHintRule"
-    }
-}
 
 impl OptimizerRule for JsonTypeConcretizeRule {
     fn name(&self) -> &str {
@@ -75,7 +54,7 @@ impl OptimizerRule for JsonTypeConcretizeRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        inject_json_type_hints(plan)?.transform_data(|plan| {
+        inject_json_get_result_types(plan)?.transform_data(|plan| {
             let json_types = deduce_json_types(&plan)?;
             if json_types.is_empty() {
                 return Ok(Transformed::no(plan));
@@ -98,60 +77,6 @@ impl OptimizerRule for JsonTypeConcretizeRule {
             })
         })
     }
-}
-
-/// Adds the type-hint type argument to untyped JSON2 path accesses.
-///
-/// The third `json_get` argument is the expression result type as well as the storage read type.
-/// Never replace an existing argument: it represents an explicit SQL cast (or another prior type
-/// coercion) and must take precedence over a JSON2 type hint.
-pub(crate) fn inject_json_type_hints(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-    let json_type_hints = collect_json_type_hints(&plan)?;
-    plan.transform_up(|plan| {
-        let mut changed = false;
-        let name_preserver = NamePreserver::new(&plan);
-        let expressions = plan
-            .expressions()
-            .into_iter()
-            .map(|expr| {
-                let original_name = name_preserver.save(&expr);
-                let transformed = expr.transform_up(|mut expr| {
-                    let Expr::ScalarFunction(function) = &mut expr else {
-                        return Ok(Transformed::no(expr));
-                    };
-                    if !function.name().eq_ignore_ascii_case(JsonGetWithType::NAME)
-                        || function.args.len() != 2
-                    {
-                        return Ok(Transformed::no(expr));
-                    }
-
-                    let Some(Expr::Column(column)) = function.args.first() else {
-                        return Ok(Transformed::no(expr));
-                    };
-                    let Some(path) = json_get_path(function) else {
-                        return Ok(Transformed::no(expr));
-                    };
-                    let Some(json_type) = json_type_from_hint(&json_type_hints, &column.name, path)
-                    else {
-                        return Ok(Transformed::no(expr));
-                    };
-
-                    let type_arg = ScalarValue::try_new_null(&json_type.as_arrow_type())?;
-                    function.args.push(Expr::Literal(type_arg, None));
-                    Ok(Transformed::yes(expr))
-                })?;
-                changed |= transformed.transformed;
-                Ok(original_name.restore(transformed.data))
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        if changed {
-            let inputs = plan.inputs().into_iter().cloned().collect();
-            Ok(Transformed::yes(plan.with_new_exprs(expressions, inputs)?))
-        } else {
-            Ok(Transformed::no(plan))
-        }
-    })
 }
 
 // FIXME: `json_types` is keyed only by unqualified column name. In joins with
@@ -231,41 +156,6 @@ pub(crate) fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, Js
     Ok(json_types)
 }
 
-/// Collects JSON2 type hints from table-scan schemas.
-fn collect_json_type_hints(plan: &LogicalPlan) -> Result<HashMap<String, JsonSettings>> {
-    let mut json_type_hints = HashMap::new();
-
-    plan.apply(|plan| {
-        let LogicalPlan::TableScan(table_scan) = plan else {
-            return Ok(TreeNodeRecursion::Continue);
-        };
-        let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
-            return Ok(TreeNodeRecursion::Continue);
-        };
-
-        for field in source.table_provider.schema().fields() {
-            if !is_json2_extension_type(field) {
-                continue;
-            }
-            let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
-                let extension = field
-                    .try_extension_type::<Json2ExtensionType>()
-                    .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
-                Some(extension.metadata().json_settings().clone())
-            } else {
-                parse_legacy_json2_settings(field.metadata())
-                    .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?
-            };
-            if let Some(settings) = settings {
-                json_type_hints.insert(field.name().clone(), settings);
-            }
-        }
-        Ok(TreeNodeRecursion::Continue)
-    })?;
-
-    Ok(json_type_hints)
-}
-
 fn is_same_name_column_projection(expr: &Expr) -> bool {
     match expr {
         Expr::Column(_) => true,
@@ -274,33 +164,6 @@ fn is_same_name_column_projection(expr: &Expr) -> bool {
         }
         _ => false,
     }
-}
-
-fn json_get_path(function: &datafusion_expr::expr::ScalarFunction) -> Option<&str> {
-    function
-        .args
-        .get(1)
-        .and_then(|expr| expr.as_literal())
-        .and_then(|value| value.try_as_str())
-        .flatten()
-}
-
-fn json_type_from_hint(
-    json_type_hints: &HashMap<String, JsonSettings>,
-    column: &str,
-    path: &str,
-) -> Option<JsonNativeType> {
-    if path.contains('[') {
-        return None;
-    }
-
-    json_type_hints.get(column).and_then(|settings| {
-        settings
-            .type_hints()
-            .iter()
-            .find(|hint| hint.path.iter().map(String::as_str).eq(path.split('.')))
-            .map(|hint| JsonNativeType::from(&hint.data_type))
-    })
 }
 
 fn deduce_json_type(
@@ -329,10 +192,10 @@ fn deduce_json_type(
         );
     };
 
-    let path = parse_json_get_path(path)
+    let json_path = parse_json_get_path(path)
         .map_err(|e| plan_datafusion_err!("Invalid JSONPath {path:?}: {e}"))?;
 
-    if path
+    if json_path
         .paths
         .iter()
         .all(|segment| matches!(segment, Path::Root))
@@ -353,7 +216,7 @@ fn deduce_json_type(
         .unwrap_or(JsonNativeType::String);
 
     let mut root = with_type;
-    for segment in path.paths.into_iter().rev() {
+    for segment in json_path.paths.into_iter().rev() {
         let name = match segment {
             Path::Root => continue,
             Path::DotField(name) | Path::ColonField(name) | Path::ObjectField(name) => name,
@@ -376,12 +239,14 @@ mod tests {
     use api::v1::SemanticType;
     use arrow_schema::DataType;
     use common_function::scalars::udf::create_udf;
+    use datafusion::config::ConfigOptions;
     use datafusion::datasource::provider_as_source;
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
+    use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
     use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::ColumnSchema;
@@ -389,6 +254,7 @@ mod tests {
     use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
+    use crate::optimizer::json_get_result_type::JsonGetResultTypeRule;
     use crate::optimizer::test_util::{MetaRegionEngine, mock_table_provider};
 
     fn json_get_expr(base: Expr, path: Expr, with_type: Option<DataType>) -> Result<Expr> {
@@ -782,11 +648,24 @@ mod tests {
     }
 
     #[test]
-    fn test_unhinted_json_get_keeps_string_return_type() -> Result<()> {
+    fn test_json_get_result_type_rule_defaults_to_string() -> Result<()> {
         let (provider, plan) =
             build_json2_plan(vec![json_get_expr(col("j"), path_expr("a"), None)?])?;
 
-        let rewritten = JsonTypeConcretizeRule.rewrite(plan, &OptimizerContext::default())?;
+        let rewritten = JsonGetResultTypeRule.analyze(plan, &ConfigOptions::default())?;
+        let LogicalPlan::Projection(projection) = &rewritten else {
+            panic!("Expected projection plan");
+        };
+        let Expr::ScalarFunction(function) = &projection.expr[0] else {
+            panic!("Expected json_get expression");
+        };
+        assert_eq!(3, function.args.len());
+        assert_eq!(
+            DataType::Utf8View,
+            function.args[2].get_type(projection.input.schema())?
+        );
+
+        let rewritten = JsonTypeConcretizeRule.rewrite(rewritten, &OptimizerContext::default())?;
         assert!(rewritten.transformed);
         assert_eq!(
             rewritten.data.schema().field(0).data_type(),
