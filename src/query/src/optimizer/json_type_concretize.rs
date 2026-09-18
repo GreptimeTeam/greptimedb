@@ -27,7 +27,6 @@ use jsonb::jsonpath::Path;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
-use crate::optimizer::json_get_type_hint::{json_get_path, json_type_from_hint};
 
 /// Concretize (deduce) the expected JSON type from query.
 ///
@@ -216,6 +215,16 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     Ok(Some((column.name.clone(), root)))
 }
 
+/// Returns the literal JSON path argument of a `json_get` call.
+fn json_get_path(function: &datafusion_expr::expr::ScalarFunction) -> Option<&str> {
+    function
+        .args
+        .get(1)
+        .and_then(|expr| expr.as_literal())
+        .and_then(|value| value.try_as_str())
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -223,14 +232,12 @@ mod tests {
     use api::v1::SemanticType;
     use arrow_schema::DataType;
     use common_function::scalars::udf::create_udf;
-    use datafusion::config::ConfigOptions;
     use datafusion::datasource::provider_as_source;
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion_common::{Column, ScalarValue};
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
-    use datafusion_optimizer::analyzer::AnalyzerRule;
     use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
     use datatypes::json::{JsonSettings, JsonTypeHint};
     use datatypes::schema::ColumnSchema;
@@ -238,7 +245,6 @@ mod tests {
     use store_api::storage::{ConcreteDataType, RegionId};
 
     use super::*;
-    use crate::optimizer::json_get_type_hint::JsonGetTypeHintRule;
     use crate::optimizer::test_util::{MetaRegionEngine, mock_table_provider};
 
     fn json_get_expr(base: Expr, path: Expr, with_type: Option<DataType>) -> Result<Expr> {
@@ -480,59 +486,6 @@ mod tests {
     }
 
     #[test]
-    fn test_json_type_hint_supplies_untyped_json_get_read_type() -> Result<()> {
-        let settings = JsonSettings::try_new(
-            vec![json_type_hint(&["a"], ConcreteDataType::int64_datatype())],
-            None,
-        )
-        .map_err(|e| plan_datafusion_err!("{e}"))?;
-        let (provider, plan) = build_json2_scan_with_settings(settings)?;
-        let plan = plan
-            .project(vec![json_get_expr(col("j"), path_expr("a"), None)?])?
-            .build()?;
-
-        let plan = JsonGetTypeHintRule.analyze(plan, &ConfigOptions::default())?;
-        let rewritten = JsonTypeConcretizeRule.rewrite(plan, &OptimizerContext::default())?;
-        assert!(rewritten.transformed);
-        assert_eq!(
-            rewritten.data.schema().field(0).data_type(),
-            &DataType::Int64
-        );
-        assert_eq!(
-            Some(&JsonNativeType::Object(JsonObjectType::from([(
-                "a".to_string(),
-                JsonNativeType::i64(),
-            )]))),
-            provider.scan_request().json_type_hint.get("j")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_json_type_hint_matches_json_paths() -> Result<()> {
-        let settings = JsonSettings::try_new(
-            vec![
-                json_type_hint(&["a"], ConcreteDataType::int64_datatype()),
-                json_type_hint(&["a.b"], ConcreteDataType::string_datatype()),
-            ],
-            None,
-        )
-        .map_err(|e| plan_datafusion_err!("{e}"))?;
-        let hints = HashMap::from([("j".to_string(), settings)]);
-
-        assert_eq!(
-            Some(JsonNativeType::i64()),
-            json_type_from_hint(&hints, "j", "$.a")
-        );
-        assert_eq!(
-            Some(JsonNativeType::String),
-            json_type_from_hint(&hints, "j", r#"$."a.b""#)
-        );
-        assert_eq!(None, json_type_from_hint(&hints, "j", "$.a[0]"));
-        Ok(())
-    }
-
-    #[test]
     fn test_explicit_json_get_type_overrides_json_type_hint() -> Result<()> {
         let settings = JsonSettings::try_new(
             vec![json_type_hint(&["a"], ConcreteDataType::int64_datatype())],
@@ -653,36 +606,6 @@ mod tests {
         )]));
 
         assert_eq!(Some(("k0".to_string(), expected)), deduced);
-        Ok(())
-    }
-
-    #[test]
-    fn test_json_get_type_hint_rule_keeps_unhinted_json_get_untyped() -> Result<()> {
-        let (provider, plan) =
-            build_json2_plan(vec![json_get_expr(col("j"), path_expr("a"), None)?])?;
-
-        let rewritten = JsonGetTypeHintRule.analyze(plan, &ConfigOptions::default())?;
-        let LogicalPlan::Projection(projection) = &rewritten else {
-            panic!("Expected projection plan");
-        };
-        let Expr::ScalarFunction(function) = &projection.expr[0] else {
-            panic!("Expected json_get expression");
-        };
-        assert_eq!(2, function.args.len());
-
-        let rewritten = JsonTypeConcretizeRule.rewrite(rewritten, &OptimizerContext::default())?;
-        assert!(rewritten.transformed);
-        assert_eq!(
-            rewritten.data.schema().field(0).data_type(),
-            &DataType::Utf8View
-        );
-        assert_eq!(
-            Some(&JsonNativeType::Object(JsonObjectType::from([(
-                "a".to_string(),
-                JsonNativeType::String,
-            )]))),
-            provider.scan_request().json_type_hint.get("j")
-        );
         Ok(())
     }
 }
