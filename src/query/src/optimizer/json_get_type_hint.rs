@@ -14,8 +14,11 @@
 
 //! Applies JSON2 type hints to `json_get` expressions.
 //!
-//! This rule runs before distributed planning so remote plans carry matching JSON2 type hints.
-//! Existing explicit result types are preserved.
+//! For example, with `j JSON2 (a BIGINT)`, `SELECT j.a FROM t` initially plans
+//! as `json_get(j, "$.a")`. This rule rewrites it to `json_get(j, "$.a", NULL::Int64)`.
+//!
+//! This rule should run before distributed planning so remote plans carry
+//! matching JSON2 type hints. Existing explicit result types are preserved.
 
 use std::collections::HashMap;
 
@@ -51,10 +54,11 @@ impl AnalyzerRule for JsonGetTypeHintRule {
 
 /// Adds matching JSON2 type hints to untyped path accesses.
 ///
-/// The third `json_get` argument is the expression result type as well as the storage read type.
-/// Never replace an existing argument: it represents an explicit SQL cast (or another prior type
-/// coercion) and must take precedence over a JSON2 type hint. Paths without a matching hint remain
-/// untyped so expression planning can infer their type from context.
+/// The third `json_get` argument is the expression result type as well as the
+/// storage read type. Never replace an existing argument: it represents an
+/// explicit SQL cast (or another prior type coercion) and must take precedence
+/// over a JSON2 type hint. Paths without a matching hint remain untyped so
+/// expression planning can infer their type from context.
 pub(crate) fn inject_json_get_type_hints(plan: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
     let json_type_hints = collect_json_type_hints(&plan)?;
     plan.transform_up(|plan| {
@@ -74,10 +78,10 @@ pub(crate) fn inject_json_get_type_hints(plan: LogicalPlan) -> Result<Transforme
                     {
                         return Ok(Transformed::no(expr));
                     }
-
                     let Some(Expr::Column(column)) = function.args.first() else {
                         return Ok(Transformed::no(expr));
                     };
+
                     let Some(path) = json_get_path(function) else {
                         return Ok(Transformed::no(expr));
                     };
@@ -95,16 +99,19 @@ pub(crate) fn inject_json_get_type_hints(plan: LogicalPlan) -> Result<Transforme
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if changed {
-            let inputs = plan.inputs().into_iter().cloned().collect();
-            Ok(Transformed::yes(plan.with_new_exprs(expressions, inputs)?))
-        } else {
-            Ok(Transformed::no(plan))
+        if !changed {
+            return Ok(Transformed::no(plan));
         }
+
+        let inputs = plan.inputs().into_iter().cloned().collect();
+        Ok(Transformed::yes(plan.with_new_exprs(expressions, inputs)?))
     })
 }
 
 /// Collects JSON2 type hints from table-scan schemas.
+///
+/// FIXME(fys): Key settings by qualified column or table-scan identity so
+/// same-named JSON2 columns in joins do not overwrite each other.
 pub(crate) fn collect_json_type_hints(plan: &LogicalPlan) -> Result<HashMap<String, JsonSettings>> {
     let mut json_type_hints = HashMap::new();
 
@@ -112,14 +119,16 @@ pub(crate) fn collect_json_type_hints(plan: &LogicalPlan) -> Result<HashMap<Stri
         let LogicalPlan::TableScan(table_scan) = plan else {
             return Ok(TreeNodeRecursion::Continue);
         };
-        let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
+
+        let Some(table_source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
             return Ok(TreeNodeRecursion::Continue);
         };
 
-        for field in source.table_provider.schema().fields() {
+        for field in table_source.table_provider.schema().fields() {
             if !is_json2_extension_type(field) {
                 continue;
             }
+
             let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
                 let extension = field
                     .try_extension_type::<Json2ExtensionType>()
@@ -129,6 +138,7 @@ pub(crate) fn collect_json_type_hints(plan: &LogicalPlan) -> Result<HashMap<Stri
                 parse_legacy_json2_settings(field.metadata())
                     .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?
             };
+
             json_type_hints.insert(field.name().clone(), settings.unwrap_or_default());
         }
         Ok(TreeNodeRecursion::Continue)

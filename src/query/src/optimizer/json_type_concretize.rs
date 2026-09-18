@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Deduces JSON2 storage read types from query expressions.
-//!
-//! JSON2 type hints are applied to `json_get` expressions by
-//! [`JsonGetTypeHintRule`](crate::optimizer::json_get_type_hint::JsonGetTypeHintRule)
-//! before this optimizer collects the storage read layout.
-
 use std::any::Any;
 use std::collections::HashMap;
 
