@@ -19,6 +19,7 @@ mod test {
     use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
     use datatypes::arrow::array::AsArray;
+    use datatypes::arrow::datatypes::TimestampMicrosecondType;
     use frontend::instance::Instance;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -37,6 +38,7 @@ mod test {
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
+    use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
@@ -886,6 +888,99 @@ WITH(
 | testserver | 1970-01-01T00:00:00 | 4.0            |
 +------------+---------------------+----------------+",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_microsecond_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_us_physical")
+            .build()
+            .await;
+
+        test_otlp_metrics_into_microsecond_physical_table(standalone.fe_instance()).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_microsecond_physical_table_on_distributed() {
+        let instance = tests::create_distributed_instance("test_otlp_us_physical_dist").await;
+
+        test_otlp_metrics_into_microsecond_physical_table(&instance.frontend()).await;
+    }
+
+    /// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>:
+    /// a physical metric table pre-created with a TIMESTAMP(6) (microsecond)
+    /// time index accepts OTLP ingestion; nanosecond samples are converted to
+    /// the physical table's unit, keeping microsecond precision.
+    async fn test_otlp_metrics_into_microsecond_physical_table(instance: &Arc<Instance>) {
+        let db = "otlp_us_physical";
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
+        // Route the request to the metric engine, like the OTLP HTTP handler
+        // does with the default `prom_store.with_metric_engine = true`.
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+
+        let mut output = instance
+            .do_query(
+                "CREATE TABLE greptime_physical_table (\
+                 greptime_timestamp TIMESTAMP(6) NOT NULL, \
+                 greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')",
+                ctx.clone(),
+            )
+            .await;
+        assert!(output.remove(0).is_ok());
+
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: "my_gauge".to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![keyvalue("host", "h1")],
+                                time_unix_nano: 1_704_067_200_123_456_789,
+                                value: Some(Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        instance.metrics(request, ctx.clone()).await.unwrap();
+
+        let mut output = instance
+            .do_query("SELECT greptime_timestamp FROM my_gauge", ctx.clone())
+            .await;
+        let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+            unreachable!()
+        };
+        let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+        assert_eq!(batches[0].num_rows(), 1);
+        // The logical table's time index keeps the physical table's
+        // microsecond unit and precision: 1704067200123456789ns ->
+        // 1704067200123456us.
+        let timestamps = batches[0]
+            .column(0)
+            .as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(timestamps.value(0), 1_704_067_200_123_456);
     }
 
     fn build_request() -> ExportMetricsServiceRequest {

@@ -23,9 +23,10 @@ use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{
-    Array, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
+    Array, ArrayRef, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
 };
-use arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt32Type};
+use arrow::compute::kernels::cast as casts;
+use arrow::datatypes::{DataType, Float64Type, TimeUnit, TimestampMillisecondType, UInt32Type};
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -383,6 +384,35 @@ fn recordbatch_to_timeseries(
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
         })?;
+    // The Prometheus remote read wire format carries millisecond timestamps,
+    // while the table's time index can use any time unit (e.g. a metric
+    // physical table created with TIMESTAMP(6)). Narrowing casts truncate the
+    // sub-millisecond part.
+    let ts_column: ArrayRef = match ts_column.data_type() {
+        DataType::Timestamp(TimeUnit::Millisecond, _) => ts_column.clone(),
+        DataType::Timestamp(_, _) => casts::cast(
+            ts_column,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+        .map_err(|e| {
+            error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "failed to cast timestamp column '{timestamp_column_name}' of datatype {:?} to millisecond: {e}",
+                    ts_column.data_type()
+                ),
+            }
+            .build()
+        })?,
+        _ => {
+            return error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                    ts_column.data_type()
+                ),
+            }
+            .fail();
+        }
+    };
     let ts_column = ts_column
         .as_primitive_opt::<TimestampMillisecondType>()
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {

@@ -791,7 +791,9 @@ mod tests {
     use common_function::utils::partition_expr_version;
     use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
     use common_recordbatch::RecordBatches;
-    use datatypes::arrow::array::{Float64Array, TimestampMillisecondArray};
+    use datatypes::arrow::array::{
+        Float64Array, TimestampMicrosecondArray, TimestampMillisecondArray,
+    };
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema};
     use datatypes::value::Value as PartitionValue;
@@ -1114,6 +1116,91 @@ mod tests {
             .gt_eq(PartitionValue::String("job-0".into()))
             .and(col("job").lt(PartitionValue::String("job-9".into())));
         expr.as_json_str().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_put_and_scan_microsecond_physical_region() {
+        let env = TestEnv::new().await;
+        let engine = env.metric();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        env.create_physical_region_with_ts_type(
+            physical_region_id,
+            &TestEnv::default_table_dir(),
+            vec![],
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        )
+        .await;
+
+        // A logical region with a matching microsecond time index is accepted.
+        let region_create_request = test_util::create_logical_region_request_with_ts_type(
+            &["job"],
+            physical_region_id,
+            &table_dir("test", logical_region_id.table_id()),
+            ConcreteDataType::timestamp_microsecond_datatype(),
+        );
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Create(region_create_request),
+            )
+            .await
+            .unwrap();
+
+        // Writing microsecond rows works.
+        let affected_rows = engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    rows: Rows {
+                        schema: test_util::row_schema_with_tags_and_ts_datatype(
+                            &["job"],
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                        rows: test_util::build_rows_with_ts_datatype(
+                            1,
+                            2,
+                            ColumnDataType::TimestampMicrosecond,
+                        ),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                    skip_wal: false,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(affected_rows.affected_rows, 2);
+
+        // The scan returns timestamps in the physical region's unit.
+        let stream = engine
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        let mut rows = Vec::new();
+        for batch in batches.iter() {
+            let batch = batch.df_record_batch();
+            let timestamps = batch
+                .column(batch.schema().index_of(greptime_timestamp()).unwrap())
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let values = batch
+                .column(batch.schema().index_of(greptime_value()).unwrap())
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            rows.extend(
+                timestamps
+                    .values()
+                    .iter()
+                    .copied()
+                    .zip(values.values().iter().copied()),
+            );
+        }
+        rows.sort_unstable_by_key(|(timestamp, _)| *timestamp);
+        assert_eq!(rows, vec![(0, 0.0), (1, 1.0)]);
     }
 
     async fn create_logical_region_with_tags(

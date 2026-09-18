@@ -22,6 +22,7 @@ use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
 };
+use api::v1::value::ValueData;
 use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
@@ -46,6 +47,8 @@ use common_query::native_histogram::{is_native_histogram_value_type, native_hist
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
+use common_time::Timestamp;
+use common_time::timestamp::TimeUnit;
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -436,8 +439,24 @@ impl Inserter {
         validate_column_count_match(&requests)?;
 
         // check and create physical table
-        self.create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
+        let physical_table_ref = self
+            .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
             .await?;
+
+        // Align the requests' time index unit with the physical table's before
+        // creating logical tables or writing: the metric engine requires the
+        // logical tables (hence the requests) to use the same time index unit
+        // as the physical table. Ingestion endpoints encode timestamps in a
+        // fixed unit (Prometheus remote write always uses millisecond, OTLP
+        // uses nanosecond on the metric engine path), so rewrite the schema
+        // and values to the physical table's unit here. Converting to a
+        // coarser unit truncates the sub-unit part, following
+        // `Timestamp::convert_to`'s floor semantics.
+        //
+        // This reuses the table lookup from `create_physical_table_on_demand`
+        // (no extra catalog access) and is a no-op apart from a schema scan
+        // when the units already match.
+        align_row_insert_requests_time_unit(&physical_table_ref, &mut requests)?;
 
         // check and create logical tables
         let CreateAlterTableResult {
@@ -1052,17 +1071,16 @@ impl Inserter {
         ctx: &QueryContextRef,
         physical_table: String,
         statement_executor: &StatementExecutor,
-    ) -> Result<()> {
+    ) -> Result<TableRef> {
         let catalog_name = ctx.current_catalog();
         let schema_name = ctx.current_schema();
 
         // check if exist
-        if self
+        if let Some(table) = self
             .get_table(catalog_name, &schema_name, &physical_table)
             .await?
-            .is_some()
         {
-            return Ok(());
+            return Ok(table);
         }
 
         // Gate here too, otherwise a disabled switch would still leak the physical table.
@@ -1114,7 +1132,7 @@ impl Inserter {
             .await;
 
         match res {
-            Ok(_) => Ok(()),
+            Ok(table) => Ok(table),
             Err(err) => {
                 error!(err; "Failed to create table {table_reference}");
                 Err(err)
@@ -1386,6 +1404,124 @@ fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
             col.datatype_extension.clone(),
             native_histogram_value_type(),
         )
+}
+
+/// Rewrites the time index column of every request in `requests` to the given
+/// physical metric table's time index unit.
+///
+/// This only rewrites requests whose time index unit differs from the
+/// physical table's; converting to a coarser unit truncates the sub-unit part
+/// (floor, see `Timestamp::convert_to`). A metric table without a timestamp
+/// column is left alone: the metric engine rejects it anyway.
+fn align_row_insert_requests_time_unit(
+    physical_table: &TableRef,
+    requests: &mut RowInsertRequests,
+) -> Result<()> {
+    let Some(target_unit) = physical_table
+        .table_info()
+        .meta
+        .schema
+        .timestamp_column()
+        .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
+    else {
+        return Ok(());
+    };
+    convert_row_insert_requests_time_unit(requests, target_unit)
+}
+
+/// Converts the time index column of each request to `target_unit`.
+fn convert_row_insert_requests_time_unit(
+    requests: &mut RowInsertRequests,
+    target_unit: TimeUnit,
+) -> Result<()> {
+    for request in &mut requests.inserts {
+        let Some(rows) = request.rows.as_mut() else {
+            continue;
+        };
+        convert_rows_time_unit(rows, target_unit)?;
+    }
+    Ok(())
+}
+
+fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> {
+    let Some(ts_index) = rows
+        .schema
+        .iter()
+        .position(|col| col.semantic_type == SemanticType::Timestamp as i32)
+    else {
+        return Ok(());
+    };
+    let Some(source_unit) = timestamp_unit_from_datatype(rows.schema[ts_index].datatype) else {
+        return Ok(());
+    };
+    if source_unit == target_unit {
+        return Ok(());
+    }
+
+    rows.schema[ts_index].datatype = column_datatype_from_time_unit(target_unit) as i32;
+    // Timestamp columns never carry a datatype extension.
+    rows.schema[ts_index].datatype_extension = None;
+
+    for row in &mut rows.rows {
+        let Some(value) = row.values.get_mut(ts_index) else {
+            continue;
+        };
+        let Some(value_data) = value.value_data.take() else {
+            continue;
+        };
+        value.value_data =
+            convert_timestamp_value_data(value_data, source_unit, target_unit, ts_index)?;
+    }
+    Ok(())
+}
+
+fn timestamp_unit_from_datatype(datatype: i32) -> Option<TimeUnit> {
+    ColumnDataType::try_from(datatype)
+        .ok()
+        .and_then(|datatype| match datatype {
+            ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
+            ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
+            ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
+            ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
+            _ => None,
+        })
+}
+
+fn column_datatype_from_time_unit(unit: TimeUnit) -> ColumnDataType {
+    match unit {
+        TimeUnit::Second => ColumnDataType::TimestampSecond,
+        TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
+        TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
+        TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
+    }
+}
+
+fn convert_timestamp_value_data(
+    value_data: ValueData,
+    source_unit: TimeUnit,
+    target_unit: TimeUnit,
+    column_index: usize,
+) -> Result<Option<ValueData>> {
+    let timestamp = match value_data {
+        ValueData::TimestampSecondValue(v) => Timestamp::new_second(v),
+        ValueData::TimestampMillisecondValue(v) => Timestamp::new_millisecond(v),
+        ValueData::TimestampMicrosecondValue(v) => Timestamp::new_microsecond(v),
+        ValueData::TimestampNanosecondValue(v) => Timestamp::new_nanosecond(v),
+        // Null or non-timestamp value; nothing to convert.
+        other => return Ok(Some(other)),
+    };
+    let converted = timestamp.convert_to(target_unit).context(InvalidInsertRequestSnafu {
+        reason: format!(
+            "timestamp column {column_index} value {} in unit {source_unit:?} overflows when converting to unit {target_unit:?}",
+            timestamp.value()
+        ),
+    })?;
+    Ok(Some(match target_unit {
+        TimeUnit::Second => ValueData::TimestampSecondValue(converted.value()),
+        TimeUnit::Millisecond => ValueData::TimestampMillisecondValue(converted.value()),
+        TimeUnit::Microsecond => ValueData::TimestampMicrosecondValue(converted.value()),
+        TimeUnit::Nanosecond => ValueData::TimestampNanosecondValue(converted.value()),
+    }))
 }
 
 fn table_is_native_histogram(table: &TableRef) -> bool {
@@ -1705,7 +1841,7 @@ mod tests {
 
     use api::helper::ColumnDataTypeWrapper;
     use api::v1::helper::{field_column_schema, time_index_column_schema};
-    use api::v1::{RowInsertRequest, Rows, Value};
+    use api::v1::{Row, RowInsertRequest, Rows, Value};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use common_meta::cache::new_table_flownode_set_cache;
     use common_meta::ddl::test_util::datanode_handler::NaiveDatanodeHandler;
@@ -1768,6 +1904,204 @@ mod tests {
             table::metadata::FilterPushDownType::Unsupported,
             Arc::new(DummyDataSource),
         ))
+    }
+
+    fn make_metric_physical_table_ref_with_time_unit(unit: TimeUnit) -> TableRef {
+        let schema = datatypes::schema::SchemaBuilder::try_from_columns(vec![
+            ColumnSchema::new(
+                greptime_timestamp(),
+                ConcreteDataType::timestamp_datatype(unit),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(schema))
+            .primary_key_indices(vec![])
+            .value_indices(vec![1])
+            .engine("metric")
+            .next_column_id(0)
+            .options(Default::default())
+            .created_on(Default::default())
+            .build()
+            .unwrap();
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(1)
+                .table_version(0)
+                .name("greptime_physical_table")
+                .schema_name(DEFAULT_SCHEMA_NAME)
+                .catalog_name(DEFAULT_CATALOG_NAME)
+                .desc(None)
+                .table_type(TableType::Base)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        Arc::new(table::Table::new(
+            info,
+            table::metadata::FilterPushDownType::Unsupported,
+            Arc::new(DummyDataSource),
+        ))
+    }
+
+    fn ms_row_insert_request(timestamp_ms: i64) -> RowInsertRequest {
+        RowInsertRequest {
+            table_name: "my_metric".to_string(),
+            rows: Some(Rows {
+                schema: vec![
+                    time_index_column_schema(
+                        greptime_timestamp(),
+                        ColumnDataType::TimestampMillisecond,
+                    ),
+                    field_column_schema(greptime_value(), ColumnDataType::Float64),
+                ],
+                rows: vec![Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMillisecondValue(timestamp_ms)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(1.0)),
+                        },
+                    ],
+                }],
+            }),
+        }
+    }
+
+    #[test]
+    fn test_convert_row_insert_requests_time_unit_noop_when_matching() {
+        let mut requests = RowInsertRequests {
+            inserts: vec![ms_row_insert_request(123)],
+        };
+        convert_row_insert_requests_time_unit(&mut requests, TimeUnit::Millisecond).unwrap();
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampMillisecond as i32
+        );
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMillisecondValue(123))
+        ));
+    }
+
+    #[test]
+    fn test_convert_row_insert_requests_time_unit_widens_losslessly() {
+        let mut requests = RowInsertRequests {
+            inserts: vec![ms_row_insert_request(123)],
+        };
+        convert_row_insert_requests_time_unit(&mut requests, TimeUnit::Microsecond).unwrap();
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampMicrosecond as i32
+        );
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMicrosecondValue(123_000))
+        ));
+    }
+
+    #[test]
+    fn test_convert_row_insert_requests_time_unit_truncates_on_narrowing() {
+        // 123_456_789 ns floors to 123_456 us and 123 ms; negative values
+        // floor towards negative infinity, matching `Timestamp::convert_to`.
+        let requests = |value_ns: i64| RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "my_metric".to_string(),
+                rows: Some(Rows {
+                    schema: vec![
+                        time_index_column_schema(
+                            greptime_timestamp(),
+                            ColumnDataType::TimestampNanosecond,
+                        ),
+                        field_column_schema(greptime_value(), ColumnDataType::Float64),
+                    ],
+                    rows: vec![Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::TimestampNanosecondValue(value_ns)),
+                            },
+                            Value {
+                                value_data: Some(ValueData::F64Value(1.0)),
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        };
+
+        let mut reqs = requests(123_456_789);
+        convert_row_insert_requests_time_unit(&mut reqs, TimeUnit::Microsecond).unwrap();
+        let rows = reqs.inserts[0].rows.as_ref().unwrap();
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMicrosecondValue(123_456))
+        ));
+
+        let mut reqs = requests(123_456_789);
+        convert_row_insert_requests_time_unit(&mut reqs, TimeUnit::Millisecond).unwrap();
+        let rows = reqs.inserts[0].rows.as_ref().unwrap();
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMillisecondValue(123))
+        ));
+
+        let mut reqs = requests(-123_456_789);
+        convert_row_insert_requests_time_unit(&mut reqs, TimeUnit::Microsecond).unwrap();
+        let rows = reqs.inserts[0].rows.as_ref().unwrap();
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMicrosecondValue(-123_457))
+        ));
+    }
+
+    #[test]
+    fn test_convert_row_insert_requests_time_unit_overflow() {
+        let mut requests = RowInsertRequests {
+            inserts: vec![ms_row_insert_request(i64::MAX)],
+        };
+        let err =
+            convert_row_insert_requests_time_unit(&mut requests, TimeUnit::Nanosecond).unwrap_err();
+        assert!(err.to_string().contains("overflows"), "{err}");
+    }
+
+    #[test]
+    fn test_align_row_insert_requests_time_unit() {
+        // Microsecond physical table, millisecond request (prometheus remote
+        // write shape): the request is rewritten to the physical unit.
+        let table = make_metric_physical_table_ref_with_time_unit(TimeUnit::Microsecond);
+        let mut requests = RowInsertRequests {
+            inserts: vec![ms_row_insert_request(123)],
+        };
+        align_row_insert_requests_time_unit(&table, &mut requests).unwrap();
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampMicrosecond as i32
+        );
+        assert!(matches!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMicrosecondValue(123_000))
+        ));
+
+        // Millisecond physical table (the auto-created default): no-op.
+        let table = make_metric_physical_table_ref_with_time_unit(TimeUnit::Millisecond);
+        let mut requests = RowInsertRequests {
+            inserts: vec![ms_row_insert_request(123)],
+        };
+        align_row_insert_requests_time_unit(&table, &mut requests).unwrap();
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(
+            rows.schema[0].datatype,
+            ColumnDataType::TimestampMillisecond as i32
+        );
     }
 
     #[tokio::test]
