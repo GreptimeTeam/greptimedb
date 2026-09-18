@@ -195,6 +195,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Metric name matcher cannot be planned as a union: {reason}"))]
+    UnsupportedMetricUnion {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Timestamp out of range: {} of {:?}", timestamp, unit))]
     TimestampOutOfRange {
         timestamp: i64,
@@ -265,7 +272,9 @@ impl ErrorExt for Error {
 
             MultipleMetricMatchers { .. } | NoMetricMatcher { .. } => StatusCode::InvalidSyntax,
 
-            MultiFieldsNotSupported { .. } => StatusCode::Unsupported,
+            MultiFieldsNotSupported { .. } | UnsupportedMetricUnion { .. } => {
+                StatusCode::Unsupported
+            }
             Catalog { source, .. } => source.status_code(),
         }
     }

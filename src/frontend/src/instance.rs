@@ -77,6 +77,7 @@ use promql_parser::label::Matcher;
 use query::QueryEngineRef;
 use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
+use query::promql::query_context_metric_name_candidates;
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
 use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
@@ -1217,21 +1218,39 @@ impl Instance {
         expr: &promql_parser::parser::Expr,
         query_ctx: &QueryContextRef,
     ) -> server_error::Result<Option<Vec<PermissionTableTarget>>> {
-        extract_tables_from_prom_expr_checked(expr)
-            .map(|tables| {
-                tables
-                    .map(|name| {
-                        table_idents_to_full_name(&name, query_ctx).map(
-                            |(catalog, schema, table)| {
-                                PermissionTableTarget::new(catalog, schema, table)
-                            },
+        if let Some(tables) = extract_tables_from_prom_expr_checked(expr) {
+            return tables
+                .map(|name| {
+                    table_idents_to_full_name(&name, query_ctx).map(|(catalog, schema, table)| {
+                        PermissionTableTarget::new(catalog, schema, table)
+                    })
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(BoxedError::new)
+                .context(ExecuteQuerySnafu)
+                .map(Some);
+        }
+
+        // A non-equality `__name__` matcher names no single table, so the protocol layer
+        // resolves the candidate metric tables, filters them by their own table permission and
+        // authorizes them before recording them here. Falling back to exactly those tables
+        // keeps the check as strict as the static path: a caller that recorded nothing is still
+        // left unresolved.
+        Ok(
+            query_context_metric_name_candidates(query_ctx).map(|candidates| {
+                candidates
+                    .metric_names
+                    .iter()
+                    .map(|table| {
+                        PermissionTableTarget::new(
+                            query_ctx.current_catalog(),
+                            candidates.schema.as_str(),
+                            table.as_str(),
                         )
                     })
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(BoxedError::new)
-                    .context(ExecuteQuerySnafu)
-            })
-            .transpose()
+                    .collect()
+            }),
+        )
     }
 
     async fn is_physical_query_permission_target(

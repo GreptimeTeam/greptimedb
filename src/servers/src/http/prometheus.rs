@@ -45,7 +45,6 @@ use datafusion_common::ScalarValue;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use datatypes::types::jsonb_to_string;
-use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
@@ -56,10 +55,12 @@ use promql_parser::parser::{
     SubqueryExpr, UnaryExpr, VectorSelector,
 };
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
+use query::promql::{MetricNameCandidates, encode_metric_name_candidates};
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
+use session::hints::PROMQL_METRIC_NAMES_EXTENSION_KEY;
 use snafu::{Location, OptionExt, ResultExt};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
@@ -180,42 +181,6 @@ pub enum PrometheusResponse {
 }
 
 impl PrometheusResponse {
-    /// Append the other [`PrometheusResponse]`.
-    /// # NOTE
-    ///   Only append matrix and vector results, otherwise just ignore the other response.
-    pub(super) fn append(&mut self, other: PrometheusResponse) {
-        match (self, other) {
-            (
-                PrometheusResponse::PromData(PromData {
-                    result: PromQueryResult::Matrix(lhs),
-                    ..
-                }),
-                PrometheusResponse::PromData(PromData {
-                    result: PromQueryResult::Matrix(rhs),
-                    ..
-                }),
-            ) => {
-                lhs.extend(rhs);
-            }
-
-            (
-                PrometheusResponse::PromData(PromData {
-                    result: PromQueryResult::Vector(lhs),
-                    ..
-                }),
-                PrometheusResponse::PromData(PromData {
-                    result: PromQueryResult::Vector(rhs),
-                    ..
-                }),
-            ) => {
-                lhs.extend(rhs);
-            }
-            _ => {
-                // TODO(dennis): process other cases?
-            }
-        }
-    }
-
     pub fn is_none(&self) -> bool {
         matches!(self, PrometheusResponse::None)
     }
@@ -450,14 +415,7 @@ pub async fn instant_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        let prom_queries = expand_metric_name_queries(&prom_query, metric_names);
-        try_call_return_response!(
-            handler
-                .check_query_permission_parsed(&prom_queries, &query_ctx)
-                .await
-        );
-
-        if prom_queries.is_empty() {
+        if metric_names.is_empty() {
             let result_type = promql_expr.value_type();
 
             return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
@@ -466,21 +424,13 @@ pub async fn instant_query(
             }));
         }
 
-        let responses = join_all(prom_queries.into_iter().map(|prom_query| {
-            let query_ctx = query_ctx.clone();
-            let handler = handler.clone();
+        let query_ctx = try_call_return_response!(
+            authorize_metric_name_union(&handler, metric_names, &schema, &query_ctx).await
+        );
 
-            async move { do_instant_query(&handler, prom_query, query_ctx).await }
-        }))
-        .await;
-
-        responses
-            .into_iter()
-            .reduce(|mut acc, resp| {
-                acc.append_query_response(resp);
-                acc
-            })
-            .unwrap()
+        // The planner scans every authorized candidate and merges them into one input, so a
+        // cross metric `sum`/`topk`/`count` is evaluated once over all of them.
+        do_instant_query(&handler, prom_query, query_ctx).await
     } else {
         do_instant_query(&handler, prom_query, query_ctx).await
     }
@@ -581,36 +531,20 @@ pub async fn range_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        let prom_queries = expand_metric_name_queries(&prom_query, metric_names);
-        try_call_return_response!(
-            handler
-                .check_query_permission_parsed(&prom_queries, &query_ctx)
-                .await
-        );
-
-        if prom_queries.is_empty() {
+        if metric_names.is_empty() {
             return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
                 result_type: ValueType::Matrix.to_string(),
                 ..Default::default()
             }));
         }
 
-        let responses = join_all(prom_queries.into_iter().map(|prom_query| {
-            let query_ctx = query_ctx.clone();
-            let handler = handler.clone();
+        let query_ctx = try_call_return_response!(
+            authorize_metric_name_union(&handler, metric_names, &schema, &query_ctx).await
+        );
 
-            async move { do_range_query(&handler, prom_query, query_ctx).await }
-        }))
-        .await;
-
-        // Safety: at least one responses, checked above
-        responses
-            .into_iter()
-            .reduce(|mut acc, resp| {
-                acc.append_query_response(resp);
-                acc
-            })
-            .unwrap()
+        // The planner scans every authorized candidate and merges them into one input, so a
+        // cross metric `sum`/`topk`/`count` is evaluated once over all of them.
+        do_range_query(&handler, prom_query, query_ctx).await
     } else {
         do_range_query(&handler, prom_query, query_ctx).await
     }
@@ -1357,6 +1291,48 @@ fn current_schema_metric_targets(
     )
 }
 
+/// Authorizes the metric tables discovered for a non-equality `__name__` matcher and records
+/// them for the planner.
+///
+/// The order matters and must not be relaxed: candidate tables are discovered first, then
+/// filtered by their own table permission, and only the remaining tables are authorized and
+/// handed to the planner. A table the user cannot read is never passed on, so planning a
+/// metric name union can never widen the caller's access.
+async fn authorize_metric_name_union(
+    handler: &PrometheusHandlerRef,
+    metric_names: Vec<String>,
+    schema: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<QueryContextRef> {
+    let mut allowed = handler
+        .filter_metadata_metric_names(metric_names, schema, query_ctx)
+        .await?;
+    allowed.sort_unstable();
+    allowed.dedup();
+
+    let mut targets = Vec::with_capacity(allowed.len());
+    for metric in &allowed {
+        targets.push(PermissionTableTarget::new(
+            query_ctx.current_catalog(),
+            schema,
+            metric,
+        ));
+    }
+    handler
+        .check_query_target_permission(PermissionTableTargets::resolved(targets), query_ctx)
+        .await?;
+
+    let mut query_ctx = query_ctx.as_ref().clone();
+    query_ctx.set_extension(
+        PROMQL_METRIC_NAMES_EXTENSION_KEY,
+        encode_metric_name_candidates(&MetricNameCandidates {
+            schema: schema.to_string(),
+            metric_names: allowed,
+        }),
+    );
+    Ok(Arc::new(query_ctx))
+}
+
 fn is_internal_physical_metric_table(table: &TableRef) -> bool {
     table.table_info().is_physical_table()
 }
@@ -1410,19 +1386,11 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
         PromqlExpr::Paren(ParenExpr { expr }) => collect_metric_names(expr, metric_names),
         PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => collect_metric_names(expr, metric_names),
         PromqlExpr::VectorSelector(VectorSelector { name, matchers, .. }) => {
-            if let Some(name) = name {
-                metric_names.insert(name.clone());
-            } else if let Some(matcher) = matchers.find_matchers(METRIC_NAME).into_iter().next() {
-                metric_names.insert(matcher.value);
-            }
+            collect_selector_metric_name(name, matchers, metric_names);
         }
         PromqlExpr::MatrixSelector(MatrixSelector { vs, .. }) => {
             let VectorSelector { name, matchers, .. } = vs;
-            if let Some(name) = name {
-                metric_names.insert(name.clone());
-            } else if let Some(matcher) = matchers.find_matchers(METRIC_NAME).into_iter().next() {
-                metric_names.insert(matcher.value);
-            }
+            collect_selector_metric_name(name, matchers, metric_names);
         }
         PromqlExpr::Call(Call { args, .. }) => {
             args.args
@@ -1430,6 +1398,30 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
                 .for_each(|e| collect_metric_names(e, metric_names));
         }
         PromqlExpr::NumberLiteral(_) | PromqlExpr::StringLiteral(_) | PromqlExpr::Extension(_) => {}
+    }
+}
+
+/// Records the metric name of one selector, or clears the collected names when the selector has
+/// no single metric name.
+///
+/// A non-equality `__name__` matcher selects several metric tables at once; it can only be
+/// evaluated by planning a metric name union, so its matcher text must never be reported as the
+/// metric name of the result.
+fn collect_selector_metric_name(
+    name: &Option<String>,
+    matchers: &Matchers,
+    metric_names: &mut HashSet<String>,
+) {
+    if let Some(name) = name {
+        let _ = metric_names.insert(name.clone());
+        return;
+    }
+
+    match matchers.find_matchers(METRIC_NAME).first() {
+        Some(matcher) if matcher.op == MatchOp::Equal => {
+            let _ = metric_names.insert(matcher.value.clone());
+        }
+        _ => metric_names.clear(),
     }
 }
 
@@ -2760,6 +2752,114 @@ mod tests {
             *handler.ordered_outputs.lock().unwrap(),
             vec![true, false, false]
         );
+    }
+
+    /// Builds a test handler both as a concrete type (for its recorded state) and as the trait
+    /// object the handler facing functions take.
+    fn new_test_handler(
+        metric_names: Vec<&str>,
+        denied_table: Option<&'static str>,
+    ) -> (Arc<TestPrometheusHandler>, PrometheusHandlerRef) {
+        let handler = Arc::new(TestPrometheusHandler {
+            catalog_manager: MemoryCatalogManager::new(),
+            deny_operation: false,
+            denied_table,
+            metric_names: metric_names.into_iter().map(str::to_string).collect(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        });
+        let handler_ref: PrometheusHandlerRef = handler.clone();
+        (handler, handler_ref)
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_records_only_authorized_candidates() {
+        let (handler, handler_ref) = new_test_handler(vec!["cpu_user", "denied"], None);
+        let query_ctx = QueryContext::arc();
+
+        let authorized = authorize_metric_name_union(
+            &handler_ref,
+            handler.metric_names.clone(),
+            "public",
+            &query_ctx,
+        )
+        .await
+        .unwrap();
+
+        // The candidates the caller cannot read are dropped before they reach the planner, so a
+        // metric name union never scans a table the caller has no permission for.
+        assert_eq!(
+            query::promql::query_context_metric_names(&authorized),
+            Some(vec!["cpu_user".to_string()])
+        );
+        assert_eq!(handler.metric_names.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_withholds_candidates_when_authorization_denies() {
+        let (handler, handler_ref) = new_test_handler(vec!["cpu_user", "denied"], Some("cpu_user"));
+        let query_ctx = QueryContext::arc();
+
+        let err = authorize_metric_name_union(
+            &handler_ref,
+            handler.metric_names.clone(),
+            "public",
+            &query_ctx,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(StatusCode::PermissionDenied, err.status_code());
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_carries_the_selected_schema() {
+        let (handler, handler_ref) = new_test_handler(vec!["cpu_user"], None);
+        let query_ctx = QueryContext::arc();
+
+        let authorized = authorize_metric_name_union(
+            &handler_ref,
+            handler.metric_names.clone(),
+            "private",
+            &query_ctx,
+        )
+        .await
+        .unwrap();
+
+        // The candidates may live in a schema other than the current one, and the run-time
+        // permission check must look at the same schema the tables were resolved in.
+        assert_eq!(
+            query::promql::query_context_metric_name_candidates(&authorized)
+                .map(|candidates| candidates.schema),
+            Some("private".to_string())
+        );
+    }
+
+    #[test]
+    fn non_equal_metric_name_matcher_reports_no_metric_name() {
+        // The matcher text is a pattern, not a metric name: reporting it would label every
+        // series of the union result with the pattern.
+        let cases = [
+            (r#"{__name__=~"cpu.*"}"#, None),
+            (r#"count by(__name__) ({__name__=~"cpu.*"})"#, None),
+            // Every matcher of a selector must not match the empty string, so the `!=` matcher
+            // is accompanied by a non-empty one.
+            (r#"topk(1, {__name__!="cpu",host="a"})"#, None),
+            (r#"{__name__="cpu"}"#, Some("cpu")),
+            (r#"cpu{host="a"}"#, Some("cpu")),
+            (r#"sum by(__name__) ({__name__="cpu"})"#, Some("cpu")),
+        ];
+
+        for (query, expected) in cases {
+            let expr = promql_parser::parser::parse(query).unwrap();
+            assert_eq!(
+                promql_expr_to_metric_name(&expr).as_deref(),
+                expected,
+                "{query}"
+            );
+        }
     }
 
     #[tokio::test]

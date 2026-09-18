@@ -31,9 +31,12 @@ TQL EVAL (0, 10, '5s') test{__database__="greptime_private"};
 -- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 
--- NOT SUPPORTED: `__name__` matcher without equal condition
+-- NOT SUPPORTED: every matcher of a selector must not match the empty string, so this is a
+-- parse error, not a metric name union.
 TQL EVAL (0, 10, '5s') {__name__!="test"};
 
+-- A non-equality `__name__` matcher selects every metric table whose name it matches. `test` is
+-- a plain table, not a metric table, so this returns an empty result instead of an error.
 TQL EVAL (0, 10, '5s') {__name__=~"test"};
 
 -- the point at 1ms will be shadowed by the point at 2ms
