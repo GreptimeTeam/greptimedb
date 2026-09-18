@@ -682,6 +682,9 @@ impl RangeManipulateStream {
     // And the generated timestamp is not aligned to the step. It's expected to do later.
     pub fn manipulate(&self, input: RecordBatch) -> DataFusionResult<Option<RecordBatch>> {
         let mut other_columns = (0..input.columns().len()).collect::<HashSet<_>>();
+        // The time index column is always replaced by the aligned timestamps below,
+        // so gathering it with the other columns is wasted work.
+        let _ = other_columns.remove(&self.time_index);
         // calculate the range
         let (ranges, (start, end)) = self.calculate_range(&input)?;
         // ignore this if all ranges are empty
