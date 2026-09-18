@@ -400,7 +400,8 @@ pub enum Error {
         location: Location,
     },
 
-    /// The requested operation is not implemented by the object store WAL.
+    /// The store supports construction, recovery, stopping and latest-entry queries;
+    /// other log-store operations return this error.
     #[snafu(display("Object store WAL operation is not supported yet"))]
     UnsupportedObjectStoreWalOperation {
         #[snafu(implicit)]
