@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
@@ -370,6 +371,41 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid WAL object, path: {}", path))]
+    InvalidWalObject {
+        path: String,
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL prefix mismatch, expected: {}, actual: {}",
+        expected,
+        actual
+    ))]
+    MismatchedWalPrefix {
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL operation failed"))]
+    ObjectStoreWal {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    /// Temporary until the object store WAL read and write operations are implemented.
+    #[snafu(display("Object store WAL operation is not supported yet"))]
+    UnsupportedObjectStoreWalOperation {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -402,6 +438,7 @@ impl ErrorExt for Error {
             | MissingValue { .. }
             | OverrideCompactedEntry { .. }
             | InvalidWalObjectStore { .. }
+            | MismatchedWalPrefix { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
@@ -421,6 +458,10 @@ impl ErrorExt for Error {
             | WalObjectConflict { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
+
+            UnsupportedObjectStoreWalOperation { .. } => StatusCode::Unsupported,
+            InvalidWalObject { source, .. } => source.status_code(),
+            ObjectStoreWal { source, .. } => source.status_code(),
 
             // Object store related errors
             CreateWriter { .. }
@@ -457,6 +498,7 @@ impl ErrorExt for Error {
             | WriteIndex { error, .. }
             | ReadIndex { error, .. }
             | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
+            ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
