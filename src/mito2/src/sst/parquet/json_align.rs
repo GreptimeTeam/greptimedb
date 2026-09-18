@@ -18,7 +18,8 @@ use std::task::{Context, Poll};
 
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
-use datatypes::arrow::array::{ArrayRef, new_null_array};
+use datatypes::arrow::array::{ArrayRef, BooleanArray, new_null_array};
+use datatypes::arrow::compute::filter_record_batch;
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JsonMetadata, is_json2_extension_type};
@@ -31,7 +32,8 @@ use serde_json::from_str;
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
-    CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
+    CastColumnSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result,
+    UnexpectedSnafu,
 };
 use crate::sst::parquet::Json2TargetLayout;
 
@@ -188,6 +190,7 @@ fn align_projected_batch(
     );
 
     let mut cols = Vec::with_capacity(projected_root_presence.len());
+    let mut valid_rows = vec![true; rb.num_rows()];
     let mut idx = 0;
     let input_schema = rb.schema_ref();
 
@@ -202,7 +205,14 @@ fn align_projected_batch(
                 align_array(rb.column(idx), input_schema.field(idx), field)?
             }
             ResolvedAlignMode::Rewrite { columns } => match columns.get(field.name()) {
-                Some(settings) => rewrite_array(rb.column(idx), input_schema.field(idx), settings)?,
+                Some(settings) => {
+                    let (array, column_valid_rows) =
+                        rewrite_array(rb.column(idx), input_schema.field(idx), settings)?;
+                    for (valid, column_valid) in valid_rows.iter_mut().zip(column_valid_rows) {
+                        *valid &= column_valid;
+                    }
+                    array
+                }
                 None => rb.column(idx).clone(),
             },
         };
@@ -210,7 +220,12 @@ fn align_projected_batch(
         idx += 1;
     }
 
-    RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
+    let batch = RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)?;
+    if valid_rows.iter().all(|valid| *valid) {
+        return Ok(batch);
+    }
+
+    filter_record_batch(&batch, &BooleanArray::from(valid_rows)).context(ComputeArrowSnafu)
 }
 
 fn align_array(
@@ -249,9 +264,9 @@ fn rewrite_array(
     source_array: &ArrayRef,
     source_field: &Field,
     settings: &RewriteSettings,
-) -> Result<ArrayRef> {
+) -> Result<(ArrayRef, Vec<bool>)> {
     JsonArray::from(source_array)
-        .rewrite_to_v2(
+        .rewrite_to_v2_discard_invalid(
             source_field,
             &settings.logical_settings,
             &settings.target_layout,
@@ -330,7 +345,9 @@ mod tests {
         Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonTypeHint;
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::types::parse_string_to_jsonb;
     use futures::{StreamExt, stream};
 
@@ -781,6 +798,68 @@ mod tests {
         assert_eq!(&target_type, output.column(1).data_type());
         assert_eq!(2, output.column(1).null_count());
         assert_eq!(int_array([10, 20]).as_ref(), output.column(3).as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_discards_rows_with_invalid_json2_settings() {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                nullable: true,
+                default_constraint: None,
+                inverted_index: false,
+            }],
+            Some(0),
+        )
+        .unwrap();
+        let target_type = json2_physical_data_type(&settings);
+        let output_schema = schema([
+            Field::new("j", target_type.clone(), true).with_extension_type(
+                Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings.clone()))),
+            ),
+            Field::new("value", DataType::Int64, true),
+        ]);
+        let source = Arc::new(BinaryArray::from_iter([
+            Some(parse_string_to_jsonb(r#"{"kind":"valid"}"#).unwrap()),
+            Some(parse_string_to_jsonb(r#"{"kind":1}"#).unwrap()),
+        ])) as ArrayRef;
+        let input = RecordBatch::try_new(
+            schema([
+                Field::new("j", DataType::Binary, true)
+                    .with_extension_type(Json2ExtensionType::default()),
+                Field::new("value", DataType::Int64, true),
+            ]),
+            vec![source, int_array([10, 20])],
+        )
+        .unwrap();
+        let columns = HashMap::from([(
+            "j".to_string(),
+            Json2TargetLayout {
+                extension_metadata: serde_json::to_string(&JsonMetadata::new(settings.clone()))
+                    .unwrap(),
+                target_layout: settings,
+            },
+        )]);
+        let mut aligner = JsonSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true, true],
+            output_schema,
+            AlignMode::Rewrite { columns },
+        )
+        .unwrap();
+
+        let output = aligner.next().await.unwrap().unwrap();
+        assert_eq!(1, output.num_rows());
+        assert_eq!(
+            10,
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        );
     }
 
     #[test]

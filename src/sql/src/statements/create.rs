@@ -160,6 +160,28 @@ impl Display for Json2Options {
     }
 }
 
+impl Json2Options {
+    pub fn build_json_settings(&self) -> Result<JsonSettings> {
+        let type_hints = self
+            .type_hints
+            .iter()
+            .map(|hint| {
+                Ok(datatypes::json::JsonTypeHint {
+                    path: hint.path.clone(),
+                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
+                    nullable: hint.nullable,
+                    default_constraint: build_json_type_hint_default_constraint(hint)?,
+                    inverted_index: hint.inverted_index,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_auto_expanded_paths = self
+            .max_auto_expanded_paths
+            .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS));
+        JsonSettings::try_new(type_hints, max_auto_expanded_paths).map_err(Into::into)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct JsonTypeHint {
     pub path: Vec<String>,
@@ -356,26 +378,7 @@ impl ColumnExtensions {
             return Ok(None);
         };
 
-        let type_hints = options
-            .type_hints
-            .iter()
-            .map(|hint| {
-                Ok(datatypes::json::JsonTypeHint {
-                    path: hint.path.clone(),
-                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
-                    nullable: hint.nullable,
-                    default_constraint: build_json_type_hint_default_constraint(hint)?,
-                    inverted_index: hint.inverted_index,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let settings = JsonSettings::try_new(
-            type_hints,
-            options
-                .max_auto_expanded_paths
-                .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS)),
-        )?;
-        Ok(Some(settings))
+        options.build_json_settings().map(Some)
     }
 
     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {

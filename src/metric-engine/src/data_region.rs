@@ -227,6 +227,7 @@ impl DataRegion {
             | AlterKind::UnsetRegionOptions { keys: _ }
             | AlterKind::SetIndexes { options: _ }
             | AlterKind::UnsetIndexes { options: _ }
+            | AlterKind::SetJsonSettings { .. }
             | AlterKind::SyncColumns {
                 column_metadatas: _,
             } => {
