@@ -115,6 +115,42 @@ tql eval(0, 5, '5s') sum by(host)(counter_metric{device="eth0"}) / on(host) sum 
 -- SQLNESS SORT_RESULT 3 1
 tql eval(0, 5, '5s') counter_metric / on(host) sum by(host)(gauge_metric{device="eth0"});
 
+-- A grouping label that is a value field, not a tag: its value varies between samples of one
+-- series, so a matcher on it must not filter the scan before sample selection (#9242).
+create table pr9202_a (
+    ts timestamp time index,
+    host string,
+    val double,
+    `status` string,
+    primary key (host)
+);
+
+create table pr9202_b (
+    ts timestamp time index,
+    host string,
+    val double,
+    `status` string,
+    primary key (host)
+);
+
+insert into pr9202_a values
+    (0, 'h1', 10, 'ready'),
+    (5000, 'h1', 20, 'busy');
+
+insert into pr9202_b values
+    (5000, 'h1', 5, 'ready');
+
+-- The 5s sample of pr9202_a has status="busy" and no partner; filtering it before sample
+-- selection would fall back to the stale "ready" sample and fabricate a result row.
+tql eval (5, 5, '1s', '1m')
+    count by(status) (pr9202_a)
+    / on(status)
+    count by(status) (pr9202_b{status="ready"});
+
+drop table pr9202_a;
+
+drop table pr9202_b;
+
 -- `topk` preserves its input labels, and filtering before `topk` changes the set of
 -- candidates it ranks, so the rewrite must not reach its input.
 -- SQLNESS SORT_RESULT 3 1
