@@ -53,4 +53,5 @@ mod format;
 #[allow(dead_code)]
 mod io;
 
-pub use batch::entry_id;
+#[allow(unused_imports)]
+pub(crate) use batch::entry_id;

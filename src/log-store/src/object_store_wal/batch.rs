@@ -45,7 +45,7 @@ pub(crate) const OBJECT_SEQ_LIMIT: u64 = 1 << (u64::BITS - POSITION_BITS);
 /// at one so that id zero, the watermark of a region without entries, is never
 /// assigned. A region's ids increase with the object sequence and have gaps
 /// wherever other regions or other positions took the sequence.
-pub fn entry_id(object_seq: u64, position: u64) -> EntryId {
+pub(crate) fn entry_id(object_seq: u64, position: u64) -> EntryId {
     debug_assert!(object_seq < OBJECT_SEQ_LIMIT && (1..POSITION_LIMIT).contains(&position));
     (object_seq << POSITION_BITS) | position
 }

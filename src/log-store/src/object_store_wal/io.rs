@@ -183,11 +183,10 @@ impl ObjectStoreIo {
 }
 
 /// Returns true when a conditional create failed because the object exists.
+/// Only the precondition failure says so: a store may report `AlreadyExists`
+/// for an unrelated path, such as a parent that is a file.
 fn reports_existing_object(error: &object_store::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::ConditionNotMatch | ErrorKind::AlreadyExists
-    )
+    error.kind() == ErrorKind::ConditionNotMatch
 }
 
 fn normalize_prefix(prefix: &str) -> Result<String> {
@@ -215,7 +214,9 @@ mod tests {
     use std::sync::Arc;
 
     use common_error::ext::{ErrorExt, RetryHint};
+    use common_test_util::temp_dir::create_temp_dir;
     use object_store::layers::mock::{self, MockLayerBuilder, oio};
+    use object_store::secure_fs::SecureFsRoot;
     use object_store::services::Memory;
 
     use super::*;
@@ -451,6 +452,27 @@ mod tests {
             "unexpected error: {error:?}"
         );
         assert_eq!(RetryHint::NonRetryable, error.retry_hint());
+    }
+
+    #[tokio::test]
+    async fn test_io_create_under_a_file_parent_is_reported_as_the_write_failure() {
+        let temp_dir = create_temp_dir("object_store_wal_io_file_parent");
+        std::fs::write(temp_dir.path().join("datanodes"), []).unwrap();
+        let store = SecureFsRoot::open(temp_dir.path())
+            .unwrap()
+            .build_operator();
+        let io = ObjectStoreIo::new(store, "datanodes/1/epochs/2/").unwrap();
+
+        // The store reports `AlreadyExists` for the parent, not for the
+        // object, so the create failure itself comes back.
+        let error = io
+            .put_if_absent(7, Bytes::from_static(b"wal"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::WalObjectStore { operation: "write", ref path, .. } if path == &io.object_path(7)),
+            "unexpected error: {error:?}"
+        );
     }
 
     #[tokio::test]
