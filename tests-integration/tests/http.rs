@@ -7827,9 +7827,19 @@ pub(crate) async fn test_otlp_traces_v2(
         "otlp_traces_v2_fixed_schema",
         &client,
         "select count(*) from information_schema.columns where table_name = 'trace_v2_spans' \
-         and (column_name like 'span_attributes.%' \
-         or column_name in ('span_events', 'span_links'));",
+         and column_name like 'span_attributes.%';",
         "[[0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_events_links",
+        &client,
+        r#"select json_get_string(span_events, '$[0].name'),
+                  json_get_int(span_events, '$[0].attributes."event.code"'),
+                  json_get_string(span_links, '$[0].trace_id'),
+                  json_get_string(span_links, '$[0].attributes."link.type"')
+           from trace_v2_spans;"#,
+        r#"[["cache.hit",7,"cc9e0991a2e63d274984bd44ee669203","follows_from"]]"#,
     )
     .await;
     validate_data(

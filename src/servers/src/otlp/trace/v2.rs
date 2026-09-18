@@ -23,18 +23,17 @@ use crate::otlp::trace::v1::span_duration_nano;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, RESOURCE_ATTRIBUTES_COLUMN,
     SCOPE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN,
-    SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_MESSAGE_COLUMN, TIMESTAMP_COLUMN, TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN,
-    TRACE_STATE_COLUMN,
+    SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN,
+    SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN, TIMESTAMP_COLUMN, TIMESTAMP_END_COLUMN,
+    TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::otlp::utils::{make_column_data, make_string_column_data};
 use crate::row_writer::{self, MultiTableData, TableData};
 
 // Preallocate for the fixed v2 schema: 3 timing columns, 3 span/trace IDs,
 // 2 kind/name columns, 2 status columns, 1 trace state, 2 scope name/version
-// columns, 1 service name, and 3 JSON2 attribute columns (17 total).
-// Events and links are excluded until ARRAY(JSON2) is supported.
-const APPROXIMATE_COLUMN_COUNT: usize = 17;
+// columns, 1 service name, 3 JSON2 attribute columns, and 2 JSON event/link columns.
+const APPROXIMATE_COLUMN_COUNT: usize = 19;
 
 /// Converts trace spans into row insert requests for the main v2 trace table.
 pub(super) fn v2_to_grpc_main_insert_requests(
@@ -139,7 +138,13 @@ fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
         &mut row,
     )?;
 
-    // TODO(LFC): Store span_events and span_links once ARRAY(JSON2) is supported.
+    row_writer::write_json(
+        writer,
+        SPAN_EVENTS_COLUMN,
+        span.span_events.into(),
+        &mut row,
+    )?;
+    row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
 
     writer.add_row(row);
     Ok(())
