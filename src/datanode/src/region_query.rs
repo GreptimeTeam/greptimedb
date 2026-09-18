@@ -36,6 +36,15 @@ use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 /// Serves the region queries issued by the datanode itself.
+///
+/// Known limitation: [`RegionQueryHandler::select_target`] resolves the leader of a region through
+/// the table route cache, which uses `InitStrategy::VersionChecked`. The version counter of that
+/// strategy belongs to the `CacheContainer` and not to a single table: any `TableId` invalidation
+/// bumps the shared version, so a cold load of one table's route retries (and loads again) when an
+/// *unrelated* table is invalidated concurrently. Clusters with frequent DDL or region movement can
+/// therefore see amplified cold-load retries on the datanode; the tail latency of cold loads in
+/// such clusters is worth verifying. The retries only add work, they keep the loaded route correct
+/// (a stale route is never returned).
 pub struct DatanodeRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,
@@ -61,6 +70,9 @@ impl RegionQueryHandler for DatanodeRegionQueryHandler {
         region_id: RegionId,
     ) -> QueryResult<RegionQueryTarget> {
         // The leader of a region is the only peer that can serve a region query.
+        //
+        // This lookup goes through the version checked table route cache: see the known limitation
+        // of `DatanodeRegionQueryHandler` about retries of unrelated invalidations.
         let peer = self
             .partition_manager
             .find_region_leader(region_id)
