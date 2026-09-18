@@ -86,6 +86,8 @@ VALUES
 
 Affected Rows: 0
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -146,6 +148,8 @@ VALUES
 
 Affected Rows: 0
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -283,6 +287,8 @@ VALUES
 
 Affected Rows: 3
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -366,6 +372,8 @@ VALUES
 
 Affected Rows: 1
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
