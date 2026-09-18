@@ -34,7 +34,6 @@ use crate::read::pruner::PartitionPruner;
 use crate::read::range_cache::{
     build_series_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
 };
-use crate::read::scan_memory::hold_reservation;
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
     PartitionMetrics, SplitRecordBatchStream, compute_average_batch_size,
@@ -419,7 +418,6 @@ async fn build_series_partition_range(
             if partition_pruner.try_skip_manifest_pruned_file_range(index, &part_metrics) {
                 continue;
             }
-            let guard = stream_ctx.input.reserve_scan_memory(index)?;
             let mut reader_metrics = ReaderMetrics {
                 filter_metrics: new_filter_metrics(part_metrics.explain_verbose()),
                 ..Default::default()
@@ -453,7 +451,7 @@ async fn build_series_partition_range(
                 stream_ctx.input.sequence_range,
                 stream_ctx.input.region_metadata().region_id,
             );
-            sources.push(Box::pin(hold_reservation(stream, guard)) as BoxedRecordBatchStream);
+            sources.push(Box::pin(stream) as BoxedRecordBatchStream);
             continue;
         }
 

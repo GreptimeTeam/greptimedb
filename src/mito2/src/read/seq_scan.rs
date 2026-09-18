@@ -505,7 +505,7 @@ impl SeqScan {
 
     /// Checks resource limit for the scanner.
     pub(crate) fn check_scan_limit(&self) -> Result<()> {
-        if self.stream_ctx.input.uses_scan_memory_budget() {
+        if self.stream_ctx.input.uses_scan_memory_limit() {
             return Ok(());
         }
         // Check max file count limit for all partitions since we scan them in parallel.
