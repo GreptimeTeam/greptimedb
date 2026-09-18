@@ -1576,6 +1576,57 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         serde_json::from_value::<PrometheusResponse>(json!(["multi_labels"])).unwrap()
     );
 
+    // Logical metrics sharing a physical table have NULL in the label columns
+    // they don't use. Prometheus reads a label a series doesn't carry as the
+    // empty string, so `demo_metrics` and `demo_metrics_with_nanos` — neither of
+    // which has a `host` label — match both of these.
+    //
+    // `.%2B` is `.+`; a bare `+` decodes to a space in a query string. Grafana
+    // encodes it the same way.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host=\"\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host!=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+            "multi_labels",
+        ]))
+        .unwrap()
+    );
+
+    // A pre-epoch RFC3339 bound is a valid range, not a panic.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=1969-12-31T23:59:59Z&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
     // buildinfo
     let res = client
         .get("/v1/prometheus/api/v1/status/buildinfo")
