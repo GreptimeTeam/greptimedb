@@ -38,6 +38,10 @@ inputs:
     description: Start image-provided Docker and grant the runner Docker group access (root-equivalent)
     required: false
     default: 'false'
+  enable-host-cache-clear:
+    description: Allow only host OS cache clearing via sudo on a dedicated benchmark runner
+    required: false
+    default: 'false'
   resource-group-id:
     description: Optional ECS resource group
     required: false
@@ -78,6 +82,7 @@ runs:
       ALIYUN_ECS_SYSTEM_DISK_GIB: ${{ inputs.system-disk-gib }}
       ALIYUN_ECS_TTL_HOURS: ${{ inputs.ttl-hours }}
       ALIYUN_ECS_ENABLE_DOCKER: ${{ inputs.enable-docker }}
+      ALIYUN_ECS_ENABLE_HOST_CACHE_CLEAR: ${{ inputs.enable-host-cache-clear }}
       ALIYUN_ECS_RESOURCE_GROUP_ID: ${{ inputs.resource-group-id }}
       QUERY_REGRESSION_RUNNER_UID: ${{ inputs.runner-uid }}
       QUERY_REGRESSION_RUNNER_GID: ${{ inputs.runner-gid }}

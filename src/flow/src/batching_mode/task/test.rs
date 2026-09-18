@@ -2944,7 +2944,10 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task.prepare_plan_for_incremental(&query_engine, &dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -3153,7 +3156,10 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let incremental_plan = task.prepare_plan_for_incremental(&query_engine, &dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);

@@ -33,7 +33,7 @@
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -74,6 +74,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
@@ -279,7 +286,7 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -332,6 +339,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |

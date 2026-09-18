@@ -21,6 +21,7 @@ import io
 import os
 import subprocess
 import sys
+import tempfile
 import unittest
 from contextlib import redirect_stderr
 from datetime import datetime, timedelta, timezone
@@ -46,6 +47,28 @@ provision = load_module(
 teardown = load_module(
     "aliyun_ecs_runner_teardown_under_test", "aliyun-ecs-runner-teardown.py"
 )
+
+
+class GitHubApiResponseTest(unittest.TestCase):
+    def test_success_response_body(self):
+        cases = ((200, b'{"runners": []}', {"runners": []}), (204, b"", {}))
+        for status, body, expected in cases:
+            with self.subTest(status=status):
+                response = Mock(status=status)
+                response.read.return_value = body
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                with patch.object(provision.urllib.request, "urlopen", return_value=response):
+                    self.assertEqual(provision.github_api("token", "DELETE", "/test"), expected)
+
+    def test_invalid_json_still_fails(self):
+        response = Mock(status=200)
+        response.read.return_value = b"not json"
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        with patch.object(provision.urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(ValueError):
+                provision.github_api("token", "GET", "/test")
 
 
 class ProvisionNamingTest(unittest.TestCase):
@@ -234,6 +257,36 @@ runuser() { echo "runuser $*"; }
                 self.assertEqual(calls, ["docker", "jq", "systemctl start docker"] + (
                     ["usermod -aG docker custom-runner", "runuser -u custom-runner -- docker info"]
                     if fail == "0" else []))
+
+    def test_host_cache_clear_is_opt_in_and_command_scoped(self) -> None:
+        args = ("runner", "label", "token", "owner/repo")
+        self.assertNotIn("o11ybench-cache-clear", provision.render_user_data(*args))
+        enabled = provision.render_user_data(*args, runner_uid="2001", enable_host_cache_clear=True)
+        setup = enabled[enabled.index("# Opt-in host-wide"):enabled.index("cat > /etc/ephemeral-github-runner.env")]
+        self.assertIn("#2001 ALL=(root) NOPASSWD: %s /proc/sys/vm/drop_caches", setup)
+        self.assertNotIn("NOPASSWD: ALL", setup)
+        self.assertIn("visudo -cf", setup)
+        self.assertLess(enabled.index("visudo -cf"), enabled.index("systemctl restart --no-block ephemeral-github-runner.service"))
+        with self.assertRaisesRegex(ValueError, "runner-uid must be numeric"):
+            provision.render_user_data(*args, runner_uid="ALL", enable_host_cache_clear=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            # Run the actual setup in an isolated path, mocking only privileged tools.
+            script = setup.replace("/etc/sudoers.d", tmp)
+            mocks = '''
+sudo() { :; }
+visudo() { echo "visudo $*"; return "$FAIL_VALIDATE"; }
+id() { [[ "$*" == "-nu 2001" ]] || return 1; echo custom-runner; }
+runuser() { echo "runuser $*"; }
+'''
+            for fail in ("0", "1"):
+                result = subprocess.run(["bash", "-euc", mocks + script],
+                    env=os.environ | {"FAIL_VALIDATE": fail}, capture_output=True, text=True)
+                self.assertEqual(result.returncode, int(fail), result.stderr)
+                policy = Path(tmp) / "o11ybench-cache-clear"
+                self.assertEqual(policy.read_text(), "#2001 ALL=(root) NOPASSWD: /usr/bin/tee /proc/sys/vm/drop_caches\n")
+                self.assertEqual(policy.stat().st_mode & 0o777, 0o440)
+                self.assertEqual('runuser -u custom-runner -- sudo -n -l -- tee /proc/sys/vm/drop_caches' in result.stdout, fail == "0")
+                policy.chmod(0o600)
 
     def test_encode_user_data_round_trips(self) -> None:
         script = self.render()

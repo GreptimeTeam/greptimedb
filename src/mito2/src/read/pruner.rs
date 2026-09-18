@@ -87,6 +87,12 @@ impl PartitionPruner {
         }
     }
 
+    /// Excludes files replaced by another candidate source from prefetching.
+    pub(crate) fn excluding_files(mut self, excluded: &HashSet<usize>) -> Self {
+        self.file_indices.retain(|index| !excluded.contains(index));
+        self
+    }
+
     /// Gets or creates the FileRangeBuilder for a file.
     ///
     /// This method also triggers pre-fetching of upcoming files in the background
@@ -737,7 +743,7 @@ impl Pruner {
 #[cfg(test)]
 impl Pruner {
     /// Returns the remaining range count for a file (test-only).
-    fn test_remaining_ranges(&self, file_index: usize) -> usize {
+    pub(crate) fn test_remaining_ranges(&self, file_index: usize) -> usize {
         self.inner.file_entries[file_index]
             .lock()
             .unwrap()

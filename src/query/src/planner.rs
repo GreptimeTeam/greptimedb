@@ -639,7 +639,7 @@ impl DfLogicalPlanner {
 ///
 /// DataFusion first resolves the leading `j.o.l` through
 /// `JsonExprPlanner::plan_compound_identifier`, which produces an untyped
-/// `json_get` with path `o.l`. Before invoking `JsonExprPlanner::plan_field_access`,
+/// `json_get` with path `$.o.l`. Before invoking `JsonExprPlanner::plan_field_access`,
 /// however, DataFusion eagerly converts every remaining access into a
 /// `GetFieldAccess`. It accepts string values but not [`SqlExpr::Identifier`]s
 /// in [`AccessExpr::Dot`] after a subscript. Without this normalization, that
@@ -652,8 +652,8 @@ impl DfLogicalPlanner {
 /// changes neither the SQL text nor the dot accesses into subscript nodes: the
 /// resulting AST is conceptually `j.o.l[1].'inner'.'l'[2]`. DataFusion converts
 /// the string-valued dot accesses into named field accesses, which
-/// `plan_field_access` safely encodes as bracket members. It can then extend the
-/// JSON path to `o.l[1]["inner"]["l"][2]`.
+/// `plan_field_access` safely encodes as dot members, quoting names when needed. It can then extend the
+/// JSON path to `$.o.l[1].inner.l[2]`.
 ///
 /// This behavior is unchanged in the latest upstream releases checked here:
 /// DataFusion 55.0.0 and sqlparser 0.62.0.

@@ -19,7 +19,7 @@ common-recordbatch.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 datatypes.workspace = true
-memcomparable = { git = "https://github.com/v0y4g3r/memcomparable.git", rev = "a07122dc03556bbd88ad66234cbea7efd3b23efb" }
+memcomparable = { git = "https://github.com/v0y4g3r/memcomparable.git", rev = "d8fb3558aff452cd50c0954f2979121401387f67" }
 paste.workspace = true
 serde.workspace = true
 snafu.workspace = true
