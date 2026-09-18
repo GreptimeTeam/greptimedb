@@ -3,19 +3,25 @@ CREATE TABLE json2_type_hint_read_type (
     j JSON2 (
         a BIGINT,
         b STRING
-    )
+    ),
+    exponent DOUBLE
 ) WITH (
     'append_mode' = 'true'
 );
 
 INSERT INTO json2_type_hint_read_type VALUES
-    (1, '{"a":42,"b":"42"}'),
-    (2, '{"a":7,"b":"7"}');
+    (1, '{"a":42,"b":"42"}', 2),
+    (2, '{"a":7,"b":"7"}', 2);
 
 ADMIN FLUSH_TABLE('json2_type_hint_read_type');
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT j.a AS hinted_bigint
+FROM json2_type_hint_read_type;
+
+-- A matching JSON2 type hint must override function-context inference.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT coalesce(j.b, exponent) AS hinted_string
 FROM json2_type_hint_read_type;
 
 -- Uncast paths use their JSON2 type hints.

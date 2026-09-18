@@ -27,13 +27,13 @@ use jsonb::jsonpath::Path;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
-use crate::optimizer::json_get_type_hint::{
-    inject_json_get_type_hints, json_get_path, json_type_from_hint,
-};
+use crate::optimizer::json_get_type_hint::{json_get_path, json_type_from_hint};
 
 /// Concretize (deduce) the expected JSON type from query.
-/// For example, we can concretize a JSON type of `{ a: { b: Number } }` from `select j.a.b::Int64`.
-/// The JSON type will be later set into the scan request, for converting the JSON arrays.
+///
+/// For example, we can concretize a JSON type of `{ a: { b: Number } }` from
+/// `select j.a.b::Int64`. The JSON type will be later set into the scan request,
+/// for converting the JSON arrays.
 #[derive(Debug)]
 pub(crate) struct JsonTypeConcretizeRule;
 
@@ -47,27 +47,24 @@ impl OptimizerRule for JsonTypeConcretizeRule {
         plan: LogicalPlan,
         _config: &dyn OptimizerConfig,
     ) -> Result<Transformed<LogicalPlan>> {
-        inject_json_get_type_hints(plan)?.transform_data(|plan| {
-            let json_types = deduce_json_types(&plan)?;
-            if json_types.is_empty() {
-                return Ok(Transformed::no(plan));
-            }
+        let json_types = deduce_json_types(&plan)?;
+        if json_types.is_empty() {
+            return Ok(Transformed::no(plan));
+        }
 
-            plan.transform_down(|plan| match &plan {
-                LogicalPlan::TableScan(table_scan) => {
-                    let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>()
-                    else {
-                        return Ok(Transformed::no(plan));
-                    };
+        plan.transform_down(|plan| match &plan {
+            LogicalPlan::TableScan(table_scan) => {
+                let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
+                    return Ok(Transformed::no(plan));
+                };
 
-                    if apply_json_type_hint(source.table_provider.as_ref(), &json_types) {
-                        Ok(Transformed::yes(plan))
-                    } else {
-                        Ok(Transformed::no(plan))
-                    }
+                if apply_json_type_hint(source.table_provider.as_ref(), &json_types) {
+                    Ok(Transformed::yes(plan))
+                } else {
+                    Ok(Transformed::no(plan))
                 }
-                _ => Ok(Transformed::no(plan)),
-            })
+            }
+            _ => Ok(Transformed::no(plan)),
         })
     }
 }
@@ -494,6 +491,7 @@ mod tests {
             .project(vec![json_get_expr(col("j"), path_expr("a"), None)?])?
             .build()?;
 
+        let plan = JsonGetTypeHintRule.analyze(plan, &ConfigOptions::default())?;
         let rewritten = JsonTypeConcretizeRule.rewrite(plan, &OptimizerContext::default())?;
         assert!(rewritten.transformed);
         assert_eq!(
