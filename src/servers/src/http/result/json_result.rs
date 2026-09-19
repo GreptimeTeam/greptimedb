@@ -90,17 +90,20 @@ impl IntoResponse for JsonResponse {
             .to_string(),
 
             Some(GreptimeQueryOutput::Records(records)) => {
-                let schema = records.schema();
+                // Borrow the schema field directly so the rows can be moved out.
+                let schema = &records.schema;
 
                 let data: Vec<Map<String, Value>> = records
                     .rows
-                    .iter()
-                    .map(|row| {
+                    .into_iter()
+                    .map(|mut row| {
+                        // Slicing keeps the out-of-bounds panic for short rows;
+                        // a plain zip would silently truncate them.
                         schema
                             .column_schemas
                             .iter()
-                            .enumerate()
-                            .map(|(i, col)| (col.name.clone(), row[i].clone()))
+                            .zip(row[..schema.column_schemas.len()].iter_mut())
+                            .map(|(col, value)| (col.name.clone(), value.take()))
                             .collect::<Map<String, Value>>()
                     })
                     .collect();
@@ -131,5 +134,49 @@ impl IntoResponse for JsonResponse {
             payload,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::to_bytes;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn test_records_response_preserves_values_and_duplicate_columns() {
+        let response: JsonResponse = serde_json::from_value(json!({
+            "output": [{"records": {
+                "schema": {"column_schemas": [
+                    {"name": "duplicate", "data_type": "String"},
+                    {"name": "nested", "data_type": "Json"},
+                    {"name": "duplicate", "data_type": "String"},
+                    {"name": "escaped\"column", "data_type": "String"}
+                ]},
+                "rows": [
+                    ["discarded", {"array": [null, true, "中文"]}, "last", "line\n\\\""],
+                    ["discarded", [1, {"key": "value"}], null, ""]
+                ]
+            }}],
+            "execution_time_ms": 7
+        }))
+        .unwrap();
+
+        let response = response.into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_TYPE], "application/json");
+        assert_eq!(response.headers()[&GREPTIME_DB_HEADER_FORMAT], "json");
+        assert_eq!(response.headers()[&GREPTIME_DB_HEADER_EXECUTION_TIME], "7");
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap(),
+            json!({
+                "data": [
+                    {"duplicate": "last", "nested": {"array": [null, true, "中文"]}, "escaped\"column": "line\n\\\""},
+                    {"duplicate": null, "nested": [1, {"key": "value"}], "escaped\"column": ""}
+                ],
+                "execution_time_ms": 7
+            })
+        );
     }
 }
