@@ -903,7 +903,9 @@ async fn packed_copy_standalone_heterogeneous_streams() {
             *expected
         );
     }
-    if let Ok(bucket) = std::env::var("GT_S3_BUCKET") {
+    if let Ok(bucket) = std::env::var("GT_S3_BUCKET")
+        && !bucket.is_empty()
+    {
         let prefix = format!(
             "packed-reader/{}/",
             destination.path().file_name().unwrap().to_str().unwrap()
