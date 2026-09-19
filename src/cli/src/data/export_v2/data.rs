@@ -30,6 +30,7 @@ pub(super) struct CopyOptions {
     pub(super) format: DataFormat,
     pub(super) time_range: TimeRange,
     pub(super) parallelism: usize,
+    pub(crate) experimental_metric_export: bool,
 }
 
 pub(super) struct CopyTarget {
@@ -210,6 +211,9 @@ pub(crate) async fn execute_copy_database_from(
 
 fn build_with_options(options: &CopyOptions) -> String {
     let mut parts = vec![format!("FORMAT='{}'", options.format)];
+    if options.experimental_metric_export {
+        parts.push("experimental_metric_export='true'".to_string());
+    }
     if let Some(start) = options.time_range.start {
         parts.push(format!(
             "START_TIME='{}'",
