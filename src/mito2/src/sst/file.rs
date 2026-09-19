@@ -631,12 +631,7 @@ impl FileHandle {
             return range.clone();
         }
         // Recheck under the write lock: another snapshot may have replaced the cached schema.
-        let aligned = self
-            .inner
-            .primary_key_range
-            .write()
-            .unwrap()
-            .align(mapper);
+        let aligned = self.inner.primary_key_range.write().unwrap().align(mapper);
         match aligned {
             Ok(range) => range,
             Err(err) => {

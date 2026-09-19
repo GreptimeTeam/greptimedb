@@ -164,7 +164,10 @@ pub(crate) async fn compaction_region_with_ssts(
     ttl: Duration,
 ) -> CompactionRegion {
     let env = SchedulerEnv::new().await;
-    let metadata = metadata_for_test();
+    let mut metadata = (*metadata_for_test()).clone();
+    // Match the table used by new_file_handle* and default FileMeta fixtures.
+    metadata.region_id = 0.into();
+    let metadata = Arc::new(metadata);
     let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
     let mut ssts = SstVersion::new(metadata.clone());
     ssts.add_files(

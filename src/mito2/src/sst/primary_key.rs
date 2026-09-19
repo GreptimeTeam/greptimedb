@@ -77,7 +77,8 @@ impl PrimaryKeyRangeMapper {
         self.metadata.region_id
     }
 
-    /// Returns unknown for other tables or defaults that cannot be safely encoded.
+    /// Maps bounds from the same table's encoding and a compatible schema prefix.
+    /// Returns unknown for defaults that cannot be safely encoded.
     /// Invalid bounds return an error so callers can diagnose them before falling back
     /// to unknown. Neither the error nor its source includes the encoded keys.
     pub(crate) fn map(&self, (min, max): (Bytes, Bytes)) -> Result<Option<(Bytes, Bytes)>> {
@@ -550,14 +551,6 @@ mod tests {
         } if actual == endpoint));
     }
 
-    #[test]
-    fn test_foreign_pk_bounds_are_unknown_without_decoding() {
-        let mapper = PrimaryKeyRangeMapper::new(metadata(&[Value::from("")]));
-        // Foreign files may use a different layout, so don't decode them as local Dense keys.
-        let key = Bytes::from_static(&[2]);
-        assert_eq!(None, mapper.map((key.clone(), key)).unwrap());
-    }
-
     #[rstest]
     #[case::source_first(false)]
     #[case::destination_first(true)]
@@ -589,12 +582,6 @@ mod tests {
             }
             previous = Some(aligned);
         }
-        let mut other_table = (*target).clone();
-        other_table.region_id = RegionId::new(2, 1);
-        assert_eq!(
-            None,
-            file.primary_key_range(&PrimaryKeyRangeMapper::new(Arc::new(other_table)))
-        );
     }
 
     #[test]

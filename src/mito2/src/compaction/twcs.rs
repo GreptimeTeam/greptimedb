@@ -1441,6 +1441,7 @@ mod tests {
         ssts.add_files(
             Arc::new(crate::sst::file_purger::NoopFilePurger),
             [100, 101].into_iter().map(|sequence| FileMeta {
+                region_id: metadata.region_id,
                 file_id: FileId::random(),
                 time_range: (
                     Timestamp::new_millisecond(0),
