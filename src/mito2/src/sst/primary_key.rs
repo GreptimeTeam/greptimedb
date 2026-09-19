@@ -29,6 +29,8 @@ use crate::error::{DecodePrimaryKeyRangeSnafu, InvalidPrimaryKeyRangeSnafu, Resu
 /// Schema conversion and default encodings shared by a version's comparison contexts.
 #[derive(Debug)]
 pub(crate) struct PrimaryKeyRangeMapper {
+    /// Target metadata pinned by the owning version or scan, not the SST's write schema.
+    /// ALTER creates a new mapper; existing snapshots keep their original target schema.
     metadata: RegionMetadataRef,
     codec: DensePrimaryKeyCodec,
     /// Encoding a constant is independent of the file's missing-prefix length.
