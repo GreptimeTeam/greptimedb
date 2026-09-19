@@ -47,6 +47,13 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
+        if let Some(layout) = req.with.get("metric_data_layout") {
+            return error::InvalidCopyParameterSnafu {
+                key: "metric_data_layout",
+                value: layout,
+            }
+            .fail();
+        }
         validate_database_directory(&req.location)?;
         build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
@@ -113,6 +120,13 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
+        if let Some(layout) = req.with.get("metric_data_layout") {
+            return error::InvalidCopyParameterSnafu {
+                key: "metric_data_layout",
+                value: layout,
+            }
+            .fail();
+        }
         validate_database_directory(&req.location)?;
 
         let parallelism = parse_parallelism_from_option_map(&req.with);

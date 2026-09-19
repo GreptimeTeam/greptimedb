@@ -27,7 +27,7 @@ use crate::data::export_v2::error::{
     TimeParseInvalidFormatSnafu,
 };
 
-/// Current manifest format version.
+/// Manifest format version produced by the current exporter.
 pub const MANIFEST_VERSION: u32 = 1;
 
 /// Manifest file name within snapshot directory.
@@ -234,6 +234,8 @@ impl str::FromStr for DataFormat {
 pub struct Manifest {
     /// Manifest format version for compatibility checking.
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_layout: Option<String>,
     /// Unique snapshot identifier.
     pub snapshot_id: Uuid,
     /// Catalog name.
@@ -259,6 +261,24 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Validates the encoding contract before any snapshot operation.
+    pub fn validate_layout(&self) -> std::result::Result<(), String> {
+        match (self.version, self.data_layout.as_deref(), self.format) {
+            (1, None, _) => Ok(()),
+            (2, Some(common_datasource::packed_snapshot::PACKED_LAYOUT), DataFormat::Parquet) => {
+                Ok(())
+            }
+            _ => Err(format!(
+                "Manifest version mismatch or unsupported layout: version {}, layout {:?}, format {}",
+                self.version, self.data_layout, self.format
+            )),
+        }
+    }
+
+    pub fn is_packed(&self) -> bool {
+        self.version == 2
+    }
+
     pub fn new_for_export(
         catalog: String,
         schemas: Vec<String>,
@@ -293,6 +313,7 @@ impl Manifest {
         let now = Utc::now();
         Self {
             version: MANIFEST_VERSION,
+            data_layout: None,
             snapshot_id: Uuid::new_v4(),
             catalog,
             schemas,
@@ -316,6 +337,7 @@ impl Manifest {
         let now = Utc::now();
         Self {
             version: MANIFEST_VERSION,
+            data_layout: None,
             snapshot_id: Uuid::new_v4(),
             catalog,
             schemas,
@@ -413,6 +435,24 @@ fn generate_single_chunk(time_range: &TimeRange) -> Vec<ChunkMeta> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packed_manifest_read_contract_preserves_legacy_writer() {
+        let mut manifest =
+            super::Manifest::new_schema_only("greptime".into(), vec!["public".into()]);
+        assert!(manifest.validate_layout().is_ok());
+        manifest.version = 2;
+        assert!(manifest.validate_layout().is_err());
+        manifest.data_layout = Some("metric-parquet-packs".into());
+        assert!(manifest.validate_layout().is_ok());
+        manifest.format = super::DataFormat::Csv;
+        assert!(manifest.validate_layout().is_err());
+        manifest.format = super::DataFormat::Parquet;
+        manifest.version = 3;
+        assert!(manifest.validate_layout().is_err());
+        manifest.version = 1;
+        assert!(manifest.validate_layout().is_err());
+    }
+
     use std::time::Duration;
 
     use chrono::{TimeZone, Utc};

@@ -97,6 +97,7 @@ zstd.workspace = true
 
 [dev-dependencies]
 catalog = { workspace = true, features = ["testing"] }
+cli.workspace = true
 common-procedure-test.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 datafusion.workspace = true

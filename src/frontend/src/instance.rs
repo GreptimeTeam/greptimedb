@@ -17,6 +17,7 @@ mod dashboard;
 mod entity_graph;
 mod export_database;
 mod grpc;
+mod import_packed;
 mod influxdb;
 mod jaeger;
 mod log_handler;
@@ -391,6 +392,15 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
+                    CopyDatabase::From(arg),
+                )) = &stmt
+                    && arg.with.get("metric_data_layout").is_some()
+                {
+                    return self
+                        .copy_packed_database(arg.clone(), &stmt, query_ctx)
+                        .await;
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await

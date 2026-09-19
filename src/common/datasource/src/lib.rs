@@ -19,6 +19,7 @@ pub mod error;
 pub mod file_format;
 pub mod lister;
 pub mod object_store;
+pub mod packed_snapshot;
 pub mod parquet_writer;
 pub mod share_buffer;
 #[cfg(test)]
