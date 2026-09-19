@@ -324,6 +324,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid WAL entry for region {}, {}", region_id, reason))]
+    InvalidWalEntry {
+        region_id: RegionId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display(
         "Invalid WAL entry range, region: {}, start: {}, end: {}",
         region_id,
@@ -400,9 +408,8 @@ pub enum Error {
         location: Location,
     },
 
-    /// The store supports construction, recovery, stopping and latest-entry queries;
-    /// other log-store operations return this error.
-    #[snafu(display("Object store WAL operation is not supported yet"))]
+    /// Appending to the object store WAL is unsupported.
+    #[snafu(display("Object store WAL operation is not supported"))]
     UnsupportedObjectStoreWalOperation {
         #[snafu(implicit)]
         location: Location,
@@ -440,6 +447,7 @@ impl ErrorExt for Error {
             | OverrideCompactedEntry { .. }
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
+            | InvalidWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
