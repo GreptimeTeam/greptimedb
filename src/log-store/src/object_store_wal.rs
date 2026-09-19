@@ -43,7 +43,6 @@
 //! id name the object that holds the entry, the low bits its position among
 //! the entries of its region in that object.
 
-// These modules have no callers until the store that writes and reads objects lands.
 #[allow(dead_code)]
 mod batch;
 #[allow(dead_code)]
@@ -53,5 +52,10 @@ mod format;
 #[allow(dead_code)]
 mod io;
 
+#[allow(dead_code)]
+mod store;
+
 #[allow(unused_imports)]
 pub(crate) use batch::entry_id;
+#[allow(unused_imports)]
+pub(crate) use store::ObjectStoreLogStore;
