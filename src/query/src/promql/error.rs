@@ -194,6 +194,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Timestamp out of range for the `@` modifier: {}", timestamp))]
+    AtModifierTimestampOutOfRange {
+        timestamp: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Timestamp out of range: {} of {:?}", timestamp, unit))]
     TimestampOutOfRange {
         timestamp: i64,
@@ -243,6 +250,7 @@ impl ErrorExt for Error {
             | UnsupportedMatcherOp { .. }
             | SameLabelSet { .. }
             | TimestampOutOfRange { .. }
+            | AtModifierTimestampOutOfRange { .. }
             | InvalidRegularExpression { .. }
             | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
 
