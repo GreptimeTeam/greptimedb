@@ -26,7 +26,7 @@ use parquet::errors::{ParquetError, Result};
 use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use tokio::sync::Mutex;
 
-const WINDOW_SIZE: usize = 8 * 1024 * 1024;
+pub const WINDOW_SIZE: usize = 8 * 1024 * 1024;
 const WINDOW_BUDGET: usize = 2 * WINDOW_SIZE;
 
 struct Window {
@@ -70,8 +70,12 @@ impl PackReadWindows {
         }
         let required = usize::try_from(range.end - range.start)
             .map_err(|_| ParquetError::General("packed read length overflow".into()))?;
-        let fetch_len =
-            (object_length - range.start).min(required.max(WINDOW_SIZE) as u64) as usize;
+        if required > WINDOW_SIZE {
+            return Err(ParquetError::General(
+                "packed cache range exceeds window".into(),
+            ));
+        }
+        let fetch_len = (object_length - range.start).min(WINDOW_SIZE as u64) as usize;
         // Evict only unpinned allocations. Bytes slices held by a decoder still
         // count against the request budget, including their entire backing window.
         let mut retained: usize = windows.iter().map(|w| w.bytes.len()).sum();
@@ -112,13 +116,14 @@ impl PackReadWindows {
     }
 }
 
-/// Translates offsets relative to one complete Parquet stream into object ranges.
+/// Pins one complete small stream; larger streams use the streaming reader.
 pub struct PackedParquetReader {
     windows: Arc<PackReadWindows>,
     path: String,
     object_length: u64,
     offset: u64,
     length: u64,
+    bytes: Option<Bytes>,
 }
 
 impl PackedParquetReader {
@@ -130,6 +135,7 @@ impl PackedParquetReader {
         length: u64,
     ) -> Result<Self> {
         if length < 12
+            || length > WINDOW_SIZE as u64
             || offset
                 .checked_add(length)
                 .is_none_or(|end| end > object_length)
@@ -142,6 +148,7 @@ impl PackedParquetReader {
             object_length,
             offset,
             length,
+            bytes: None,
         })
     }
 }
@@ -154,13 +161,22 @@ impl AsyncFileReader for PackedParquetReader {
                     "read outside indexed Parquet stream".into(),
                 ));
             }
-            self.windows
-                .read(
-                    &self.path,
-                    self.object_length,
-                    self.offset + range.start..self.offset + range.end,
-                )
-                .await
+            if self.bytes.is_none() {
+                self.bytes = Some(
+                    self.windows
+                        .read(
+                            &self.path,
+                            self.object_length,
+                            self.offset..self.offset + self.length,
+                        )
+                        .await?,
+                );
+            }
+            Ok(self
+                .bytes
+                .as_ref()
+                .unwrap()
+                .slice(range.start as usize..range.end as usize))
         })
     }
 
@@ -256,46 +272,69 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pinned_allocations_bound_fetches_and_release_for_reuse() {
-        let dir = common_test_util::temp_dir::create_temp_dir("packed-budget");
+    async fn small_stream_pins_one_window_for_multiple_columns() {
+        use parquet::file::properties::WriterProperties;
+        let schema = Arc::new(Schema::new(
+            (0..3)
+                .map(|i| Field::new(format!("v{i}"), arrow_schema::DataType::Utf8, false))
+                .collect::<Vec<_>>(),
+        ));
+        let value = "x".repeat(1024 * 1024);
+        let arrays = (0..3)
+            .map(|_| Arc::new(StringArray::from(vec![value.as_str()])) as ArrayRef)
+            .collect();
+        let batch = RecordBatch::try_new(schema.clone(), arrays).unwrap();
+        let mut writer = ArrowWriter::try_new(
+            Vec::new(),
+            schema,
+            Some(
+                WriterProperties::builder()
+                    .set_dictionary_enabled(false)
+                    .build(),
+            ),
+        )
+        .unwrap();
+        writer.write(&batch).unwrap();
+        let bytes = writer.into_inner().unwrap();
+        assert!(bytes.len() < WINDOW_SIZE);
+        let dir = common_test_util::temp_dir::create_temp_dir("packed-columns");
         let store = crate::test_util::test_store(dir.path().to_str().unwrap());
-        let length = (3 * WINDOW_SIZE) as u64;
-        store
-            .write("pack-0.bin", vec![1u8; length as usize])
-            .await
-            .unwrap();
+        let mut object = vec![0; WINDOW_SIZE - 1024];
+        let offset = object.len() as u64;
+        object.extend_from_slice(&bytes);
+        let length = object.len() as u64;
+        store.write("pack-0.bin", object).await.unwrap();
         let windows = PackReadWindows::new(store);
-        let first = windows.read("pack-0.bin", length, 0..1).await.unwrap();
-        let second = windows
-            .read(
-                "pack-0.bin",
-                length,
-                WINDOW_SIZE as u64..WINDOW_SIZE as u64 + 1,
-            )
+        let pinned = windows.read("pack-0.bin", length, 0..1).await.unwrap();
+        let mut reader = PackedParquetReader::new(
+            windows.clone(),
+            "pack-0.bin".into(),
+            length,
+            offset,
+            bytes.len() as u64,
+        )
+        .unwrap();
+        let metadata = reader.get_metadata(None).await.unwrap();
+        let mut columns = Vec::new();
+        for column in metadata.row_group(0).columns() {
+            let (start, len) = column.byte_range();
+            columns.push(reader.get_bytes(start..start + len).await.unwrap());
+        }
+        let batches: Vec<_> = ParquetRecordBatchStreamBuilder::new(reader)
+            .await
+            .unwrap()
+            .build()
+            .unwrap()
+            .try_collect()
             .await
             .unwrap();
-        assert!(
-            windows
-                .read("pack-0.bin", length, 2 * WINDOW_SIZE as u64..length)
-                .await
-                .is_err()
-        );
-        assert_eq!(
-            windows
-                .windows
-                .lock()
-                .await
-                .iter()
-                .map(|w| w.bytes.len())
-                .sum::<usize>(),
-            WINDOW_BUDGET
-        );
-        drop(first);
-        windows
-            .read("pack-0.bin", length, 2 * WINDOW_SIZE as u64..length)
-            .await
-            .unwrap();
-        assert_eq!(second[0], 1);
+        assert_eq!(batches, vec![batch]);
+        let retained = windows.windows.lock().await;
+        assert_eq!(retained.len(), 2);
+        assert!(retained.iter().all(|w| w.bytes.len() <= WINDOW_SIZE));
+        assert!(retained.iter().map(|w| w.bytes.len()).sum::<usize>() <= WINDOW_BUDGET);
+        assert_eq!(columns.len(), 3);
+        assert_eq!(pinned[0], 0);
     }
 
     #[tokio::test]

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use common_datasource::file_format::Format;
 use common_datasource::file_format::parquet::packed_reader::{
-    PackReadWindows, PackedParquetReader,
+    PackReadWindows, PackedParquetReader, WINDOW_SIZE,
 };
 use common_datasource::object_store::{BuiltBackend, build_backend_with_path};
 use common_datasource::packed_snapshot::{ObjectKind, PACK_INDEX_FILE, PackIndex};
@@ -185,7 +185,7 @@ impl StatementExecutor {
                     .build()
                 })?;
                 match object.kind {
-                    ObjectKind::Pack => {
+                    ObjectKind::Pack if entry.length <= WINDOW_SIZE as u64 => {
                         let reader = PackedParquetReader::new(
                             Arc::clone(&windows),
                             object.path.clone(),
@@ -204,7 +204,9 @@ impl StatementExecutor {
                         )
                         .await?
                     }
-                    ObjectKind::Parquet => {
+                    ObjectKind::Pack | ObjectKind::Parquet => {
+                        // The virtual file keeps footer/column offsets relative to this
+                        // stream. Parquet decoder allocations are separate from the cache.
                         let reader = plan
                             .backend
                             .object_store
@@ -212,7 +214,7 @@ impl StatementExecutor {
                             .chunk(256 * 1024)
                             .await
                             .context(error::ReadObjectSnafu { path: &object.path })?
-                            .into_futures_async_read(0..object.length)
+                            .into_futures_async_read(entry.offset..entry.offset + entry.length)
                             .await
                             .context(error::ReadObjectSnafu { path: &object.path })?
                             .compat();

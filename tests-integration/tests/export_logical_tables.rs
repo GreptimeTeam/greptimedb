@@ -1142,3 +1142,96 @@ async fn packed_copy_standalone_heterogeneous_streams() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn packed_copy_large_column_in_middle_stream() {
+    use common_datasource::packed_snapshot::{ObjectKind, PackIndex, PackObject, PackTable};
+    use datafusion::parquet::arrow::ArrowWriter;
+    use datafusion::parquet::basic::Compression;
+    use datafusion::parquet::file::properties::WriterProperties;
+    use datatypes::arrow::array::{
+        ArrayRef, BooleanArray, Int64Array, StringArray, TimestampMillisecondArray,
+    };
+    use datatypes::arrow::datatypes::{Field, Schema};
+    use datatypes::arrow::record_batch::RecordBatch;
+    let standalone = GreptimeDbStandaloneBuilder::new("packed_large_column")
+        .build()
+        .await;
+    let instance = standalone.fe_instance();
+    let directory = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let large = "x".repeat(20 * 1024 * 1024);
+    let arrays: [ArrayRef; 3] = [
+        Arc::new(Int64Array::from(vec![42])),
+        Arc::new(StringArray::from(vec![large.as_str()])),
+        Arc::new(BooleanArray::from(vec![true])),
+    ];
+    let mut packed = Vec::new();
+    let mut index = PackIndex {
+        version: 1,
+        objects: vec![],
+        tables: vec![],
+    };
+    for (i, (array, typ)) in arrays
+        .into_iter()
+        .zip(["BIGINT", "STRING", "BOOLEAN"])
+        .enumerate()
+    {
+        sql(
+            instance,
+            &format!("CREATE TABLE restored_{i} (ts TIMESTAMP TIME INDEX, val {typ})"),
+        )
+        .await;
+        let timestamps: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![1]));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ts", timestamps.data_type().clone(), false),
+            Field::new("val", array.data_type().clone(), false),
+        ]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![timestamps, array]).unwrap();
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::UNCOMPRESSED)
+            .set_dictionary_enabled(false)
+            .build();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(properties)).unwrap();
+        writer.write(&batch).unwrap();
+        let metadata = writer.close().unwrap();
+        if i == 1 {
+            assert!(metadata.row_group(0).column(1).compressed_size() > 16 * 1024 * 1024);
+            assert!(!packed.is_empty());
+        }
+        index.tables.push(PackTable {
+            table_name: format!("restored_{i}"),
+            object: "pack-0.bin".into(),
+            offset: packed.len() as u64,
+            length: bytes.len() as u64,
+            row_count: 1,
+        });
+        packed.extend(bytes);
+    }
+    index.objects.push(PackObject {
+        path: "pack-0.bin".into(),
+        kind: ObjectKind::Pack,
+        length: packed.len() as u64,
+    });
+    std::fs::write(directory.path().join("pack-0.bin"), packed).unwrap();
+    std::fs::write(
+        directory.path().join("pack-index.json"),
+        serde_json::to_vec(&index).unwrap(),
+    )
+    .unwrap();
+    let output = sql(instance, &format!("COPY DATABASE public FROM '{}/' WITH (FORMAT='parquet', metric_data_layout='packed', parallelism=2)", directory.path().display())).await;
+    assert!(matches!(output.data, OutputData::AffectedRows(3)));
+    for (i, expected) in [
+        datatypes::value::Value::Int64(42),
+        datatypes::value::Value::String(large.into()),
+        datatypes::value::Value::Boolean(true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            values(instance, &format!("SELECT val FROM restored_{i}")).await,
+            vec![vec![expected]]
+        );
+    }
+}
