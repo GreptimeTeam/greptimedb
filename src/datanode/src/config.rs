@@ -88,6 +88,14 @@ pub struct DatanodeOptions {
     #[serde(with = "humantime_serde")]
     pub concurrent_query_limiter_timeout: Duration,
     /// Options for different store engines.
+    ///
+    /// Note: no field-level `#[serde(default)]` here — the struct-level
+    /// `#[serde(default)]` above already fills a missing field from
+    /// `DatanodeOptions::default().region_engine` (mito + file). Adding a
+    /// field-level `default` with no path would instead fall back to
+    /// `Vec::default()` (an empty list), silently dropping both default
+    /// engines whenever `region_engine` is absent from the input.
+    #[serde(deserialize_with = "deserialize_region_engine_options")]
     pub region_engine: Vec<RegionEngineConfig>,
     pub logging: LoggingOptions,
     pub enable_telemetry: bool,
@@ -184,6 +192,87 @@ pub enum RegionEngineConfig {
     File(FileEngineConfig),
     #[serde(rename = "metric")]
     Metric(MetricEngineConfig),
+}
+
+/// A serde `deserialize_with` helper for the `region_engine` field.
+///
+/// `region_engine` is normally a sequence of single-key tables, e.g.
+/// `[[region_engine]]` / `[region_engine.mito]` in TOML, which serializes as a
+/// JSON array of externally-tagged [`RegionEngineConfig`] values
+/// (`[{"mito": {...}}, {"file": {...}}]`). That is how both the config-file
+/// source and the `Self::default()` source represent it.
+///
+/// The environment-variable source is different: because env vars are parsed
+/// as a dunder(`__`)-separated path, `REGION_ENGINE__MITO__GLOBAL_WRITE_BUFFER_REJECT_SIZE`
+/// builds a *map* keyed by engine name (`{"mito": {"global_write_buffer_reject_size": ...}}`),
+/// not a sequence. Deserializing that map straight into `Vec<RegionEngineConfig>`
+/// fails with `invalid type: map, expected a sequence` (see
+/// <https://github.com/GreptimeTeam/greptimedb/issues/8620>).
+///
+/// To reconcile the two shapes, an object is treated as a set of *partial*
+/// per-engine overrides rather than a full replacement of the list: each key
+/// must be a known engine name (`mito`, `file` or `metric`, matching the
+/// `#[serde(rename = "...")]` tags on [`RegionEngineConfig`]) and its value is
+/// merged onto that engine's own defaults (each engine config type either has
+/// `#[serde(default)]` on the struct, or `default = ...` on every field, so a
+/// partial object deserializes with the rest of the fields left at their
+/// defaults). Engines that are not mentioned in the object keep whatever
+/// value they had in `DatanodeOptions::default()`'s `region_engine` list, so
+/// overriding e.g. just `mito.global_write_buffer_reject_size` through the
+/// environment does not drop the `file` (or, once configured, `metric`)
+/// engine entries.
+///
+/// This helper is shared by [`DatanodeOptions`] and `standalone::options::StandaloneOptions`,
+/// which both use the same [`RegionEngineConfig`] type for this field.
+pub fn deserialize_region_engine_options<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Vec<RegionEngineConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Array(_) => serde_json::from_value(value).map_err(D::Error::custom),
+        serde_json::Value::Object(overrides) => {
+            let mut engines = DatanodeOptions::default().region_engine;
+            for (engine_name, override_value) in overrides {
+                let mut single = serde_json::Map::with_capacity(1);
+                single.insert(engine_name.clone(), override_value);
+                let parsed: RegionEngineConfig =
+                    serde_json::from_value(serde_json::Value::Object(single)).map_err(|e| {
+                        D::Error::custom(format!(
+                            "invalid options for region engine `{engine_name}`: {e}"
+                        ))
+                    })?;
+
+                if let Some(existing) = engines.iter_mut().find(|engine| {
+                    std::mem::discriminant(*engine) == std::mem::discriminant(&parsed)
+                }) {
+                    *existing = parsed;
+                } else {
+                    engines.push(parsed);
+                }
+            }
+            Ok(engines)
+        }
+        other => Err(D::Error::custom(format!(
+            "invalid type for `region_engine`: expected an array or an object, found {}",
+            json_value_type_name(&other)
+        ))),
+    }
+}
+
+fn json_value_type_name(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 #[cfg(test)]
