@@ -42,11 +42,11 @@ use operator::insert::{
 use operator::statement::StatementExecutor;
 use prost::Message;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::PendingRowsSchemaAlterer;
 use servers::error::{self, AuthSnafu, Result as ServerResult};
 use servers::http::header::{CONTENT_ENCODING_SNAPPY, CONTENT_TYPE_PROTOBUF, collect_plan_metrics};
 use servers::http::prom_store::PHYSICAL_TABLE_PARAM;
 use servers::interceptor::{PromStoreProtocolInterceptor, PromStoreProtocolInterceptorRef};
-use servers::pending_rows_batcher::PendingRowsSchemaAlterer;
 use servers::prom_store;
 use servers::query_handler::{
     PromStoreProtocolHandler, PromStoreProtocolHandlerRef, PromStoreResponse,
