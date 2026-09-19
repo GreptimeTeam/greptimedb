@@ -250,6 +250,8 @@ pub(crate) struct ScanRegion {
     scan_memory_pool: Arc<dyn MemoryPool>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
+    /// Whether to ignore range indexes during scans.
+    ignore_range_index: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -286,6 +288,7 @@ impl ScanRegion {
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             experimental_series_scan_v2: false,
+            ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -336,6 +339,13 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
         self.experimental_series_scan_v2 = enabled;
+        self
+    }
+
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.ignore_range_index = ignore;
         self
     }
 
@@ -574,6 +584,7 @@ impl ScanRegion {
 
         let input = ScanInput::builder(self.access_layer, mapper)
             .with_series_index(self.series_index)
+            .with_ignore_range_index(self.ignore_range_index)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
@@ -944,6 +955,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 pub struct ScanInput {
     /// Pinned series-index snapshot and its storage, when configured.
     pub(crate) series_index: Option<SeriesIndexReadContext>,
+    /// Whether to ignore range indexes while retaining series-index candidate discovery.
+    ignore_range_index: bool,
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -1043,6 +1056,7 @@ impl ScanInput {
         ScanInputBuilder {
             input: ScanInput {
                 series_index: None,
+                ignore_range_index: false,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
                 mapper: Arc::new(mapper),
@@ -1107,6 +1121,13 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.input.ignore_range_index = ignore;
+        self
+    }
+
     /// Sets the pinned series-index context for candidate discovery.
     #[must_use]
     pub(crate) fn with_series_index(
@@ -1577,7 +1598,11 @@ impl ScanInput {
         let reader = self
             .access_layer
             .read_sst(file.clone())
-            .series_index(self.series_index.clone())
+            .series_index(
+                self.series_index
+                    .clone()
+                    .filter(|_| !self.ignore_range_index),
+            )
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
