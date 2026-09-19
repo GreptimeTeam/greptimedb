@@ -38,7 +38,6 @@ use crate::memtable::{MemtableBuilderRef, MemtableId};
 use crate::region::options::RegionOptions;
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
-use crate::sst::primary_key::primary_key_metadata_eq;
 use crate::sst::version::{SstVersion, SstVersionRef};
 use crate::wal::EntryId;
 
@@ -438,9 +437,7 @@ impl VersionBuilder {
 
     /// Sets metadata.
     pub(crate) fn metadata(mut self, metadata: RegionMetadataRef) -> Self {
-        if !Arc::ptr_eq(&self.metadata, &metadata)
-            && !primary_key_metadata_eq(&self.metadata, &metadata)
-        {
+        if !Arc::ptr_eq(&self.metadata, &metadata) {
             Arc::make_mut(&mut self.ssts).set_metadata(metadata.clone());
         }
         self.metadata = metadata;

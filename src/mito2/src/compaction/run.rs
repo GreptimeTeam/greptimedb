@@ -23,7 +23,7 @@ use common_base::BitVec;
 use common_time::Timestamp;
 
 use crate::sst::file::FileHandle;
-use crate::sst::primary_key::PrimaryKeyRanges;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Trait for any items with specific range (both boundaries are inclusive).
 pub trait Ranged {
@@ -163,26 +163,26 @@ impl Ranged for FileHandle {
 pub(crate) fn files_overlap(
     lhs: &FileHandle,
     rhs: &FileHandle,
-    primary_key_ranges: &PrimaryKeyRanges,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> bool {
-    lhs.overlap(rhs) && file_primary_keys_overlap(lhs, rhs, primary_key_ranges)
+    lhs.overlap(rhs) && file_primary_keys_overlap(lhs, rhs, mapper)
 }
 
 /// Includes touching time and PK boundaries when checking file dependencies.
 pub(crate) fn files_overlap_inclusive(
     lhs: &FileHandle,
     rhs: &FileHandle,
-    primary_key_ranges: &PrimaryKeyRanges,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> bool {
-    lhs.overlap_inclusive(rhs) && file_primary_keys_overlap(lhs, rhs, primary_key_ranges)
+    lhs.overlap_inclusive(rhs) && file_primary_keys_overlap(lhs, rhs, mapper)
 }
 
 fn file_primary_keys_overlap(
     lhs: &FileHandle,
     rhs: &FileHandle,
-    primary_key_ranges: &PrimaryKeyRanges,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> bool {
-    match (primary_key_ranges.range(lhs), primary_key_ranges.range(rhs)) {
+    match (lhs.primary_key_range(mapper), rhs.primary_key_range(mapper)) {
         (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(&lhs, &rhs),
         _ => true,
     }
@@ -502,7 +502,7 @@ mod tests {
     use super::*;
     use crate::compaction::test_util::{
         new_file_handle_with_size_sequence_and_primary_key_range, pk_range,
-        primary_key_ranges_for_test,
+        primary_key_mapper_for_test,
     };
 
     #[derive(Clone, Debug, PartialEq)]
@@ -788,7 +788,7 @@ mod tests {
             pk_range(b"x", b"z"),
         );
 
-        assert!(!files_overlap(&lhs, &rhs, &primary_key_ranges_for_test()));
+        assert!(!files_overlap(&lhs, &rhs, &primary_key_mapper_for_test()));
     }
 
     #[test]
@@ -814,7 +814,7 @@ mod tests {
             ),
         ];
 
-        let ranges = primary_key_ranges_for_test();
+        let ranges = primary_key_mapper_for_test();
         let runs = find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, &ranges));
 
         assert_eq!(1, runs.len());
@@ -853,7 +853,7 @@ mod tests {
             ),
         ];
 
-        let ranges = primary_key_ranges_for_test();
+        let ranges = primary_key_mapper_for_test();
         let runs = find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, &ranges));
 
         assert_eq!(2, runs.len());
@@ -887,7 +887,7 @@ mod tests {
         ]);
         let mut result = Vec::new();
 
-        let ranges = primary_key_ranges_for_test();
+        let ranges = primary_key_mapper_for_test();
         find_overlapping_items(&mut left, &mut right, &mut result, |lhs, rhs| {
             files_overlap_inclusive(lhs, rhs, &ranges)
         });
@@ -916,6 +916,6 @@ mod tests {
             pk_range(b"a", b"f"),
         );
 
-        assert!(!files_overlap(&lhs, &rhs, &primary_key_ranges_for_test()));
+        assert!(!files_overlap(&lhs, &rhs, &primary_key_mapper_for_test()));
     }
 }

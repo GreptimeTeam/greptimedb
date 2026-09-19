@@ -14,65 +14,17 @@
 
 //! Schema-bound views of persisted primary key ranges.
 
-use std::collections::HashMap;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::OnceLock;
 
 use bytes::Bytes;
-use common_telemetry::warn;
 use datatypes::prelude::ConcreteDataType;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodec, SortField};
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
-use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataRef};
+use store_api::metadata::{ColumnMetadata, RegionMetadataRef};
 use store_api::storage::RegionId;
 
 use crate::error::{DecodePrimaryKeyRangeSnafu, InvalidPrimaryKeyRangeSnafu, Result};
-use crate::sst::file::{FileHandle, RegionFileId};
-
-type CachedPrimaryKeyRanges = HashMap<RegionFileId, Option<(Bytes, Bytes)>>;
-
-/// Comparable bounds for one scan or compaction task's pinned schema.
-///
-/// Keep the cache with the task rather than physical files: old snapshots may
-/// need different defaults, and completed tasks must release their cached bounds.
-#[derive(Debug)]
-pub(crate) struct PrimaryKeyRanges {
-    mapper: Arc<PrimaryKeyRangeMapper>,
-    ranges: RwLock<CachedPrimaryKeyRanges>,
-}
-
-impl PrimaryKeyRanges {
-    /// Shares schema constants while keeping file bounds local to this task.
-    pub(crate) fn new(mapper: Arc<PrimaryKeyRangeMapper>) -> Self {
-        Self {
-            mapper,
-            ranges: RwLock::new(HashMap::new()),
-        }
-    }
-
-    /// Returns normalized bounds, or unknown when they cannot safely exclude data.
-    /// Invalid statistics are diagnosed once per task without failing the operation.
-    pub(crate) fn range(&self, file: &FileHandle) -> Option<(Bytes, Bytes)> {
-        if let Some(range) = self.ranges.read().unwrap().get(&file.file_id()) {
-            return range.clone();
-        }
-        // Legacy statistics can arrive after the first comparison. Retry missing bounds.
-        let raw = file.raw_primary_key_range()?;
-        self.ranges
-            .write()
-            .unwrap()
-            .entry(file.file_id())
-            .or_insert_with(|| match self.mapper.map(file.region_id(), raw) {
-                Ok(range) => range,
-                Err(err) => {
-                    warn!(err; "Invalid SST primary key range; using unknown bounds, region: {}, file: {}, schema version: {}",
-                        file.region_id(), file.file_id(), self.mapper.schema_version());
-                    None
-                }
-            })
-            .clone()
-    }
-}
 
 /// Schema conversion and default encodings shared by a version's comparison contexts.
 #[derive(Debug)]
@@ -118,28 +70,26 @@ impl PrimaryKeyRangeMapper {
         self.metadata.schema_version
     }
 
-    /// Returns unknown for foreign regions or defaults that cannot be safely encoded.
+    /// Returns the region id of mapper.
+    pub(crate) fn region_id(&self) -> RegionId {
+        self.metadata.region_id
+    }
+
+    /// Returns unknown for other tables or defaults that cannot be safely encoded.
     /// Invalid bounds return an error so callers can diagnose them before falling back
     /// to unknown. Neither the error nor its source includes the encoded keys.
-    pub(crate) fn map(
-        &self,
-        region_id: RegionId,
-        (min, max): (Bytes, Bytes),
-    ) -> Result<Option<(Bytes, Bytes)>> {
+    pub(crate) fn map(&self, (min, max): (Bytes, Bytes)) -> Result<Option<(Bytes, Bytes)>> {
         ensure!(
             min <= max,
             InvalidPrimaryKeyRangeSnafu {
                 reason: "min is greater than max",
             }
         );
-        if region_id != self.metadata.region_id {
-            return Ok(None);
-        }
         // Sparse-to-sparse read compatibility preserves encoded keys verbatim.
         if self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse {
             return Ok(Some((min, max)));
         }
-        // Ordinary same-region Dense ALTER only appends PK fields and preserves
+        // Ordinary same-table Dense ALTER only appends PK fields and preserves
         // prefix order/types. SyncColumns violating that invariant is out of scope.
         let prefix_len = self.range_prefix_len(&min, &max)?;
         if prefix_len == self.codec.num_fields() {
@@ -194,17 +144,6 @@ impl PrimaryKeyRangeMapper {
         }
         Some(suffix.into())
     }
-}
-
-/// Changes to fields, indexes or schema version alone do not invalidate PK views.
-pub(crate) fn primary_key_metadata_eq(left: &RegionMetadata, right: &RegionMetadata) -> bool {
-    left.region_id == right.region_id
-        && left.primary_key_encoding == right.primary_key_encoding
-        && left.primary_key.len() == right.primary_key.len()
-        && left
-            .primary_key_columns()
-            .zip(right.primary_key_columns())
-            .all(|(left, right)| same_pk_column(left, right))
 }
 
 fn same_pk_column(left: &ColumnMetadata, right: &ColumnMetadata) -> bool {
@@ -296,6 +235,12 @@ mod tests {
         Arc::new(builder.build().unwrap())
     }
 
+    fn metadata_at_version(defaults: &[Value], version: u64) -> RegionMetadataRef {
+        let mut metadata = (*metadata(defaults)).clone();
+        metadata.schema_version = version;
+        Arc::new(metadata)
+    }
+
     fn encode(metadata: &RegionMetadataRef, values: &[Value]) -> Bytes {
         let mut bytes = Vec::new();
         let values: Vec<_> = values
@@ -336,14 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn test_field_addition_preserves_sst_range_views() {
+    fn test_field_addition_updates_cache_version_and_shares_sst_list() {
         let metadata = metadata(&[Value::from(""), Value::from("default")]);
         let raw = file_meta(&metadata, &[Value::from("a")]);
         let file_id = raw.file_id;
         let original = version_with_files(metadata.clone(), vec![raw]);
-        let ranges = original.ssts.primary_key_ranges();
-        let range = ranges
-            .range(&original.ssts.levels()[0].files[&file_id])
+        let mapper = original.ssts.primary_key_mapper();
+        let range = original.ssts.levels()[0].files[&file_id]
+            .primary_key_range(&mapper)
             .unwrap();
         let mut builder = RegionMetadataBuilder::from_existing((*metadata).clone());
         builder
@@ -359,16 +304,21 @@ mod tests {
 
         assert_eq!(1, changed.metadata.schema_version);
         assert!(changed.metadata.column_by_id(101).is_some());
-        // Unrelated metadata changes share the SST snapshot and its encoded defaults.
-        assert!(Arc::ptr_eq(&original.ssts, &changed.ssts));
-        let changed_ranges = changed.ssts.primary_key_ranges();
-        assert!(Arc::ptr_eq(&ranges.mapper, &changed_ranges.mapper));
-        let changed_range = ranges
-            .range(&changed.ssts.levels()[0].files[&file_id])
+        assert_eq!(
+            original.ssts.levels().as_ptr(),
+            changed.ssts.levels().as_ptr()
+        );
+        let changed_mapper = changed.ssts.primary_key_mapper();
+        assert_eq!(1, changed_mapper.schema_version());
+        let changed_range = changed.ssts.levels()[0].files[&file_id]
+            .primary_key_range(&changed_mapper)
             .unwrap();
         assert_eq!(range, changed_range);
-        assert_eq!(range.0.as_ptr(), changed_range.0.as_ptr());
-        assert_eq!(range.1.as_ptr(), changed_range.1.as_ptr());
+        let cached = changed.ssts.levels()[0].files[&file_id]
+            .primary_key_range(&changed_mapper)
+            .unwrap();
+        assert_eq!(cached.0.as_ptr(), changed_range.0.as_ptr());
+        assert_eq!(cached.1.as_ptr(), changed_range.1.as_ptr());
     }
 
     // SET/DROP DEFAULT may change padding even when the number of PK columns stays fixed.
@@ -388,8 +338,8 @@ mod tests {
         let complete_id = complete.file_id;
         let complete_range = complete.primary_key_range();
         let original = version_with_files(metadata.clone(), vec![missing, complete]);
-        let old_ranges = original.ssts.primary_key_ranges();
-        let old_range = old_ranges.range(&original.ssts.levels()[0].files[&missing_id]);
+        let old_mapper = original.ssts.primary_key_mapper();
+        let old_range = original.ssts.levels()[0].files[&missing_id].primary_key_range(&old_mapper);
 
         let mut changed_metadata = (*metadata).clone();
         changed_metadata.column_metadatas[1].column_schema = changed_metadata.column_metadatas[1]
@@ -408,20 +358,20 @@ mod tests {
             &changed_metadata,
             &[Value::from("a"), new_default.unwrap_or(Value::Null)],
         );
-        let changed_ranges = changed.ssts.primary_key_ranges();
+        let changed_mapper = changed.ssts.primary_key_mapper();
         assert_eq!(
             Some((expected.clone(), expected)),
-            changed_ranges.range(&changed.ssts.levels()[0].files[&missing_id])
+            changed.ssts.levels()[0].files[&missing_id].primary_key_range(&changed_mapper)
         );
         assert_eq!(
             complete_range,
-            changed_ranges.range(&changed.ssts.levels()[0].files[&complete_id])
+            changed.ssts.levels()[0].files[&complete_id].primary_key_range(&changed_mapper)
         );
         let expected_old = encode(&metadata, &[Value::from("a"), previous_default]);
         assert_eq!(Some((expected_old.clone(), expected_old)), old_range);
         assert_eq!(
             old_range,
-            old_ranges.range(&original.ssts.levels()[0].files[&missing_id])
+            original.ssts.levels()[0].files[&missing_id].primary_key_range(&old_mapper)
         );
     }
 
@@ -442,9 +392,7 @@ mod tests {
             let prefix = encode(&metadata, &defaults[..count]);
             assert_eq!(
                 Some((expected.clone(), expected.clone())),
-                mapper
-                    .map(metadata.region_id, (prefix.clone(), prefix))
-                    .unwrap()
+                mapper.map((prefix.clone(), prefix)).unwrap()
             );
         }
     }
@@ -465,12 +413,7 @@ mod tests {
         values[0] = Value::from("stored");
         let raw = encode(&mapper.metadata, &values[..1]);
         if warm {
-            assert!(
-                mapper
-                    .map(mapper.metadata.region_id, (raw.clone(), raw))
-                    .unwrap()
-                    .is_some()
-            );
+            assert!(mapper.map((raw.clone(), raw)).unwrap().is_some());
         }
 
         for count in 3..=defaults.len() {
@@ -490,18 +433,14 @@ mod tests {
                 let prefix = encode(&next_metadata, &values[..prefix_len]);
                 assert_eq!(
                     Some((expected.clone(), expected.clone())),
-                    next_mapper
-                        .map(next_metadata.region_id, (prefix.clone(), prefix))
-                        .unwrap()
+                    next_mapper.map((prefix.clone(), prefix)).unwrap()
                 );
             }
             let old_expected = encode(&mapper.metadata, &values[..count - 1]);
             let raw = encode(&mapper.metadata, &values[..1]);
             assert_eq!(
                 Some((old_expected.clone(), old_expected)),
-                mapper
-                    .map(mapper.metadata.region_id, (raw.clone(), raw))
-                    .unwrap()
+                mapper.map((raw.clone(), raw)).unwrap()
             );
             mapper = next_mapper;
         }
@@ -534,12 +473,7 @@ mod tests {
         );
         let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
         let expected = known.then(|| (Bytes::from_static(&[0]), Bytes::from_static(&[0])));
-        assert_eq!(
-            expected,
-            mapper
-                .map(metadata.region_id, (Bytes::new(), Bytes::new()))
-                .unwrap()
-        );
+        assert_eq!(expected, mapper.map((Bytes::new(), Bytes::new())).unwrap());
         if known {
             let encoded_null = encode(&metadata, &[Value::Null]);
             assert_eq!(Some((encoded_null.clone(), encoded_null)), expected);
@@ -569,9 +503,7 @@ mod tests {
             .encode_values(&[(0, Value::from("b"))], &mut b)
             .unwrap();
         let mapper = PrimaryKeyRangeMapper::new(metadata);
-        let err = mapper
-            .map(mapper.metadata.region_id, (b.into(), a.into()))
-            .unwrap_err();
+        let err = mapper.map((b.into(), a.into())).unwrap_err();
         assert!(matches!(
             err,
             crate::error::Error::InvalidPrimaryKeyRange { .. }
@@ -586,7 +518,7 @@ mod tests {
         let min = encode(&metadata, &[Value::from("a")]);
         let max = encode(&metadata, &[Value::from("b"), Value::Int64(42)]);
         assert!(matches!(
-            mapper.map(metadata.region_id, (min, max)),
+            mapper.map((min, max)),
             Err(crate::error::Error::InvalidPrimaryKeyRange { .. })
         ));
     }
@@ -607,7 +539,7 @@ mod tests {
         } else {
             max.truncate(max.len() - 1);
         }
-        let err = mapper.map(metadata.region_id, (min, max)).unwrap_err();
+        let err = mapper.map((min, max)).unwrap_err();
         assert_eq!(StatusCode::Internal, err.status_code());
         assert!(matches!(err, crate::error::Error::DecodePrimaryKeyRange {
             endpoint: actual,
@@ -621,37 +553,46 @@ mod tests {
         let mapper = PrimaryKeyRangeMapper::new(metadata(&[Value::from("")]));
         // Foreign files may use a different layout, so don't decode them as local Dense keys.
         let key = Bytes::from_static(&[2]);
-        assert_eq!(
-            None,
-            mapper.map(RegionId::new(2, 1), (key.clone(), key)).unwrap()
-        );
+        assert_eq!(None, mapper.map((key.clone(), key)).unwrap());
     }
 
     #[rstest]
-    #[case::local_first(false)]
-    #[case::foreign_first(true)]
-    fn test_comparison_cache_distinguishes_region_owners(#[case] foreign_first: bool) {
-        let metadata = metadata(&[Value::from("")]);
-        let raw = file_meta(&metadata, &[Value::from("a")]);
-        let expected = raw.primary_key_range();
-        let local = FileHandle::new(raw.clone(), new_noop_file_purger());
-        let foreign = FileHandle::new(
-            FileMeta {
-                region_id: RegionId::new(2, 1),
-                ..raw
-            },
+    #[case::source_first(false)]
+    #[case::destination_first(true)]
+    fn test_aligned_cache_uses_table_schema_across_region_migration(
+        #[case] destination_first: bool,
+    ) {
+        let source = metadata(&[Value::from("")]);
+        let file = FileHandle::new(
+            file_meta(&source, &[Value::from("a")]),
             new_noop_file_purger(),
         );
-        let ranges = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata)));
-        let mut cases = [(&local, expected), (&foreign, None)];
-        if foreign_first {
-            cases.reverse();
+        let target = metadata_at_version(&[Value::from(""), Value::Int64(42)], 1);
+        let expected = encode(&target, &[Value::from("a"), Value::Int64(42)]);
+        let mut regions = [RegionId::new(1, 1), RegionId::new(1, 2)];
+        if destination_first {
+            regions.reverse();
         }
-        for _ in 0..2 {
-            for (file, expected) in &cases {
-                assert_eq!(*expected, ranges.range(file));
+        let mut previous: Option<(Bytes, Bytes)> = None;
+        for region_id in regions {
+            let mut metadata = (*target).clone();
+            metadata.region_id = region_id;
+            let mapper = PrimaryKeyRangeMapper::new(Arc::new(metadata));
+            let aligned = file.primary_key_range(&mapper).unwrap();
+            assert_eq!((expected.clone(), expected.clone()), aligned);
+            if let Some(previous) = previous {
+                // Different metadata allocations/region ids still share one schema-version cache.
+                assert_eq!(previous.0.as_ptr(), aligned.0.as_ptr());
+                assert_eq!(previous.1.as_ptr(), aligned.1.as_ptr());
             }
+            previous = Some(aligned);
         }
+        let mut other_table = (*target).clone();
+        other_table.region_id = RegionId::new(2, 1);
+        assert_eq!(
+            None,
+            file.primary_key_range(&PrimaryKeyRangeMapper::new(Arc::new(other_table)))
+        );
     }
 
     #[test]
@@ -677,7 +618,6 @@ mod tests {
             common_telemetry::tracing_subscriber::registry().with(WarningCounter(warnings.clone()));
         let metadata = metadata(&[Value::from("")]);
         let mapper = Arc::new(PrimaryKeyRangeMapper::new(metadata.clone()));
-        let ranges = PrimaryKeyRanges::new(mapper);
         let healthy_meta = file_meta(&metadata, &[Value::from("c")]);
         let healthy = FileHandle::new(healthy_meta, new_noop_file_purger());
         let a = encode(&metadata, &[Value::from("a")]);
@@ -689,11 +629,11 @@ mod tests {
                 meta.primary_key_min = Some(min);
                 meta.primary_key_max = Some(max);
                 let file = FileHandle::new(meta, new_noop_file_purger());
-                assert_eq!(None, ranges.range(&file));
-                assert_eq!(None, ranges.range(&file.clone()));
+                assert_eq!(None, file.primary_key_range(&mapper));
+                assert_eq!(None, file.clone().primary_key_range(&mapper));
                 // These raw ranges look disjoint from c; unknown must prevent pruning.
-                assert!(files_overlap_inclusive(&file, &healthy, &ranges));
-                assert!(files_overlap_inclusive(&healthy, &file, &ranges));
+                assert!(files_overlap_inclusive(&file, &healthy, &mapper));
+                assert!(files_overlap_inclusive(&healthy, &file, &mapper));
             }
         });
         assert_eq!(2, warnings.load(Ordering::Relaxed));
@@ -711,19 +651,14 @@ mod tests {
             .unwrap();
         let metadata = Arc::new(metadata);
         let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
-        assert_eq!(
-            None,
-            mapper
-                .map(metadata.region_id, (Bytes::new(), Bytes::new()))
-                .unwrap()
-        );
+        assert_eq!(None, mapper.map((Bytes::new(), Bytes::new())).unwrap());
         let key = encode(
             &metadata,
             &[Value::Timestamp(Timestamp::new_millisecond(10))],
         );
         assert_eq!(
             Some((key.clone(), key.clone())),
-            mapper.map(metadata.region_id, (key.clone(), key)).unwrap()
+            mapper.map((key.clone(), key)).unwrap()
         );
     }
 
@@ -738,50 +673,58 @@ mod tests {
             .encode_values(&[(0, Value::from("a"))], &mut bytes)
             .unwrap();
         let key = Bytes::from(bytes);
-        let region_id = metadata.region_id;
         let mapper = PrimaryKeyRangeMapper::new(metadata);
         assert_eq!(
             Some((key.clone(), key.clone())),
-            mapper.map(region_id, (key.clone(), key)).unwrap()
+            mapper.map((key.clone(), key)).unwrap()
         );
     }
 
     #[test]
-    fn test_comparison_contexts_isolate_schemas_and_share_file_state() {
+    fn test_aligned_cache_isolates_schemas_and_shares_file_state() {
         let old_metadata = metadata(&[Value::from("")]);
-        let new_metadata = metadata(&[Value::from(""), Value::Null, Value::Int64(42)]);
+        let new_metadata =
+            metadata_at_version(&[Value::from(""), Value::Null, Value::Int64(42)], 1);
         let raw_meta = file_meta(&old_metadata, &[Value::from("b")]);
         let original = version_with_files(old_metadata.clone(), vec![raw_meta.clone()]);
         let old_file = original.ssts.levels()[0].files().next().unwrap();
-        let old_ranges = original.ssts.primary_key_ranges();
+        let old_mapper = original.ssts.primary_key_mapper();
         let changed = VersionBuilder::from_version(original.clone())
             .metadata(new_metadata.clone())
             .build();
         let new_file = changed.ssts.levels()[0].files().next().unwrap();
-        let new_ranges = changed.ssts.primary_key_ranges();
+        let new_mapper = changed.ssts.primary_key_mapper();
         let expected = encode(
             &new_metadata,
             &[Value::from("b"), Value::Null, Value::Int64(42)],
         );
-        assert_eq!(raw_meta.primary_key_range(), old_ranges.range(old_file));
+        assert_eq!(
+            raw_meta.primary_key_range(),
+            old_file.primary_key_range(&old_mapper)
+        );
         assert_eq!(
             Some((expected.clone(), expected)),
-            new_ranges.range(new_file)
+            new_file.primary_key_range(&new_mapper)
         );
         assert_eq!(raw_meta, *new_file.meta_ref());
         assert_eq!(
             raw_meta.primary_key_range(),
             new_file.raw_primary_key_range()
         );
-        // Either context can interpret the same physical handle without rebinding it.
-        assert_eq!(old_ranges.range(old_file), old_ranges.range(new_file));
-        assert_eq!(new_ranges.range(new_file), new_ranges.range(old_file));
+        assert_eq!(
+            old_file.primary_key_range(&old_mapper),
+            new_file.primary_key_range(&old_mapper)
+        );
+        assert_eq!(
+            new_file.primary_key_range(&new_mapper),
+            old_file.primary_key_range(&new_mapper)
+        );
         old_file.set_compacting(true);
         assert!(new_file.compacting());
         new_file.mark_deleted();
         assert!(old_file.is_deleted());
 
-        // Old-schema flushes can finish after ALTER; compare them with the same context.
+        // Old-schema flushes can finish after ALTER; compare them with the target mapper.
         let added_meta = file_meta(&old_metadata, &[Value::from("a")]);
         let added_id = added_meta.file_id;
         let changed = VersionBuilder::from_version(Arc::new(changed))
@@ -803,28 +746,71 @@ mod tests {
             &new_metadata,
             &[Value::from("a"), Value::Null, Value::Int64(42)],
         );
-        assert_eq!(Some((expected.clone(), expected)), new_ranges.range(added));
+        assert_eq!(
+            Some((expected.clone(), expected)),
+            added.primary_key_range(&new_mapper)
+        );
     }
 
     #[test]
     fn test_late_statistics_and_changed_defaults_use_each_pinned_schema() {
         let metadata_v1 = metadata(&[Value::from(""), Value::Int64(42)]);
-        let metadata_v2 = metadata(&[Value::from(""), Value::Int64(100)]);
+        let metadata_v2 = metadata_at_version(&[Value::from(""), Value::Int64(100)], 1);
         let mut meta = file_meta(&metadata_v1, &[Value::from("a")]);
         let raw = meta.primary_key_range().unwrap();
         meta.primary_key_min = None;
         meta.primary_key_max = None;
         let file = FileHandle::new(meta, new_noop_file_purger());
-        let v1 = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata_v1.clone())));
-        let v2 = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata_v2.clone())));
-        assert_eq!(None, v1.range(&file));
-        assert_eq!(None, v2.range(&file));
+        let v1 = PrimaryKeyRangeMapper::new(metadata_v1.clone());
+        let v2 = PrimaryKeyRangeMapper::new(metadata_v2.clone());
+        assert_eq!(None, file.primary_key_range(&v1));
+        assert_eq!(None, file.primary_key_range(&v2));
         file.set_primary_key_range(raw.clone());
-        for (ranges, metadata, default) in [(v1, metadata_v1, 42), (v2, metadata_v2, 100)] {
-            let expected = encode(&metadata, &[Value::from("a"), Value::Int64(default)]);
-            assert_eq!(Some((expected.clone(), expected)), ranges.range(&file));
+        for (mapper, metadata, default) in [
+            (&v2, &metadata_v2, 100),
+            (&v1, &metadata_v1, 42),
+            (&v2, &metadata_v2, 100),
+        ] {
+            let expected = encode(metadata, &[Value::from("a"), Value::Int64(default)]);
+            assert_eq!(
+                Some((expected.clone(), expected)),
+                file.primary_key_range(mapper)
+            );
         }
         assert_eq!(Some(raw), file.raw_primary_key_range());
+    }
+
+    #[test]
+    fn test_concurrent_snapshots_do_not_return_each_others_aligned_bounds() {
+        let old_metadata = metadata(&[Value::from(""), Value::Int64(42)]);
+        let new_metadata = metadata_at_version(&[Value::from(""), Value::Int64(100)], 1);
+        let raw = file_meta(&old_metadata, &[Value::from("a")]);
+        let original_bounds = raw.primary_key_range();
+        let file = FileHandle::new(raw, new_noop_file_purger());
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            for (metadata, default) in [(old_metadata, 42), (new_metadata, 100)] {
+                let file = &file;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let expected = encode(&metadata, &[Value::from("a"), Value::Int64(default)]);
+                    let mapper = PrimaryKeyRangeMapper::new(metadata);
+                    let mut all_matched = true;
+                    for _ in 0..64 {
+                        barrier.wait();
+                        all_matched &= file.primary_key_range(&mapper)
+                            == Some((expected.clone(), expected.clone()));
+                    }
+                    // Assert after all barriers so a failure cannot strand the other snapshot.
+                    assert!(
+                        all_matched,
+                        "wrong bounds for schema version {}",
+                        mapper.schema_version()
+                    );
+                });
+            }
+        });
+        assert_eq!(original_bounds, file.raw_primary_key_range());
     }
 
     #[test]
@@ -845,10 +831,13 @@ mod tests {
         };
         let serialized = SerializedPickerOutput::from(&picked);
         let output = PickerOutput::from_serialized(serialized, new_noop_file_purger());
-        let ranges = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata.clone())));
+        let mapper = PrimaryKeyRangeMapper::new(metadata.clone());
         let file = &output.outputs[0].inputs[0];
         let completed = encode(&metadata, &[Value::from("a"), Value::Int64(42)]);
-        assert_eq!(Some((completed.clone(), completed)), ranges.range(file));
+        assert_eq!(
+            Some((completed.clone(), completed)),
+            file.primary_key_range(&mapper)
+        );
         assert_eq!(raw, *file.meta_ref());
     }
 
@@ -856,7 +845,6 @@ mod tests {
     fn test_compaction_overlap_uses_completed_endpoints() {
         let metadata = metadata(&[Value::from(""), Value::Null]);
         let mapper = Arc::new(PrimaryKeyRangeMapper::new(metadata.clone()));
-        let ranges = PrimaryKeyRanges::new(mapper);
         let mut old = file_meta(&metadata, &[Value::from("a")]);
         old.primary_key_max = Some(encode(&metadata, &[Value::from("b")]));
         let mut new = file_meta(&metadata, &[Value::from("b"), Value::Null]);
@@ -864,7 +852,7 @@ mod tests {
         assert!(old.primary_key_max < new.primary_key_min);
         let old = FileHandle::new(old, new_noop_file_purger());
         let new = FileHandle::new(new, new_noop_file_purger());
-        assert!(files_overlap_inclusive(&old, &new, &ranges));
-        assert!(files_overlap_inclusive(&new, &old, &ranges));
+        assert!(files_overlap_inclusive(&old, &new, &mapper));
+        assert!(files_overlap_inclusive(&new, &old, &mapper));
     }
 }

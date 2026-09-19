@@ -14,14 +14,13 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
 
 use common_time::Timestamp;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 use crate::compaction::run::primary_key_ranges_overlap;
 use crate::sst::file::{FileHandle, RegionFileId};
-use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Snapshot-local overlap candidates, ordered by start time. Each subtree stores
 /// its maximum active end. Removing visited files prunes dense internal overlaps.
@@ -30,7 +29,7 @@ use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
 pub(super) struct FileOverlapIndex<'a> {
     /// Current region metadata used to decide whether PK bounds can safely exclude overlaps.
     metadata: &'a RegionMetadata,
-    primary_key_ranges: PrimaryKeyRanges,
+    primary_key_mapper: PrimaryKeyRangeMapper,
     /// Candidates in original snapshot order, retained after removal so their
     /// indices remain stable and drained matches can preserve merge input order.
     files: Vec<FileHandle>,
@@ -73,9 +72,7 @@ impl<'a> FileOverlapIndex<'a> {
         }
         Self {
             metadata,
-            primary_key_ranges: PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(
-                metadata.clone(),
-            ))),
+            primary_key_mapper: PrimaryKeyRangeMapper::new(metadata.clone()),
             files,
             by_start,
             positions,
@@ -137,7 +134,7 @@ impl<'a> FileOverlapIndex<'a> {
                 query.input,
                 &self.files[i],
                 self.metadata,
-                &self.primary_key_ranges,
+                &self.primary_key_mapper,
             )
             .then_some(i);
         }
@@ -153,7 +150,7 @@ fn files_may_overlap(
     lhs: &FileHandle,
     rhs: &FileHandle,
     metadata: &RegionMetadata,
-    primary_key_ranges: &PrimaryKeyRanges,
+    mapper: &PrimaryKeyRangeMapper,
 ) -> bool {
     let (lhs_start, lhs_end) = lhs.time_range();
     let (rhs_start, rhs_end) = rhs.time_range();
@@ -172,7 +169,7 @@ fn files_may_overlap(
     {
         return true;
     }
-    match (primary_key_ranges.range(lhs), primary_key_ranges.range(rhs)) {
+    match (lhs.primary_key_range(mapper), rhs.primary_key_range(mapper)) {
         (Some(lhs), Some(rhs)) if lhs.0 <= lhs.1 && rhs.0 <= rhs.1 => {
             primary_key_ranges_overlap(&lhs, &rhs)
         }
@@ -183,6 +180,7 @@ fn files_may_overlap(
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
     use rand::{Rng, SeedableRng};
     use store_api::storage::FileId;
@@ -228,7 +226,7 @@ mod tests {
         metadata.region_id = 0.into();
         metadata.schema_version = schema_version;
         let metadata = Arc::new(metadata);
-        let ranges = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata.clone())));
+        let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
         let lhs = file(0, 10, Some(("a", "b")));
         let mut rhs = file(start, start + 10, pk);
         if foreign {
@@ -262,7 +260,7 @@ mod tests {
     #[test]
     fn test_index_matches_linear_scan_after_removals() {
         let metadata = primary_key_metadata_for_test();
-        let ranges = PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(metadata.clone())));
+        let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
         let mut rng = rand::rngs::StdRng::seed_from_u64(9146);
         for count in [0, 1, 7, 32, 127] {
             let files: Vec<_> = (0..count)

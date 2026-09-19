@@ -27,7 +27,7 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::config::MitoConfig;
 use crate::region::options::RegionOptions;
 use crate::sst::file::{FileHandle, FileMeta, Level};
-use crate::sst::primary_key::{PrimaryKeyRangeMapper, PrimaryKeyRanges};
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::SstVersion;
 use crate::test_util::memtable_util::metadata_for_test;
 use crate::test_util::new_noop_file_purger;
@@ -39,10 +39,8 @@ pub(crate) fn primary_key_metadata_for_test() -> RegionMetadataRef {
     Arc::new(metadata)
 }
 
-pub(crate) fn primary_key_ranges_for_test() -> PrimaryKeyRanges {
-    PrimaryKeyRanges::new(Arc::new(PrimaryKeyRangeMapper::new(
-        primary_key_metadata_for_test(),
-    )))
+pub(crate) fn primary_key_mapper_for_test() -> PrimaryKeyRangeMapper {
+    PrimaryKeyRangeMapper::new(primary_key_metadata_for_test())
 }
 
 /// Encodes the single string tag used by compaction range fixtures.
