@@ -1,10 +1,10 @@
 # Metric export/import experiment results
 
-These experiments support three changes: physical-table export, batched logical
-DDL, and removal of repeated directory listing during COPY. They measure separate
-parts of export/import; their speedups should not be multiplied.
+These experiments cover physical-table export, batched logical DDL, explicit-file
+COPY and packed-object transfer. They measure different stages and workloads;
+their speedups should not be multiplied.
 
-Measurements were taken on September 10–11, 2026, on an ARM64 machine with 16 GiB
+The first three experiments were measured on September 10–11, 2026, on an ARM64 machine with 16 GiB
 RAM, using local standalone instances, local files, warm caches and unoptimized
 test builds. Each table entry represents one run. The results establish useful
 optimization directions, not production throughput estimates.
@@ -88,7 +88,95 @@ The **5.481 s result still uses per-table writes**, with only 19,998 rows. It is
 not a merged-write result. Larger files, distributed targets and object stores
 are needed to decide whether merged writes provide enough additional benefit.
 
-## Correctness and remaining coverage
+## Packed-object export and restore
+
+The packing experiment uses 1,000 or 10,000 logical tables with 100 rows each,
+two physical tables, two logical schemas, and two ordinary tables with 100 rows
+each. The larger fixture therefore has 1,000,200 rows. It uses a macOS development
+binary and local Docker MinIO. Both paths use concurrency eight, shared physical
+scans, bounded parallel writers, batched SHOW CREATE, HTTP client reuse and
+removal of redundant export HEAD requests in an exclusively owned destination.
+
+The packed path adds a streaming object containing complete logical Parquet
+files, an index, and a reader sharing two 8 MiB range windows. It still performs
+normal per-table database insertion. Both paths use the same independent driver:
+schema-only V2 export/import plus actual database COPY operations. This validates
+the data path, not production version-2 manifest handling or V2 packed resume.
+
+### Full-duration comparison
+
+For 10,000 logical tables with 5 ms added to each MinIO request, three alternating
+rounds gave the following medians. Schema time is included in the full durations.
+
+| Phase | Optimized per-table objects (s) | Packed objects and reader (s) | Speedup |
+| --- | ---: | ---: | ---: |
+| Full export | 21.76 | 8.12 | 2.68x |
+| Export schema | 2.72 | 2.75 | 0.99x |
+| Export data | 18.12 | 5.35 | 3.39x |
+| Full restore | 88.55 | 30.33 | 2.92x |
+| Restore schema | 24.53 | 24.42 | 1.00x |
+| Restore data | 64.02 | 5.95 | 10.76x |
+
+Full export ranged from 20.58–23.32 s for per-table objects and 8.05–8.26 s for
+packing. Full restore ranged from 87.50–92.03 s and 30.26–32.26 s respectively.
+Phase medians need not sum to the full median; the full measurements also include
+driver orchestration and metadata work.
+
+| Additional control | Per-table objects | Packed objects and reader | Speedup |
+| --- | ---: | ---: | ---: |
+| 1,000 tables, +5 ms, full export, one pair | 2.46 s | 1.72 s | 1.44x |
+| 1,000 tables, +5 ms, full restore, one pair | 10.54 s | 5.07 s | 2.08x |
+| 10,000 tables, no added latency, full export, one pair | 14.16 s | 7.98 s | 1.77x |
+
+The benefit increases with small-object count and request latency. The
+zero-added-latency result does not establish a multi-fold full-export improvement.
+After packing, remaining schema/scan/encoding costs limit export; roughly 24 s
+of CREATE work dominates restore and motivates batch DDL.
+
+### Storage requests and resources
+
+The following compares the 10,000-table +5 ms runs. Request/object counts were
+the same in each round; process RSS peaks and CPU time are three-run medians.
+
+| Metric | Per-table objects | Packed objects and reader |
+| --- | ---: | ---: |
+| Data objects | 10,002 | 3: one pack and two ordinary Parquet objects |
+| Parquet data bytes | 19,317,488 | 19,317,488 |
+| Full-export storage requests | 10,020 | 16 |
+| Full-restore storage requests | 60,017 | 22 |
+| Export peak RSS | 408.2 MiB | 454.8 MiB |
+| Restore peak RSS | 271.8 MiB | 372.8 MiB |
+| Export process CPU | 28.99 s | 22.59 s |
+| Restore process CPU | 76.48 s | 45.90 s |
+
+Counts include schema, index, experiment manifest and multipart requests. The
+packed path adds a 984,344-byte index. Data bytes are unchanged. Request savings
+are evidence for lower request overhead; no provider billing model was measured.
+Restore improvement includes removal of repeated metadata/range requests by the
+reader, some of which can also be optimized for standalone files.
+
+The 19,315,054-byte pack was uploaded in parts of 8,388,608, 8,388,608 and 2,537,838
+bytes. Observed request bodies never exceeded 8 MiB, and HTTP concurrency did not
+exceed eight. This tests a write-size bound, not an object-size bound or a total
+RSS bound. No comparison of different part sizes was performed.
+
+### Verification and limits
+
+Ten exports and eight complete restores passed schema, DDL, row-count and typed
+value checks. The affected modules had 241 passing tests and one skip, including
+large-table streaming fallback, cross-window reads, pack/index failures and
+cleanup of owned partial files. These checks do not replace release acceptance.
+
+The experiment's process-global reader cache must become request-owned before
+production use. Production packed-format versioning, capability checks, normal
+V2 completion/resume, distributed execution and large-table throughput remain
+to be validated. Large-table fallback has module coverage; these throughput
+fixtures contain small logical tables. Peak RSS was sampled for the whole
+process and increased with packing. A few proxy idle-connection reconnects
+occurred; client retry time remains included in the results.
+
+
+## Earlier experiments: correctness and remaining coverage
 
 The experiments compared exported/restored schemas and typed rows with the
 source. Checks covered dense/sparse keys, different logical schemas, NULL and
@@ -105,5 +193,6 @@ These limitations require production integration work.
 
 Production acceptance still requires release-build measurements with repeated
 runs, larger workloads, distributed/multi-region execution, object stores,
-released-reader compatibility and export cancellation/recovery. These are tracked
+version-1 compatibility, old-reader rejection of packed snapshots, and export
+cancellation/recovery. These are tracked
 in the [tracking issue](https://github.com/GreptimeTeam/greptimedb/issues/9120).
