@@ -1,7 +1,7 @@
 name: Follow Up Docs
 on:
   pull_request_target:
-    types: [opened, edited]
+    types: [opened, edited, closed]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}

@@ -17,7 +17,12 @@
 import * as core from '@actions/core'
 import {handleError, obtainClient} from "@/common";
 import {context} from "@actions/github";
-import {PullRequestEditedEvent, PullRequestEvent, PullRequestOpenedEvent} from "@octokit/webhooks-types";
+import {
+    PullRequestClosedEvent,
+    PullRequestEditedEvent,
+    PullRequestEvent,
+    PullRequestOpenedEvent
+} from "@octokit/webhooks-types";
 // @ts-expect-error moduleResolution:nodenext issue 54523
 import {RequestError} from "@octokit/request-error";
 
@@ -30,8 +35,6 @@ async function main() {
         throw new Error(`Only pull request event supported. ${context.eventName} is unsupported.`)
     }
 
-    const client = obtainClient("GITHUB_TOKEN")
-    const docsClient = obtainClient("DOCS_REPO_TOKEN")
     const payload = context.payload as PullRequestEvent
     const { owner, repo, number, actor, title, html_url } = {
         owner: payload.pull_request.base.user.login,
@@ -41,7 +44,37 @@ async function main() {
         html_url: payload.pull_request.html_url,
         actor: payload.pull_request.user.login,
     }
-    const followUpDocs = checkPullRequestEvent(payload)
+
+    switch (payload.action) {
+        case "opened":
+        case "edited": {
+            const client = obtainClient("GITHUB_TOKEN")
+            await updateDocsLabels(client, owner, repo, number, checkPullRequestEvent(payload))
+            break
+        }
+        case "closed": {
+            const event = payload as PullRequestClosedEvent
+            if (!event.pull_request.merged) {
+                core.info("PR closed without merging; no docs issue needed.")
+                return
+            }
+            const hasDocsLabel = event.pull_request.labels.some((label) =>
+                (typeof label === "string" ? label : label.name) === labelDocsRequired
+            )
+            if (!hasDocsLabel) {
+                core.info(`Label ${labelDocsRequired} not present; no docs issue needed.`)
+                return
+            }
+            const docsClient = obtainClient("DOCS_REPO_TOKEN")
+            await createDocsIssue(docsClient, title, html_url, actor)
+            break
+        }
+        default:
+            throw new Error(`${payload.action} is unsupported.`)
+    }
+}
+
+async function updateDocsLabels(client: ReturnType<typeof obtainClient>, owner: string, repo: string, number: number, followUpDocs: boolean) {
     if (followUpDocs) {
         core.info("Follow up docs.")
         await client.rest.issues.removeLabel({
@@ -54,28 +87,6 @@ async function main() {
         })
         await client.rest.issues.addLabels({
             owner, repo, issue_number: number, labels: [labelDocsRequired],
-        })
-
-        // Get available assignees for the docs repo
-        const assigneesResponse = await docsClient.rest.issues.listAssignees({
-            owner: 'GreptimeTeam',
-            repo: 'docs',
-        })
-        const validAssignees = assigneesResponse.data.map(assignee => assignee.login)
-        core.info(`Available assignees: ${validAssignees.join(', ')}`)
-
-        // Check if the actor is a valid assignee, otherwise fallback to fengjiachun
-        const assignee = validAssignees.includes(actor) ? actor : 'fengjiachun'
-        core.info(`Assigning issue to: ${assignee}`)
-
-        await docsClient.rest.issues.create({
-            owner: 'GreptimeTeam',
-            repo: 'docs',
-            title: `Update docs for ${title}`,
-            body: `A document change request is generated from ${html_url}`,
-            assignee: assignee,
-        }).then((res) => {
-            core.info(`Created issue ${res.data}`)
         })
     } else {
         core.info("No need to follow up docs.")
@@ -91,6 +102,32 @@ async function main() {
             owner, repo, issue_number: number, labels: [labelDocsNotRequired],
         })
     }
+}
+
+async function createDocsIssue(docsClient: ReturnType<typeof obtainClient>, title: string, html_url: string, actor: string) {
+    core.info("Creating follow-up docs issue for merged PR.")
+
+    // Get available assignees for the docs repo
+    const assigneesResponse = await docsClient.rest.issues.listAssignees({
+        owner: 'GreptimeTeam',
+        repo: 'docs',
+    })
+    const validAssignees = assigneesResponse.data.map(assignee => assignee.login)
+    core.info(`Available assignees: ${validAssignees.join(', ')}`)
+
+    // Check if the actor is a valid assignee, otherwise fallback to fengjiachun
+    const assignee = validAssignees.includes(actor) ? actor : 'fengjiachun'
+    core.info(`Assigning issue to: ${assignee}`)
+
+    await docsClient.rest.issues.create({
+        owner: 'GreptimeTeam',
+        repo: 'docs',
+        title: `Update docs for ${title}`,
+        body: `A document change request is generated from ${html_url}`,
+        assignee: assignee,
+    }).then((res) => {
+        core.info(`Created issue ${res.data}`)
+    })
 }
 
 function checkPullRequestEvent(payload: PullRequestEvent) {
