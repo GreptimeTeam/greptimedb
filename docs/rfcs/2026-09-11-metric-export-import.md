@@ -31,19 +31,13 @@ includes reports of exports taking days for roughly 100,000 logical tables with
 only several GiB of data. Table count, physical schema width and data volume must
 be measured separately; total database bytes do not describe the transfer cost.
 
-The [experiment results](2026-09-11-metric-export-import/experiment-results.md)
-cover physical scans, batch DDL, explicit-file COPY and packed-object transfer.
-At 10,000 small logical tables and concurrency eight, with 5 ms added to each
-MinIO request, packing plus its reader improved full export from 21.76 s to
-8.12 s (2.68x) and full restore from 88.55 s to 30.33 s (2.92x), using three-run
-medians. The comparison already includes export writer concurrency, redundant
-export HEAD removal, batched SHOW CREATE and HTTP client reuse.
-
-Without added latency, one full-export pair improved 1.77x. These local debug
-measurements establish direction, not release acceptance. Packing and the new
-reader jointly reduce restore requests; they do not merge database inserts.
-After packing, about 24 s of restore still goes to DDL, making batch CREATE part
-of the first-release work.
+The [experiment conclusions](2026-09-11-metric-export-import/experiment-results.md)
+support shared scans, batch DDL, explicit-file COPY and packed-object transfer.
+Packing with a bounded range reader substantially reduces storage requests and
+improves full export and restore for many small logical tables. Benefits depend
+on request latency, and memory use increases. Remaining CREATE work makes batch
+DDL part of the first release. These local experiments establish direction;
+production V2 recovery and release performance still require acceptance tests.
 
 # Terminology
 
@@ -247,8 +241,13 @@ Use one streaming pack writer per schema chunk initially. Multiple physical
 groups can feed it, with bounded multipart upload concurrency. Append each small
 Parquet intact. A pack may exceed 8 MiB; 8 MiB limits one write/part, not the object.
 Roll to a new pack at a table boundary before exhausting a backend object/part
-limit. A single standalone table exceeding the backend's object limit fails
-explicitly. Its write submissions remain bounded.
+limit. A standalone table is subject to both the backend object-size limit and
+its multipart part-count limit. With at most N parts and an 8 MiB part cap, its
+effective size ceiling is no greater than min(object-size limit, N × 8 MiB), and
+can be lower if emitted parts are smaller. Before submitting an out-of-limit
+part or exceeding the object limit, fail explicitly, abort the upload and leave
+the chunk incomplete. Do not enlarge parts or split the logical table to bypass
+these limits. Exercise this boundary with a reduced-part-limit test backend.
 
 Record object lengths while writing and include all standalone outputs in the
 index. Restore need not list the directory or rediscover a pack's size for each
@@ -409,7 +408,7 @@ request deduplication is available, include it in B as well.
 The proposed release target is at least 3x faster full export and full restore
 for D versus A on 10,000 and 100,000 small logical tables with MinIO request
 latency increased by 5 ms. Fix this target during RFC review, before running
-release measurements. The current local 2.68x/2.92x C-versus-B observations are
+release measurements. The independent local C-versus-B experiment establishes
 neither this comparison nor proof of that target.
 
 Use Linux release builds and at least three alternating rounds for primary
