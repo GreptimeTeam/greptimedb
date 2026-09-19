@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["IndexFileType"],"fn":["file_operation","purge_file","run_index_purge_task","series_index_channel"],"struct":["IndexFilePurger","PurgeRequest"]};

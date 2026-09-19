@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["PromSampleValue"],"fn":["format_prometheus_sample_value","label_runs","merge_annotations","prefer_label_runs","prometheus_native_histogram"],"struct":["PromSeriesSamples","PrometheusJsonResponse"]};

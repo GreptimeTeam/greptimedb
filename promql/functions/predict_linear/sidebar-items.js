@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["predict_linear_impl"],"struct":["PredictLinear"]};

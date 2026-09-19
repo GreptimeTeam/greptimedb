@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["column","filters_for_schema","time_range_exprs","validate_index_schema"],"struct":["SeriesIndexSearcher"]};

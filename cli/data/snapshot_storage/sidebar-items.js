@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StorageScheme"],"fn":["ensure_snapshot_exists","extract_file_path_from_uri","extract_remote_location_with_root_policy","has_explicit_dot_segment","reject_query_or_fragment","schema_index_path","validate_file_snapshot_uri","validate_snapshot_uri","validate_uri"],"struct":["OpenDalStorage","RemoteLocation"],"trait":["SnapshotStorage"]};

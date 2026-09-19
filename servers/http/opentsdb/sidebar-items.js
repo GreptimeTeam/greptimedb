@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OneOrMany","OpentsdbPutResponse"],"fn":["parse_data_points","put"],"struct":["DataPointRequest","OpentsdbDebuggingResponse","OpentsdbDetailError"]};

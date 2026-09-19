@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LABEL_PRESERVING_RANGE_FUNCTIONS","MATCH_ALL_REGEX"],"fn":["matches_every_value","partitions_by_grouping_labels","propagate","selector_matchers","single_matrix_argument","try_propagate"]};

@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["mito2",[["impl RegionScanner for <a class=\"struct\" href=\"mito2/read/seq_scan/struct.SeqScan.html\" title=\"struct mito2::read::seq_scan::SeqScan\">SeqScan</a>",0],["impl RegionScanner for <a class=\"struct\" href=\"mito2/read/series_scan/struct.SeriesScan.html\" title=\"struct mito2::read::series_scan::SeriesScan\">SeriesScan</a>",0],["impl RegionScanner for <a class=\"struct\" href=\"mito2/read/unordered_scan/struct.UnorderedScan.html\" title=\"struct mito2::read::unordered_scan::UnorderedScan\">UnorderedScan</a>",0]]],["store_api",[]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[530,17]}

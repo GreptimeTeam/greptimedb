@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["configure_cache_registry","setup_standalone_plugins"],"mod":["context"]};

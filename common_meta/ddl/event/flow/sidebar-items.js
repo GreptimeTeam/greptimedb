@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CREATE_FLOW_EVENT_TYPE","DROP_FLOW_EVENT_TYPE","PAYLOAD_VERSION"],"enum":["FlowDdlPayload"],"struct":["CreateFlowEventIntent","CreateFlowPayload","DropFlowPayload","FlowDdlEvent"]};

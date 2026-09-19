@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_partition_rule_manager","new_test_region_wal_options","new_test_table_info","new_test_table_info_with_columns","test_column_schemas","test_new_partition_info_cache","test_new_table_route_cache"]};

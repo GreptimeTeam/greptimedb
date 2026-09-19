@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["State"],"fn":["recv_gc_regions_reply","recv_get_packed_file_refs_reply","scoped_gc_instruction","send_gc_regions_inner","send_get_packed_file_refs_inner"],"struct":["BatchGcData","BatchGcProcedure"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["create_partition_rule_manager","new_test_table_info","prepare_mocked_backend"],"mod":["kv_backend","partition_manager"]};

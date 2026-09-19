@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["SERIES_INDEX_TRIGGER_FILES"],"fn":["group_files_into_series_buckets","group_series_buckets","merge_window_sequences","plan_series_indexes","reconcile_series_buckets","rounded_bucket_width"],"struct":["IndexBucket","SeriesBucket","SeriesIndexPlan"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["__add_index","__finish"]};

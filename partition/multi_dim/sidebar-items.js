@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_REGION"],"fn":["columnar_value_to_boolean_array"],"struct":["MultiDimPartitionRule"],"type":["PhysicalExprCache"]};

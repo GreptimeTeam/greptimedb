@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["FLOW_EXTENSIONS_METADATA_KEY","SNAPSHOT_SEQS_METADATA_KEY"],"enum":["FlightMessage"],"fn":["build_none_flight_msg","flight_messages_to_recordbatches","record_batch_to_ipc"],"mod":["do_put"],"struct":["FlightDecoder","FlightEncoder"]};

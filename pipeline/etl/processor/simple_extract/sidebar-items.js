@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROCESSOR_SIMPLE_EXTRACT"],"struct":["SimpleExtractProcessor"]};

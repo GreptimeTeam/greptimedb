@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["STANDALONE_GENERATION"],"enum":["CorruptedSegmentAction"],"struct":["ObjectStoreWalConfig"]};

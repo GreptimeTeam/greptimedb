@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CHECK_STEP","NORMALIZE_STEP","ZERO"],"enum":["GluonOp"],"struct":["AtomicExpr","Collider","NucleonExpr"]};

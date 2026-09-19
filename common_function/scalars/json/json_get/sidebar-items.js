@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["json_object_path","json_struct_get","jsonb_get","nested_projection_type","parse_json_get_path","result_builder"],"struct":["BoolResultBuilder","FloatResultBuilder","JsonGetBool","JsonGetFloat","JsonGetInt","JsonGetObject","JsonGetString","JsonGetWithType","StringResultBuilder"],"trait":["JsonGetResultBuilder"]};

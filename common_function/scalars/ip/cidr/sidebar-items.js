@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["auto_detect_ipv6_subnet","complete_and_parse_ipv4","complete_and_parse_ipv6","mask_ipv6"],"struct":["Ipv4ToCidr","Ipv6ToCidr"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["RANGE_CATALOG","SERIES_CATALOG","SERIES_DIR","SERIES_METADATA_KEY"],"fn":["delete_catalogs","load_catalog","load_version_control","range_catalog_path","series_catalog_path","series_index_path","series_metadata","store_catalog"],"struct":["RangeIndexCatalog","SeriesIndexCatalog","SeriesIndexEntry","WindowSequence"]};

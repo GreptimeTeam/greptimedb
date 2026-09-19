@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["sort","sort_create"],"trait":["InvertedIndexCreator"]};

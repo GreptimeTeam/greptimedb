@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["df_logical_plan","df_substrait","error","extension_serializer","variation_const"],"struct":["DFLogicalSubstraitConvertor"],"trait":["SerializerRegistry","SubstraitPlan"]};
