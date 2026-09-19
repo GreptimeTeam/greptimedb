@@ -22,16 +22,22 @@ pub const INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY: &str =
 pub const SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY: &str =
     "query.support_flight_metrics_before_batch";
 pub const LIVE_ANALYZE_METRICS_EXTENSION_KEY: &str = "query.live_analyze_metrics";
+/// Metric table names resolved for a PromQL `__name__` non-equality matcher.
+///
+/// The protocol layers discover the candidate metric tables, filter them by permission and
+/// authorize the result before setting this extension; the planner never broadens it.
+pub const PROMQL_METRIC_NAMES_EXTENSION_KEY: &str = "promql_metric_names";
 
 /// Skip WAL for this insert only; never persisted as a table option.
 pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
-pub const RESERVED_EXTENSION_KEYS: [&str; 4] = [
+pub const RESERVED_EXTENSION_KEYS: [&str; 5] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
     LIVE_ANALYZE_METRICS_EXTENSION_KEY,
+    PROMQL_METRIC_NAMES_EXTENSION_KEY,
 ];
 
 /// Deprecated, use `HINTS_KEY` instead.
@@ -65,6 +71,7 @@ mod tests {
         assert!(is_reserved_extension_key(
             LIVE_ANALYZE_METRICS_EXTENSION_KEY
         ));
+        assert!(is_reserved_extension_key(PROMQL_METRIC_NAMES_EXTENSION_KEY));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
 }

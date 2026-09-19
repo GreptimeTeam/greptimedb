@@ -74,6 +74,11 @@ impl DfTableSourceProvider {
         &self.query_ctx
     }
 
+    /// Returns the catalog manager this provider resolves tables from.
+    pub fn catalog_manager(&self) -> &CatalogManagerRef {
+        &self.catalog_manager
+    }
+
     pub fn resolve_table_ref(&self, table_ref: TableReference) -> Result<ResolvedTableReference> {
         if self.disallow_cross_catalog_query {
             match &table_ref {

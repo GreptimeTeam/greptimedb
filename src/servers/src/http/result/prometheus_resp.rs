@@ -213,13 +213,6 @@ impl PrometheusJsonResponse {
         self.infos = (!infos.is_empty()).then_some(infos);
     }
 
-    /// Merges data and annotations from another expanded PromQL query response.
-    pub(crate) fn append_query_response(&mut self, mut other: Self) {
-        self.data.append(other.data);
-        merge_annotations(&mut self.warnings, other.warnings.take());
-        merge_annotations(&mut self.infos, other.infos.take());
-    }
-
     /// Convert from `Result<Output>`
     pub async fn from_query_result(
         result: Result<Output>,
@@ -359,6 +352,16 @@ impl PrometheusJsonResponse {
             .fail();
         }
 
+        // A metric name union query projects the metric name as a label of every row, so the
+        // metric name is already part of the tag columns and injecting it again would duplicate
+        // the label of every series.
+        let schema = batches.schema();
+        let metric_name = metric_name.filter(|_| {
+            !tag_column_indices
+                .iter()
+                .any(|index| schema.column_name_by_index(*index) == METRIC_NAME)
+        });
+
         // Preserves the order of output tags.
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
@@ -366,7 +369,6 @@ impl PrometheusJsonResponse {
         // Only a series that is new to `buffer` needs its own key vector.
         let mut tags = Vec::with_capacity(num_label_columns + 1);
 
-        let schema = batches.schema();
         for batch in batches.iter() {
             // prepare things...
             let tag_columns = tag_column_indices
@@ -635,16 +637,6 @@ fn prefer_label_runs(columns: &[&ArrayRef], rows: usize) -> bool {
     true
 }
 
-fn merge_annotations(target: &mut Option<Vec<String>>, source: Option<Vec<String>>) {
-    let Some(source) = source else {
-        return;
-    };
-    let target = target.get_or_insert_default();
-    target.extend(source);
-    target.sort();
-    target.dedup();
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -655,9 +647,7 @@ mod tests {
         native_histogram_value_type,
     };
     use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
-    use common_query::promql_annotations::{
-        PromqlAnnotationCollector, promql_annotation_collector,
-    };
+    use common_query::promql_annotations::promql_annotation_collector;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -668,12 +658,13 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn query_response_preserves_and_merges_promql_annotations() {
-        let query_id = "query_response_preserves_and_merges_promql_annotations";
-        let left = promql_annotation_collector(query_id);
-        left.record_warning("shared warning");
-        left.record_info("left info");
-        let mut response = PrometheusJsonResponse::from_query_result(
+    async fn query_response_preserves_promql_annotations() {
+        let query_id = "query_response_preserves_promql_annotations";
+        let collector = promql_annotation_collector(query_id);
+        collector.record_warning("shared warning");
+        collector.record_warning("shared warning");
+        collector.record_info("info");
+        let response = PrometheusJsonResponse::from_query_result(
             Ok(Output::new_with_record_batches(RecordBatches::empty())),
             None,
             ValueType::Vector,
@@ -681,24 +672,11 @@ mod tests {
         )
         .await;
 
-        let right = PromqlAnnotationCollector::default();
-        right.record_warning("shared warning");
-        right.record_info("right info");
-        let mut other = PrometheusJsonResponse::success(PrometheusResponse::None);
-        other.append_promql_annotations(&right);
-        response.append_query_response(other);
-
         assert_eq!(response.warnings, Some(vec!["shared warning".to_string()]));
-        assert_eq!(
-            response.infos,
-            Some(vec!["left info".to_string(), "right info".to_string()])
-        );
+        assert_eq!(response.infos, Some(vec!["info".to_string()]));
         let json = serde_json::to_value(response).unwrap();
         assert_eq!(json["warnings"], serde_json::json!(["shared warning"]));
-        assert_eq!(
-            json["infos"],
-            serde_json::json!(["left info", "right info"])
-        );
+        assert_eq!(json["infos"], serde_json::json!(["info"]));
     }
 
     fn sample_histogram() -> NativeHistogram {
