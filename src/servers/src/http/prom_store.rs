@@ -175,12 +175,17 @@ async fn remote_write_v1(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+    let mut decoded =
+        decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
 
+    // Rows and pipeline values own their data; the decode buffer need not span downstream awaits.
     let req = if processor.use_pipeline {
+        drop(decoded);
         processor.exec_pipeline().await?
     } else {
-        req.as_insert_requests()
+        let req = decoded.as_insert_requests();
+        drop(decoded);
+        req
     };
     let batches = into_prom_write_batches(req, query_ctx);
 
