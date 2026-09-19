@@ -22,8 +22,7 @@ use api::v1::ColumnDataType;
 use api::v1::value::ValueData;
 use chrono::Utc;
 use datatypes::json::{JsonSettings, JsonTypeHint};
-use datatypes::schema::{ColumnDefaultConstraint, FulltextOptions, SkippingIndexOptions};
-use datatypes::value::Value;
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::{
     validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
@@ -56,7 +55,6 @@ const TRANSFORM_ON_FAILURE: &str = "on_failure";
 const JSON2_TYPE: &str = "json2";
 const JSON2_TYPE_HINT: &str = "type.json2[]";
 const JSON2_TYPE_HINT_PATH: &str = "path";
-const JSON2_TYPE_HINT_NULLABLE: &str = "nullable";
 
 pub use transformer::greptime::GreptimeTransformer;
 
@@ -480,8 +478,6 @@ fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
     })?;
     let mut path = None;
     let mut type_name = None;
-    let mut nullable = true;
-    let mut default = None;
     let mut index = None;
 
     for (key, value) in config {
@@ -491,10 +487,6 @@ fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
         match key {
             JSON2_TYPE_HINT_PATH => path = Some(yaml_string(value, JSON2_TYPE_HINT_PATH)?),
             TRANSFORM_TYPE => type_name = Some(yaml_string(value, TRANSFORM_TYPE)?),
-            JSON2_TYPE_HINT_NULLABLE => {
-                nullable = yaml_bool(value, JSON2_TYPE_HINT_NULLABLE)?;
-            }
-            TRANSFORM_DEFAULT => default = Some(value),
             TRANSFORM_INDEX => index = Some(value),
             _ => {
                 return InvalidJson2TypeHintSnafu {
@@ -528,13 +520,6 @@ fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
         }
     );
     let data_type = ColumnDataTypeWrapper::new(type_, None).into();
-    let default_constraint = default
-        .map(|value| parse_json2_type_hint_default(value, &type_))
-        .transpose()?;
-    if let Some(default_constraint) = &default_constraint {
-        default_constraint.validate(&data_type, nullable)?;
-    }
-
     let inverted_index = if let Some(value) = index {
         let (index, options) = parse_transform_index(value)?;
         ensure!(
@@ -552,38 +537,8 @@ fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
     Ok(JsonTypeHint {
         path,
         data_type,
-        nullable,
-        default_constraint,
         inverted_index,
     })
-}
-
-fn parse_json2_type_hint_default(
-    value: &yaml_rust::Yaml,
-    type_: &ColumnDataType,
-) -> Result<ColumnDefaultConstraint> {
-    if value.is_null() {
-        return Ok(ColumnDefaultConstraint::Value(Value::Null));
-    }
-
-    let value = match value {
-        yaml_rust::Yaml::Real(value) | yaml_rust::Yaml::String(value) => value.clone(),
-        yaml_rust::Yaml::Integer(value) => value.to_string(),
-        yaml_rust::Yaml::Boolean(value) => value.to_string(),
-        _ => {
-            return FieldMustBeTypeSnafu {
-                field: TRANSFORM_DEFAULT,
-                ty: "scalar",
-            }
-            .fail();
-        }
-    };
-    let value = api::v1::Value {
-        value_data: Some(parse_str_value(type_, &value)?),
-    };
-    Ok(ColumnDefaultConstraint::Value(
-        api::helper::pb_value_to_value_ref(&value, None).into(),
-    ))
 }
 
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
@@ -708,8 +663,6 @@ type:
   json2:
     - path: "user.id"
       type: int64
-      nullable: false
-      default: 7
       index:
         type: inverted
     - path: 'attrs."http.status_code"'
@@ -726,19 +679,13 @@ type:
             hints[0].data_type,
             datatypes::prelude::ConcreteDataType::int64_datatype()
         );
-        assert!(!hints[0].nullable);
-        assert_eq!(
-            hints[0].default_constraint,
-            Some(ColumnDefaultConstraint::Value(Value::Int64(7)))
-        );
         assert!(hints[0].inverted_index);
         assert_eq!(hints[1].path, ["attrs", "http.status_code"]);
-        assert!(hints[1].nullable);
     }
 
     #[test]
-    fn test_transform_rejects_non_finite_json2_default() {
-        for default in ["NaN", "1e9999"] {
+    fn test_transform_rejects_json2_nullable_and_default() {
+        for option in ["nullable: false", "default: 7"] {
             let err = parse_transform(&format!(
                 r#"
 field: payload
@@ -746,22 +693,12 @@ type:
   json2:
     - path: score
       type: float64
-      default: {default}
+      {option}
 "#,
             ))
             .unwrap_err();
 
-            assert!(
-                matches!(
-                    &err,
-                    Error::Datatypes {
-                        source: datatypes::error::Error::InvalidJson2Settings { .. },
-                        ..
-                    }
-                ),
-                "{err:?}"
-            );
-            assert!(err.to_string().contains("must be finite"), "{err}");
+            assert!(err.to_string().contains("unsupported field"), "{err}");
         }
     }
 

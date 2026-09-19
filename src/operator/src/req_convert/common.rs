@@ -39,7 +39,7 @@ use crate::error::{
 /// Encodes a string value as JSONB binary data if the value is of `StringValue` type.
 fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
     if let ValueData::StringValue(json) = &value_data {
-        let binary = jsonb::parse_value(json.as_bytes())
+        let binary = jsonb::parse_value_standard_mode(json.as_bytes())
             .map_err(|_| InvalidJsonFormatSnafu { json }.build())
             .map(|jsonb| jsonb.to_vec())?;
         Ok(ValueData::BinaryValue(binary))
@@ -51,7 +51,7 @@ fn encode_string_to_jsonb_binary(value_data: ValueData) -> Result<ValueData> {
     }
 }
 
-/// Prepares row insertion requests by converting any JSON values to binary JSONB format.
+/// Converts legacy JSON strings to binary JSONB and preserves native JSON2 values.
 pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> Result<()> {
     for request in requests {
         validate_rows(&request.rows)?;
@@ -61,7 +61,7 @@ pub fn preprocess_row_insert_requests(requests: &mut Vec<RowInsertRequest>) -> R
     Ok(())
 }
 
-/// Prepares row deletion requests by converting any JSON values to binary JSONB format.
+/// Converts legacy JSON strings to binary JSONB and preserves native JSON2 values.
 pub fn preprocess_row_delete_requests(requests: &mut Vec<RowDeleteRequest>) -> Result<()> {
     for request in requests {
         validate_rows(&request.rows)?;
@@ -79,12 +79,28 @@ fn prepare_rows(rows: &mut Option<Rows>) -> Result<()> {
             .enumerate()
             .filter_map(|(idx, schema)| {
                 if schema.datatype() == ColumnDataType::Json {
-                    Some(idx)
+                    match schema
+                        .datatype_extension
+                        .as_ref()
+                        .and_then(|x| x.type_ext.as_ref())
+                    {
+                        None | Some(TypeExt::JsonType(_)) => Some(Ok(idx)),
+                        Some(TypeExt::JsonNativeType(_)) => None,
+                        Some(_) => Some(
+                            InvalidInsertRequestSnafu {
+                                reason: format!(
+                                    "Invalid type extension for JSON column '{}'",
+                                    schema.column_name
+                                ),
+                            }
+                            .fail(),
+                        ),
+                    }
                 } else {
                     None
                 }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         for idx in &indexes {
             let column = &mut rows.schema[*idx];
             column.datatype_extension = Some(ColumnDataTypeExtension {
@@ -390,8 +406,64 @@ mod tests {
     use api::v1::column::Values;
     use api::v1::{SemanticType, VectorTypeExtension};
     use common_base::bit_vec::prelude::*;
+    use common_error::ext::WhateverResult;
 
     use super::*;
+
+    #[test]
+    fn test_prepare_jsonb_rows() -> WhateverResult<()> {
+        let binary = Some(ColumnDataTypeExtension {
+            type_ext: Some(TypeExt::JsonType(JsonTypeExtension::JsonBinary.into())),
+        });
+        for extension in [
+            None,
+            Some(ColumnDataTypeExtension::default()),
+            binary.clone(),
+        ] {
+            for value in [Some(ValueData::StringValue(r#"{"key":1}"#.into())), None] {
+                let expected = value.as_ref().map(|_| {
+                    ValueData::BinaryValue(jsonb::parse_value(br#"{"key":1}"#).unwrap().to_vec())
+                });
+                let mut rows = Some(Rows {
+                    schema: vec![ColumnSchema {
+                        datatype: ColumnDataType::Json as i32,
+                        datatype_extension: extension.clone(),
+                        ..Default::default()
+                    }],
+                    rows: vec![Row {
+                        values: vec![Value { value_data: value }],
+                    }],
+                });
+                prepare_rows(&mut rows)?;
+                let rows = rows.unwrap();
+                assert_eq!(rows.schema[0].datatype_extension, binary);
+                assert_eq!(rows.rows[0].values[0].value_data, expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_preprocess_json_invalid_extension() {
+        let mut rows = Some(Rows {
+            schema: vec![ColumnSchema {
+                datatype: ColumnDataType::Json as i32,
+                datatype_extension: Some(ColumnDataTypeExtension {
+                    type_ext: Some(TypeExt::VectorType(VectorTypeExtension { dim: 3 })),
+                }),
+                ..Default::default()
+            }],
+            rows: vec![Row {
+                values: vec![Value { value_data: None }],
+            }],
+        });
+        assert!(
+            prepare_rows(&mut rows)
+                .unwrap_err()
+                .to_string()
+                .contains("Invalid type extension")
+        );
+    }
 
     #[test]
     fn test_request_column_to_row() {

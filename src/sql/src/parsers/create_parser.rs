@@ -24,6 +24,7 @@ use datafusion_common::ScalarValue;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, IntervalUnit};
 use datatypes::data_type::ConcreteDataType;
 use itertools::Itertools;
+pub(crate) use json::parse_json2_type_and_options;
 pub use json::parse_json2_type_hint_path;
 use snafu::{OptionExt, ResultExt, ensure};
 use sqlparser::ast::{
@@ -35,13 +36,13 @@ use sqlparser::keywords::ALL_KEYWORDS;
 use sqlparser::parser::IsOptional::Mandatory;
 use sqlparser::parser::{Parser, ParserError};
 use sqlparser::tokenizer::{Token, TokenWithSpan, Word};
-use table::requests::validate_database_option;
+use table::requests::{validate_database_option, validate_database_option_value};
 
 use crate::ast::{ColumnDef, Ident, ObjectNamePartExt};
 use crate::error::{
-    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidFlowQuerySnafu,
-    InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu, MissingTimeIndexSnafu, Result,
-    SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
+    self, InvalidColumnOptionSnafu, InvalidDatabaseOptionSnafu, InvalidDatabaseOptionValueSnafu,
+    InvalidFlowQuerySnafu, InvalidIntervalSnafu, InvalidSqlSnafu, InvalidTimeIndexSnafu,
+    MissingTimeIndexSnafu, Result, SyntaxSnafu, UnexpectedSnafu, UnsupportedSnafu,
 };
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
@@ -223,11 +224,22 @@ impl<'a> ParserContext<'a> {
             .map(parse_option_string)
             .collect::<Result<HashMap<String, OptionValue>>>()?;
 
-        for key in options.keys() {
+        for (key, option_value) in &options {
             ensure!(
                 validate_database_option(key),
                 InvalidDatabaseOptionSnafu { key: key.clone() }
             );
+            let option_value_str = option_value.as_string();
+            validate_database_option_value(key, option_value_str).map_err(|reason| {
+                InvalidDatabaseOptionValueSnafu {
+                    key: key.clone(),
+                    value: option_value_str
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| option_value.to_string()),
+                    reason: reason.to_string(),
+                }
+                .build()
+            })?;
         }
         if let Some(append_mode) = options.get("append_mode").and_then(|x| x.as_string())
             && append_mode == "true"
@@ -1579,6 +1591,70 @@ mod tests {
             }
             _ => unreachable!(),
         }
+    }
+
+    #[test]
+    fn test_parse_create_database_option_validation() {
+        let overflow = format!("{}0", usize::MAX);
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            for invalid in ["invalid", "-1", overflow.as_str()] {
+                let sql = format!("CREATE DATABASE invalid WITH ('{key}'='{invalid}')");
+                let err = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap_err();
+                assert_eq!(
+                    err.to_string(),
+                    format!(
+                        "Invalid database option value for {key}: {invalid}, expected a non-negative integer fitting in usize"
+                    )
+                );
+            }
+            for valid in ["0", "1"] {
+                let sql = format!("CREATE DATABASE valid WITH ('{key}'='{valid}')");
+                ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap();
+            }
+        }
+        for key in [
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            let sql = format!("CREATE DATABASE invalid WITH ('{key}'='1')");
+            let err = ParserContext::create_with_dialect(
+                &sql,
+                &GreptimeDbDialect {},
+                ParseOptions::default(),
+            )
+            .unwrap_err();
+            assert_eq!(
+                format!(
+                    "Invalid database option value for {key}: 1, expected an integer greater than or equal to 2"
+                ),
+                err.to_string()
+            );
+        }
+
+        let sql =
+            "CREATE DATABASE valid WITH ('compaction.twcs.active_window.l1_merge_trigger'='2')";
+        ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+            .unwrap();
+
+        let sql = "CREATE DATABASE invalid WITH ('unknown'='1')";
+        let err =
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+                .unwrap_err();
+        assert_eq!("Unrecognized database option key: unknown", err.to_string());
     }
 
     #[test]

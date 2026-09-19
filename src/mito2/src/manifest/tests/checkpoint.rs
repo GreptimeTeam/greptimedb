@@ -21,8 +21,8 @@ use common_datasource::compression::CompressionType;
 use common_error::ext::{ErrorExt, RetryHint};
 use common_error::status_code::StatusCode;
 use object_store::layers::mock::{
-    Buffer, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete,
-    Result as MockResult, oio,
+    BytesRange, Error as MockError, ErrorKind, MockLayer, MockLayerBuilder, OpDelete,
+    Result as MockResult, RpRead, oio,
 };
 use store_api::storage::{FileId, RegionId};
 use strum::IntoEnumIterator;
@@ -90,8 +90,8 @@ fn nop_action() -> RegionMetaActionList {
 
 struct NotFoundReader;
 
-impl oio::Read for NotFoundReader {
-    async fn read(&mut self) -> MockResult<Buffer> {
+impl oio::StreamRead for NotFoundReader {
+    async fn open(&self, _: BytesRange) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
         Err(MockError::new(
             ErrorKind::NotFound,
             "mock listed manifest delta not found",
@@ -104,7 +104,7 @@ fn fail_manifest_delta_reads_layer() -> MockLayer {
         .reader_factory(Arc::new(|path, _args, inner| {
             let file_name = path.rsplit('/').next().unwrap_or(path);
             if is_delta_file(file_name) {
-                Box::new(NotFoundReader)
+                Box::new(oio::StreamReader::new(NotFoundReader))
             } else {
                 inner
             }

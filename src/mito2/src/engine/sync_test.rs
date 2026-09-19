@@ -148,7 +148,11 @@ async fn test_sync_after_flush_region_with_format(flat_format: bool) {
 
     common_telemetry::info!("Scan the region on the follower engine");
     // Scan the region on the follower engine
-    let expected = "++\n++";
+    let expected = "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Returns error since the max manifest is 1
@@ -262,7 +266,11 @@ async fn test_sync_after_alter_region_with_format(flat_format: bool) {
 +-------+-------+---------+---------------------+";
 
     scan_check(&engine, region_id, expected, 0, 1).await;
-    let expected = "++\n++";
+    let expected = "\
++-------+---------+----+
+| tag_0 | field_0 | ts |
++-------+---------+----+
++-------+---------+----+";
     scan_check(&follower_engine, region_id, expected, 0, 0).await;
 
     // Sync the region from the leader engine to the follower engine

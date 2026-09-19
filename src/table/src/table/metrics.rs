@@ -33,6 +33,8 @@ pub struct StreamMetrics {
     poll_elapsed: Time,
     /// Elapsed time used to `.await`ing the stream
     await_elapsed: Time,
+    /// Time spent evaluating and applying decoded dynamic filters.
+    dynamic_filter_cost: Time,
 }
 
 impl StreamMetrics {
@@ -47,6 +49,8 @@ impl StreamMetrics {
             output_bytes: MetricBuilder::new(metrics).output_bytes(partition),
             poll_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_poll", partition),
             await_elapsed: MetricBuilder::new(metrics).subset_time("elapsed_await", partition),
+            dynamic_filter_cost: MetricBuilder::new(metrics)
+                .subset_time("dynamic_filter_cost", partition),
         }
     }
 
@@ -68,6 +72,10 @@ impl StreamMetrics {
     /// Return a timer guard that records the time elapsed in poll
     pub fn poll_timer(&self) -> ScopedTimerGuard<'_> {
         self.poll_elapsed.timer()
+    }
+
+    pub fn dynamic_filter_timer(&self) -> ScopedTimerGuard<'_> {
+        self.dynamic_filter_cost.timer()
     }
 
     pub fn record_await_duration(&self, duration: Duration) {

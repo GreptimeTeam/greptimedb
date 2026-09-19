@@ -622,8 +622,7 @@ fn build_local_file_source(file_path: &Path) -> error::Result<ParquetbenchSource
             msg: format!("failed to build local file object store: {e:?}"),
         }
         .build()
-    })?
-    .finish();
+    })?;
 
     let file_id = file_path
         .file_stem()

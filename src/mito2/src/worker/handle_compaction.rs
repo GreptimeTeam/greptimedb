@@ -30,6 +30,10 @@ use crate::request::{
 use crate::sst::index::IndexBuildType;
 use crate::worker::RegionWorkerLoop;
 
+fn made_progress(files_to_add: usize, files_to_remove: usize) -> bool {
+    files_to_add > 0 || files_to_remove > files_to_add
+}
+
 impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_compaction_pick_finished(
         &mut self,
@@ -131,11 +135,10 @@ impl<S> RegionWorkerLoop<S> {
             return;
         }
         let execution = request.execution.clone();
-        // Whether this execution reduced the SST file count. The scheduler keeps
-        // draining while compaction makes progress; a rewrite that did not reduce
-        // files (e.g. its output was split into more files than its input) must end
-        // the chain to avoid a no-progress loop.
-        let made_progress = request.edit.files_to_remove.len() > request.edit.files_to_add.len();
+        let made_progress = made_progress(
+            request.edit.files_to_add.len(),
+            request.edit.files_to_remove.len(),
+        );
 
         region.version_control.apply_edit(
             Some(request.edit.clone()),
@@ -267,6 +270,28 @@ impl<S> RegionWorkerLoop<S> {
                     error!(e; "Failed to schedule compaction for region: {}", region.region_id)
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::made_progress;
+
+    #[test]
+    fn test_nonempty_output_or_file_reduction_is_progress() {
+        for (files_to_add, files_to_remove, expected) in [
+            (3, 3, true),  // Equal-count rewrite.
+            (1, 3, true),  // Ordinary reduction.
+            (0, 3, true),  // Zero-output reduction.
+            (0, 0, false), // Empty edit.
+            (3, 2, true),  // Growth rewrite with output.
+        ] {
+            assert_eq!(
+                expected,
+                made_progress(files_to_add, files_to_remove),
+                "files_to_remove: {files_to_remove}, files_to_add: {files_to_add}"
+            );
         }
     }
 }

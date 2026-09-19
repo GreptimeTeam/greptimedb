@@ -40,10 +40,6 @@ impl BooleanVector {
     pub fn as_boolean_array(&self) -> &BooleanArray {
         &self.array
     }
-
-    pub(crate) fn false_count(&self) -> usize {
-        self.array.false_count()
-    }
 }
 
 impl From<Vec<bool>> for BooleanVector {
@@ -251,7 +247,6 @@ mod tests {
         let v = BooleanVector::from(bools.clone());
         assert_eq!(9, v.len());
         assert_eq!("BooleanVector", v.vector_type_name());
-        assert!(!v.is_const());
         assert!(v.validity().is_all_valid());
         assert!(!v.only_null());
         assert_eq!(2, v.memory_size());

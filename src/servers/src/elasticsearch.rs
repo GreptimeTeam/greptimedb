@@ -260,11 +260,12 @@ fn write_bulk_response(took_ms: i64, n: usize, status_code: u32, error_reason: &
                 })
             })
             .collect();
-        json!({
+        let mut response = json!({
             "took": took_ms,
             "errors": false,
-            "items": items,
-        })
+        });
+        response["items"] = Value::Array(items);
+        response
     } else {
         json!({
             "took": took_ms,

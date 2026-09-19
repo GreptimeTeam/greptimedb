@@ -45,21 +45,31 @@ async function isTeamMember(octokit, owner, repo, username) {
   }
 }
 
-function buildComment(author, total, limit, openPrs) {
-  const listed = openPrs
-    .slice(0, MAX_LISTED_PRS)
-    .map((pr) => `- #${pr.number} ${pr.title}`);
+function buildComment(author, total, limit, owner, repo, openPrs) {
+  const listed = openPrs.slice(0, MAX_LISTED_PRS).map((pr) => {
+    // Escape ASCII punctuation so titles stay literal Markdown link labels.
+    const title = pr.title
+      .replace(/\s+/g, " ")
+      .replace(/[\x21-\x2f\x3a-\x40\x5b-\x60\x7b-\x7e]/g, "\\$&");
+    // Redirect links avoid creating backlinks on the listed PRs.
+    return `- [PR ${pr.number}: ${title}](https://redirect.github.com/${owner}/${repo}/pull/${pr.number})`;
+  });
   const hidden = openPrs.length - listed.length;
-  const list = hidden > 0 ? `${listed.join("\n")}\n- ...and ${hidden} more` : listed.join("\n");
+  if (hidden > 0) {
+    listed.push(`- ...and ${hidden} more`);
+  }
+  const list = listed.length > 0 ? `${listed.join("\n")}\n\n` : "";
+  const query = `is:pr is:open author:${author} draft:false`;
+  const url = `https://github.com/${owner}/${repo}/pulls?q=${encodeURIComponent(query)}`;
 
   return `${MARKER}
 > [!WARNING]
-> @${author} has **${total}** open pull requests in this repository, over the limit of **${limit}**.
+> @${author} has **${total}** open non-draft pull requests in this repository, over the limit of **${limit}**.
 
 Review is the scarcest resource here. Please land or close some of these before
-pushing this one forward:
+pushing this one forward.
 
-${list}
+${list}[View your open pull requests](${url})
 
 This check is advisory for now and blocks nothing.`;
 }
@@ -136,7 +146,7 @@ async function upsertComment(octokit, params, body) {
   await upsertComment(
     octokit,
     { owner, repo, issue_number: prNumber },
-    buildComment(author, total, limit, others)
+    buildComment(author, total, limit, owner, repo, others)
   );
 })().catch((error) => {
   console.error(error);

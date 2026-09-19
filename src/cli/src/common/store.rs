@@ -125,6 +125,14 @@ impl StoreConfig {
         }
     }
 
+    /// Sanitize store addrs for logging (redacts passwords in connection strings).
+    fn sanitize_store_addrs(&self) -> Vec<String> {
+        self.store_addrs
+            .iter()
+            .map(|addr| common_meta::kv_backend::util::sanitize_connection_string(addr))
+            .collect()
+    }
+
     /// Builds a [`KvBackendRef`] from the store configuration.
     pub async fn build(&self) -> Result<KvBackendRef, BoxedError> {
         let max_txn_ops = self.max_txn_ops;
@@ -134,7 +142,7 @@ impl StoreConfig {
         } else {
             common_telemetry::info!(
                 "Building kvbackend with store addrs: {:?}, backend: {:?}",
-                store_addrs,
+                &self.sanitize_store_addrs(),
                 self.backend
             );
             let kvbackend = match self.backend {

@@ -12,16 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use async_trait::async_trait;
 use auth::tests::{DatabaseAuthInfo, MockUserProvider};
-use auth::{UserProviderRef, format_pg_scram_sha256_password_verifier, user_provider_from_option};
+use auth::{
+    BEARER_TOKEN_USER, Identity, Password, UserInfoRef, UserProvider, UserProviderRef,
+    format_pg_scram_sha256_password_verifier, user_provider_from_option,
+};
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
 use pgwire::api::Type;
+use postgres_types::FromSql;
 use rand::Rng;
 use rustls::client::danger::{ServerCertVerified, ServerCertVerifier};
 use rustls::{Error, SignatureScheme};
@@ -36,6 +43,51 @@ use table::test_util::MemTable;
 use tokio_postgres::{Client, Error as PgError, NoTls, SimpleQueryMessage};
 
 use crate::create_testing_instance;
+
+#[derive(Default)]
+struct BearerProvider {
+    authentications: AtomicUsize,
+    authorizations: AtomicUsize,
+}
+
+#[async_trait]
+impl UserProvider for BearerProvider {
+    fn name(&self) -> &str {
+        "bearer-test"
+    }
+
+    async fn authenticate(
+        &self,
+        _: Identity<'_>,
+        _: Password<'_>,
+    ) -> auth::error::Result<UserInfoRef> {
+        unreachable!("the bearer sentinel must not use password authentication")
+    }
+
+    async fn authenticate_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+    ) -> auth::error::Result<UserInfoRef> {
+        assert_eq!("signed-token", token);
+        assert_eq!(DEFAULT_CATALOG_NAME, catalog);
+        self.authentications.fetch_add(1, Ordering::Relaxed);
+        Ok(auth::userinfo_by_name(Some("alice".to_string())))
+    }
+
+    async fn authorize(
+        &self,
+        catalog: &str,
+        schema: &str,
+        user_info: &UserInfoRef,
+    ) -> auth::error::Result<()> {
+        assert_eq!(DEFAULT_CATALOG_NAME, catalog);
+        assert_eq!(DEFAULT_SCHEMA_NAME, schema);
+        assert_eq!("alice", user_info.username());
+        self.authorizations.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
 
 fn create_postgres_server(
     table: TableRef,
@@ -85,13 +137,14 @@ fn create_postgres_server_with_user_provider(
 
 async fn start_test_server_with_user_provider(
     user_provider: UserProviderRef,
+    tls: TlsOption,
 ) -> Result<(Box<dyn Server>, u16)> {
     common_telemetry::init_default_ut_logging();
     let _ = install_default_crypto_provider();
 
     let table = MemTable::default_numbers_table();
     let mut postgres_server =
-        create_postgres_server_with_user_provider(table, Default::default(), Some(user_provider))?;
+        create_postgres_server_with_user_provider(table, tls, Some(user_provider))?;
     let listening = "127.0.0.1:0".parse::<SocketAddr>().unwrap();
     postgres_server.start(listening).await.unwrap();
     let server_addr = postgres_server.bind_addr().unwrap();
@@ -169,7 +222,7 @@ async fn test_pg_scram_sha256_auth() -> Result<()> {
         user_provider_from_option(&format!("static_user_provider:cmd:greptime={verifier}"))
             .unwrap();
     let (postgres_server, server_port) =
-        start_test_server_with_user_provider(user_provider).await?;
+        start_test_server_with_user_provider(user_provider, Default::default()).await?;
 
     let client = create_plain_connection_with_credentials(server_port, "greptime", "greptime")
         .await
@@ -213,6 +266,27 @@ async fn test_pg_cleartext_auth_fallback() -> Result<()> {
     assert!(wrong_password.is_err());
 
     postgres_server.shutdown().await.unwrap();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_bearer_token_auth_over_cleartext() -> Result<()> {
+    let provider = Arc::new(BearerProvider::default());
+    let (server, port) =
+        start_test_server_with_user_provider(provider.clone(), TlsOption::default()).await?;
+
+    let client = create_plain_connection_with_credentials(port, BEARER_TOKEN_USER, "signed-token")
+        .await
+        .unwrap();
+    let rows = client
+        .simple_query("SELECT uint32s FROM numbers LIMIT 1")
+        .await
+        .unwrap();
+    assert_eq!("0", unwrap_results(&rows)[0]);
+    assert_eq!(1, provider.authentications.load(Ordering::Relaxed));
+    assert_eq!(1, provider.authorizations.load(Ordering::Relaxed));
+
+    server.shutdown().await?;
     Ok(())
 }
 
@@ -417,6 +491,66 @@ async fn test_using_db() -> Result<()> {
     Ok(())
 }
 
+struct RegprocOid(u32);
+
+impl<'a> FromSql<'a> for RegprocOid {
+    fn from_sql(
+        ty: &Type,
+        raw: &'a [u8],
+    ) -> std::result::Result<Self, Box<dyn std::error::Error + Sync + Send>> {
+        if ty != &Type::REGPROC {
+            return Err(Box::new(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected REGPROC, got {ty}"),
+            )));
+        }
+
+        let oid = raw.try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("expected a four-byte OID, got {} bytes", raw.len()),
+            )
+        })?;
+        Ok(Self(u32::from_be_bytes(oid)))
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        ty == &Type::REGPROC
+    }
+}
+
+#[tokio::test]
+async fn test_extended_query_regproc_response() -> Result<()> {
+    let server_port = start_test_server(TlsOption::default()).await?;
+    let client = create_connection_with_given_db(server_port, DEFAULT_SCHEMA_NAME)
+        .await
+        .unwrap();
+    let stmt = client
+        .prepare("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    assert_eq!(stmt.columns()[0].type_(), &Type::REGPROC);
+
+    let rows = client.query(&stmt, &[]).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<usize, RegprocOid>(0).0, 2436);
+
+    let result = client
+        .simple_query("SELECT typreceive FROM pg_catalog.pg_type WHERE oid = 16")
+        .await
+        .unwrap();
+    let row = result
+        .iter()
+        .find_map(|message| match message {
+            SimpleQueryMessage::Row(row) => Some(row),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(row.get(0), Some("boolrecv"));
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_extended_query() -> Result<()> {
     let server_port = start_test_server(TlsOption::default()).await?;
@@ -461,7 +595,7 @@ async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> 
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
         let _ = result.unwrap();
     } else {
-        let client = create_secure_connection(server_port, false).await.unwrap();
+        let client = create_secure_connection(server_port, None).await.unwrap();
         let result = client.simple_query("SELECT uint32s FROM numbers").await;
         let _ = result.unwrap();
     }
@@ -471,14 +605,15 @@ async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> 
 
 async fn create_secure_connection(
     port: u16,
-    with_pwd: bool,
+    credentials: Option<(&str, &str)>,
 ) -> std::result::Result<Client, PgError> {
-    let url = if with_pwd {
-        format!(
-            "sslmode=require host=127.0.0.1 port={port} user=greptime password=greptime connect_timeout=2, dbname={DEFAULT_SCHEMA_NAME}",
-        )
-    } else {
-        format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
+    let url = match credentials {
+        Some((user, password)) => format!(
+            "sslmode=require host=127.0.0.1 port={port} user={user} password={password} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}",
+        ),
+        None => {
+            format!("host=127.0.0.1 port={port} connect_timeout=2 dbname={DEFAULT_SCHEMA_NAME}")
+        }
     };
 
     let mut config = rustls::ClientConfig::builder()

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod matching_filters;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -48,15 +50,14 @@ use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion::sql::TableReference;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_common::{DFSchema, NullEquality};
+use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
+    ExprSchemable, Literal, Projection, SortExpr, TableScanBuilder, TableSource, col, lit,
 };
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -587,6 +588,7 @@ impl PromPlanner {
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
+            0,
             range_ms,
             time_index_column,
             self.ctx.field_columns.clone(),
@@ -1336,10 +1338,8 @@ impl PromPlanner {
                 let mut field_expr = field_expr_builder(lhs, rhs)?;
 
                 if is_comparison_op && should_return_bool {
-                    field_expr = DfExpr::Cast(Cast {
-                        expr: Box::new(field_expr),
-                        data_type: ArrowDataType::Float64,
-                    });
+                    field_expr =
+                        DfExpr::Cast(Cast::new(Box::new(field_expr), ArrowDataType::Float64));
                 }
 
                 Ok(LogicalPlan::Extension(Extension {
@@ -1405,10 +1405,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1474,10 +1472,8 @@ impl PromPlanner {
                     };
 
                     if is_comparison_op && should_return_bool {
-                        binary_expr = DfExpr::Cast(Cast {
-                            expr: Box::new(binary_expr),
-                            data_type: ArrowDataType::Float64,
-                        });
+                        binary_expr =
+                            DfExpr::Cast(Cast::new(Box::new(binary_expr), ArrowDataType::Float64));
                     }
                     Ok(binary_expr)
                 };
@@ -1496,21 +1492,53 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                let mut left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let left_context = self.ctx.clone();
+                let mut left_context = self.ctx.clone();
 
-                let right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                let mut right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
                 let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let right_context = self.ctx.clone();
+                let mut right_context = self.ctx.clone();
+
+                // Both operands are planned first because only the planned contexts tell a tag
+                // from a value field. The rewrite merely adds matchers to a selector, so the
+                // table reference, time index and field columns captured above stay valid.
+                if let Some(rewritten) = matching_filters::propagate(
+                    binary_expr,
+                    &left_context.tag_columns,
+                    &right_context.tag_columns,
+                ) {
+                    // A copied matcher belongs to the scan, not to the operand's identity:
+                    // `absent()` turns `selector_matcher` into the labels it reports, so the
+                    // re-planned context keeps the matchers the operand was written with.
+                    if rewritten.lhs.as_ref() != lhs.as_ref() {
+                        let selectors = std::mem::take(&mut left_context.selector_matcher);
+                        left_input = self
+                            .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
+                            .await?;
+                        left_context = self.ctx.clone();
+                        left_context.selector_matcher = selectors;
+                    }
+                    if rewritten.rhs.as_ref() != rhs.as_ref() {
+                        let selectors = std::mem::take(&mut right_context.selector_matcher);
+                        right_input = self
+                            .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
+                            .await?;
+                        right_context = self.ctx.clone();
+                        right_context.selector_matcher = selectors;
+                    }
+                    // The code below reads `self.ctx` as the right operand's context.
+                    self.ctx = right_context.clone();
+                }
+
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
@@ -1696,10 +1724,10 @@ impl PromPlanner {
                                 None => binary_expr_builder(lhs, rhs)?,
                             };
                             if is_comparison_op && should_return_bool {
-                                binary_expr = DfExpr::Cast(Cast {
-                                    expr: Box::new(binary_expr),
-                                    data_type: ArrowDataType::Float64,
-                                });
+                                binary_expr = DfExpr::Cast(Cast::new(
+                                    Box::new(binary_expr),
+                                    ArrowDataType::Float64,
+                                ));
                             }
                             Ok(binary_expr)
                         })
@@ -1943,6 +1971,11 @@ impl PromPlanner {
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
         let normalize = self
             .selector_to_series_normalize_plan(offset, matchers, false)
             .await?;
@@ -1974,8 +2007,48 @@ impl PromPlanner {
                     DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
                 })
                 .collect::<Vec<_>>();
-            project_exprs
-                .push(build_special_time_expr(&time_index_column).alias(&timestamp_value_column));
+            // `timestamp()` preserves the shifted selector timeline even though
+            // SeriesNormalize now retains raw native timestamp storage. Decimal
+            // arithmetic shifts before truncating to milliseconds.
+            let unit_factor = match col(&time_index_column)
+                .get_type(normalize.schema())
+                .context(DataFusionPlanningSnafu)?
+            {
+                ArrowDataType::Timestamp(ArrowTimeUnit::Second, _) => (1_000_i128, 4, 0),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => (1, 1, 0),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => (1, 4, 3),
+                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => (1, 7, 6),
+                _ => unreachable!("time index is a timestamp"),
+            };
+            let sample_time = col(&time_index_column)
+                .cast_to(&ArrowDataType::Int64, normalize.schema())
+                .context(DataFusionPlanningSnafu)?
+                .cast_to(&ArrowDataType::Decimal128(19, 0), normalize.schema())
+                .context(DataFusionPlanningSnafu)?;
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Multiply,
+                right: Box::new(lit(ScalarValue::Decimal128(
+                    Some(unit_factor.0),
+                    unit_factor.1,
+                    unit_factor.2,
+                ))),
+            });
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Plus,
+                right: Box::new(lit(ScalarValue::Decimal128(Some(offset_ms as i128), 19, 0))),
+            })
+            .cast_to(&ArrowDataType::Int64, normalize.schema())
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Float64, normalize.schema())
+            .context(DataFusionPlanningSnafu)?;
+            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
+                left: Box::new(sample_time),
+                op: Operator::Divide,
+                right: Box::new(lit(1000.0)),
+            });
+            project_exprs.push(sample_time.alias(&timestamp_value_column));
             let normalize = LogicalPlanBuilder::from(normalize)
                 .project(project_exprs)
                 .context(DataFusionPlanningSnafu)?
@@ -1992,6 +2065,7 @@ impl PromPlanner {
             self.ctx.end,
             self.ctx.lookback_delta,
             self.ctx.interval,
+            offset_ms,
             time_index_column,
             if self.ctx.use_tsid {
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
@@ -2067,6 +2141,11 @@ impl PromPlanner {
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
@@ -2081,6 +2160,7 @@ impl PromPlanner {
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
+            offset_ms,
             // TODO(ruihang): convert via Timestamp datatypes to support different time units
             range_ms,
             self.ctx
@@ -2142,8 +2222,6 @@ impl PromPlanner {
                 ),
             })
         };
-        let preserve_any_value =
-            Self::field_columns_are_alternative_samples(input.schema(), &self.ctx.field_columns);
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
@@ -2158,10 +2236,15 @@ impl PromPlanner {
             func_exprs.push(tsid_col);
         }
 
+        // A row survives as long as one field column produced a sample, and the fields without
+        // one stay NULL, which is the shape a selector already emits. Requiring every field to
+        // be non-NULL would drop one field's samples because another field has none in the same
+        // window — the reason alternative float/histogram columns already needed this form. A
+        // single field column reduces to the same predicate either way.
         let builder = LogicalPlanBuilder::from(input)
             .project(func_exprs)
             .context(DataFusionPlanningSnafu)?
-            .filter(self.create_empty_values_filter_expr(preserve_any_value)?)
+            .filter(self.create_empty_values_filter_expr(true)?)
             .context(DataFusionPlanningSnafu)?;
 
         let builder = match func.name {
@@ -2295,7 +2378,9 @@ impl PromPlanner {
 
         self.ctx.table_name = metric_name;
 
-        let mut matchers = HashSet::new();
+        // Deduplicate in place instead of through a `HashSet`: the scan filter is built in
+        // this order, and a hashed order makes the plan of one query vary between runs.
+        let mut matchers: Vec<Matcher> = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in &label_matchers.matchers {
             // TODO(ruihang): support other metric match ops
             if matcher.name == FIELD_COLUMN_MATCHER {
@@ -2314,11 +2399,13 @@ impl PromPlanner {
                 self.ctx.schema_name = Some(matcher.value.clone());
             } else if matcher.name != METRIC_NAME {
                 self.ctx.selector_matcher.push(matcher.clone());
-                let _ = matchers.insert(matcher.clone());
+                if !matchers.contains(matcher) {
+                    matchers.push(matcher.clone());
+                }
             }
         }
 
-        Ok(Matchers::new(matchers.into_iter().collect()))
+        Ok(Matchers::new(matchers))
     }
 
     async fn selector_to_series_normalize_plan(
@@ -2339,14 +2426,18 @@ impl PromPlanner {
             None => 0,
         };
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
-        if let Some(time_index_filter) = self.build_time_index_filter(offset_duration)? {
+        if let Some(time_index_filter) =
+            self.build_time_index_filter(offset_duration, table_schema)?
+        {
             scan_filters.push(time_index_filter);
         }
-        table_scan = LogicalPlanBuilder::from(table_scan)
-            .filter(conjunction(scan_filters).unwrap()) // Safety: `scan_filters` is not empty.
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)?;
+        if let Some(filter) = conjunction(scan_filters) {
+            table_scan = LogicalPlanBuilder::from(table_scan)
+                .filter(filter)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
 
         // make a projection plan if there is any `__field__` matcher
         if let Some(field_matchers) = &self.ctx.field_column_matcher {
@@ -2691,11 +2782,9 @@ impl PromPlanner {
 
     fn table_from_source(&self, source: &Arc<dyn TableSource>) -> Result<table::TableRef> {
         Ok(source
-            .as_any()
             .downcast_ref::<DefaultTableSource>()
             .context(UnknownTableSnafu)?
             .table_provider
-            .as_any()
             .downcast_ref::<DfTableProviderAdapter>()
             .context(UnknownTableSnafu)?
             .table())
@@ -2718,72 +2807,99 @@ impl PromPlanner {
         Ok(table_ref)
     }
 
-    fn build_time_index_filter(&self, offset_duration: i64) -> Result<Option<DfExpr>> {
+    fn build_time_index_filter(
+        &self,
+        offset_duration: i64,
+        schema: &DFSchemaRef,
+    ) -> Result<Option<DfExpr>> {
         let start = self.ctx.start;
         let end = self.ctx.end;
         if end < start {
             return InvalidTimeRangeSnafu { start, end }.fail();
         }
-        let lookback_delta = self.ctx.lookback_delta;
-        let range = self.ctx.range.unwrap_or_default();
-        let interval = self.ctx.interval;
         let time_index_expr = self.create_time_index_column_expr()?;
-        let num_points = (end - start) / interval;
-
-        // Prometheus semantics:
-        // - Instant selector lookback: (eval_ts - lookback_delta, eval_ts]
-        // - Range selector:           (eval_ts - range, eval_ts]
-        //
-        // So samples positioned exactly at the lower boundary must be excluded. We align the scan
-        // lower bound with Prometheus by shifting it forward by 1ms (millisecond granularity),
-        // while still using a `>=` filter.
-        let selector_window = if range == 0 { lookback_delta } else { range };
-        let lower_exclusive_adjustment = if selector_window > 0 { 1 } else { 0 };
-
-        // Scan a continuous time range
-        if (end - start) / interval > MAX_SCATTER_POINTS || interval <= INTERVAL_1H {
-            let single_time_range = time_index_expr
-                .clone()
-                .gt_eq(DfExpr::Literal(
-                    ScalarValue::TimestampMillisecond(
-                        Some(
-                            self.ctx.start - offset_duration - selector_window
-                                + lower_exclusive_adjustment,
-                        ),
-                        None,
-                    ),
-                    None,
-                ))
-                .and(time_index_expr.lt_eq(DfExpr::Literal(
-                    ScalarValue::TimestampMillisecond(Some(self.ctx.end - offset_duration), None),
-                    None,
-                )));
-            return Ok(Some(single_time_range));
-        }
-
-        // Otherwise scan scatter ranges separately
-        let mut filters = Vec::with_capacity(num_points as usize + 1);
-        for timestamp in (start..=end).step_by(interval as usize) {
-            filters.push(
+        let time_index_name = self.ctx.time_index_column.as_ref().unwrap();
+        let unit = schema
+            .index_of_column_by_name(None, time_index_name)
+            .and_then(|index| match schema.field(index).data_type() {
+                ArrowDataType::Timestamp(unit, _) => Some(*unit),
+                _ => None,
+            })
+            .unwrap_or(ArrowTimeUnit::Millisecond);
+        let native_value = |milliseconds: i128| match unit {
+            ArrowTimeUnit::Second => milliseconds.div_euclid(1_000),
+            ArrowTimeUnit::Millisecond => milliseconds,
+            ArrowTimeUnit::Microsecond => milliseconds * 1_000,
+            ArrowTimeUnit::Nanosecond => milliseconds * 1_000_000,
+        };
+        let scalar = |milliseconds: i128| -> Option<ScalarValue> {
+            let value = i64::try_from(native_value(milliseconds)).ok()?;
+            Some(match unit {
+                ArrowTimeUnit::Second => ScalarValue::TimestampSecond(Some(value), None),
+                ArrowTimeUnit::Millisecond => ScalarValue::TimestampMillisecond(Some(value), None),
+                ArrowTimeUnit::Microsecond => ScalarValue::TimestampMicrosecond(Some(value), None),
+                ArrowTimeUnit::Nanosecond => ScalarValue::TimestampNanosecond(Some(value), None),
+            })
+        };
+        let window = self.ctx.range.unwrap_or(self.ctx.lookback_delta);
+        let filter = |lower_ms: i128, upper_ms: i128| {
+            let lower_value = native_value(lower_ms);
+            let upper_value = native_value(upper_ms);
+            if lower_value > i128::from(i64::MAX) || upper_value < i128::from(i64::MIN) {
+                return Some(lit(false));
+            }
+            let lower_filter = (lower_value >= i128::from(i64::MIN)).then(|| {
+                let lower = DfExpr::Literal(scalar(lower_ms).unwrap(), None);
+                if window == 0 {
+                    time_index_expr.clone().gt_eq(lower)
+                } else if unit == ArrowTimeUnit::Millisecond
+                    && let Some(inclusive_lower) = lower_ms
+                        .checked_add(1)
+                        .and_then(|lower| i64::try_from(lower).ok())
+                        .and_then(|lower| scalar(i128::from(lower)))
+                {
+                    time_index_expr
+                        .clone()
+                        .gt_eq(DfExpr::Literal(inclusive_lower, None))
+                } else {
+                    time_index_expr.clone().gt(lower)
+                }
+            });
+            let upper_filter = (upper_value <= i128::from(i64::MAX)).then(|| {
                 time_index_expr
                     .clone()
-                    .gt_eq(DfExpr::Literal(
-                        ScalarValue::TimestampMillisecond(
-                            Some(
-                                timestamp - offset_duration - selector_window
-                                    + lower_exclusive_adjustment,
-                            ),
-                            None,
-                        ),
-                        None,
-                    ))
-                    .and(time_index_expr.clone().lt_eq(DfExpr::Literal(
-                        ScalarValue::TimestampMillisecond(Some(timestamp - offset_duration), None),
-                        None,
-                    ))),
-            )
-        }
+                    .lt_eq(DfExpr::Literal(scalar(upper_ms).unwrap(), None))
+            });
 
+            // An underflowing lower bound must not discard a representable upper
+            // bound: without it, LastRow could retain a future row and discard the
+            // older eligible sample before the manipulator can check its time.
+            match (lower_filter, upper_filter) {
+                (Some(lower), Some(upper)) => Some(lower.and(upper)),
+                (Some(filter), None) | (None, Some(filter)) => Some(filter),
+                (None, None) => None,
+            }
+        };
+        let bounds = |timestamp: i64| {
+            let upper = i128::from(timestamp) - i128::from(offset_duration);
+            (upper - i128::from(window), upper)
+        };
+        let num_points = (end as i128 - start as i128) / self.ctx.interval as i128;
+        if num_points > MAX_SCATTER_POINTS as i128 || self.ctx.interval <= INTERVAL_1H {
+            let (lower, _) = bounds(start);
+            let (_, upper) = bounds(end);
+            return Ok(filter(lower, upper));
+        }
+        let mut filters = Vec::new();
+        for timestamp in (start..=end).step_by(self.ctx.interval as usize) {
+            let (lower, upper) = bounds(timestamp);
+            let Some(filter) = filter(lower, upper) else {
+                // A point whose native bounds cannot be represented may cover the whole native
+                // time domain, so its disjunct cannot be omitted.
+                return Ok(None);
+            };
+            filters.push(filter);
+        }
         Ok(filters.into_iter().reduce(DfExpr::or))
     }
 
@@ -2884,14 +3000,16 @@ impl PromPlanner {
             self.ctx.tag_columns.clone()
         };
 
-        let is_time_index_ms = scan_table
+        let time_index_data_type = scan_table
             .schema()
             .timestamp_column()
             .with_context(|| TimeIndexNotFoundSnafu {
                 table: maybe_phy_table_ref.to_quoted_string(),
             })?
             .data_type
-            == ConcreteDataType::timestamp_millisecond_datatype();
+            .clone();
+        let is_time_index_second =
+            time_index_data_type == ConcreteDataType::timestamp_second_datatype();
 
         let scan_projection = if table_id_filter.is_some() {
             let mut required_columns = HashSet::new();
@@ -2944,8 +3062,11 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        if !is_time_index_ms {
-            // cast to ms if time_index not in Millisecond precision
+        if is_time_index_second {
+            // Promote seconds so millisecond offsets remain exact; retain finer precision.
+            // Later manipulators compare native sample ticks, while PromQL evaluation and
+            // emitted timestamps remain millisecond-based, so this projection must not
+            // silently truncate a finer-grained time index.
             let expr: Vec<_> = self
                 .create_field_column_exprs()?
                 .into_iter()
@@ -2959,10 +3080,10 @@ impl PromPlanner {
                     DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
                 ))))
                 .chain(Some(DfExpr::Alias(Alias {
-                    expr: Box::new(DfExpr::Cast(Cast {
-                        expr: Box::new(self.create_time_index_column_expr()?),
-                        data_type: ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
-                    })),
+                    expr: Box::new(DfExpr::Cast(Cast::new(
+                        Box::new(self.create_time_index_column_expr()?),
+                        ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    ))),
                     relation: Some(table_ref.clone()),
                     name: self
                         .ctx
@@ -2980,8 +3101,15 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)?;
-        } else if table_id_filter.is_some() {
-            // Drop the internal `__table_id` column after filtering.
+        } else if table_id_filter.is_some()
+            || time_index_data_type == ConcreteDataType::timestamp_microsecond_datatype()
+            || time_index_data_type == ConcreteDataType::timestamp_nanosecond_datatype()
+        {
+            // Drop the internal `__table_id` column after filtering and preserve PromQL's
+            // field/tag/timestamp column order for native microsecond/nanosecond timestamps.
+            // Keeping the original time column also lets the existing ordering hints
+            // use PerSeries scans without a cast, repartition, and sort. This benefits
+            // multi-evaluation selectors too; only a single evaluation can use LastRow.
             let project_exprs = self
                 .create_field_column_exprs()?
                 .into_iter()
@@ -3099,13 +3227,12 @@ impl PromPlanner {
                         projection.sort_unstable();
                         projection.dedup();
 
-                        let new_scan = TableScan::try_new(
-                            scan.table_name.clone(),
-                            scan.source.clone(),
-                            Some(projection),
-                            scan.filters,
-                            scan.fetch,
-                        )?;
+                        let new_scan =
+                            TableScanBuilder::new(scan.table_name.clone(), scan.source.clone())
+                                .with_projection(Some(projection))
+                                .with_filters(scan.filters)
+                                .with_fetch(scan.fetch)
+                                .build()?;
                         Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)))
                     }
                     LogicalPlan::Projection(proj) => {
@@ -3328,10 +3455,10 @@ impl PromPlanner {
         }
 
         if func.name == "predict_linear" {
-            other_input_exprs[0] = DfExpr::Cast(Cast {
-                expr: Box::new(other_input_exprs[0].clone()),
-                data_type: ArrowDataType::Int64,
-            });
+            other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                Box::new(other_input_exprs[0].clone()),
+                ArrowDataType::Int64,
+            ));
         }
 
         let timestamp_range = DfExpr::Column(Column::from_name(
@@ -3617,10 +3744,10 @@ impl PromPlanner {
                 if all_field_columns_are_native_histogram_ranges {
                     ScalarFunc::Udf(native_histogram_drop_udf(func.name))
                 } else {
-                    other_input_exprs[0] = DfExpr::Cast(Cast {
-                        expr: Box::new(other_input_exprs[0].clone()),
-                        data_type: ArrowDataType::Int64,
-                    });
+                    other_input_exprs[0] = DfExpr::Cast(Cast::new(
+                        Box::new(other_input_exprs[0].clone()),
+                        ArrowDataType::Int64,
+                    ));
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -5279,10 +5406,10 @@ impl PromPlanner {
                     false
                 };
                 if is_comparison_op && should_return_bool {
-                    Some(DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: ArrowDataType::Float64,
-                    }))
+                    Some(DfExpr::Cast(Cast::new(
+                        Box::new(expr),
+                        ArrowDataType::Float64,
+                    )))
                 } else {
                     Some(expr)
                 }
@@ -5377,18 +5504,12 @@ impl PromPlanner {
         let cast_float = |expr| {
             if matches!(
                 &expr,
-                DfExpr::Cast(Cast {
-                    data_type: ArrowDataType::Float64,
-                    ..
-                })
+                DfExpr::Cast(Cast { field, .. }) if field.data_type() == &ArrowDataType::Float64
             ) || matches!(&expr, DfExpr::Literal(ScalarValue::Float64(_), _))
             {
                 expr
             } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(expr),
-                    data_type: ArrowDataType::Float64,
-                })
+                DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
             }
         };
         match token.id() {
@@ -5983,21 +6104,29 @@ impl PromPlanner {
     ) -> Result<(LogicalPlan, LogicalPlan, bool)> {
         let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
         let left_has_marker = left_context.tag_columns.iter().any(|tag| tag == marker);
-        let (present, add_to_left) = if left_has_marker {
-            (&left, false)
-        } else {
-            (&right, true)
+        let (data_type, value_type, add_to_left) = {
+            let (present, add_to_left) = if left_has_marker {
+                (&left, false)
+            } else {
+                (&right, true)
+            };
+            let data_type = present
+                .schema()
+                .fields()
+                .iter()
+                .find(|field| field.name() == marker)
+                .map(|field| field.data_type().clone())
+                .with_context(|| ColumnNotFoundSnafu {
+                    col: marker.to_string(),
+                })?;
+            let value_type = Self::string_value_data_type(&data_type)
+                .cloned()
+                .with_context(|| UnexpectedPlanExprSnafu {
+                    desc: format!("temporality match label {marker} must be a string"),
+                })?;
+            (data_type, value_type, add_to_left)
         };
-        let data_type = present
-            .schema()
-            .fields()
-            .iter()
-            .find(|field| field.name() == marker)
-            .map(|field| field.data_type().clone())
-            .with_context(|| ColumnNotFoundSnafu {
-                col: marker.to_string(),
-            })?;
-        let null = Self::string_scalar_value(&data_type, None).with_context(|| {
+        let null = Self::string_scalar_value(&value_type, None).with_context(|| {
             UnexpectedPlanExprSnafu {
                 desc: format!("temporality match label {marker} must be a string"),
             }
@@ -6020,7 +6149,28 @@ impl PromPlanner {
                 .build()
                 .context(DataFusionPlanningSnafu)
         };
-
+        if data_type != value_type {
+            let present = if add_to_left { &mut right } else { &mut left };
+            let visible = present
+                .schema()
+                .iter()
+                .map(|(qualifier, field)| {
+                    let column =
+                        DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()));
+                    if field.name() == marker {
+                        DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
+                            .alias_qualified(qualifier.cloned(), field.name().clone())
+                    } else {
+                        column
+                    }
+                })
+                .collect::<Vec<_>>();
+            *present = LogicalPlanBuilder::from(present.clone())
+                .project(visible)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+        }
         if add_to_left {
             left = add_marker(left)?;
             left_context.tag_columns.push(marker.to_string());
@@ -6044,10 +6194,7 @@ impl PromPlanner {
             let column = if &data_type == value_type {
                 column
             } else {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(column),
-                    data_type: value_type.clone(),
-                })
+                DfExpr::Cast(Cast::new(Box::new(column), value_type.clone()))
             };
             DfExpr::ScalarFunction(ScalarFunction {
                 func: coalesce(),
@@ -6256,7 +6403,8 @@ impl PromPlanner {
             result
         };
 
-        // AND/UNLESS preserve the complete left operand schema and metadata.
+        // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
+        // markers are decoded.
         self.ctx = output_context;
         Ok(result)
     }
@@ -6617,11 +6765,7 @@ impl PromPlanner {
                 if source_type == target_type {
                     expr
                 } else {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_type.clone(),
-                    })
-                    .alias(col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_type.clone())).alias(col.clone())
                 }
             } else {
                 DfExpr::Literal(
@@ -6645,11 +6789,8 @@ impl PromPlanner {
                     if data_type == &ArrowDataType::Float64 {
                         expr.alias(output_col)
                     } else {
-                        DfExpr::Cast(Cast {
-                            expr: Box::new(expr),
-                            data_type: ArrowDataType::Float64,
-                        })
-                        .alias(output_col)
+                        DfExpr::Cast(Cast::new(Box::new(expr), ArrowDataType::Float64))
+                            .alias(output_col)
                     }
                 } else {
                     DfExpr::Literal(ScalarValue::Float64(None), None).alias(output_col)
@@ -6675,13 +6816,13 @@ impl PromPlanner {
                 && col == left_field_col
                 && left_field.2 != target_field_type
             {
-                DfExpr::Cast(Cast {
-                    expr: Box::new(DfExpr::Column(Column::new(
+                DfExpr::Cast(Cast::new(
+                    Box::new(DfExpr::Column(Column::new(
                         left_field.1.clone(),
                         left_field_col,
                     ))),
-                    data_type: target_field_type.clone(),
-                })
+                    target_field_type.clone(),
+                ))
                 .alias(left_field_col.clone())
             } else if target_tag_types.contains_key(col) {
                 aligned_label_expr(col, &left_tag_types)
@@ -6706,11 +6847,8 @@ impl PromPlanner {
             } else if !mixed_sample_types && col == left_field_col {
                 let expr = DfExpr::Column(Column::new(right_field.1.clone(), right_field_col));
                 if right_field.2 != target_field_type {
-                    DfExpr::Cast(Cast {
-                        expr: Box::new(expr),
-                        data_type: target_field_type.clone(),
-                    })
-                    .alias(left_field_col.clone())
+                    DfExpr::Cast(Cast::new(Box::new(expr), target_field_type.clone()))
+                        .alias(left_field_col.clone())
                 } else if left_field_col != right_field_col {
                     expr.alias(left_field_col.clone())
                 } else {
@@ -8832,7 +8970,7 @@ mod test {
             \n  Projection: some_metric.timestamp, value AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n    Projection: some_metric.timestamp, __promql_timestamp_value_ AS value, some_metric.tag_0 [timestamp:Timestamp(ms), value:Float64, tag_0:Utf8]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
-            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(some_metric.timestamp AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
+            \n        Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, CAST(CAST(CAST(CAST(some_metric.timestamp AS Int64) AS Decimal128(19, 0)) * Decimal128(1,1,0) + Decimal128(0,19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_timestamp_value_:Float64]\
             \n          PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n            Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              Filter: some_metric.tag_0 != Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
@@ -9051,7 +9189,17 @@ mod test {
 
         let manipulate = find_instant_manipulate(&plan).unwrap();
         let exec = manipulate.to_execution_plan(Arc::new(DataSourceExec::new(Arc::new(
-            MemorySourceConfig::try_new(&[], Arc::new(ArrowSchema::empty()), None).unwrap(),
+            MemorySourceConfig::try_new(
+                &[],
+                Arc::new(
+                    datafusion_expr::UserDefinedLogicalNodeCore::inputs(manipulate)[0]
+                        .schema()
+                        .as_arrow()
+                        .clone(),
+                ),
+                None,
+            )
+            .unwrap(),
         ))));
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
     }
@@ -10576,13 +10724,13 @@ mod test {
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Filter: some_metric.tag_0 = Utf8(\"foo\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.tag_0 = Utf8(\"foo\") AND some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: rhs [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.tag_0 = Utf8(\"foo\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
         );
 
@@ -10814,6 +10962,7 @@ mod test {
                 1_000,
                 5_000,
                 1_000,
+                0,
                 "timestamp".to_string(),
                 Vec::new(),
                 Some(greptime_native_histogram().to_string()),
@@ -11443,6 +11592,7 @@ mod test {
                     3000,
                     3000,
                     1000,
+                    0,
                     3000,
                     "timestamp".to_string(),
                     planner.ctx.field_columns.clone(),
@@ -12136,6 +12286,101 @@ mod test {
     }
 
     #[tokio::test]
+    async fn native_scan_bounds_preserve_zero_lookback_and_overflow() {
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&build_eval_stmt("some_metric")),
+            promql_annotations: None,
+        };
+        planner.ctx.time_index_column = Some("timestamp".to_string());
+        planner.ctx.start = 1_000;
+        planner.ctx.lookback_delta = 0;
+        let schema = Arc::new(
+            DFSchema::try_from(ArrowSchema::new(vec![Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+                false,
+            )]))
+            .unwrap(),
+        );
+        for (end, interval, windows) in [
+            (1_000, 1_000, 1),
+            (2_000, 1_000, 1),
+            (7_201_000, 7_200_000, 2),
+        ] {
+            planner.ctx.end = end;
+            planner.ctx.interval = interval;
+            let filter = planner
+                .build_time_index_filter(0, &schema)
+                .unwrap()
+                .unwrap()
+                .to_string();
+            assert_eq!(filter.matches(">=").count(), windows, "{filter}");
+            assert!(
+                filter.contains("TimestampNanosecond(1000000000, None)"),
+                "{filter}"
+            );
+        }
+        planner.ctx.end = i64::MAX;
+        let filter = planner
+            .build_time_index_filter(0, &schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
+        assert!(
+            filter.contains("timestamp >= TimestampNanosecond(1000000000, None)"),
+            "{filter}"
+        );
+
+        // A lookback subtraction can underflow milliseconds while the upper bound remains
+        // representable. Keep that upper bound so LastRow cannot select a future sample.
+        let ms_schema = Arc::new(
+            DFSchema::try_from(ArrowSchema::new(vec![Field::new(
+                "timestamp",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            )]))
+            .unwrap(),
+        );
+        planner.ctx.start = i64::MIN + 100;
+        planner.ctx.end = planner.ctx.start;
+        planner.ctx.lookback_delta = 200;
+        let filter = planner
+            .build_time_index_filter(0, &ms_schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            filter,
+            format!(
+                "timestamp <= TimestampMillisecond({}, None)",
+                i64::MIN + 100
+            )
+        );
+
+        // The lower bound can also overflow while converting milliseconds to native nanoseconds.
+        // Its representable upper bound still has to reach the scan.
+        planner.ctx.start = 0;
+        planner.ctx.end = 0;
+        planner.ctx.lookback_delta = 300_000;
+        let filter = planner
+            .build_time_index_filter(9_223_372_036_854, &schema)
+            .unwrap()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            filter,
+            "timestamp <= TimestampNanosecond(-9223372036854000000, None)"
+        );
+    }
+
+    #[tokio::test]
     async fn test_non_ms_precision() {
         let catalog_list = MemoryCatalogManager::with_default_setup();
         let columns = vec![
@@ -12205,12 +12450,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n  PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-999, None) AND metrics.timestamp <= TimestampMillisecond(100000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n        Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(ms)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n          TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\n  PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n    Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n      Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-1000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n        Projection: metrics.field, metrics.tag, metrics.timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n          TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
         let plan = PromPlanner::stmt_to_plan(
             DfTableSourceProvider::new(
@@ -12235,15 +12475,7 @@ mod test {
         .unwrap();
         assert_eq!(
             plan.display_indent_schema().to_string(),
-            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
-            \n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\
-            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(ms), timestamp_range:Dictionary(Int64, Timestamp(ms))]\
-            \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n        PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp >= TimestampMillisecond(-4999, None) AND metrics.timestamp <= TimestampMillisecond(100000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n              Projection: metrics.field, metrics.tag, CAST(metrics.timestamp AS Timestamp(ms)) AS timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ms)]\
-            \n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
+            "Filter: prom_avg_over_time(timestamp_range,field) IS NOT NULL [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n  Projection: metrics.timestamp, prom_avg_over_time(timestamp_range, field) AS prom_avg_over_time(timestamp_range,field), metrics.tag [timestamp:Timestamp(ms), prom_avg_over_time(timestamp_range,field):Float64;N, tag:Utf8]\n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[5000], time index=[timestamp], values=[\"field\"] [field:Dictionary(Int64, Float64);N, tag:Utf8, timestamp:Timestamp(ms), timestamp_range:Dictionary(Int64, Timestamp(ms))]\n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n        PromSeriesDivide: tags=[\"tag\"] [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n          Sort: metrics.tag ASC NULLS FIRST, metrics.timestamp ASC NULLS FIRST [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n            Filter: metrics.tag = Utf8(\"1\") AND metrics.timestamp > TimestampNanosecond(-5000000000, None) AND metrics.timestamp <= TimestampNanosecond(100000000000000, None) [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n              Projection: metrics.field, metrics.tag, metrics.timestamp [field:Float64;N, tag:Utf8, timestamp:Timestamp(ns)]\n                TableScan: metrics [tag:Utf8, timestamp:Timestamp(ns), field:Float64;N]"
         );
     }
 
@@ -13113,6 +13345,74 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         assert!(matches!(&plan, LogicalPlan::EmptyRelation(_)), "{plan:?}");
         assert!(!plan.schema().fields().is_empty());
         assert!(!contains_histogram_fold(&plan), "{plan:?}");
+    }
+
+    async fn build_matching_filter_plan(query: &str) -> String {
+        let table_provider = build_test_table_provider_with_distinct_tags(&[
+            ("metric_a", &["host", "device"]),
+            ("metric_b", &["host", "device"]),
+        ])
+        .await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        plan.display_indent().to_string()
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_reaches_both_operands() {
+        for query in [
+            r#"metric_a / metric_b{host="foo"}"#,
+            r#"metric_a / on(host, device) metric_b{host="foo"}"#,
+            r#"count_over_time(metric_a[1m]) / on(host) count_over_time(metric_b{host="foo"}[1m])"#,
+            r#"metric_a / ignoring(device) metric_b{host="foo"}"#,
+            r#"sum by(host) (metric_a) / on(host) sum by(host) (metric_b{host="foo"})"#,
+            r#"metric_a / on(host) avg without(device) (metric_b{host="foo"})"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(
+                plan.matches(r#"host = Utf8("foo")"#).count(),
+                2,
+                "{query}\n{plan}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_skips_selecting_aggregations() {
+        // `topk` ranks its input, so filtering before it changes the candidate set.
+        let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
+    }
+
+    #[tokio::test]
+    async fn binary_value_field_matcher_stays_on_its_own_operand() {
+        let value = greptime_value();
+        for query in [
+            format!(r#"metric_a / metric_b{{{value}="2"}}"#),
+            format!(r#"metric_a / on(host, device, {value}) metric_b{{{value}="2"}}"#),
+        ] {
+            let plan = build_matching_filter_plan(&query).await;
+            assert_eq!(plan.matches(r#"Utf8("2")"#).count(), 1, "{query}\n{plan}");
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_skips_unproven_expressions() {
+        for query in [
+            r#"metric_a > on(host, device) metric_b{host="foo"}"#,
+            r#"metric_a / on(host) group_left metric_b{host="foo"}"#,
+            r#"metric_a / on(host) label_replace(metric_b{host="foo"},"extra","e","host",".*")"#,
+            r#"metric_a / on(device) metric_b{host="foo"}"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
+        }
     }
 
     #[tokio::test]

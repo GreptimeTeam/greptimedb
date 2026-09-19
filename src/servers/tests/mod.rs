@@ -18,7 +18,10 @@ use api::v1::greptime_request::Request;
 use api::v1::query_request::Query;
 use async_trait::async_trait;
 use catalog::memory::MemoryCatalogManager;
-use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use catalog::system_schema::SystemSchemaProvider;
+use catalog::system_schema::pg_catalog::PGCatalogProvider;
+use catalog::{CatalogManager, RegisterTableRequest};
+use common_catalog::consts::{DEFAULT_CATALOG_NAME, PG_CATALOG_NAME};
 use common_error::ext::BoxedError;
 use common_grpc::flight::do_put::DoPutResponse;
 use common_query::Output;
@@ -169,7 +172,13 @@ impl SqlQueryHandler for DummyInstance {
     }
 
     async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
-        Ok(catalog == DEFAULT_CATALOG_NAME && schema == DEFAULT_SCHEMA_NAME)
+        Ok(self
+            .query_engine
+            .engine_state()
+            .catalog_manager()
+            .schema_exists(catalog, schema, None)
+            .await
+            .unwrap())
     }
 }
 
@@ -232,6 +241,22 @@ impl GrpcQueryHandler for DummyInstance {
 
 fn create_testing_instance(table: TableRef) -> DummyInstance {
     let catalog_manager = MemoryCatalogManager::new_with_table(table);
+    let pg_catalog = PGCatalogProvider::new(
+        DEFAULT_CATALOG_NAME.to_string(),
+        Arc::downgrade(&(catalog_manager.clone() as Arc<dyn CatalogManager>)),
+    );
+    for table in pg_catalog.tables().values() {
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: PG_CATALOG_NAME.to_string(),
+                table_name: table.table_info().name.clone(),
+                table_id: table.table_info().ident.table_id,
+                table: table.clone(),
+            })
+            .unwrap();
+    }
+
     let query_engine = QueryEngineFactory::new(
         catalog_manager,
         None,

@@ -8,6 +8,7 @@ members = [
     "src/client",
     "src/cmd",
     "src/common/base",
+    "src/common/batcher",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
@@ -100,13 +101,13 @@ rust.unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tokio_unstable)'] }
 # See for more detaiils: https://github.com/rust-lang/cargo/issues/11329
 ahash = { version = "0.8", features = ["compile-time-rng"] }
 aquamarine = "0.6"
-arrow = { version = "58.3", features = ["prettyprint"] }
-arrow-array = { version = "58.3", default-features = false, features = ["chrono-tz"] }
-arrow-buffer = "58.3"
-arrow-cast = "58.3"
-arrow-flight = "58.3"
-arrow-ipc = { version = "58.3", default-features = false, features = ["lz4", "zstd"] }
-arrow-schema = { version = "58.3", features = ["serde"] }
+arrow = { version = "=59.2.0", features = ["prettyprint"] }
+arrow-array = { version = "=59.2.0", default-features = false, features = ["chrono-tz"] }
+arrow-buffer = "=59.2.0"
+arrow-cast = "=59.2.0"
+arrow-flight = "=59.2.0"
+arrow-ipc = { version = "=59.2.0", default-features = false, features = ["lz4", "zstd"] }
+arrow-schema = { version = "=59.2.0", features = ["serde"] }
 async-stream = "0.3"
 async-trait = "0.1"
 # Remember to update axum-extra, axum-macros when updating axum
@@ -125,25 +126,26 @@ chrono-tz = { version = "0.10", features = ["case-insensitive"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 const_format = "0.2"
+crc32fast = "1"
 criterion = "0.7"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
-datafusion = "=53.1.0"
-datafusion-common = "=53.1.0"
-datafusion-datasource = "=53.1.0"
-datafusion-expr = "=53.1.0"
-datafusion-expr-common = "=53.1.0"
-datafusion-functions = "=53.1.0"
-datafusion-functions-aggregate-common = "=53.1.0"
-datafusion-functions-window-common = "=53.1.0"
-datafusion-optimizer = "=53.1.0"
-datafusion-orc = { git = "https://github.com/datafusion-contrib/datafusion-orc.git", rev = "6c07fa282dc8d62db2aa4ded06ab55485efc811a" }
-datafusion-pg-catalog = "0.17.3"
-datafusion-physical-expr = "=53.1.0"
-datafusion-physical-plan = "=53.1.0"
-datafusion-proto = "=53.1.0"
-datafusion-sql = "=53.1.0"
-datafusion-substrait = "=53.1.0"
+datafusion = "=55.0.0"
+datafusion-common = "=55.0.0"
+datafusion-datasource = "=55.0.0"
+datafusion-expr = "=55.0.0"
+datafusion-expr-common = "=55.0.0"
+datafusion-functions = "=55.0.0"
+datafusion-functions-aggregate-common = "=55.0.0"
+datafusion-functions-window-common = "=55.0.0"
+datafusion-optimizer = "=55.0.0"
+datafusion-orc = "0.10.0"
+datafusion-pg-catalog = "0.18.3"
+datafusion-physical-expr = "=55.0.0"
+datafusion-physical-plan = "=55.0.0"
+datafusion-proto = "=55.0.0"
+datafusion-sql = "=55.0.0"
+datafusion-substrait = "=55.0.0"
 datafusion_object_store = { package = "object_store", version = "0.13.2" }
 deadpool = "0.12"
 deadpool-postgres = "0.14"
@@ -159,8 +161,9 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "32f467fa2ba2b3588a58381a24af83de09fbb00a" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0c4beffaa2b3968034915867593a717c6ab0c6b4" }
 hex = "0.4"
+hostname = "0.4.0"
 http = "1"
 humantime = "2.1"
 humantime-serde = "1.1"
@@ -169,7 +172,9 @@ hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
 itertools = "0.14"
-jsonb = { version = "0.4.4", default-features = false }
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9de38959328caa7628e81b6b1", default-features = false, features = [
+    "databend",
+] }
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
@@ -180,7 +185,7 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.57"
+object_store_opendal = "0.58"
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.32", features = [
     "gen-tonic",
@@ -194,11 +199,12 @@ otel-arrow-rust = { git = "https://github.com/GreptimeTeam/otel-arrow", rev = "5
     "server",
 ] }
 parking_lot = "0.12"
-parquet = { version = "58.3", default-features = false, features = ["arrow", "async", "object_store"] }
-parquet-variant = "58.3"
-parquet-variant-compute = "58.3"
-parquet-variant-json = "58.3"
+parquet = { version = "=59.2.0", default-features = false, features = ["arrow", "async", "object_store"] }
+parquet-variant = "=59.2.0"
+parquet-variant-compute = "=59.2.0"
+parquet-variant-json = "=59.2.0"
 paste = "1.0"
+percent-encoding = "2.3"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
@@ -220,10 +226,7 @@ reqwest = { version = "0.13", default-features = false, features = [
     "stream",
     "multipart",
 ] }
-url = "2.3"
-# Branch: feat/request-timeout
-hostname = "0.4.0"
-rskafka = { git = "https://github.com/GreptimeTeam/rskafka.git", rev = "f5688f83e7da591cda3f2674c2408b4c0ed4ed50", features = [
+rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "80f42eb15eb9419579a376bdf4411893a7da2728", features = [
     "transport-tls",
 ] }
 rstest = "0.25"
@@ -241,7 +244,7 @@ simd-json = "0.15"
 similar-asserts = "1.6.0"
 smallvec = { version = "1", features = ["serde"] }
 snafu = "0.8"
-sqlparser = { version = "0.61.0", default-features = false, features = ["std", "visitor", "serde"] }
+sqlparser = { version = "0.62.0", default-features = false, features = ["std", "visitor", "serde"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "any",
     "macros",
@@ -253,6 +256,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 stringprep = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
+temp-env = "0.3"
 tempfile = "3"
 tokio = { version = "1.47", features = ["full"] }
 tokio-postgres = "0.7.18"
@@ -260,6 +264,7 @@ tokio-rustls = { version = "0.26.2", default-features = false }
 tokio-stream = "0.1"
 tokio-util = { version = "0.7", features = ["io-util", "compat"] }
 toml = "0.8.8"
+url = "2.3"
 # Pin below 0.14.5 to avoid the `connection_timeout_future` "async fn resumed after
 # completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
 tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
@@ -274,6 +279,7 @@ uddsketch-rs = "0.1.0"
 uuid = { version = "1.17", features = ["serde", "v4", "v7", "fast-rng"] }
 vrl = "0.33"
 vu128 = "1.1"
+winner_tree = "0.1.1"
 zstd = "0.13"
 # DO_NOT_REMOVE_THIS: END_OF_EXTERNAL_DEPENDENCIES
 
@@ -287,6 +293,7 @@ cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
+common-batcher = { path = "src/common/batcher" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
@@ -353,22 +360,32 @@ git = "https://github.com/GreptimeTeam/greptime-meter.git"
 rev = "5618e779cf2bb4755b499c630fba4c35e91898cb"
 
 [patch.crates-io]
-datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "a281d9f0ea4b3fb2ec88bc3553d8dcef307e072a" }
-sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "2aefa08a8d69c96eec2d6d6703598a009bba6e4c" }                           # on branch v0.61.x
+substrait = { git = "https://github.com/GreptimeTeam/substrait-rs.git", rev = "91ec978b0649417ad3da8390e7a515baec723b1b" }
+datafusion = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-datasource = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-functions = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-functions-aggregate-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-functions-window-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-optimizer = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-physical-expr = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-physical-expr-common = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "b66dca3260c8e04f314c8036cdfbb08f1a564d95" }
+datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
+arrow-pg = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
+sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
+
+# Temporary: use the GreptimeTeam fork of tikv-jemalloc-sys embedding
+# jemalloc 5.3.1 + backport of 54f22c83 ("Initialize TSD tcache before
+# enabling it"), fixing the TSD/tcache enable-before-init reentrancy
+# window. Remove once tikv/jemallocator ships a jemalloc snapshot that
+# includes the fix. See GreptimeTeam/jemalloc#1.
+tikv-jemalloc-sys = { git = "https://github.com/GreptimeTeam/jemallocator", rev = "e254a7eaf13a9ede04953ddefd173b5303018530" }
 
 [profile.release]
 debug = 1

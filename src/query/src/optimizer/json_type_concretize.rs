@@ -12,10 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::any::Any;
 use std::collections::HashMap;
 
 use arrow_schema::DataType;
-use common_function::scalars::json::json_get::JsonGetWithType;
+use common_function::scalars::json::json_get::{JsonGetWithType, parse_json_get_path};
 use datafusion::datasource::{DefaultTableSource, TableProvider};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{Result, plan_datafusion_err, plan_err};
@@ -23,6 +24,7 @@ use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_optimizer::{OptimizerConfig, OptimizerRule};
 use datatypes::extension::json::is_json2_extension_type;
 use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+use jsonb::jsonpath::Path;
 use table::table::adapter::DfTableProviderAdapter;
 
 use crate::dummy_catalog::DummyTableProvider;
@@ -50,11 +52,7 @@ impl OptimizerRule for JsonTypeConcretizeRule {
 
         plan.transform_down(|plan| match &plan {
             LogicalPlan::TableScan(table_scan) => {
-                let Some(source) = table_scan
-                    .source
-                    .as_any()
-                    .downcast_ref::<DefaultTableSource>()
-                else {
+                let Some(source) = table_scan.source.downcast_ref::<DefaultTableSource>() else {
                     return Ok(Transformed::no(plan));
                 };
 
@@ -95,12 +93,12 @@ fn apply_json_type_hint(
         return false;
     }
 
-    if let Some(adapter) = provider.as_any().downcast_ref::<DummyTableProvider>() {
+    if let Some(adapter) = (provider as &dyn Any).downcast_ref::<DummyTableProvider>() {
         adapter.with_json_type_hint(json_types);
         return true;
     }
 
-    if let Some(adapter) = provider.as_any().downcast_ref::<DfTableProviderAdapter>() {
+    if let Some(adapter) = (provider as &dyn Any).downcast_ref::<DfTableProviderAdapter>() {
         adapter.with_json_type_hint(json_types);
         return true;
     }
@@ -184,10 +182,15 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         );
     };
 
-    // Object-only type deduction cannot represent bracket JSONPath access, so preserve the
-    // full Variant and let json_get apply the expression.
-    if path.contains('[') {
-        return Ok(Some((column.name.clone(), JsonNativeType::Variant)));
+    let path = parse_json_get_path(path)
+        .map_err(|e| plan_datafusion_err!("Invalid JSONPath {path:?}: {e}"))?;
+
+    if path
+        .paths
+        .iter()
+        .all(|segment| matches!(segment, Path::Root))
+    {
+        return Ok(Some((column.name.clone(), JsonNativeType::String)));
     }
 
     let with_type = f
@@ -199,18 +202,17 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     let with_type =
         JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
 
-    let mut split = path.rsplit(".");
-    let Some(leaf) = split.next().filter(|&x| !x.is_empty() && x != "$") else {
-        return Ok(Some((column.name.clone(), JsonNativeType::String)));
-    };
-
-    let mut object = JsonObjectType::new();
-    object.insert(leaf.to_string(), with_type);
-    let mut root = JsonNativeType::Object(object);
-
-    for s in split {
+    let mut root = with_type;
+    for segment in path.paths.into_iter().rev() {
+        let name = match segment {
+            Path::Root => continue,
+            Path::DotField(name) | Path::ColonField(name) | Path::ObjectField(name) => name,
+            // A full JSONPath expression can select arrays or use filters/wildcards.
+            // Keep the entire value when an object projection cannot represent it.
+            _ => return Ok(Some((column.name.clone(), JsonNativeType::Variant))),
+        };
         let mut object = JsonObjectType::new();
-        object.insert(s.to_string(), root);
+        object.insert(name.into_owned(), root);
         root = JsonNativeType::Object(object);
     }
 
@@ -331,13 +333,52 @@ mod tests {
     }
 
     #[test]
-    fn test_deduce_json_type_with_list_index() -> Result<()> {
-        let expr = json_get_expr(col("j"), path_expr("l[0]"), Some(DataType::Int64))?;
+    fn test_deduce_json_type_object_paths() -> Result<()> {
+        for paths in [
+            ["a.b", r#"$."a"."b""#, r#"["a"]["b"]"#],
+            [r#"$."a.b"."c.d""#, r#"["a.b"]["c.d"]"#, r#"$."a.b"["c.d"]"#],
+        ] {
+            let deduce = |path| {
+                deduce_json_type(&json_get_expr(
+                    col("j"),
+                    path_expr(path),
+                    Some(DataType::Int64),
+                )?)
+            };
+            let expected = deduce(paths[0])?;
+            assert!(!matches!(expected, Some((_, JsonNativeType::Variant))));
+            for path in &paths[1..] {
+                assert_eq!(deduce(path)?, expected);
+            }
+        }
+        Ok(())
+    }
 
-        assert_eq!(
-            Some(("j".to_string(), JsonNativeType::Variant)),
-            deduce_json_type(&expr)?
-        );
+    #[test]
+    fn test_deduce_json_type_invalid_path() -> Result<()> {
+        let expr = json_get_expr(col("j"), path_expr("$.a["), Some(DataType::Int64))?;
+        let err = deduce_json_type(&expr).unwrap_err();
+        assert!(err.to_string().contains("Invalid JSONPath"), "{err}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_deduce_json_type_with_list_index() -> Result<()> {
+        for path in [
+            "l[0]",
+            "$.l[0]",
+            "$.l[*]",
+            "$.o.*",
+            "$.l[0 to 2]",
+            "$.l ? (@.a == 1)",
+        ] {
+            let expr = json_get_expr(col("j"), path_expr(path), Some(DataType::Int64))?;
+            assert_eq!(
+                Some(("j".to_string(), JsonNativeType::Variant)),
+                deduce_json_type(&expr)?,
+                "{path}"
+            );
+        }
         Ok(())
     }
 

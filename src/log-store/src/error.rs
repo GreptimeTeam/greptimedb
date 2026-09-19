@@ -308,6 +308,68 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Corrupted WAL object, {}", reason))]
+    CorruptedWalObject {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid WAL object store, {}", reason))]
+    InvalidWalObjectStore {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid WAL entry range, region: {}, start: {}, end: {}",
+        region_id,
+        start_entry_id,
+        end_entry_id
+    ))]
+    InvalidWalEntryRange {
+        region_id: RegionId,
+        start_entry_id: u64,
+        end_entry_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("WAL object sequence is exhausted, last sequence: {}", last_object_seq))]
+    WalObjectSequenceExhausted {
+        last_object_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "WAL entry positions of region {} in one object are exhausted",
+        region_id
+    ))]
+    WalEntryPositionExhausted {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("WAL object already exists with different content, path: {}", path))]
+    WalObjectConflict {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to {} WAL object, path: {}", operation, path))]
+    WalObjectStore {
+        operation: &'static str,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -338,7 +400,9 @@ impl ErrorExt for Error {
             | IllegalNamespace { .. }
             | MissingKey { .. }
             | MissingValue { .. }
-            | OverrideCompactedEntry { .. } => StatusCode::InvalidArguments,
+            | OverrideCompactedEntry { .. }
+            | InvalidWalObjectStore { .. }
+            | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
             | IllegalState { .. }
@@ -353,10 +417,17 @@ impl ErrorExt for Error {
             | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. } => StatusCode::Internal,
 
+            CorruptedWalObject { .. }
+            | WalObjectConflict { .. }
+            | WalObjectSequenceExhausted { .. }
+            | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
+
             // Object store related errors
-            CreateWriter { .. } | WriteIndex { .. } | ReadIndex { .. } | Io { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            CreateWriter { .. }
+            | WriteIndex { .. }
+            | ReadIndex { .. }
+            | WalObjectStore { .. }
+            | Io { .. } => StatusCode::StorageUnavailable,
             // Raft engine
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
                 StatusCode::StorageUnavailable
@@ -382,9 +453,10 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
-                retry_hint_from_opendal_error(error)
-            }
+            CreateWriter { error, .. }
+            | WriteIndex { error, .. }
+            | ReadIndex { error, .. }
+            | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {

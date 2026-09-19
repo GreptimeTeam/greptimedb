@@ -99,9 +99,7 @@ pub fn build_s3_backend(
         }
     }
 
-    let object_store = ObjectStore::new(builder)
-        .context(error::BuildBackendSnafu)?
-        .finish();
+    let object_store = ObjectStore::new(builder).context(error::BuildBackendSnafu)?;
     Ok(with_instrument_layers(
         with_retry_layers(object_store),
         true,

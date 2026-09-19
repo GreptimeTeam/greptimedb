@@ -23,6 +23,7 @@ use futures::TryStreamExt;
 use mito_codec::row_converter::{PrimaryKeyFilter, SparsePrimaryKeyCodec};
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
+use store_api::storage::SequenceRange;
 use tokio::sync::Semaphore;
 
 #[cfg(feature = "enterprise")]
@@ -36,8 +37,8 @@ use crate::read::range_cache::{
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
     PartitionMetrics, SplitRecordBatchStream, compute_average_batch_size,
-    compute_parallel_channel_size, new_filter_metrics, scan_flat_mem_ranges,
-    should_split_flat_batches_for_merge,
+    compute_parallel_channel_size, filter_flat_batch_by_sequence, new_filter_metrics,
+    scan_flat_mem_ranges, should_split_flat_batches_for_merge,
 };
 use crate::read::seq_scan::SeqScan;
 use crate::read::series_candidate::validate_metric_metadata;
@@ -158,15 +159,20 @@ impl SeriesBatchCollector {
 struct MetricSeriesFilter {
     range: SeriesRange,
     series: Arc<HashSet<MetricSeriesId>>,
+    sorted_series: Arc<Vec<MetricSeriesId>>,
     enable_range_cache: bool,
 }
 
 impl MetricSeriesFilter {
     fn new(assigned: &AssignedSeriesBatch) -> Self {
-        let series = assigned.series().iter().copied().collect();
+        let mut sorted_series = assigned.series().to_vec();
+        sorted_series.sort_unstable();
+        sorted_series.dedup();
+        let series = sorted_series.iter().copied().collect();
         Self {
             range: assigned.range(),
             series: Arc::new(series),
+            sorted_series: Arc::new(sorted_series),
             enable_range_cache: assigned.enable_range_cache(),
         }
     }
@@ -255,7 +261,6 @@ fn filter_flat_stream_by_series(
 pub(crate) struct SeriesReader {
     stream_ctx: Arc<StreamContext>,
     partition_ranges: Vec<PartitionRange>,
-    range: SeriesRange,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
@@ -291,13 +296,11 @@ impl SeriesReader {
             }
         );
 
-        let range = assigned_series.range();
         let filter = MetricSeriesFilter::new(&assigned_series);
         let codec = SparsePrimaryKeyCodec::new(stream_ctx.input.region_metadata());
         Ok(Self {
             stream_ctx,
             partition_ranges,
-            range,
             filter,
             codec,
             partition_pruner,
@@ -319,7 +322,6 @@ impl SeriesReader {
             let partition_pruner = self.partition_pruner.clone();
             let range_semaphore = self.range_semaphore.clone();
             let part_metrics = self.part_metrics.clone();
-            let range = self.range;
             tasks.push(common_runtime::spawn_query(async move {
                 let _permit = range_semaphore.acquire().await.map_err(|error| {
                     UnexpectedSnafu {
@@ -330,7 +332,6 @@ impl SeriesReader {
                 build_series_partition_range(
                     stream_ctx,
                     part_range,
-                    range,
                     filter,
                     codec,
                     partition_pruner,
@@ -366,12 +367,12 @@ impl SeriesReader {
 async fn build_series_partition_range(
     stream_ctx: Arc<StreamContext>,
     part_range: PartitionRange,
-    range: SeriesRange,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
     partition_pruner: Arc<PartitionPruner>,
     part_metrics: PartitionMetrics,
 ) -> Result<(BoxedRecordBatchStream, usize)> {
+    let range = filter.range;
     let cache_key = filter
         .enable_range_cache
         .then(|| build_series_range_cache_key(&stream_ctx, &part_range, range))
@@ -447,6 +448,8 @@ async fn build_series_partition_range(
                 ranges,
                 filter.clone(),
                 codec.clone(),
+                stream_ctx.input.sequence_range,
+                stream_ctx.input.region_metadata().region_id,
             );
             sources.push(Box::pin(stream) as BoxedRecordBatchStream);
             continue;
@@ -494,6 +497,8 @@ fn scan_series_file_ranges(
     ranges: smallvec::SmallVec<[crate::sst::parquet::file_range::FileRange; 2]>,
     filter: MetricSeriesFilter,
     codec: SparsePrimaryKeyCodec,
+    sequence_range: Option<SequenceRange>,
+    region_id: store_api::storage::RegionId,
 ) -> impl futures::Stream<Item = Result<datatypes::arrow::record_batch::RecordBatch>> {
     try_stream! {
         let fetch_metrics = part_metrics
@@ -507,24 +512,39 @@ fn scan_series_file_ranges(
 
         for range in ranges {
             let build_start = Instant::now();
-            let Some(mut reader) = range
-                .reader_by_primary_key(
-                    primary_key_filter.as_mut(),
-                    fetch_metrics.as_deref(),
-                )
-                .await?
-            else {
-                continue;
+            let searcher = range.range_index_searcher().await?;
+            let reader = if let Some(searcher) = searcher {
+                let row_group_id = u32::try_from(range.row_group_index()).map_err(|_| UnexpectedSnafu {
+                    reason: format!("row group index exceeds u32: {}", range.row_group_index()),
+                }.build())?;
+                let selected = searcher.search(row_group_id, &filter.sorted_series).await?;
+                range.reader_by_row_ranges(selected, fetch_metrics.as_deref()).await?
+            } else {
+                range.reader_by_primary_key(primary_key_filter.as_mut(), fetch_metrics.as_deref()).await?
             };
             let build_cost = build_start.elapsed();
             reader_metrics.build_cost += build_cost;
             part_metrics.inc_build_reader_cost(build_cost);
+            let Some(mut reader) = reader else {
+                continue;
+            };
 
             let scan_start = Instant::now();
+            let file_sequence_trusted = range
+                .file_handle()
+                .is_effective_target_sequence_trusted(region_id);
             while let Some(record_batch) = reader.next_batch().await? {
                 reader_metrics.num_record_batches += 1;
                 reader_metrics.num_batches += 1;
                 reader_metrics.num_rows += record_batch.num_rows();
+
+                let Some(record_batch) = filter_flat_batch_by_sequence(
+                    record_batch,
+                    sequence_range,
+                    file_sequence_trusted,
+                )? else {
+                    continue;
+                };
 
                 let num_rows_before_filter = record_batch.num_rows();
                 let Some(record_batch) = range.precise_filter_flat(

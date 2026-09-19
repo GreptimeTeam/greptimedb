@@ -21,9 +21,14 @@ use futures::stream::BoxStream;
 use humantime_serde::re::humantime;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
+use store_api::mito_engine_options::{
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM, normalize_twcs_trigger_options,
+};
 
 use crate::ensure_values;
-use crate::error::{self, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result};
+use crate::error::{
+    self, ConflictingSchemaOptionsSnafu, Error, InvalidMetadataSnafu, ParseOptionSnafu, Result,
+};
 use crate::key::txn_helper::TxnOpGetResponseSet;
 use crate::key::{
     DeserializedValueWithBytes, MetadataKey, SCHEMA_NAME_KEY_PATTERN, SCHEMA_NAME_KEY_PREFIX,
@@ -82,6 +87,17 @@ impl TryFrom<&HashMap<String, String>> for SchemaNameValue {
     type Error = Error;
 
     fn try_from(value: &HashMap<String, String>) -> std::result::Result<Self, Self::Error> {
+        let mut value = value.clone();
+        normalize_twcs_trigger_options(&mut value).map_err(|conflict| {
+            ConflictingSchemaOptionsSnafu {
+                first_key: TWCS_TRIGGER_FILE_NUM,
+                first_value: conflict.legacy_value,
+                second_key: TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
+                second_value: conflict.canonical_value,
+            }
+            .build()
+        })?;
+
         let ttl = value
             .get(OPT_KEY_TTL)
             .map(|ttl_str| {
@@ -340,6 +356,12 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_error::ext::ErrorExt;
+    use common_error::status_code::StatusCode;
+    use store_api::mito_engine_options::{
+        TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
+    };
+
     use super::*;
     use crate::kv_backend::memory::MemoryKvBackend;
 
@@ -408,6 +430,48 @@ mod tests {
 
         let err_empty = SchemaNameValue::try_from_raw_value("".as_bytes());
         assert!(err_empty.is_err());
+    }
+
+    #[test]
+    fn test_schema_value_normalizes_twcs_trigger_aliases() {
+        for options in [
+            HashMap::from([(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            )]),
+            HashMap::from([
+                (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+                (
+                    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                    "4".to_string(),
+                ),
+            ]),
+        ] {
+            let value = SchemaNameValue::try_from(&options).unwrap();
+            assert_eq!(
+                BTreeMap::from([(TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string())]),
+                value.extra_options
+            );
+        }
+    }
+
+    #[test]
+    fn test_schema_value_rejects_conflicting_twcs_trigger_aliases() {
+        let options = HashMap::from([
+            (TWCS_TRIGGER_FILE_NUM.to_string(), "4".to_string()),
+            (
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "8".to_string(),
+            ),
+        ]);
+
+        let error = SchemaNameValue::try_from(&options).unwrap_err();
+
+        assert_eq!(StatusCode::InvalidArguments, error.status_code());
+        assert_eq!(
+            "Conflicting schema options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
+            error.to_string()
+        );
     }
 
     #[test]

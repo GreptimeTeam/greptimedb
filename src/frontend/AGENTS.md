@@ -44,6 +44,12 @@ remote datanodes via `operator`/`client`.
   auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
   datanodes (distributed).
 
+- **Table batching** (`instance/builder.rs`): protocol entry points opt in through
+  `QueryContext`. The primary inserter prepares eligible ordinary-table writes
+  for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
+  inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
+  avoiding recursive batching. The batcher handles successful-write Flow notifications.
+
 ## Public surface
 
 - `Instance` (`instance.rs`) — the business-logic container.

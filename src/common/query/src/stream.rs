@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, Mutex};
 
@@ -22,14 +21,25 @@ use datafusion::execution::SendableRecordBatchStream as DfSendableRecordBatchStr
 use datafusion::execution::context::TaskContext;
 use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalSortExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
-use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
+use datafusion::physical_plan::{
+    DisplayAs, DisplayFormatType, ExecutionPlan, PhysicalExpr, PlanProperties,
+};
 use datafusion_common::DataFusionError;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datatypes::arrow::datatypes::SchemaRef as ArrowSchemaRef;
 use datatypes::schema::SchemaRef;
+
+/// Opens a new scan stream equivalent to the one this plan was built from.
+pub type StreamFactoryRef =
+    Arc<dyn Fn() -> datafusion_common::Result<SendableRecordBatchStream> + Send + Sync>;
 
 /// Adapts greptime's [SendableRecordBatchStream] to DataFusion's [ExecutionPlan].
 pub struct StreamScanAdapter {
     stream: Mutex<Option<SendableRecordBatchStream>>,
+    /// Opens a replacement stream once `stream` has been handed out. DataFusion
+    /// executes a plan more than once in a recursive CTE, where every iteration
+    /// re-executes the recursive term.
+    stream_factory: Option<StreamFactoryRef>,
     schema: SchemaRef,
     arrow_schema: ArrowSchemaRef,
     properties: Arc<PlanProperties>,
@@ -58,6 +68,7 @@ impl StreamScanAdapter {
 
         Self {
             stream: Mutex::new(Some(stream)),
+            stream_factory: None,
             schema,
             arrow_schema,
             properties,
@@ -67,6 +78,13 @@ impl StreamScanAdapter {
 
     pub fn with_output_ordering(mut self, output_ordering: Option<Vec<PhysicalSortExpr>>) -> Self {
         self.output_ordering = output_ordering;
+        self
+    }
+
+    /// Makes this plan re-executable. The factory must open a stream over the
+    /// same scan request.
+    pub fn with_stream_factory(mut self, stream_factory: StreamFactoryRef) -> Self {
+        self.stream_factory = Some(stream_factory);
         self
     }
 }
@@ -83,10 +101,6 @@ impl DisplayAs for StreamScanAdapter {
 }
 
 impl ExecutionPlan for StreamScanAdapter {
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn schema(&self) -> ArrowSchemaRef {
         self.arrow_schema.clone()
     }
@@ -97,6 +111,13 @@ impl ExecutionPlan for StreamScanAdapter {
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> datafusion_common::Result<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     // DataFusion will swap children unconditionally.
@@ -113,10 +134,16 @@ impl ExecutionPlan for StreamScanAdapter {
         _partition: usize,
         _context: Arc<TaskContext>,
     ) -> datafusion_common::Result<DfSendableRecordBatchStream> {
-        let mut stream = self.stream.lock().unwrap();
-        let stream = stream
-            .take()
-            .ok_or_else(|| DataFusionError::Execution("Stream already exhausted".to_string()))?;
+        let stream = self.stream.lock().unwrap().take();
+        let stream = match stream {
+            Some(stream) => stream,
+            None => {
+                let factory = self.stream_factory.as_ref().ok_or_else(|| {
+                    DataFusionError::Execution("Stream already exhausted".to_string())
+                })?;
+                factory()?
+            }
+        };
         Ok(Box::pin(DfRecordBatchStreamAdapter::new(stream)))
     }
 
@@ -174,6 +201,43 @@ mod test {
         match result {
             Err(e) => assert!(e.to_string().contains("Stream already exhausted")),
             _ => unreachable!(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_re_execute_with_stream_factory() {
+        let ctx = SessionContext::new();
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "a",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![Arc::new(Int32Vector::from_slice([1, 2])) as _],
+        )
+        .unwrap();
+
+        let factory_schema = schema.clone();
+        let factory_batch = batch.clone();
+        let scan = StreamScanAdapter::new(
+            RecordBatches::try_new(schema.clone(), vec![batch.clone()])
+                .unwrap()
+                .as_stream(),
+        )
+        .with_stream_factory(Arc::new(move || {
+            Ok(
+                RecordBatches::try_new(factory_schema.clone(), vec![factory_batch.clone()])
+                    .unwrap()
+                    .as_stream(),
+            )
+        }));
+
+        for _ in 0..3 {
+            let stream = scan.execute(0, ctx.task_ctx()).unwrap();
+            let recordbatches = stream.try_collect::<Vec<_>>().await.unwrap();
+            assert_eq!(recordbatches, vec![batch.clone().into_df_record_batch()]);
         }
     }
 }

@@ -39,6 +39,19 @@ WITH RECURSIVE cte(d) AS (
 )
 SELECT max(d) FROM cte;
 
+-- the recursive term is re-executed once per iteration, so its scans must be re-runnable
+WITH RECURSIVE t AS (
+		SELECT 0 AS depth
+	UNION ALL
+		SELECT t.depth + 1 AS depth
+		FROM t, information_schema.tables
+		WHERE table_catalog = 'greptime'
+			AND table_schema = 'information_schema'
+			AND table_name = 'tables'
+			AND t.depth < 2
+)
+SELECT depth FROM t ORDER BY depth;
+
 -- Nested aliases is not supported in datafusion
 with cte (a) as (
     select 1

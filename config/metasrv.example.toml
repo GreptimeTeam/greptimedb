@@ -229,6 +229,14 @@ provider = "raft_engine"
 ## **It's only used when the provider is `kafka`**.
 broker_endpoints = ["127.0.0.1:9092"]
 
+## The connect timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ connect_timeout = "3s"
+
+## The total request timeout for kafka client.
+## **It's only used when the provider is `kafka`**.
+#+ timeout = "5s"
+
 ## Automatically create topics for WAL.
 ## Set to `true` to automatically create topics for WAL.
 ## Otherwise, use topics named `topic_name_prefix_[0..num_topics)`
@@ -320,7 +328,8 @@ ttl = "90d"
 ## `drop_flow`, `create_table`, `create_logical_tables`, `alter_table`,
 ## `alter_logical_tables`, `drop_table`, `undrop_table`, `purge_dropped_table`,
 ## `truncate_table`, `create_view`, `drop_view`, `repartition`,
-## `repartition_group`, `wal_prune`, `batch_gc`, `reconcile_table`.
+## `repartition_group`, `wal_prune`, `batch_gc`, `reconcile_catalog`,
+## `reconcile_database`, `reconcile_table`, `reconcile_logical_tables`.
 ## When omitted, all current and future event types are recorded.
 ## Set to an empty array to disable event recording.
 #+ event_types = ["region_migration"]
@@ -370,6 +379,10 @@ log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
 
 ## The OTLP tracing export protocol. Can be `grpc`/`http`.
 otlp_export_protocol = "http"

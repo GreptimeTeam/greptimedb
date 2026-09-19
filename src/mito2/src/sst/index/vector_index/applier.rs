@@ -356,7 +356,7 @@ mod tests {
     ) -> (TempDir, VectorIndexApplier, RegionIndexId, u64) {
         let (dir, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_vector_index_applier_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_id = RegionFileId::new(0.into(), FileId::random());
         let index_id = RegionIndexId::new(file_id, 0);
         let table_dir = "table_dir".to_string();

@@ -223,7 +223,7 @@ mod tests {
         let store_dir = dir.path().to_str().unwrap();
         let builder = Builder::default().root(store_dir);
 
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let state_store = ObjectStateStore::new(object_store);
 
         let data: Vec<_> = state_store
@@ -293,7 +293,7 @@ mod tests {
         let store_dir = dir.path().to_str().unwrap();
         let builder = Builder::default().root(store_dir);
 
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         let state_store = ObjectStateStore::new(object_store);
 
         state_store.put("a/1", b"v1".to_vec()).await.unwrap();

@@ -1,7 +1,9 @@
 SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
 
-++
-++
++---------------------+
+| sum(numbers.number) |
++---------------------+
++---------------------+
 
 EXPLAIN SELECT * FROM (SELECT SUM(number) FROM numbers LIMIT 100000000000) LIMIT 0;
 

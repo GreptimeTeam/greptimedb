@@ -12,15 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-use ahash::{HashSet, RandomState};
+use ahash::HashSet;
 use datafusion::arrow::array::UInt64Array;
 use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::common::hash_utils::RandomState as FixedState;
+use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::common::{DFSchema, DFSchemaRef};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::context::TaskContext;
@@ -29,8 +30,9 @@ use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream, hash_utils,
+    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, InputDistributionRequirements,
+    Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream,
+    hash_utils,
 };
 use datafusion_expr::col;
 use datatypes::arrow::compute;
@@ -179,7 +181,7 @@ impl UnionDistinctOn {
             output_schema,
             metric: ExecutionPlanMetricsSet::new(),
             properties,
-            random_state: RandomState::new(),
+            random_state: FixedState::with_seed(0),
         })
     }
 
@@ -347,21 +349,27 @@ pub struct UnionDistinctOnExec {
     metric: ExecutionPlanMetricsSet,
     properties: Arc<PlanProperties>,
 
-    /// Shared the `RandomState` for the hashing algorithm
-    random_state: RandomState,
+    /// Shared deterministic hash state for the hashing algorithm.
+    random_state: FixedState,
 }
 
 impl ExecutionPlan for UnionDistinctOnExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
         self.output_schema.clone()
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition, Distribution::SinglePartition]
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        InputDistributionRequirements::new(vec![
+            Distribution::SinglePartition,
+            Distribution::SinglePartition,
+        ])
     }
 
     fn properties(&self) -> &Arc<PlanProperties> {
@@ -452,7 +460,7 @@ pub struct UnionDistinctOnStream {
     /// Include time index
     compare_keys: Vec<usize>,
     output_schema: SchemaRef,
-    random_state: RandomState,
+    random_state: FixedState,
     lhs_signatures: HashSet<u64>,
     hashes: Vec<u64>,
     phase: StreamPhase,
@@ -911,12 +919,17 @@ mod test {
     }
 
     impl ExecutionPlan for TestExec {
-        fn name(&self) -> &str {
-            "TestExec"
+        fn apply_expressions(
+            &self,
+            _f: &mut dyn FnMut(
+                &Arc<dyn PhysicalExpr>,
+            ) -> datafusion_common::Result<TreeNodeRecursion>,
+        ) -> DataFusionResult<TreeNodeRecursion> {
+            Ok(TreeNodeRecursion::Continue)
         }
 
-        fn as_any(&self) -> &dyn Any {
-            self
+        fn name(&self) -> &str {
+            "TestExec"
         }
 
         fn properties(&self) -> &Arc<PlanProperties> {
@@ -965,7 +978,7 @@ mod test {
             right: None,
             compare_keys: vec![1, 0],
             output_schema,
-            random_state: RandomState::new(),
+            random_state: FixedState::with_seed(0),
             lhs_signatures: HashSet::default(),
             hashes: Vec::new(),
             phase: StreamPhase::Left,

@@ -267,8 +267,8 @@ impl CompactionScheduler {
     /// Notifies waiters, schedules a pending manual or automatic follow-up, or
     /// removes the region status. A follow-up is scheduled whenever the cycle
     /// latched an automatic trigger, or when `made_progress` is true (the
-    /// execution removed more files than it added): successful compaction keeps
-    /// draining the region until the picker returns no plan. The returned
+    /// execution produced output or reduced the file count): successful compaction
+    /// keeps draining the region until the picker returns no plan. The returned
     /// transition reports a dispatched automatic follow-up or DDLs that are now
     /// safe to execute.
     ///
@@ -617,8 +617,8 @@ impl CompactionScheduler {
         }
 
         // Keep draining when the cycle latched an automatic trigger, or when the
-        // execution reduced the file count. A no-progress rewrite stops here so a
-        // split-heavy output cannot loop forever; the next flush trigger resumes.
+        // execution produced output or reduced the file count. An empty edit stops
+        // here; the next flush trigger resumes.
         let should_continue = status.active.reset_automatic_followup() || made_progress;
         if should_continue
             && self.schedule_automatic_followup(region_id, manifest_ctx, schema_metadata_manager)

@@ -122,6 +122,12 @@ pub const INFORMATION_SCHEMA_STATISTICS_TABLE_ID: u32 = 43;
 pub const INFORMATION_SCHEMA_RECYCLE_BIN_TABLE_ID: u32 = 44;
 /// id for information_schema.flow_statistics
 pub const INFORMATION_SCHEMA_FLOW_STATISTICS_TABLE_ID: u32 = 45;
+/// id for information_schema.PLUGINS
+pub const INFORMATION_SCHEMA_PLUGINS_TABLE_ID: u32 = 47;
+/// id for information_schema.USER_PRIVILEGES
+pub const INFORMATION_SCHEMA_USER_PRIVILEGES_TABLE_ID: u32 = 48;
+/// id for information_schema.PROCESSLIST (for mysql)
+pub const INFORMATION_SCHEMA_PROCESSLIST_TABLE_ID: u32 = 49;
 
 // ----- End of information_schema tables -----
 
@@ -150,6 +156,23 @@ pub const FILE_ENGINE: &str = "file";
 pub const SEMANTIC_TYPE_PRIMARY_KEY: &str = "TAG";
 pub const SEMANTIC_TYPE_FIELD: &str = "FIELD";
 pub const SEMANTIC_TYPE_TIME_INDEX: &str = "TIMESTAMP";
+
+const SYSTEM_SCHEMA_NAMES: [&str; 3] = [
+    INFORMATION_SCHEMA_NAME,
+    PG_CATALOG_NAME,
+    DEFAULT_PRIVATE_SCHEMA_NAME,
+];
+
+/// Returns the canonical name of the system schema `schema` refers to, ignoring ASCII
+/// case, or `None` if it is not one.
+///
+/// Only system schemas are matched case-insensitively, as MySQL does; user schema names
+/// keep the case they were created with.
+pub fn system_schema_name(schema: &str) -> Option<&'static str> {
+    SYSTEM_SCHEMA_NAMES
+        .into_iter()
+        .find(|name| schema.eq_ignore_ascii_case(name))
+}
 
 pub fn is_readonly_schema(schema: &str) -> bool {
     matches!(schema, INFORMATION_SCHEMA_NAME)

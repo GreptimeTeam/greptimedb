@@ -76,6 +76,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -235,6 +236,8 @@ impl Scanner {
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
+    /// Pinned index snapshot and its storage for candidate discovery.
+    series_index: Option<SeriesIndexReadContext>,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
     /// Scan request.
@@ -276,6 +279,7 @@ impl ScanRegion {
     ) -> ScanRegion {
         ScanRegion {
             version,
+            series_index: None,
             access_layer,
             request,
             cache_strategy,
@@ -292,6 +296,16 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Pins the series-index snapshot used by candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.series_index = series_index;
+        self
     }
 
     /// Sets counters that should receive query-load metrics.
@@ -559,6 +573,7 @@ impl ScanRegion {
         });
 
         let input = ScanInput::builder(self.access_layer, mapper)
+            .with_series_index(self.series_index)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
@@ -927,6 +942,8 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Pinned series-index snapshot and its storage, when configured.
+    pub(crate) series_index: Option<SeriesIndexReadContext>,
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -1025,6 +1042,7 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                series_index: None,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
                 mapper: Arc::new(mapper),
@@ -1089,6 +1107,16 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    /// Sets the pinned series-index context for candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.input.series_index = series_index;
+        self
+    }
+
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
@@ -1549,6 +1577,7 @@ impl ScanInput {
         let reader = self
             .access_layer
             .read_sst(file.clone())
+            .series_index(self.series_index.clone())
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
@@ -1688,6 +1717,27 @@ impl ScanInput {
         );
     }
 
+    /// Whether physical source row counts equal the rows visible to this region,
+    /// before applying query predicates.
+    pub(crate) fn total_rows_is_exact(&self) -> bool {
+        if self.region_partition_expr.is_none() {
+            return true;
+        }
+
+        // Extension ranges do not expose their partition expressions.
+        #[cfg(feature = "enterprise")]
+        if !self.extension_ranges.is_empty() {
+            return false;
+        }
+
+        // Repartition flushes existing memtables before entering staging. New
+        // writes are routed under the target partition rules, whereas historical
+        // SSTs can be shared by regions and still need partition filtering.
+        self.files
+            .iter()
+            .all(|file| self.should_skip_region_partition(file))
+    }
+
     pub(crate) fn total_rows(&self) -> usize {
         let rows_in_files: usize = self.files.iter().map(|f| f.num_rows()).sum();
         let rows_in_memtables: usize = self.memtables.iter().map(|m| m.stats().num_rows()).sum();
@@ -1796,7 +1846,7 @@ impl PruningStatistics for FileLevelPruningStats {
         }
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 
@@ -1836,9 +1886,10 @@ fn pre_filter_mode(append_mode: bool, merge_mode: MergeMode) -> PreFilterMode {
 /// contribute a row to `(C, H]`.
 ///
 /// Unmarked local files use `FileMeta.sequence` as an admission barrier rather
-/// than a row maximum. Compaction and edit assign it as `committed_sequence + 1`;
-/// `C >= barrier` proves Flow has already consumed the entire file, so such a
-/// file is excluded before the capability check.
+/// than a row maximum. Region edits allocate this barrier; compaction inherits
+/// the maximum input bound without assigning a new barrier. `C >= barrier`
+/// proves Flow has already consumed the entire file, so such a file is excluded
+/// before the capability check. An unknown bound cannot prove this exclusion.
 ///
 /// A foreign file is different: the parquet reader virtualizes every row to its
 /// target-local `FileMeta.sequence`. Consequently, a present sequence is the
@@ -2242,6 +2293,12 @@ impl PredicateGroup {
         self.predicate_without_region.add_dyn_filters(dyn_filters);
     }
 
+    /// Removes dynamic filters while preserving the static and region predicates.
+    pub(crate) fn clear_dyn_filters(&self) {
+        self.predicate_all.clear_dyn_filters();
+        self.predicate_without_region.clear_dyn_filters();
+    }
+
     /// Returns the region partition expr from metadata, if any.
     pub(crate) fn region_partition_expr(&self) -> Option<&PartitionExpr> {
         self.region_partition_expr.as_ref()
@@ -2316,6 +2373,43 @@ mod tests {
                     .build(),
             )))
             .with_files(vec![file])
+    }
+
+    #[tokio::test]
+    async fn test_total_rows_is_exact_after_partition_filter() {
+        let expr = partition_col("k0").gt_eq(Value::String("foo".into()));
+        let other = partition_col("k0").gt_eq(Value::String("bar".into()));
+        for (region_expr, file_exprs, exact) in [
+            (None, vec![None], true),
+            (None, vec![Some(expr.clone())], true),
+            (Some(expr.clone()), vec![], true),
+            (Some(expr.clone()), vec![Some(expr.clone())], true),
+            (Some(expr.clone()), vec![None], false),
+            (Some(expr.clone()), vec![Some(other)], false),
+            (Some(expr.clone()), vec![Some(expr), None], false),
+        ] {
+            let mut builder =
+                RegionMetadataBuilder::from_existing(metadata_with_primary_key(vec![0, 1], false));
+            builder.partition_expr_json(region_expr.map(|expr| expr.as_json_str().unwrap()));
+            let metadata = Arc::new(builder.build_without_validation().unwrap());
+            let files = file_exprs
+                .into_iter()
+                .map(|partition_expr| {
+                    FileHandle::new(
+                        FileMeta {
+                            partition_expr,
+                            ..Default::default()
+                        },
+                        Arc::new(crate::sst::file_purger::NoopFilePurger),
+                    )
+                })
+                .collect();
+            let input = new_scan_input(metadata, vec![])
+                .await
+                .with_files(files)
+                .build();
+            assert_eq!(input.total_rows_is_exact(), exact);
+        }
     }
 
     /// Helper to create a timestamp millisecond literal.
@@ -2503,7 +2597,7 @@ mod tests {
         )
         .await
         .with_distribution(Some(TimeSeriesDistribution::PerSeries))
-        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow))
+        .with_series_row_selector(Some(TimeSeriesRowSelector::LastRow { after_merge: true }))
         .with_merge_mode(MergeMode::LastNonNull)
         .with_filter_deleted(false)
         .build();
@@ -2528,7 +2622,7 @@ mod tests {
                 col("v0").gt(lit(1)).to_string(),
             ],
             time_filters: vec![col("ts").gt_eq(ts_lit(1000)).to_string()],
-            series_row_selector: Some(TimeSeriesRowSelector::LastRow),
+            series_row_selector: Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             append_mode: false,
             filter_deleted: false,
             merge_mode: MergeMode::LastNonNull,
@@ -2537,6 +2631,10 @@ mod tests {
         }
         .build();
         assert_eq!(&expected, fingerprint);
+        assert_eq!(
+            input.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
     }
 
     #[tokio::test]
@@ -2793,6 +2891,27 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_dyn_filters_preserves_predicate_group_static_filters() {
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let static_filters = vec![col("k0").eq(lit("foo"))];
+        let predicate_group = PredicateGroup::new(metadata.as_ref(), &static_filters).unwrap();
+        let dynamic_filter = Arc::new(DynamicFilterPhysicalExpr::new(vec![], physical_lit(true)));
+        predicate_group.add_dyn_filters(vec![dynamic_filter.clone()]);
+
+        predicate_group.clear_dyn_filters();
+        // Updating the old producer cannot add its wrapper to a new execution.
+        dynamic_filter.update(physical_lit(false)).unwrap();
+
+        for predicate in [
+            predicate_group.predicate().unwrap(),
+            predicate_group.predicate_without_region().unwrap(),
+        ] {
+            assert_eq!(predicate.exprs(), static_filters);
+            assert!(predicate.dyn_filters().is_empty());
+        }
+    }
+
+    #[test]
     fn test_file_level_pruning_stats_prunes_old_file() {
         let ts_col_name = "ts";
         let predicate = Predicate::new(vec![col(ts_col_name).gt(ts_lit(1000))]);
@@ -2963,6 +3082,8 @@ mod tests {
         dyn_filter.update(updated).unwrap();
 
         assert!(input.can_manifest_prune_file(&file));
+        input.predicate.clear_dyn_filters();
+        assert!(!input.can_manifest_prune_file(&file));
     }
 
     #[tokio::test]

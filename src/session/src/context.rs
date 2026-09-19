@@ -79,6 +79,9 @@ pub struct QueryContext {
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
+    /// Local-only write batching selection; never transported in protobuf extensions.
+    #[builder(default)]
+    batching_enabled: bool,
     /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
@@ -150,6 +153,15 @@ impl QueryContextBuilder {
             .write()
             .unwrap()
             .explain_options = explain_options;
+        self
+    }
+
+    pub fn skip_wal(mut self, skip_wal: bool) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .skip_wal = skip_wal;
         self
     }
 
@@ -348,6 +360,15 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().timezone = timezone;
     }
 
+    /// Returns whether ordinary inserts in this request should skip WAL.
+    pub fn skip_wal(&self) -> bool {
+        self.mutable_session_data.read().unwrap().skip_wal
+    }
+
+    pub fn set_skip_wal(&self, skip_wal: bool) {
+        self.mutable_session_data.write().unwrap().skip_wal = skip_wal;
+    }
+
     pub fn read_preference(&self) -> ReadPreference {
         self.mutable_session_data.read().unwrap().read_preference
     }
@@ -410,6 +431,16 @@ impl QueryContext {
 
     pub fn configuration_parameter(&self) -> &ConfigurationVariables {
         &self.configuration_parameter
+    }
+
+    /// Whether the local HTTP entry point selected write batching.
+    pub fn batching_enabled(&self) -> bool {
+        self.batching_enabled
+    }
+
+    /// Sets local write batching selection without adding a wire-visible extension.
+    pub fn set_batching_enabled(&mut self, enabled: bool) {
+        self.batching_enabled = enabled;
     }
 
     pub fn channel(&self) -> Channel {
@@ -576,6 +607,7 @@ impl QueryContextBuilder {
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
+            batching_enabled: self.batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
             protocol_ctx: self.protocol_ctx.unwrap_or_default(),
@@ -691,9 +723,8 @@ mod test {
 
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
-    use super::*;
     use crate::Session;
-    use crate::context::Channel;
+    use crate::context::{Channel, *};
 
     #[test]
     fn test_session() {
@@ -737,6 +768,37 @@ mod test {
 
         assert_eq!(context.current_schema(), "public");
         assert_eq!(fork.current_schema(), "private");
+    }
+
+    #[test]
+    fn test_skip_wal_default_builder_and_fork() {
+        let default_context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(!default_context.skip_wal());
+        assert!(!QueryContextBuilder::default().build().skip_wal());
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        assert!(context.skip_wal());
+        let fork = context.fork();
+        assert!(fork.skip_wal());
+        fork.set_skip_wal(false);
+        assert!(context.skip_wal());
+        assert!(!fork.skip_wal());
+        context.set_skip_wal(false);
+        fork.set_skip_wal(true);
+        assert!(!context.skip_wal());
+        assert!(fork.skip_wal());
+    }
+
+    #[test]
+    fn test_skip_wal_is_not_serialized_in_query_context() {
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        let api_context: api::v1::QueryContext = context.into();
+        assert!(
+            !api_context
+                .extensions
+                .contains_key(crate::hints::INSERT_SKIP_WAL_HINT)
+        );
+        let restored: QueryContext = api_context.into();
+        assert!(!restored.skip_wal());
     }
 
     #[test]
@@ -810,5 +872,19 @@ mod test {
 
         ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "another-query-id");
         assert!(!ctx.live_analyze_metrics_enabled());
+    }
+    #[test]
+    fn test_batching_selection_is_local_only() {
+        let mut ctx = QueryContextBuilder::default().build();
+        assert!(!ctx.batching_enabled());
+        ctx.set_batching_enabled(true);
+        assert!(ctx.clone().batching_enabled());
+        assert!(ctx.fork().batching_enabled());
+        let wire: api::v1::QueryContext = ctx.into();
+        assert!(!QueryContext::from(wire).batching_enabled());
+        let ctx = QueryContextBuilder::default()
+            .set_extension("batching_enabled".to_string(), "true".to_string())
+            .build();
+        assert!(!ctx.batching_enabled());
     }
 }

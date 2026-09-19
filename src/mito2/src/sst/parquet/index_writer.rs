@@ -21,6 +21,7 @@ use parquet::arrow::AsyncArrowWriter;
 use parquet::arrow::async_writer::AsyncFileWriter;
 use parquet::basic::{Compression, Encoding, ZstdLevel};
 use parquet::errors::ParquetError;
+use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use snafu::{OptionExt, ResultExt};
 
@@ -94,6 +95,7 @@ impl ParquetIndexWriter {
         path: &str,
         schema: &SchemaRef,
         row_group_size: usize,
+        key_value_metadata: Option<Vec<KeyValue>>,
     ) -> Result<Self> {
         let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
         let output = object_store
@@ -108,6 +110,7 @@ impl ParquetIndexWriter {
             .set_max_row_group_row_count(Some(row_group_size))
             .set_column_index_truncate_length(None)
             .set_statistics_truncate_length(None)
+            .set_key_value_metadata(key_value_metadata)
             .build();
         let writer =
             AsyncArrowWriter::try_new(AsyncWriter::new(output), schema.clone(), Some(properties))

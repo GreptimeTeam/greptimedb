@@ -52,6 +52,8 @@ pub(crate) type Json2RewritePlans = HashMap<String, Json2RewritePlan>;
 #[derive(Clone)]
 struct Json2LeafPathStats {
     rows: u64,
+    /// Number of input schemas that explicitly represent this leaf.
+    sources: usize,
     data_type: JsonNativeType,
     is_type_conflicted: bool,
 }
@@ -59,8 +61,8 @@ struct Json2LeafPathStats {
 /// Builds the JSON2 rewrite plans for a compaction.
 ///
 /// Type hints from current region metadata are always retained. Existing explicit dynamic paths
-/// from all input SST schemas are ranked once to produce a fixed layout; paths found only in a v2
-/// remainder are deliberately not promoted. [`rewrite_json2_batch`] decodes inputs and rewrites
+/// shared by every input SST schema are ranked once to produce a fixed layout; paths that may
+/// reside in a v2 remainder are deliberately not promoted. [`rewrite_json2_batch`] decodes inputs and rewrites
 /// them according to these plans. Non-JSON2 columns are omitted from the returned map.
 ///
 /// Returns an error when a JSON2 column has invalid or missing extension metadata, or when its
@@ -144,6 +146,14 @@ pub(crate) fn collect_json2_rewrite_plans(
             collect_json2_path_stats(field, *rows, &hint_paths, &mut stats)?;
         }
 
+        // A leaf absent from an input's explicit schema may have arbitrary values
+        // (including scalar ancestors) in its remainder. Only common explicit leaves
+        // are safe to promote without inspecting rows. Keep unsafe paths opaque for
+        // the entire output SST so existing readers never miss remainder values when
+        // projecting an explicit leaf.
+        for stat in stats.values_mut() {
+            stat.is_type_conflicted |= stat.sources != schemas.len();
+        }
         let mut hints = settings.type_hints().to_vec();
         hints.extend(select_dynamic_hints(settings, &hint_paths, &stats));
         let target_layout = JsonSettings::try_new(hints, Some(0)).context(DataTypeMismatchSnafu)?;
@@ -187,12 +197,14 @@ fn collect_json2_path_stats<'a>(
                 path,
                 Json2LeafPathStats {
                     rows,
+                    sources: 1,
                     data_type,
                     is_type_conflicted: false,
                 },
             );
             continue;
         };
+        stat.sources += 1;
         if stat.data_type != data_type {
             stat.is_type_conflicted = true;
         } else {
@@ -247,6 +259,9 @@ fn select_dynamic_hints(
         .iter()
         .filter(|(path, stat)| {
             !stat.is_type_conflicted
+                // TODO(LFC): Instead of "primitive only", consider retaining stable compound types
+                // that are safe to write to Parquet, as flush does. Or better, unite the two 
+                // selection process.
                 && stat.data_type.is_primitive()
                 && !has_ancestor_path(path)
                 && !has_descendant_path(path)
@@ -265,8 +280,6 @@ fn select_dynamic_hints(
         .map(|(path, stat)| JsonTypeHint {
             path: path.iter().map(|x| (*x).to_owned()).collect(),
             data_type: ConcreteDataType::from_arrow_type(&stat.data_type.as_arrow_type()),
-            nullable: true,
-            default_constraint: None,
             inverted_index: false,
         })
         .collect()
@@ -357,14 +370,13 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["hint".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(2),
         )?;
         let stat = |rows, data_type, is_type_conflicted| Json2LeafPathStats {
             rows,
+            sources: 1,
             data_type,
             is_type_conflicted,
         };
@@ -414,8 +426,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -470,8 +480,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -492,15 +500,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["source_only".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -567,8 +571,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -578,15 +580,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["promoted".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],

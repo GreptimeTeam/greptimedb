@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod kafka;
+pub mod object_store;
 pub mod raft_engine;
 
 use std::time::Duration;
@@ -25,6 +26,7 @@ use crate::config::kafka::common::{
     DEFAULT_PERIODIC_CHECKPOINT_PERSIST_INTERVAL, DEFAULT_REGION_FLUSH_TRIGGER_INTERVAL,
 };
 use crate::config::kafka::{DatanodeKafkaConfig, MetasrvKafkaConfig};
+use crate::config::object_store::ObjectStoreWalConfig;
 use crate::config::raft_engine::RaftEngineConfig;
 use crate::error::{Error, UnsupportedWalProviderSnafu};
 
@@ -46,6 +48,8 @@ pub enum DatanodeWalConfig {
     RaftEngine(RaftEngineConfig),
     Kafka(DatanodeKafkaConfig),
     Noop,
+    #[serde(rename = "experimental_object_store")]
+    ObjectStore(ObjectStoreWalConfig),
 }
 
 impl Default for DatanodeWalConfig {
@@ -81,6 +85,10 @@ impl TryFrom<DatanodeWalConfig> for MetasrvWalConfig {
             })),
             DatanodeWalConfig::Noop => UnsupportedWalProviderSnafu {
                 provider: "noop".to_string(),
+            }
+            .fail(),
+            DatanodeWalConfig::ObjectStore(_) => UnsupportedWalProviderSnafu {
+                provider: "experimental_object_store".to_string(),
             }
             .fail(),
         }
@@ -130,6 +138,7 @@ mod tests {
 
     use super::*;
     use crate::TopicSelectorType;
+    use crate::config::object_store::CorruptedSegmentAction;
     use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 
     #[test]
@@ -214,7 +223,7 @@ mod tests {
                     client_key_path: None,
                 }),
                 connect_timeout: Duration::from_secs(3),
-                timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(5),
             },
             kafka_topic: KafkaTopicConfig {
                 num_topics: 32,
@@ -252,7 +261,7 @@ mod tests {
                     client_key_path: None,
                 }),
                 connect_timeout: Duration::from_secs(3),
-                timeout: Duration::from_secs(3),
+                timeout: Duration::from_secs(5),
             },
             max_batch_bytes: ReadableSize::mb(1),
             consumer_wait_timeout: Duration::from_millis(100),
@@ -267,6 +276,56 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(datanode_wal_config, DatanodeWalConfig::Kafka(expected));
+    }
+
+    #[test]
+    fn test_toml_object_store() {
+        let toml_str = r#"
+            provider = "experimental_object_store"
+        "#;
+        let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(
+            datanode_wal_config,
+            DatanodeWalConfig::ObjectStore(ObjectStoreWalConfig::default())
+        );
+        let DatanodeWalConfig::ObjectStore(config) = &datanode_wal_config else {
+            unreachable!()
+        };
+        assert_eq!(config.prefix, "wal");
+        assert_eq!(config.flush_interval, Duration::from_millis(100));
+        assert_eq!(config.max_batch_bytes, ReadableSize::mb(8));
+        assert_eq!(config.on_corrupted_segment, CorruptedSegmentAction::Skip);
+        assert!(matches!(
+            MetasrvWalConfig::try_from(datanode_wal_config).unwrap_err(),
+            Error::UnsupportedWalProvider { .. }
+        ));
+
+        let toml_str = r#"
+            provider = "experimental_object_store"
+            storage_provider = "s3"
+            prefix = "cluster-a/wal"
+            flush_interval = "500ms"
+            max_batch_bytes = "4MB"
+            on_corrupted_segment = "fail"
+        "#;
+        let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
+        let expected = ObjectStoreWalConfig {
+            storage_provider: "s3".to_string(),
+            prefix: "cluster-a/wal".to_string(),
+            flush_interval: Duration::from_millis(500),
+            max_batch_bytes: ReadableSize::mb(4),
+            on_corrupted_segment: CorruptedSegmentAction::Fail,
+        };
+        assert_eq!(
+            datanode_wal_config,
+            DatanodeWalConfig::ObjectStore(expected)
+        );
+
+        // The persisted tag is not accepted as a config provider.
+        let toml_str = r#"
+            provider = "object_store"
+        "#;
+        assert!(toml::from_str::<DatanodeWalConfig>(toml_str).is_err());
     }
 
     #[test]
@@ -289,5 +348,35 @@ mod tests {
         assert!(debug.contains("greptime"));
         assert!(debug.contains("<REDACTED>"));
         assert!(!debug.contains("kafka-secret"));
+    }
+}
+
+#[cfg(test)]
+mod rskafka_contract_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rskafka::build_info::DEFAULT_CLIENT_ID;
+    use rskafka::messenger::{Messenger, RequestError, SyncVersionsError};
+
+    #[tokio::test]
+    async fn test_send_timeout_poisoned_messenger() {
+        let (_peer, stream) = tokio::io::duplex(1);
+        let mut messenger = Messenger::new(
+            stream,
+            1_000,
+            Arc::from(DEFAULT_CLIENT_ID),
+            Some(Duration::from_millis(50)),
+        );
+
+        let error = messenger.sync_versions().await.unwrap_err();
+        assert!(matches!(
+            error,
+            SyncVersionsError::RequestError(RequestError::Poisoned(error))
+                if matches!(
+                    error.as_ref(),
+                    RequestError::IO(error) if error.kind() == std::io::ErrorKind::TimedOut
+                )
+        ));
     }
 }

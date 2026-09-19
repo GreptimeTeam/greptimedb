@@ -36,10 +36,18 @@ mod repartition;
 mod repartition_event;
 #[macro_use]
 mod repartition_expr_version;
+mod export_logical_tables;
 mod mysql;
 mod reconciliation_event;
 mod view_ddl_event;
 mod wal_prune_event;
+
+#[rstest_reuse::template]
+#[rstest::rstest]
+#[case::standalone(false)]
+#[case::distributed(true)]
+#[tokio::test(flavor = "multi_thread")]
+fn both_deployment_cases(#[case] distributed: bool) {}
 
 grpc_tests!(File, S3, S3WithCache, Oss, Azblob, Gcs);
 

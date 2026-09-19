@@ -40,7 +40,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use store_api::metadata::RegionMetadataRef;
-use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
+use store_api::mito_engine_options::FloatFieldEncoding;
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber, SequenceRange};
 use tokio::sync::Semaphore;
 
 use crate::compaction::{
@@ -92,14 +93,30 @@ pub(crate) static ENCODE_ROW_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
 /// Default bytes threshold for encoding.
 const DEFAULT_ENCODE_BYTES_THRESHOLD: usize = 64 * 1024 * 1024;
 
-/// Bytes threshold for encoding parts. Configurable via `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
-/// When estimated bytes exceed this threshold, parts are encoded as EncodedBulkPart.
-static ENCODE_BYTES_THRESHOLD: LazyLock<usize> = LazyLock::new(|| {
-    env_usize(
-        "GREPTIME_BULK_ENCODE_BYTES_THRESHOLD",
-        DEFAULT_ENCODE_BYTES_THRESHOLD,
-    )
+/// Maximum bytes threshold for encoding when adapting to the write buffer size.
+const MAX_ENCODE_BYTES_THRESHOLD: usize = 512 * 1024 * 1024;
+
+/// Divisor to derive the encode bytes threshold from the global write buffer size.
+const ENCODE_BYTES_THRESHOLD_DIVISOR: usize = 32;
+
+/// Optional bytes threshold override from `GREPTIME_BULK_ENCODE_BYTES_THRESHOLD`.
+static ENCODE_BYTES_THRESHOLD_OVERRIDE: LazyLock<Option<usize>> = LazyLock::new(|| {
+    std::env::var("GREPTIME_BULK_ENCODE_BYTES_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse().ok())
 });
+
+/// Computes the encode bytes threshold adapted to the global write buffer size:
+/// `max(64 MiB, min(global_write_buffer_size / 32, 512 MiB))`.
+fn adaptive_encode_bytes_threshold(global_write_buffer_bytes: usize) -> usize {
+    (global_write_buffer_bytes / ENCODE_BYTES_THRESHOLD_DIVISOR)
+        .clamp(DEFAULT_ENCODE_BYTES_THRESHOLD, MAX_ENCODE_BYTES_THRESHOLD)
+}
+
+/// Returns the default bytes threshold for encoding parts.
+fn default_encode_bytes_threshold() -> usize {
+    ENCODE_BYTES_THRESHOLD_OVERRIDE.unwrap_or(DEFAULT_ENCODE_BYTES_THRESHOLD)
+}
 
 /// Configuration for bulk memtable.
 #[serde_as]
@@ -125,7 +142,7 @@ impl Default for BulkMemtableConfig {
         Self {
             merge_threshold: *MERGE_THRESHOLD,
             encode_row_threshold: *ENCODE_ROW_THRESHOLD,
-            encode_bytes_threshold: *ENCODE_BYTES_THRESHOLD,
+            encode_bytes_threshold: default_encode_bytes_threshold(),
             max_merge_groups: *MAX_MERGE_GROUPS,
         }
         .sanitize()
@@ -133,6 +150,15 @@ impl Default for BulkMemtableConfig {
 }
 
 impl BulkMemtableConfig {
+    /// Returns the default config adapted to `global_write_buffer_bytes`.
+    pub(crate) fn default_for_write_buffer_size(global_write_buffer_bytes: usize) -> Self {
+        Self {
+            encode_bytes_threshold: ENCODE_BYTES_THRESHOLD_OVERRIDE
+                .unwrap_or_else(|| adaptive_encode_bytes_threshold(global_write_buffer_bytes)),
+            ..Default::default()
+        }
+    }
+
     fn sanitize(mut self) -> Self {
         if self.merge_threshold == 0 {
             self.merge_threshold = DEFAULT_MERGE_THRESHOLD;
@@ -399,6 +425,7 @@ pub struct BulkMemtable {
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
+    min_sequence: AtomicU64,
     num_rows: AtomicUsize,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
@@ -410,6 +437,7 @@ pub struct BulkMemtable {
     merge_mode: MergeMode,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl std::fmt::Debug for BulkMemtable {
@@ -451,6 +479,7 @@ impl Memtable for BulkMemtable {
             max_ts: fragment.max_timestamp,
             num_rows: fragment.num_rows(),
             max_sequence: fragment.sequence,
+            min_sequence: fragment.min_sequence,
         };
 
         {
@@ -612,6 +641,7 @@ impl Memtable for BulkMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                min_sequence: 0,
                 series_count: 0,
             };
         }
@@ -635,32 +665,20 @@ impl Memtable for BulkMemtable {
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            min_sequence: self.min_sequence.load(Ordering::Relaxed),
             series_count: self.estimated_series_count(),
         }
     }
 
+    fn min_sequence(&self) -> SequenceNumber {
+        if self.alloc_tracker.bytes_allocated() == 0 || self.num_rows.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        self.min_sequence.load(Ordering::Relaxed)
+    }
+
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(Self {
-            id,
-            config: self.config.clone(),
-            parts: Arc::new(RwLock::new(BulkParts::default())),
-            metadata: metadata.clone(),
-            alloc_tracker: AllocTracker::new(self.alloc_tracker.write_buffer_manager()),
-            max_timestamp: AtomicI64::new(i64::MIN),
-            min_timestamp: AtomicI64::new(i64::MAX),
-            max_sequence: AtomicU64::new(0),
-            num_rows: AtomicUsize::new(0),
-            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
-                metadata.region_id,
-                id,
-                self.config.clone(),
-                self.row_group_size,
-            ))),
-            compact_dispatcher: self.compact_dispatcher.clone(),
-            append_mode: self.append_mode,
-            merge_mode: self.merge_mode,
-            row_group_size: self.row_group_size,
-        })
+        self.fork_inner(id, metadata)
     }
 
     fn compact(&self, for_flush: bool) -> Result<()> {
@@ -689,6 +707,33 @@ impl Memtable for BulkMemtable {
 }
 
 impl BulkMemtable {
+    fn fork_inner(&self, id: MemtableId, metadata: &RegionMetadataRef) -> Arc<BulkMemtable> {
+        Arc::new(Self {
+            id,
+            config: self.config.clone(),
+            parts: Arc::new(RwLock::new(BulkParts::default())),
+            metadata: metadata.clone(),
+            alloc_tracker: AllocTracker::new(self.alloc_tracker.write_buffer_manager()),
+            max_timestamp: AtomicI64::new(i64::MIN),
+            min_timestamp: AtomicI64::new(i64::MAX),
+            max_sequence: AtomicU64::new(0),
+            min_sequence: AtomicU64::new(u64::MAX),
+            num_rows: AtomicUsize::new(0),
+            compactor: Arc::new(Mutex::new(MemtableCompactor::new(
+                metadata.region_id,
+                id,
+                self.config.clone(),
+                self.row_group_size,
+                self.float_field_encoding,
+            ))),
+            compact_dispatcher: self.compact_dispatcher.clone(),
+            append_mode: self.append_mode,
+            merge_mode: self.merge_mode,
+            row_group_size: self.row_group_size,
+            float_field_encoding: self.float_field_encoding,
+        })
+    }
+
     /// Creates a new BulkMemtable with the default row group size.
     pub fn new(
         id: MemtableId,
@@ -723,6 +768,32 @@ impl BulkMemtable {
         merge_mode: MergeMode,
         row_group_size: usize,
     ) -> Self {
+        Self::new_with_row_group_size_and_encoding(
+            id,
+            config,
+            metadata,
+            write_buffer_manager,
+            compact_dispatcher,
+            append_mode,
+            merge_mode,
+            row_group_size,
+            FloatFieldEncoding::default(),
+        )
+    }
+
+    /// Creates a new BulkMemtable with the given row group size and float encoding.
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_row_group_size_and_encoding(
+        id: MemtableId,
+        config: BulkMemtableConfig,
+        metadata: RegionMetadataRef,
+        write_buffer_manager: Option<WriteBufferManagerRef>,
+        compact_dispatcher: Option<Arc<CompactDispatcher>>,
+        append_mode: bool,
+        merge_mode: MergeMode,
+        row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
+    ) -> Self {
         let config = config.sanitize();
         let region_id = metadata.region_id;
         Self {
@@ -734,17 +805,20 @@ impl BulkMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
+            min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 region_id,
                 id,
                 config,
                 row_group_size,
+                float_field_encoding,
             ))),
             compact_dispatcher,
             append_mode,
             merge_mode,
             row_group_size,
+            float_field_encoding,
         }
     }
 
@@ -781,6 +855,8 @@ impl BulkMemtable {
             .fetch_min(stats.min_ts, Ordering::Relaxed);
         self.max_sequence
             .fetch_max(stats.max_sequence, Ordering::Relaxed);
+        self.min_sequence
+            .fetch_min(stats.min_sequence, Ordering::Relaxed);
         self.num_rows.fetch_add(stats.num_rows, Ordering::Relaxed);
     }
 
@@ -1154,6 +1230,7 @@ struct MemtableCompactor {
     config: BulkMemtableConfig,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl MemtableCompactor {
@@ -1163,12 +1240,14 @@ impl MemtableCompactor {
         memtable_id: MemtableId,
         config: BulkMemtableConfig,
         row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
     ) -> Self {
         Self {
             region_id,
             memtable_id,
             config,
             row_group_size,
+            float_field_encoding,
         }
     }
 
@@ -1208,6 +1287,7 @@ impl MemtableCompactor {
         let encode_row_threshold = self.config.encode_row_threshold;
         let encode_bytes_threshold = self.config.encode_bytes_threshold;
         let row_group_size = self.row_group_size;
+        let float_field_encoding = self.float_field_encoding;
 
         // Merge all groups in parallel
         let merged_parts = collected
@@ -1222,6 +1302,7 @@ impl MemtableCompactor {
                     encode_row_threshold,
                     encode_bytes_threshold,
                     row_group_size,
+                    float_field_encoding,
                 )
             })
             .collect::<Result<Vec<Option<MergedPart>>>>()?;
@@ -1257,6 +1338,7 @@ impl MemtableCompactor {
         encode_row_threshold: usize,
         encode_bytes_threshold: usize,
         row_group_size: usize,
+        float_field_encoding: FloatFieldEncoding,
     ) -> Result<Option<MergedPart>> {
         if parts_to_merge.is_empty() {
             return Ok(None);
@@ -1357,7 +1439,11 @@ impl MemtableCompactor {
         if estimated_total_rows > encode_row_threshold
             || estimated_total_bytes > encode_bytes_threshold
         {
-            let encoder = BulkPartEncoder::new(metadata.clone(), row_group_size)?;
+            let encoder = BulkPartEncoder::new_with_float_field_encoding(
+                metadata.clone(),
+                row_group_size,
+                float_field_encoding,
+            )?;
             let mut metrics = BulkPartEncodeMetrics::default();
             let encoded_part = encoder.encode_record_batch_iter(
                 boxed_iter,
@@ -1483,6 +1569,7 @@ pub struct BulkMemtableBuilder {
     merge_mode: MergeMode,
     /// Max number of rows in a parquet row group for encoded parts.
     row_group_size: usize,
+    float_field_encoding: FloatFieldEncoding,
 }
 
 impl Default for BulkMemtableBuilder {
@@ -1494,6 +1581,7 @@ impl Default for BulkMemtableBuilder {
             append_mode: false,
             merge_mode: MergeMode::default(),
             row_group_size: DEFAULT_ROW_GROUP_SIZE,
+            float_field_encoding: FloatFieldEncoding::default(),
         }
     }
 }
@@ -1525,6 +1613,11 @@ impl BulkMemtableBuilder {
         self
     }
 
+    pub(super) fn with_float_field_encoding(mut self, encoding: FloatFieldEncoding) -> Self {
+        self.float_field_encoding = encoding;
+        self
+    }
+
     /// Sets the compact dispatcher.
     pub fn with_compact_dispatcher(mut self, compact_dispatcher: Arc<CompactDispatcher>) -> Self {
         self.compact_dispatcher = Some(compact_dispatcher);
@@ -1539,7 +1632,7 @@ impl BulkMemtableBuilder {
 
 impl MemtableBuilder for BulkMemtableBuilder {
     fn build(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
-        Arc::new(BulkMemtable::new_with_row_group_size(
+        Arc::new(BulkMemtable::new_with_row_group_size_and_encoding(
             id,
             self.config.clone(),
             metadata.clone(),
@@ -1548,6 +1641,7 @@ impl MemtableBuilder for BulkMemtableBuilder {
             self.append_mode,
             self.merge_mode,
             self.row_group_size,
+            self.float_field_encoding,
         ))
     }
 
@@ -1562,7 +1656,8 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Mutation, Row, Rows, SemanticType};
     use common_error::ext::WhateverResult;
-    use datatypes::arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::arrow::array::AsArray;
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, UInt64Type};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{
         JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, Json2PhysicalLayout, JsonMetadata,
@@ -1572,12 +1667,14 @@ mod tests {
     use datatypes::schema::ColumnSchema;
     use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
     use mito_codec::row_converter::build_primary_key_codec;
+    use parquet::basic::{Encoding, Type as PhysicalType};
     use serde_json::json;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::scan_region::PredicateGroup;
+    use crate::sst::parquet::flat_format::sequence_column_index;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
@@ -1615,6 +1712,25 @@ mod tests {
     }
 
     #[test]
+    fn test_adaptive_encode_bytes_threshold() {
+        // Below the lower bound: clamped to the default 64 MiB.
+        assert_eq!(
+            DEFAULT_ENCODE_BYTES_THRESHOLD,
+            adaptive_encode_bytes_threshold(1024 * 1024 * 1024) // 1 GiB / 32 = 32 MiB
+        );
+        // In range: global_write_buffer_size / 32.
+        assert_eq!(
+            256 * 1024 * 1024,
+            adaptive_encode_bytes_threshold(8 * 1024 * 1024 * 1024) // 8 GiB / 32 = 256 MiB
+        );
+        // Above the upper bound: clamped to 512 MiB.
+        assert_eq!(
+            MAX_ENCODE_BYTES_THRESHOLD,
+            adaptive_encode_bytes_threshold(64 * 1024 * 1024 * 1024) // 64 GiB / 32 = 2 GiB
+        );
+    }
+
+    #[test]
     fn test_bulk_memtable_sanitizes_zero_merge_threshold() {
         let metadata = metadata_for_test();
         let config = BulkMemtableConfig {
@@ -1630,6 +1746,64 @@ mod tests {
             DEFAULT_MERGE_THRESHOLD,
             memtable.compactor.lock().unwrap().config.merge_threshold
         );
+    }
+
+    #[test]
+    fn test_min_sequence_survives_mixed_parts_compaction_and_fork() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 3,
+            encode_row_threshold: 1,
+            encode_bytes_threshold: 1,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            1,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastNonNull,
+        );
+        memtable.set_unordered_part_threshold(0);
+        for (sequence, expected_min, expected_ranges) in [(100, 100, 1), (10, 10, 2), (200, 10, 1)]
+        {
+            let part = create_bulk_part_with_converter(
+                "a",
+                1,
+                vec![2000, 1000],
+                vec![Some(1.0), Some(2.0)],
+                sequence,
+            )
+            .unwrap();
+            // Regular row writes produce heterogeneous parts, sorted by timestamp
+            // rather than sequence. Neither the scalar nor the first row is a minimum.
+            assert_eq!(sequence + 1, part.sequence);
+            assert_eq!(sequence, part.min_sequence);
+            let sequences = part
+                .batch
+                .column(sequence_column_index(part.batch.num_columns()))
+                .as_primitive::<UInt64Type>();
+            assert_eq!(&[sequence + 1, sequence], sequences.values().as_ref());
+            memtable.write_bulk(part).unwrap();
+            assert_eq!(expected_min, memtable.stats().min_sequence);
+            assert_eq!(expected_min, memtable.min_sequence());
+            assert_eq!(expected_ranges, memtable.stats().num_ranges);
+        }
+        // The third write synchronously merges all parts without a dispatcher.
+        // Dedup can remove the oldest rows, but their lower bound remains safe.
+        assert_eq!(10, memtable.stats().min_sequence);
+        assert_eq!(201, memtable.stats().max_sequence);
+        let fork = memtable.fork(2, &metadata);
+        assert!(fork.is_empty());
+        assert_eq!(0, fork.min_sequence());
+        fork.write_bulk(
+            create_bulk_part_with_converter("a", 1, vec![1000], vec![Some(1.0)], 50).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(50, fork.stats().min_sequence);
+        assert_eq!(50, fork.min_sequence());
     }
 
     #[test]
@@ -1676,6 +1850,7 @@ mod tests {
         assert_eq!(5, stats.num_rows);
         assert_eq!(3, stats.num_ranges);
         assert_eq!(300, stats.max_sequence);
+        assert_eq!(100, stats.min_sequence);
 
         let (min_ts, max_ts) = stats.time_range.unwrap();
         assert_eq!(1000, min_ts.value());
@@ -1763,7 +1938,7 @@ mod tests {
         let second = mock_bulk_part_with_json2_values(
             &metadata,
             vec![3000, 4000],
-            vec![json!({"b": 3}), json!({"b": 4})],
+            vec![json!({"a": 3, "b": 3}), json!({"a": 4, "b": 4})],
             200,
         )?;
         let parts = vec![
@@ -1785,6 +1960,7 @@ mod tests {
             usize::MAX,
             usize::MAX,
             DEFAULT_ROW_GROUP_SIZE,
+            FloatFieldEncoding::default(),
         )?
         .unwrap();
         let MergedPart::Multi(part) = merged else {
@@ -1835,9 +2011,18 @@ mod tests {
             unreachable!()
         };
         assert_eq!(
-            vec![JSON2_REMAINDER_FIELD_NAME, "a", "b"],
+            vec![JSON2_REMAINDER_FIELD_NAME],
             fields.iter().map(|x| x.name().as_str()).collect::<Vec<_>>()
         );
+        // Neither path is explicit in every source; keep both opaque without losing values.
+        assert_eq!(4, batch.num_rows());
+        let json = datatypes::vectors::json::array::JsonArray::from(batch.column(0));
+        let restored = json.project_to_v2(schema.field(0), &ArrowDataType::Binary)?;
+        let restored = datatypes::vectors::json::array::JsonArray::from(&restored);
+        assert_eq!(json!({"a": 1}), restored.try_get_value(0)?);
+        assert_eq!(json!({"a": 2}), restored.try_get_value(1)?);
+        assert_eq!(json!({"b": 3}), restored.try_get_value(2)?);
+        assert_eq!(json!({"b": 4}), restored.try_get_value(3)?);
         Ok(())
     }
 
@@ -1847,8 +2032,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["id".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -2090,7 +2273,7 @@ mod tests {
     #[test]
     fn test_bulk_memtable_fork() {
         let metadata = metadata_for_test();
-        let original_memtable = BulkMemtable::new(
+        let original_memtable = BulkMemtable::new_with_row_group_size_and_encoding(
             333,
             BulkMemtableConfig::default(),
             metadata.clone(),
@@ -2098,6 +2281,8 @@ mod tests {
             None,
             false,
             MergeMode::LastRow,
+            DEFAULT_ROW_GROUP_SIZE,
+            FloatFieldEncoding::ByteStreamSplit,
         );
 
         let bulk_part =
@@ -2106,9 +2291,25 @@ mod tests {
 
         original_memtable.write_bulk(bulk_part).unwrap();
 
-        let forked_memtable = original_memtable.fork(444, &metadata);
+        let forked_memtable = original_memtable.fork_inner(444, &metadata);
 
         assert_eq!(forked_memtable.id(), 444);
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            original_memtable.float_field_encoding
+        );
+        assert_eq!(
+            original_memtable.float_field_encoding,
+            forked_memtable.float_field_encoding
+        );
+        assert_eq!(
+            original_memtable.float_field_encoding,
+            forked_memtable
+                .compactor
+                .lock()
+                .unwrap()
+                .float_field_encoding
+        );
         assert!(forked_memtable.is_empty());
         assert_eq!(0, forked_memtable.stats().num_rows);
 
@@ -2725,6 +2926,42 @@ mod tests {
         assert!(BulkParts::is_merge_candidate_by_size(false, usize::MAX, 8));
         assert!(BulkParts::is_merge_candidate_by_size(true, 8, 8));
         assert!(!BulkParts::is_merge_candidate_by_size(true, 9, 8));
+    }
+
+    #[test]
+    fn test_bulk_part_encoder_preserves_byte_stream_split() -> WhateverResult<()> {
+        let metadata = metadata_for_test();
+        let bulk_part = create_bulk_part_with_converter(
+            "byte_stream_split",
+            0,
+            vec![1000, 2000],
+            vec![Some(10.0), Some(20.0)],
+            100,
+        )?;
+        let encoder = BulkPartEncoder::new_with_float_field_encoding(
+            metadata,
+            DEFAULT_ROW_GROUP_SIZE,
+            FloatFieldEncoding::ByteStreamSplit,
+        )?;
+        let encoded_part = encoder.encode_part(&bulk_part)?.unwrap();
+        let field_column = encoded_part
+            .metadata()
+            .parquet_metadata
+            .row_groups()
+            .iter()
+            .flat_map(|row_group| row_group.columns())
+            .find(|column| {
+                column.column_path().string() == "v1"
+                    && column.column_type() == PhysicalType::DOUBLE
+            })
+            .expect("Float64 field should be present in encoded bulk part");
+
+        assert!(
+            field_column
+                .encodings()
+                .any(|encoding| encoding == Encoding::BYTE_STREAM_SPLIT)
+        );
+        Ok(())
     }
 
     #[test]

@@ -517,7 +517,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_basic_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
@@ -545,7 +545,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_type_mismatch_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         let predicates = BTreeMap::from_iter([(
@@ -573,7 +573,7 @@ mod tests {
     async fn test_compatible_predicate_for_sst_partial_type_mismatch() {
         let (_d, puffin_manager_factory) =
             PuffinManagerFactory::new_for_test_async("test_plan_for_sst_partial_mismatch_").await;
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let table_dir = "table_dir".to_string();
 
         // Column 1 (tag_str): expected string — matches SST (compatible).

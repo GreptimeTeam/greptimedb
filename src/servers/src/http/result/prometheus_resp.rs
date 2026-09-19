@@ -15,8 +15,12 @@
 //! prom supply the prometheus HTTP API Server compliance
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
+use std::hash::BuildHasher;
+use std::ops::Range;
 
-use arrow::array::{Array, AsArray, StructArray};
+use arrow::array::{Array, ArrayRef, AsArray, StructArray};
+use arrow::buffer::BooleanBuffer;
+use arrow::compute::kernels::cmp::distinct;
 use arrow::datatypes::{Float64Type, TimestampMillisecondType};
 use arrow_schema::DataType;
 use axum::Json;
@@ -36,10 +40,13 @@ use common_recordbatch::RecordBatches;
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::ConcreteDataType;
 use indexmap::IndexMap;
+use indexmap::map::RawEntryApiV1;
+use indexmap::map::raw_entry_v1::RawEntryMut;
+use itertools::Either;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
 use ryu::Buffer;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt};
 
@@ -55,8 +62,43 @@ use crate::http::prometheus::{
 
 #[derive(Default)]
 struct PromSeriesSamples {
-    values: Vec<(f64, String)>,
+    values: Vec<(f64, PromSampleValue)>,
     histograms: Vec<(f64, PromNativeHistogram)>,
+}
+
+/// A sample value of the Prometheus HTTP API JSON format.
+///
+/// Samples read out of a query result are kept as `f64` and formatted while the
+/// response is serialized, which avoids one `String` per sample. Samples parsed
+/// from a JSON body keep their original spelling, so a response that is
+/// deserialized and serialized again is unchanged.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(untagged)]
+pub enum PromSampleValue {
+    #[serde(skip_deserializing)]
+    Number(f64),
+    Text(String),
+}
+
+impl Serialize for PromSampleValue {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        match self {
+            Self::Number(value) if value.is_finite() => {
+                serializer.serialize_str(Buffer::new().format_finite(*value))
+            }
+            Self::Number(value) => serializer.collect_str(value),
+            Self::Text(value) => serializer.serialize_str(value),
+        }
+    }
+}
+
+impl PromSampleValue {
+    fn into_string(self) -> String {
+        match self {
+            Self::Number(value) => format_prometheus_sample_value(value),
+            Self::Text(value) => value,
+        }
+    }
 }
 
 fn prometheus_native_histogram(histogram: &NativeHistogram) -> Result<PromNativeHistogram> {
@@ -321,14 +363,8 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
 
-        // Query output is clustered by series (the range plan sorts by series
-        // key + timestamp), so consecutive rows usually belong to the same
-        // series. Remember the index of the previous row's entry in `buffer`,
-        // and reuse it directly when its tags are unchanged. This avoids
-        // building and hashing the label vector on every row; the worst case
-        // adds one `Vec` comparison per series transition before falling back
-        // to the map lookup.
-        let mut last_entry_index = None;
+        // Only a series that is new to `buffer` needs its own key vector.
+        let mut tags = Vec::with_capacity(num_label_columns + 1);
 
         let schema = batches.schema();
         for batch in batches.iter() {
@@ -364,71 +400,94 @@ impl PrometheusJsonResponse {
                 })
                 .transpose()?;
 
+            // Read the labels once per run of rows that share them instead of
+            // once per row. `label_runs` finds every boundary, so the probe only
+            // decides whether looking for runs is worth its cost.
+            let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
+                Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
+            } else {
+                Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
+            };
+
             // assemble rows
-            for row_index in 0..batch.num_rows() {
-                let value = field_column.and_then(|field_column| {
-                    if !field_column.is_valid(row_index) {
-                        return None;
+            for run in label_runs {
+                let mut run_entry_index = None;
+                for row_index in run {
+                    let value = field_column.and_then(|field_column| {
+                        if !field_column.is_valid(row_index) {
+                            return None;
+                        }
+                        let value = field_column.value(row_index);
+                        (!is_prometheus_stale_nan(value))
+                            .then_some((timestamp_column.value(row_index), value))
+                    });
+                    let histogram = native_histogram_column
+                        .and_then(|column| {
+                            read_histogram(column, row_index)
+                                .context(DataFusionSnafu)
+                                .transpose()
+                        })
+                        .transpose()?
+                        .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
+                        .map(|histogram| {
+                            prometheus_native_histogram(&histogram)
+                                .map(|histogram| (timestamp_column.value(row_index), histogram))
+                        })
+                        .transpose()?;
+
+                    if value.is_none() && histogram.is_none() {
+                        continue;
                     }
-                    let value = field_column.value(row_index);
-                    (!is_prometheus_stale_nan(value))
-                        .then_some((timestamp_column.value(row_index), value))
-                });
-                let histogram = native_histogram_column
-                    .and_then(|column| {
-                        read_histogram(column, row_index)
-                            .context(DataFusionSnafu)
-                            .transpose()
-                    })
-                    .transpose()?
-                    .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
-                    .map(|histogram| {
-                        prometheus_native_histogram(&histogram)
-                            .map(|histogram| (timestamp_column.value(row_index), histogram))
-                    })
-                    .transpose()?;
 
-                if value.is_none() && histogram.is_none() {
-                    continue;
-                }
+                    let entry_index = match run_entry_index {
+                        Some(index) => index,
+                        None => {
+                            // retrieve tags
+                            tags.clear();
+                            if let Some(metric_name) = &metric_name {
+                                tags.push((METRIC_NAME, metric_name.as_str()));
+                            }
+                            for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
+                                if let Some(tag_value) =
+                                    string_array_value_at_index(tag_column, row_index)
+                                {
+                                    tags.push((tag_name, tag_value));
+                                }
+                            }
 
-                // retrieve tags
-                let mut tags = Vec::with_capacity(num_label_columns + 1);
-                if let Some(metric_name) = &metric_name {
-                    tags.push((METRIC_NAME, metric_name.as_str()));
-                }
-                for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                    if let Some(tag_value) = string_array_value_at_index(tag_column, row_index) {
-                        tags.push((tag_name, tag_value));
+                            let hash = buffer.hasher().hash_one(&tags);
+                            let entry = buffer
+                                .raw_entry_mut_v1()
+                                .from_key_hashed_nocheck(hash, &tags);
+                            let index = entry.index();
+                            if let RawEntryMut::Vacant(entry) = entry {
+                                // Hand the key buffer over with the hash that was
+                                // just computed for the lookup.
+                                let key = std::mem::replace(
+                                    &mut tags,
+                                    Vec::with_capacity(num_label_columns + 1),
+                                );
+                                entry.insert_hashed_nocheck(
+                                    hash,
+                                    key,
+                                    PromSeriesSamples::default(),
+                                );
+                            }
+                            run_entry_index = Some(index);
+                            index
+                        }
+                    };
+                    let samples = &mut buffer[entry_index];
+                    if let Some((timestamp_millis, histogram)) = histogram {
+                        samples
+                            .histograms
+                            .push((timestamp_millis as f64 / 1000.0, histogram));
+                    } else if let Some((timestamp_millis, value)) = value {
+                        samples.values.push((
+                            timestamp_millis as f64 / 1000.0,
+                            PromSampleValue::Number(value),
+                        ));
                     }
-                }
-
-                let reuse = last_entry_index.filter(|index| {
-                    buffer
-                        .get_index(*index)
-                        .is_some_and(|(key, _)| key == &tags)
-                });
-                let samples = if let Some(index) = reuse {
-                    buffer
-                        .get_index_mut(index)
-                        .map(|(_, samples)| samples)
-                        .with_context(|| UnexpectedResultSnafu {
-                            reason: "reused series entry must exist",
-                        })?
-                } else {
-                    let entry = buffer.entry(tags);
-                    last_entry_index = Some(entry.index());
-                    entry.or_default()
-                };
-                if let Some((timestamp_millis, histogram)) = histogram {
-                    samples
-                        .histograms
-                        .push((timestamp_millis as f64 / 1000.0, histogram));
-                } else if let Some((timestamp_millis, value)) = value {
-                    samples.values.push((
-                        timestamp_millis as f64 / 1000.0,
-                        format_prometheus_sample_value(value),
-                    ));
                 }
             }
         }
@@ -451,7 +510,10 @@ impl PrometheusJsonResponse {
                 PromQueryResult::Vector(ref mut v) => {
                     let histogram = samples.histograms.pop();
                     let value = if histogram.is_none() {
-                        samples.values.pop()
+                        samples
+                            .values
+                            .pop()
+                            .map(|(timestamp, value)| (timestamp, value.into_string()))
                     } else {
                         None
                     };
@@ -481,7 +543,10 @@ impl PrometheusJsonResponse {
                     });
                 }
                 PromQueryResult::Scalar(ref mut v) => {
-                    *v = samples.values.pop();
+                    *v = samples
+                        .values
+                        .pop()
+                        .map(|(timestamp, value)| (timestamp, value.into_string()));
                 }
                 PromQueryResult::String(ref mut _v) => {
                     // TODO(ruihang): Not supported yet
@@ -503,6 +568,71 @@ impl PrometheusJsonResponse {
 
         Ok(data)
     }
+}
+
+/// Ranges of consecutive rows whose label values are all equal.
+///
+/// `arrow::compute::partition` computes the same ranges, but its contract takes
+/// lexicographically sorted columns, which query output is not: range queries
+/// run without the plan's output sort, and `sort`/`topk` order by value.
+/// `distinct` is element-wise, so it holds for any row order, and its null
+/// handling is the one a series key needs: a null label and an empty one are
+/// distinct, and two nulls are not.
+fn label_runs(columns: &[&ArrayRef], rows: usize) -> Result<Vec<Range<usize>>> {
+    let mut boundaries: Option<BooleanBuffer> = None;
+    if rows >= 2 {
+        for column in columns {
+            let changed = distinct(&column.slice(0, rows - 1), &column.slice(1, rows - 1))
+                .context(ArrowSnafu)?;
+            boundaries = Some(match boundaries {
+                Some(accumulated) => &accumulated | changed.values(),
+                None => changed.values().clone(),
+            });
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut start = 0;
+    for boundary in boundaries.iter().flat_map(BooleanBuffer::set_indices) {
+        runs.push(start..boundary + 1);
+        start = boundary + 1;
+    }
+    runs.push(start..rows);
+    Ok(runs)
+}
+
+/// Decides whether to group the rows of a batch into runs that share their
+/// label values.
+///
+/// Sampling adjacent row pairs keeps the decision independent of the batch
+/// size. Probe positions come from a xorshift sequence instead of a fixed
+/// stride, which would alias with periodic series layouts. A wrong guess only
+/// costs time: `partition` still validates every boundary, and the row-by-row
+/// path builds the labels of every row.
+fn prefer_label_runs(columns: &[&ArrayRef], rows: usize) -> bool {
+    if columns.is_empty() {
+        return true;
+    }
+    if rows < 2 {
+        return false;
+    }
+    let mut position = 0x9e37_79b9_u32;
+    let mut changes = 0;
+    for _ in 0..8 {
+        position ^= position << 13;
+        position ^= position >> 17;
+        position ^= position << 5;
+        let row = position as usize % (rows - 1);
+        if columns.iter().any(|column| {
+            string_array_value_at_index(column, row) != string_array_value_at_index(column, row + 1)
+        }) {
+            changes += 1;
+            if changes > 2 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn merge_annotations(target: &mut Option<Vec<String>>, source: Option<Vec<String>>) {
@@ -666,6 +796,101 @@ mod tests {
     }
 
     #[test]
+    fn sample_value_serialization_matches_eager_formatting() {
+        let mut values = vec![
+            0.0,
+            -0.0,
+            f64::MAX,
+            f64::MIN,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            1e-7,
+            1e21,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let mut bits = 0x1234_5678_9876_5432_u64;
+        for _ in 0..1000 {
+            bits ^= bits << 13;
+            bits ^= bits >> 7;
+            bits ^= bits << 17;
+            values.push(f64::from_bits(bits));
+        }
+        for value in values {
+            assert_eq!(
+                serde_json::to_string(&PromSampleValue::Number(value)).unwrap(),
+                serde_json::to_string(&format_prometheus_sample_value(value)).unwrap()
+            );
+        }
+        for value in ["1.00", "+Inf", "-0", "NaN", "not-a-number", "", "\"\\\n"] {
+            let json = serde_json::to_string(value).unwrap();
+            let parsed: PromSampleValue = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), json);
+        }
+        for value in ["1", "null", "true", "[]", "{}"] {
+            assert!(serde_json::from_str::<PromSampleValue>(value).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn matrix_response_body_matches_eagerly_formatted_json() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batches = RecordBatches::try_new(
+            schema.clone(),
+            vec![
+                RecordBatch::new(
+                    schema,
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values([
+                            1000, 2000, 3000, 4000, 5000,
+                        ])) as _,
+                        Arc::new(StringVector::from(vec![Some("a"); 5])) as _,
+                        Arc::new(Float64Vector::from_values([
+                            -0.0,
+                            f64::NAN,
+                            1e-7,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                        ])) as _,
+                    ],
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let actual = PrometheusJsonResponse::from_query_result(
+            Ok(Output::new_with_record_batches(batches)),
+            None,
+            ValueType::Matrix,
+            None,
+        )
+        .await;
+        // Deserializing the expectation yields `PromSampleValue::Text`, so this
+        // compares the deferred numeric encoding against eagerly built strings.
+        let expected: PrometheusJsonResponse = serde_json::from_value(serde_json::json!({
+            "status": "success",
+            "data": {"resultType": "matrix", "result": [{
+                "metric": {"host": "a"},
+                "values": [[1.0, "-0.0"], [2.0, "NaN"], [3.0, "1e-7"], [4.0, "inf"], [5.0, "-inf"]]
+            }]}
+        }))
+        .unwrap();
+        assert_eq!(
+            serde_json::to_string(&actual).unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+    }
+
+    #[test]
     fn matrix_response_preserves_ordinary_nan_and_filters_stale_markers() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -704,8 +929,8 @@ mod tests {
 
         assert_eq!(series.len(), 1);
         assert_eq!(
-            series[0].values,
-            vec![(1.0, "1.0".to_string()), (2.0, "NaN".to_string())]
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::json!([[1.0, "1.0"], [2.0, "NaN"]])
         );
     }
 
@@ -766,7 +991,10 @@ mod tests {
                 ((index + 1) as f64, expected_value)
             })
             .collect::<Vec<_>>();
-        assert_eq!(series[0].values, expected);
+        assert_eq!(
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
     }
 
     #[test]
@@ -809,21 +1037,16 @@ mod tests {
 
         assert_eq!(series.len(), 1);
         assert_eq!(
-            series[0].values,
-            vec![
-                (1.0, "inf".to_string()),
-                (2.0, "-inf".to_string()),
-                (3.0, "NaN".to_string()),
-            ]
+            serde_json::to_value(&series[0].values).unwrap(),
+            serde_json::json!([[1.0, "inf"], [2.0, "-inf"], [3.0, "NaN"]])
         );
     }
 
     #[test]
-    fn record_batches_to_data_reuses_entries_for_clustered_series() {
-        // Rows are clustered by series (a, b, a, a, b, c): consecutive rows of
-        // the same series exercise the entry-reuse fast path, while series
-        // transitions fall back to the map lookup. The result must keep the
-        // first-occurrence order and accumulate values per series as before.
+    fn record_batches_to_data_groups_clustered_series() {
+        // Rows are clustered by series (a, b, a, a, b, c) and `a` is revisited
+        // after `b`. The result must keep the first-occurrence order and
+        // accumulate values per series.
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -887,6 +1110,286 @@ mod tests {
         assert_eq!(series[0].value, Some((4.0, "4.0".to_string())));
         assert_eq!(series[1].value, Some((5.0, "5.0".to_string())));
         assert_eq!(series[2].value, Some((6.0, "6.0".to_string())));
+    }
+
+    #[test]
+    fn label_strategy_switches_preserve_all_rows_when_probes_miss_changes() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let mut batches = Vec::new();
+        let mut expected = BTreeMap::<String, Vec<(f64, PromSampleValue)>>::new();
+        for layout in 0..3 {
+            let labels = (0..1024)
+                .map(|row| {
+                    let alternating = match layout {
+                        0 => true,
+                        1 => row < 64,
+                        _ => row >= 64,
+                    };
+                    if alternating && row % 2 != 0 {
+                        "b"
+                    } else {
+                        "a"
+                    }
+                })
+                .collect::<Vec<_>>();
+            for (row, label) in labels.iter().enumerate() {
+                let value = (layout * 1024 + row) as f64;
+                expected
+                    .entry((*label).to_string())
+                    .or_default()
+                    .push((value, PromSampleValue::Number(value)));
+            }
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_values(
+                        (0..1024).map(|row| (layout * 1024 + row) as i64 * 1000),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        labels.into_iter().map(Some).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(Float64Vector::from(
+                        (0..1024)
+                            .map(|row| Some((layout * 1024 + row) as f64))
+                            .collect::<Vec<_>>(),
+                    )) as _,
+                ],
+            )
+            .unwrap();
+            // The middle batch alternates only over a prefix the probes miss,
+            // so it takes the run path even though most rows are not runs.
+            assert_eq!(
+                prefer_label_runs(&[batch.column(1)], batch.num_rows()),
+                layout == 1
+            );
+            batches.push(batch);
+        }
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, batches).unwrap(),
+            None,
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), expected.len());
+        for series in series {
+            assert_eq!(series.metric.len(), 1);
+            assert!(series.histograms.is_empty());
+            assert_eq!(
+                series.values,
+                expected.remove(&series.metric["host"]).unwrap()
+            );
+        }
+        assert!(expected.is_empty());
+    }
+
+    #[test]
+    fn label_runs_keep_null_and_empty_labels_apart_across_batches() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        // Two batches of two runs each, with only `rack` changing: a null label
+        // and an empty one must not share a run, and the run opening the second
+        // batch continues the series that ended the first one.
+        let mut batches = Vec::new();
+        let mut expected = vec![Vec::new(), Vec::new()];
+        for (batch_index, leading_null) in [true, false].into_iter().enumerate() {
+            let mut racks = Vec::new();
+            let mut values = Vec::new();
+            for row in 0..1024 {
+                let value = (batch_index * 1024 + row) as f64;
+                let null_rack = (row < 512) == leading_null;
+                racks.push((!null_rack).then_some(""));
+                values.push(Some(value));
+                expected[usize::from(!null_rack)].push((value, PromSampleValue::Number(value)));
+            }
+            batches.push(
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values(
+                            values.iter().map(|value| value.unwrap() as i64 * 1000),
+                        )) as _,
+                        Arc::new(StringVector::from(vec![Some("a"); 1024])) as _,
+                        Arc::new(StringVector::from(racks)) as _,
+                        Arc::new(Float64Vector::from(values)) as _,
+                    ],
+                )
+                .unwrap(),
+            );
+        }
+        for batch in &batches {
+            assert!(prefer_label_runs(
+                &[batch.column(1), batch.column(2)],
+                batch.num_rows()
+            ));
+        }
+        for series in &mut expected {
+            series.sort_by(|left, right| left.0.total_cmp(&right.0));
+        }
+
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, batches).unwrap(),
+            None,
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 2);
+        assert_eq!(
+            series[0].metric,
+            BTreeMap::from([("host".into(), "a".into())])
+        );
+        assert_eq!(series[0].values, expected[0]);
+        assert_eq!(
+            series[1].metric,
+            BTreeMap::from([("host".into(), "a".into()), ("rack".into(), "".into())])
+        );
+        assert_eq!(series[1].values, expected[1]);
+    }
+
+    #[test]
+    fn matrix_response_is_independent_of_input_row_order() {
+        // Range queries run without the plan's output sort, so this function sees
+        // series interleaved across batches with timestamps out of order. The
+        // serialized matrix must be the same either way.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("rack", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("histogram", native_histogram_value_type().clone(), true),
+        ]));
+        let histogram = |sum: f64| NativeHistogram {
+            sum,
+            ..sample_histogram()
+        };
+        // timestamp, host, rack, float value, histogram value
+        type Row = (
+            i64,
+            Option<&'static str>,
+            Option<&'static str>,
+            Option<f64>,
+            Option<NativeHistogram>,
+        );
+        let rows: Vec<Row> = vec![
+            (1_000, Some("a"), Some("r"), Some(1.0), None),
+            (3_000, Some("a"), Some("r"), Some(3.0), None),
+            (2_000, Some("a"), Some("r"), Some(2.0), None),
+            (5_000, Some("a"), None, Some(5.0), None),
+            (4_000, Some("a"), None, Some(4.0), None),
+            (7_000, Some(""), None, Some(7.0), None),
+            (8_000, None, None, Some(8.0), None),
+            (6_000, None, None, Some(6.0), None),
+            (2_000, Some("h"), None, None, Some(histogram(20.0))),
+            (1_000, Some("h"), None, None, Some(histogram(10.0))),
+        ];
+        let matrix = |order: &[usize], splits: &[usize]| {
+            let batch = RecordBatch::new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_vec(
+                        order.iter().map(|&row| rows[row].0).collect(),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        order.iter().map(|&row| rows[row].1).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(StringVector::from(
+                        order.iter().map(|&row| rows[row].2).collect::<Vec<_>>(),
+                    )) as _,
+                    Arc::new(Float64Vector::from(
+                        order.iter().map(|&row| rows[row].3).collect::<Vec<_>>(),
+                    )) as _,
+                    histogram_vector(
+                        &order
+                            .iter()
+                            .map(|&row| rows[row].4.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                ],
+            )
+            .unwrap();
+            let mut batches = Vec::new();
+            let mut start = 0;
+            for &end in splits.iter().chain(std::iter::once(&order.len())) {
+                batches.push(batch.slice(start, end - start).unwrap());
+                start = end;
+            }
+            let response = PrometheusJsonResponse::record_batches_to_data(
+                RecordBatches::try_new(schema.clone(), batches).unwrap(),
+                Some("metric".to_string()),
+                ValueType::Matrix,
+            )
+            .unwrap();
+            let PrometheusResponse::PromData(PromData {
+                result: PromQueryResult::Matrix(series),
+                ..
+            }) = response
+            else {
+                panic!("expected matrix response");
+            };
+            series
+        };
+
+        let clustered = matrix(&[0, 2, 1, 4, 3, 5, 7, 6, 9, 8], &[5]);
+        let interleaved = matrix(&[8, 5, 1, 6, 0, 3, 9, 2, 7, 4], &[3, 6]);
+        assert_eq!(
+            serde_json::to_value(&interleaved).unwrap(),
+            serde_json::to_value(&clustered).unwrap()
+        );
+
+        // Pin the canonical arrangement itself, not only its stability.
+        assert_eq!(
+            serde_json::to_value(&clustered[..4]).unwrap(),
+            serde_json::json!([
+                {"metric": {"__name__": "metric"}, "values": [[6.0, "6.0"], [8.0, "8.0"]]},
+                {"metric": {"__name__": "metric", "host": ""}, "values": [[7.0, "7.0"]]},
+                {"metric": {"__name__": "metric", "host": "a"},
+                 "values": [[4.0, "4.0"], [5.0, "5.0"]]},
+                {"metric": {"__name__": "metric", "host": "a", "rack": "r"},
+                 "values": [[1.0, "1.0"], [2.0, "2.0"], [3.0, "3.0"]]},
+            ])
+        );
+        assert_eq!(clustered[4].metric["host"], "h");
+        assert_eq!(
+            clustered[4]
+                .histograms
+                .iter()
+                .map(|(timestamp, histogram)| (*timestamp, histogram.sum.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(1.0, "10"), (2.0, "20")]
+        );
     }
 
     #[test]

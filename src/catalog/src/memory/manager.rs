@@ -450,6 +450,15 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn test_reserved_schema_name_ignores_case() {
+        let catalog = MemoryCatalogManager::with_default_setup();
+
+        assert!(catalog.is_reserved_schema_name("INFORMATION_SCHEMA"));
+        assert!(catalog.is_reserved_schema_name(&DEFAULT_PRIVATE_SCHEMA_NAME.to_uppercase()));
+        assert!(!catalog.is_reserved_schema_name("my_information_schema"));
+    }
+
     #[tokio::test]
     async fn test_new_memory_catalog_list() {
         let catalog_list = new_memory_catalog_manager().unwrap();

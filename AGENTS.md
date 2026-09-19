@@ -69,6 +69,11 @@ a module map, read/write paths, change-coupling points, and gotchas:
 - [`tests/compatibility/AGENTS.md`](tests/compatibility/AGENTS.md)
 - [`tests/perf/AGENTS.md`](tests/perf/AGENTS.md)
 
+## Rust style
+
+Follow [`docs/style-guide.md`](docs/style-guide.md) for Rust style, module
+design, naming, and reuse guidance.
+
 ## Read before changing code
 
 - [`.agents/architecture-invariants.md`](.agents/architecture-invariants.md) —
@@ -136,6 +141,11 @@ blast radius requires it.
    [`.github/pull_request_template.md`](.github/pull_request_template.md): include
    the CLA statement, fill the change-intention section with enough detail, and
    update checklist items accurately.
+11. If the change must also land on release branches, add the matching
+   `backport-<target>` labels (e.g. `backport-v1.3` targets `release/v1.3`). The
+   Backport workflow (`.github/workflows/backport.yml`) cherry-picks a merged PR
+   onto each target branch and opens a backport PR automatically; on conflicts
+   it aborts and files an issue for a manual backport.
 
 ## More
 

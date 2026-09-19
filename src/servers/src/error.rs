@@ -687,6 +687,13 @@ pub enum Error {
     },
 
     #[snafu(transparent)]
+    Operator {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
     GreptimeProto {
         source: api::error::Error,
         #[snafu(implicit)]
@@ -745,7 +752,7 @@ impl ErrorExt for Error {
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,
 
-            CollectRecordbatch { .. } => StatusCode::EngineExecuteQuery,
+            CollectRecordbatch { source, .. } => source.status_code(),
 
             ExecuteQuery { source, .. }
             | ExecutePlan { source, .. }
@@ -853,6 +860,7 @@ impl ErrorExt for Error {
             GreptimeProto { source, .. } => source.status_code(),
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
+            Operator { source, .. } => source.status_code(),
             SubmitBatch { source, .. } => source.status_code(),
         }
     }
@@ -887,6 +895,7 @@ impl ErrorExt for Error {
             GreptimeProto { source, .. } => source.retry_hint(),
             Partition { source, .. } => source.retry_hint(),
             MetricEngine { source, .. } => source.retry_hint(),
+            Operator { source, .. } => source.retry_hint(),
             SubmitBatch { source, .. } => source.retry_hint(),
 
             MemoryLimitExceeded { source, .. } => source.retry_hint(),
@@ -984,5 +993,39 @@ pub fn status_code_to_http_status(status_code: &StatusCode) -> HttpStatusCode {
         | StatusCode::Unknown
         | StatusCode::RuntimeResourcesExhausted
         | StatusCode::EngineExecuteQuery => HttpStatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use common_error::GREPTIME_DB_HEADER_ERROR_CODE;
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn collect_recordbatch_preserves_poll_stream_status_in_tonic_status() {
+        let error = Error::CollectRecordbatch {
+            source: common_recordbatch::error::Error::PollStream {
+                error: DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                    "neutral error".to_string(),
+                    StatusCode::RequestOutdated,
+                )))),
+                location: Location::default(),
+            },
+            location: Location::default(),
+        };
+
+        let status: tonic::Status = error.into();
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status
+                .metadata()
+                .get(GREPTIME_DB_HEADER_ERROR_CODE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            (StatusCode::RequestOutdated as u32).to_string()
+        );
     }
 }

@@ -18,11 +18,11 @@ use common_query::error;
 use datafusion::arrow::compute::kernels::numeric;
 use datafusion_common::arrow::compute::kernels::cast;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_expr::type_coercion::aggregates::NUMERICS;
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, Signature, Volatility};
 use snafu::ResultExt;
 
 use crate::function::{Function, extract_args};
+use crate::helper::NUMERICS;
 
 /// generates rates from a sequence of adjacent data points.
 #[derive(Clone, Debug)]
@@ -96,12 +96,13 @@ mod tests {
         let rate = RateFunction::default();
         assert_eq!("rate", rate.name());
         assert_eq!(DataType::Float64, rate.return_type(&[]).unwrap());
-        assert!(matches!(rate.signature(),
-                         Signature {
-                             type_signature: TypeSignature::Uniform(2, valid_types),
-                             volatility: Volatility::Immutable,
-                             ..
-                         } if  valid_types == NUMERICS
+        assert!(matches!(
+            rate.signature(),
+            Signature {
+                type_signature: TypeSignature::Uniform(2, valid_types),
+                volatility: Volatility::Immutable,
+                ..
+            } if valid_types == NUMERICS
         ));
         let values = vec![1.0, 3.0, 6.0];
         let ts = vec![0, 1, 2];

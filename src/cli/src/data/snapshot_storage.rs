@@ -338,9 +338,7 @@ impl OpenDalStorage {
         let path = extract_file_path_from_uri(uri)?;
 
         let builder = Fs::default().root(&path);
-        let object_store = ObjectStore::new(builder)
-            .context(BuildObjectStoreSnafu)?
-            .finish();
+        let object_store = ObjectStore::new(builder).context(BuildObjectStoreSnafu)?;
         Ok(Self::new_operator_rooted(
             Self::finish_local_store(object_store),
             uri,
@@ -381,9 +379,7 @@ impl OpenDalStorage {
         Self::validate_remote_config(uri, "s3", config.validate())?;
 
         let conn: S3Connection = config.into();
-        let object_store = ObjectStore::new(S3::from(&conn))
-            .context(BuildObjectStoreSnafu)?
-            .finish();
+        let object_store = ObjectStore::new(S3::from(&conn)).context(BuildObjectStoreSnafu)?;
         Ok(Self::new_operator_rooted(
             Self::finish_remote_store(object_store),
             uri,
@@ -412,9 +408,7 @@ impl OpenDalStorage {
         Self::validate_remote_config(uri, "oss", config.validate())?;
 
         let conn: OssConnection = config.into();
-        let object_store = ObjectStore::new(Oss::from(&conn))
-            .context(BuildObjectStoreSnafu)?
-            .finish();
+        let object_store = ObjectStore::new(Oss::from(&conn)).context(BuildObjectStoreSnafu)?;
         Ok(Self::new_operator_rooted(
             Self::finish_remote_store(object_store),
             uri,
@@ -448,9 +442,7 @@ impl OpenDalStorage {
         }
 
         let conn: GcsConnection = config.into();
-        let object_store = ObjectStore::new(Gcs::from(&conn))
-            .context(BuildObjectStoreSnafu)?
-            .finish();
+        let object_store = ObjectStore::new(Gcs::from(&conn)).context(BuildObjectStoreSnafu)?;
         Ok(Self::new_operator_rooted(
             Self::finish_remote_store(object_store),
             uri,
@@ -500,9 +492,7 @@ impl OpenDalStorage {
         Self::validate_remote_config(uri, "azblob", config.validate())?;
 
         let conn: AzblobConnection = config.into();
-        let object_store = ObjectStore::new(Azblob::from(&conn))
-            .context(BuildObjectStoreSnafu)?
-            .finish();
+        let object_store = ObjectStore::new(Azblob::from(&conn)).context(BuildObjectStoreSnafu)?;
         Ok(Self::new_operator_rooted(
             Self::finish_remote_store(object_store),
             uri,
@@ -732,9 +722,7 @@ mod tests {
     use crate::data::export_v2::schema::SchemaDefinition;
 
     fn make_storage_with_rooted_fs(dir: &std::path::Path) -> OpenDalStorage {
-        let object_store = ObjectStore::new(Fs::default().root(dir.to_str().unwrap()))
-            .unwrap()
-            .finish();
+        let object_store = ObjectStore::new(Fs::default().root(dir.to_str().unwrap())).unwrap();
         OpenDalStorage::new_operator_rooted(
             OpenDalStorage::finish_local_store(object_store),
             Url::from_directory_path(dir).unwrap().as_ref(),

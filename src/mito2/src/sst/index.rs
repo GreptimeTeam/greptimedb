@@ -13,11 +13,17 @@
 // limitations under the License.
 
 pub(crate) mod bloom_filter;
+mod column;
+#[cfg(test)]
+mod column_test;
 pub(crate) mod fulltext_index;
 mod indexer;
 pub mod intermediate;
 pub(crate) mod inverted_index;
+mod primary_key;
 pub mod puffin_manager;
+#[cfg(test)]
+mod sparse_test;
 mod statistics;
 pub(crate) mod store;
 #[cfg(feature = "vector_index")]
@@ -30,14 +36,11 @@ use std::sync::Arc;
 
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
-use datatypes::arrow::array::BinaryArray;
 use datatypes::arrow::record_batch::RecordBatch;
-use mito_codec::index::IndexValuesCodec;
-use mito_codec::row_converter::CompositeValues;
 use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use statistics::{ByteCount, RowCount};
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};
@@ -54,8 +57,8 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
-    RegionDroppedSnafu, RegionTruncatedSnafu, Result,
+    BuildIndexAsyncSnafu, Error, RegionClosedSnafu, RegionDroppedSnafu, RegionTruncatedSnafu,
+    Result,
 };
 use crate::metrics::{
     INDEX_ARTIFACT_CLEANUP_FAILURE_TOTAL, INDEX_CREATE_MEMORY_USAGE, INDEX_PUBLICATION_STALE_TOTAL,
@@ -79,8 +82,6 @@ use crate::sst::index::fulltext_index::creator::FulltextIndexer;
 use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::inverted_index::creator::InvertedIndexer;
 use crate::sst::parquet::SstInfo;
-use crate::sst::parquet::flat_format::primary_key_column_index;
-use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::worker::WorkerListener;
 
 pub(crate) const TYPE_INVERTED_INDEX: &str = "inverted_index";
@@ -1450,55 +1451,6 @@ impl IndexBuildScheduler {
     }
 }
 
-/// Decodes primary keys from a flat format RecordBatch.
-/// Returns a list of (decoded_pk_value, count) tuples where count is the number of occurrences.
-pub(crate) fn decode_primary_keys_with_counts(
-    batch: &RecordBatch,
-    codec: &IndexValuesCodec,
-) -> Result<Vec<(CompositeValues, usize)>> {
-    let primary_key_index = primary_key_column_index(batch.num_columns());
-    let pk_dict_array = batch
-        .column(primary_key_index)
-        .as_any()
-        .downcast_ref::<PrimaryKeyArray>()
-        .context(InvalidRecordBatchSnafu {
-            reason: "Primary key column is not a dictionary array",
-        })?;
-    let pk_values_array = pk_dict_array
-        .values()
-        .as_any()
-        .downcast_ref::<BinaryArray>()
-        .context(InvalidRecordBatchSnafu {
-            reason: "Primary key values are not binary array",
-        })?;
-    let keys = pk_dict_array.keys();
-
-    // Decodes primary keys and count consecutive occurrences
-    let mut result: Vec<(CompositeValues, usize)> = Vec::new();
-    let mut prev_key: Option<u32> = None;
-
-    let pk_indices = keys.values();
-    for &current_key in pk_indices.iter().take(keys.len()) {
-        // Checks if current key is the same as previous key
-        if let Some(prev) = prev_key
-            && prev == current_key
-        {
-            // Safety: We already have a key in the result vector.
-            result.last_mut().unwrap().1 += 1;
-            continue;
-        }
-
-        // New key, decodes it.
-        let pk_bytes = pk_values_array.value(current_key as usize);
-        let decoded_value = codec.decoder().decode(pk_bytes).context(DecodeSnafu)?;
-
-        result.push((decoded_value, 1));
-        prev_key = Some(current_key);
-    }
-
-    Ok(result)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1660,7 +1612,7 @@ mod tests {
     }
 
     fn mock_object_store() -> ObjectStore {
-        ObjectStore::new(Memory::default()).unwrap().finish()
+        ObjectStore::new(Memory::default()).unwrap()
     }
 
     async fn mock_intm_mgr(path: impl AsRef<str>) -> IntermediateManager {

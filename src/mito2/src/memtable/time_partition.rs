@@ -192,6 +192,7 @@ pub fn filter_record_batch(part: &BulkPart, min: i64, max: i64) -> Result<Option
         max_timestamp: max_ts,
         min_timestamp: min_ts,
         sequence: part.sequence,
+        min_sequence: part.min_sequence,
         timestamp_index: part.timestamp_index,
         raw_data: None,
     }))
@@ -1250,6 +1251,7 @@ mod tests {
             max_timestamp: max_ts,
             min_timestamp: min_ts,
             sequence,
+            min_sequence: sequence,
             timestamp_index: 0,
             raw_data: None,
         }
@@ -1388,6 +1390,7 @@ mod tests {
             max_timestamp: 8000,
             min_timestamp: 1000,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 0,
             raw_data: None,
         };

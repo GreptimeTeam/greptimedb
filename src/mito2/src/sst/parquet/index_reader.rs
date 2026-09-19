@@ -172,7 +172,7 @@ impl PruningStatistics for IndexRowGroupPruningStats<'_> {
         column_null_counts(self.row_groups, column_index)
     }
 
-    fn row_counts(&self, _column: &Column) -> Option<ArrayRef> {
+    fn row_counts(&self) -> Option<ArrayRef> {
         None
     }
 
@@ -185,6 +185,15 @@ impl IndexRowGroupPruningStats<'_> {
     fn column_values(&self, column: &Column, is_min: bool) -> Option<ArrayRef> {
         let column_index = self.schema.index_of(&column.name).ok()?;
         let data_type = self.schema.field(column_index).data_type();
-        column_values_by_type(self.row_groups, data_type, column_index, is_min)
+        let values = column_values_by_type(self.row_groups, data_type, column_index, is_min)?;
+        if values.data_type() == data_type {
+            Some(values)
+        } else {
+            // Parquet timestamp statistics surface as raw Int64; reinterpret
+            // them in the column's Timestamp type so pruning compares
+            // like-typed values. A cast failure yields no stats and keeps the
+            // row group (conservative).
+            datatypes::arrow::compute::cast(&values, data_type).ok()
+        }
     }
 }

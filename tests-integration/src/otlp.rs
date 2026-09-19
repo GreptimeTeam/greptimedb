@@ -18,7 +18,9 @@ mod test {
 
     use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
+    use datatypes::arrow::array::AsArray;
     use frontend::instance::Instance;
+    use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
     use otel_arrow_rust::proto::opentelemetry::common::v1::{
@@ -30,12 +32,476 @@ mod test {
         NumberDataPoint, ResourceMetrics, ScopeMetrics, Sum, metric,
     };
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
+    use pipeline::{GreptimePipelineParams, PipelineWay};
+    use serde_json::json;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trace_v2_on_standalone() -> Result<(), Box<dyn std::error::Error>> {
+        let standalone = GreptimeDbStandaloneBuilder::new("trace_v2_standalone")
+            .build()
+            .await;
+        test_trace_v2(standalone.fe_instance()).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trace_v2_on_distributed() -> Result<(), Box<dyn std::error::Error>> {
+        let distributed = tests::create_distributed_instance("trace_v2_distributed").await;
+        test_trace_v2(&distributed.frontend()).await?;
+        Ok(())
+    }
+
+    async fn test_trace_v2(instance: &Arc<Instance>) -> Result<(), Box<dyn std::error::Error>> {
+        let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        context.set_extension(
+            common_catalog::consts::TRACE_TABLE_NAME_SESSION_KEY,
+            "trace_v2",
+        );
+        let ctx = Arc::new(context);
+        let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+            "resourceSpans": [{
+                "resource": {"attributes": [
+                    {"key": "deployment.environment", "value": {"stringValue": "prod"}},
+                    {"key": "cloud.region", "value": {"stringValue": "us-west"}},
+                    {"key": "capacity", "value": {"intValue": "8"}}
+                ]},
+                "scopeSpans": [{
+                    "scope": {"attributes": [
+                        {"key": "sample.rate", "value": {"doubleValue": 0.5}},
+                        {"key": "enabled", "value": {"boolValue": true}},
+                        {"key": "config", "value": {"kvlistValue": {"values": [
+                            {"key": "batch_size", "value": {"intValue": "4"}}
+                        ]}}}
+                    ]},
+                    "spans": [{
+                        "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                        "spanId": "9630f2916e2f7909", "name": "op", "kind": 2,
+                        "startTimeUnixNano": "1736480942444376000",
+                        "endTimeUnixNano": "1736480942444499000",
+                        "events": [{
+                            "timeUnixNano": "1736480942444400000",
+                            "name": "cache.hit",
+                            "attributes": [{"key": "event.code", "value": {"intValue": "7"}}]
+                        }],
+                        "links": [{
+                            "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                            "spanId": "8f847259b0f6e1ab",
+                            "traceState": "vendor=value",
+                            "attributes": [{"key": "link.type", "value": {"stringValue": "follows_from"}}]
+                        }],
+                        "attributes": [
+                            {"key": "http.status_code", "value": {"intValue": "200"}},
+                            {"key": "latency", "value": {"doubleValue": 12.5}},
+                            {"key": "empty"},
+                            {"key": "bytes", "value": {"bytesValue": "AQID"}},
+                            {"key": "nested", "value": {"kvlistValue": {"values": [
+                                {"key": "a.b", "value": {"arrayValue": {"values": [{"boolValue": true}, {"stringValue": "ok"}]}}}
+                            ]}}}
+                        ]
+                    }]
+                }]
+            }]
+        }))?;
+        let result = instance
+            .traces(
+                instance.clone(),
+                request.clone(),
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await?;
+        assert_eq!((result.accepted_spans, result.rejected_spans), (1, 0));
+
+        // Check the complete schema created by the first export, before later writes.
+        let output = instance
+            .do_query("SHOW CREATE TABLE trace_v2", ctx.clone())
+            .await;
+        let batches = match output
+            .into_iter()
+            .next()
+            .ok_or("Expected non-empty SQL output")??
+            .data
+        {
+            OutputData::Stream(stream) => RecordBatches::try_collect(stream).await?,
+            OutputData::RecordBatches(batches) => batches,
+            OutputData::AffectedRows(_) => return Err("Expected SHOW CREATE TABLE rows".into()),
+        };
+        let expected = r#"CREATE TABLE IF NOT EXISTS "trace_v2" (
+  "timestamp" TIMESTAMP(9) NOT NULL,
+  "timestamp_end" TIMESTAMP(9) NULL,
+  "duration_nano" BIGINT NULL,
+  "parent_span_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  "span_id" STRING NULL,
+  "span_kind" STRING NULL,
+  "span_name" STRING NULL,
+  "span_status_code" STRING NULL,
+  "span_status_message" STRING NULL,
+  "trace_state" STRING NULL,
+  "scope_name" STRING NULL,
+  "scope_version" STRING NULL,
+  "service_name" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'),
+  "span_attributes" JSON2(
+    max_auto_expanded_paths = 100
+  ) NULL,
+  "scope_attributes" JSON2(
+    max_auto_expanded_paths = 100
+  ) NULL,
+  "resource_attributes" JSON2(
+    max_auto_expanded_paths = 100
+  ) NULL,
+  "span_events" JSON NULL,
+  "span_links" JSON NULL,
+  TIME INDEX ("timestamp"),
+  PRIMARY KEY ("service_name")
+)
+PARTITION ON COLUMNS ("trace_id") (
+  trace_id < '1',
+  trace_id >= '1' AND trace_id < '2',
+  trace_id >= '2' AND trace_id < '3',
+  trace_id >= '3' AND trace_id < '4',
+  trace_id >= '4' AND trace_id < '5',
+  trace_id >= '5' AND trace_id < '6',
+  trace_id >= '6' AND trace_id < '7',
+  trace_id >= '7' AND trace_id < '8',
+  trace_id >= '8' AND trace_id < '9',
+  trace_id >= '9' AND trace_id < 'a',
+  trace_id >= 'a' AND trace_id < 'b',
+  trace_id >= 'b' AND trace_id < 'c',
+  trace_id >= 'c' AND trace_id < 'd',
+  trace_id >= 'd' AND trace_id < 'e',
+  trace_id >= 'e' AND trace_id < 'f',
+  trace_id >= 'f'
+)
+ENGINE=mito
+WITH(
+  'comment' = 'Created on insertion',
+  append_mode = 'true',
+  'greptime.semantic.entity.service.id' = 'service_name',
+  'greptime.semantic.pipeline' = 'greptime_trace_v2',
+  'greptime.semantic.signal_type' = 'trace',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.trace.conventions' = 'unknown',
+  table_data_model = 'greptime_trace_v2'
+)"#;
+        let batches = batches.take();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), 1);
+        assert_eq!(batches[0].num_columns(), 2);
+        assert_eq!(
+            batches[0].iter_column_as_string(1).collect::<Vec<_>>(),
+            vec![Some(expected.to_string())],
+        );
+
+        // First write has no service.name: it must still create the tag, but no auxiliary rows.
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 1
+             FROM trace_v2
+             WHERE service_name IS NULL",
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 19
+             FROM information_schema.columns
+             WHERE table_name = 'trace_v2'",
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 0
+             FROM information_schema.tables
+             WHERE table_name IN ('trace_v2_services', 'trace_v2_operations')",
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            r#"SELECT COUNT(*) = 1
+             FROM trace_v2
+             WHERE span_attributes."http.status_code"::BIGINT = 200
+               AND span_attributes.empty::STRING IS NULL
+               AND span_attributes.bytes[1]::BIGINT = 2
+               AND span_attributes.nested."a.b"[0]::BOOLEAN = true"#,
+            ctx.clone(),
+        )
+        .await?;
+
+        // Exercise each JSON2 column and expressions combining columns, before and after flush.
+        let event_time =
+            common_time::Timestamp::new_nanosecond(1736480942444400000).to_iso8601_string();
+        let event_query = format!(
+            r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
+                 WHEN json_get_string(span_events, '$[0].name') = 'cache.hit'
+                   AND json_get_string(span_events, '$[0].time') = '{event_time}'
+                   AND json_get_int(span_events, '$[0].attributes."event.code"') = 7
+                   AND json_get_string(span_links, '$[0].trace_id') = 'cc9e0991a2e63d274984bd44ee669203'
+                   AND json_get_string(span_links, '$[0].span_id') = '8f847259b0f6e1ab'
+                   AND json_get_string(span_links, '$[0].trace_state') = 'vendor=value'
+                   AND json_get_string(span_links, '$[0].attributes."link.type"') = 'follows_from'
+                 THEN 1 END)
+             FROM trace_v2"#
+        );
+        let json_queries = [
+            event_query.as_str(),
+            r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
+                 WHEN span_attributes.latency::DOUBLE * 2 = 25
+                   AND upper(span_attributes.nested."a.b"[1]::STRING) = 'OK'
+                   AND span_attributes.missing::STRING IS NULL
+                 THEN 1 END)
+             FROM trace_v2"#,
+            r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
+                 WHEN scope_attributes."sample.rate"::DOUBLE + 0.25 = 0.75
+                   AND scope_attributes.enabled::BOOLEAN
+                   AND scope_attributes.config.batch_size::BIGINT * 2 = 8
+                 THEN 1 END)
+             FROM trace_v2"#,
+            r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
+                 WHEN upper(resource_attributes."cloud.region"::STRING) = 'US-WEST'
+                   AND resource_attributes.capacity::BIGINT - 2 = 6
+                 THEN 1 END)
+             FROM trace_v2"#,
+            r#"SELECT AVG(span_attributes.latency::DOUBLE
+                        * scope_attributes."sample.rate"::DOUBLE) = 6.25
+                   AND SUM(resource_attributes.capacity::BIGINT)
+                       = SUM(scope_attributes.config.batch_size::BIGINT) * 2
+             FROM trace_v2"#,
+        ];
+        for sql in json_queries {
+            assert_trace_v2_query(instance, sql, ctx.clone()).await?;
+        }
+
+        let mut mixed = request.clone();
+        mixed.resource_spans[0]
+            .resource
+            .as_mut()
+            .ok_or("Expected non-empty resource in trace fixture")?
+            .attributes[0]
+            .key = "service.name".to_string();
+        let spans = &mut mixed.resource_spans[0].scope_spans[0].spans;
+        // Reject one span in the first chunk, merge its healthy rows, then write the next chunk.
+        spans.resize(514, spans[0].clone());
+        for (index, span) in spans.iter_mut().enumerate() {
+            span.span_id = (index as u64).to_be_bytes().to_vec();
+        }
+        spans[0].attributes[0]
+            .value
+            .as_mut()
+            .ok_or("Expected non-empty attribute value in trace fixture")?
+            .value = Some(
+            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue("ok".to_string()),
+        );
+        spans[511].end_time_unix_nano = u64::MAX;
+        let result = instance
+            .traces(
+                instance.clone(),
+                mixed,
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await?;
+        assert_eq!((result.accepted_spans, result.rejected_spans), (513, 1));
+        assert!(
+            result
+                .error_message
+                .as_deref()
+                .is_some_and(|s| s.contains("Timestamp overflow"))
+        );
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 514
+             FROM trace_v2",
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            r#"SELECT COUNT(*) = 1
+             FROM trace_v2
+             WHERE span_attributes."http.status_code"::STRING = 'ok'"#,
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 1
+             FROM trace_v2_services
+             WHERE service_name = 'prod'",
+            ctx.clone(),
+        )
+        .await?;
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 1
+             FROM trace_v2_operations
+             WHERE service_name = 'prod'",
+            ctx.clone(),
+        )
+        .await?;
+
+        let mut invalid = request.clone();
+        invalid.resource_spans[0].scope_spans[0].spans[0].start_time_unix_nano = u64::MAX;
+        let result = instance
+            .traces(
+                instance.clone(),
+                invalid,
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await?;
+        assert_eq!((result.accepted_spans, result.rejected_spans), (0, 1));
+
+        // A v1 request must fail before auto-ALTER can flatten attributes into this table.
+        let error = instance
+            .traces(
+                instance.clone(),
+                request.clone(),
+                PipelineWay::OtlpTraceDirectV1,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await
+            .err()
+            .ok_or("Expected mixed trace models to be rejected")?;
+        let error = format!("{error:?}");
+        assert!(
+            error.contains("Trace table `trace_v2` uses greptime_trace_v2, but the request uses greptime_trace_v1"),
+            "{error}",
+        );
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 19
+             FROM information_schema.columns
+             WHERE table_name = 'trace_v2'",
+            ctx.clone(),
+        )
+        .await?;
+
+        let mut context = (*ctx).clone();
+        context.set_extension(
+            common_catalog::consts::TRACE_TABLE_NAME_SESSION_KEY,
+            "trace_v1",
+        );
+        let v1_ctx = Arc::new(context);
+        // Create the v1 table with an explicit service identity for the isolation check.
+        let mut v1_request = request.clone();
+        v1_request.resource_spans[0]
+            .resource
+            .as_mut()
+            .ok_or("Expected non-empty resource in trace fixture")?
+            .attributes[0]
+            .key = "service.name".to_string();
+        let result = instance
+            .traces(
+                instance.clone(),
+                v1_request,
+                PipelineWay::OtlpTraceDirectV1,
+                GreptimePipelineParams::default(),
+                "trace_v1".to_string(),
+                v1_ctx.clone(),
+            )
+            .await?;
+        assert_eq!(result.accepted_spans, 1);
+        let error = instance
+            .traces(
+                instance.clone(),
+                request.clone(),
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v1".to_string(),
+                v1_ctx,
+            )
+            .await
+            .err()
+            .ok_or("Expected mixed trace models to be rejected")?;
+        let error = format!("{error:?}");
+        assert!(
+            error.contains("Trace table `trace_v1` uses greptime_trace_v1, but the request uses greptime_trace_v2"),
+            "{error}",
+        );
+
+        let output = instance
+            .do_query("ADMIN FLUSH_TABLE('trace_v2')", ctx.clone())
+            .await;
+        assert!(output.into_iter().all(|r| r.is_ok()));
+        assert_trace_v2_query(
+            instance,
+            r#"SELECT COUNT(*) = 513
+             FROM trace_v2
+             WHERE span_attributes."http.status_code"::BIGINT = 200"#,
+            ctx.clone(),
+        )
+        .await?;
+        for sql in json_queries {
+            assert_trace_v2_query(instance, sql, ctx.clone()).await?;
+        }
+        // Empty events and links are stored as JSON arrays in the same 19-column table.
+        let mut empty_request = request;
+        let empty_span = &mut empty_request.resource_spans[0].scope_spans[0].spans[0];
+        empty_span.events.clear();
+        empty_span.links.clear();
+        let result = instance
+            .traces(
+                instance.clone(),
+                empty_request,
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await?;
+        assert_eq!((result.accepted_spans, result.rejected_spans), (1, 0));
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 1 FROM trace_v2
+             WHERE json_to_string(span_events) = '[]' AND json_to_string(span_links) = '[]'",
+            ctx.clone(),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn assert_trace_v2_query(
+        instance: &Arc<Instance>,
+        sql: &str,
+        ctx: Arc<QueryContext>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let output = instance.do_query(sql, ctx).await;
+        let OutputData::Stream(stream) = output
+            .into_iter()
+            .next()
+            .ok_or("Expected non-empty SQL output")??
+            .data
+        else {
+            return Err(format!("Expected a query stream: {sql}").into());
+        };
+        let batches = RecordBatches::try_collect(stream).await?;
+        let batches = batches.take();
+        assert_eq!(batches.len(), 1, "{sql}");
+        assert_eq!(batches[0].num_rows(), 1, "{sql}");
+        assert_eq!(
+            batches[0].column(0).as_boolean().iter().collect::<Vec<_>>(),
+            vec![Some(true)],
+            "{sql}"
+        );
+        Ok(())
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_on_standalone() {

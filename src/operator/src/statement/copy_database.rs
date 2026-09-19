@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -21,56 +19,26 @@ use client::{Output, OutputData, OutputMeta};
 use common_catalog::format_full_table_name;
 use common_datasource::file_format::Format;
 use common_datasource::lister::{Lister, Source};
-#[cfg(windows)]
-use common_datasource::object_store::{FS_SCHEMA, parse_url};
 use common_datasource::object_store::{LocalFileAccess, build_backend, build_backend_for_write};
-use common_stat::get_total_cpu_cores;
 use common_telemetry::{debug, error, info, tracing};
 use futures::future::try_join_all;
 use object_store::Entry;
 use regex::Regex;
 use session::context::QueryContextRef;
-use snafu::{OptionExt, ResultExt, ensure};
-use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
+use snafu::ResultExt;
 use table::requests::{CopyDatabaseRequest, CopyDirection, CopyTableRequest};
-use table::table_reference::TableReference;
 use tokio::sync::Semaphore;
 
 use crate::error;
-use crate::error::{CatalogSnafu, InvalidCopyDatabasePathSnafu};
 use crate::statement::StatementExecutor;
+use crate::statement::database_copy::{
+    DatabaseExportFile, database_import_source, parse_parallelism_from_option_map,
+    validate_database_directory,
+};
 
 pub(crate) const COPY_DATABASE_TIME_START_KEY: &str = "start_time";
 pub(crate) const COPY_DATABASE_TIME_END_KEY: &str = "end_time";
 pub(crate) const CONTINUE_ON_ERROR_KEY: &str = "continue_on_error";
-pub(crate) const PARALLELISM_KEY: &str = "parallelism";
-
-fn is_directory_location(location: &str) -> bool {
-    if location.ends_with('/') {
-        return true;
-    }
-
-    #[cfg(windows)]
-    {
-        location.ends_with(std::path::MAIN_SEPARATOR)
-            && matches!(
-                parse_url(location),
-                Ok((schema, _, _)) if schema.eq_ignore_ascii_case(FS_SCHEMA)
-            )
-    }
-
-    #[cfg(not(windows))]
-    false
-}
-
-/// Get parallelism from options, default to total CPU cores.
-fn parse_parallelism_from_option_map(options: &HashMap<String, String>) -> usize {
-    options
-        .get(PARALLELISM_KEY)
-        .and_then(|v| v.parse::<usize>().ok())
-        .unwrap_or_else(get_total_cpu_cores)
-        .max(1)
-}
 
 impl StatementExecutor {
     #[tracing::instrument(skip_all)]
@@ -79,13 +47,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        // Location must end with a separator so that every table is exported to a file.
-        ensure!(
-            is_directory_location(&req.location),
-            InvalidCopyDatabasePathSnafu {
-                value: req.location,
-            }
-        );
+        validate_database_directory(&req.location)?;
         build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
             .await
             .context(error::BuildBackendSnafu)?;
@@ -95,12 +57,10 @@ impl StatementExecutor {
             "Copy database {}.{} to dir: {}, time: {:?}, parallelism: {}",
             req.catalog_name, req.schema_name, req.location, req.time_range, parallelism
         );
-        let table_names = self
-            .catalog_manager
-            .table_names(&req.catalog_name, &req.schema_name, Some(&ctx))
-            .await
-            .context(CatalogSnafu)?;
-        let num_tables = table_names.len();
+        let tables = self
+            .capture_database_export_tables(&req, None, &ctx)
+            .await?;
+        let num_tables = tables.len();
 
         let suffix = Format::try_from(&req.with)
             .context(error::ParseFileFormatSnafu)?
@@ -109,34 +69,10 @@ impl StatementExecutor {
         let mut tasks = Vec::with_capacity(num_tables);
         let semaphore = Arc::new(Semaphore::new(parallelism));
 
-        for (i, table_name) in table_names.into_iter().enumerate() {
-            let table = self
-                .get_table(&TableReference {
-                    catalog: &req.catalog_name,
-                    schema: &req.schema_name,
-                    table: &table_name,
-                })
-                .await?;
-            // Only base tables, ignores views and temporary tables.
-            if table.table_type() != table::metadata::TableType::Base {
-                continue;
-            }
-            // Ignores physical tables of metric engine.
-            if table.table_info().meta.engine == METRIC_ENGINE_NAME
-                && !table
-                    .table_info()
-                    .meta
-                    .options
-                    .extra_options
-                    .contains_key(LOGICAL_TABLE_METADATA_KEY)
-            {
-                continue;
-            }
-
+        for (i, table) in tables.into_iter().enumerate() {
+            let table_name = table.table_info().name.clone();
             let semaphore_moved = semaphore.clone();
-            let mut table_file = req.location.clone();
-            table_file.push_str(&table_name);
-            table_file.push_str(suffix);
+            let table_file = DatabaseExportFile::new(&req.location, &table_name, suffix)?.location;
             let table_no = i + 1;
             let moved_ctx = ctx.clone();
             let full_table_name =
@@ -160,7 +96,8 @@ impl StatementExecutor {
                     "Copy table({}/{}): {} to {}",
                     table_no, num_tables, full_table_name, table_file
                 );
-                self.copy_table_to(copy_table_req, moved_ctx).await
+                self.copy_captured_table_to(table, copy_table_req, moved_ctx)
+                    .await
             });
         }
 
@@ -176,13 +113,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         ctx: QueryContextRef,
     ) -> error::Result<Output> {
-        // Location must end with a directory separator.
-        ensure!(
-            is_directory_location(&req.location),
-            InvalidCopyDatabasePathSnafu {
-                value: req.location,
-            }
-        );
+        validate_database_directory(&req.location)?;
 
         let parallelism = parse_parallelism_from_option_map(&req.with);
         info!(
@@ -205,8 +136,8 @@ impl StatementExecutor {
         let semaphore = Arc::new(Semaphore::new(parallelism));
 
         for e in entries {
-            let table_name = match parse_file_name_to_copy(&e) {
-                Ok(table_name) => table_name,
+            let (table_name, location) = match database_import_source(&req.location, e.path()) {
+                Ok(source) => source,
                 Err(err) => {
                     if continue_on_error {
                         error!(err; "Failed to import table from file: {:?}", e);
@@ -221,7 +152,7 @@ impl StatementExecutor {
                 catalog_name: req.catalog_name.clone(),
                 schema_name: req.schema_name.clone(),
                 table_name: table_name.clone(),
-                location: format!("{}{}", req.location, e.path()),
+                location,
                 with: req.with.clone(),
                 connection: req.connection.clone(),
                 pattern: None,
@@ -266,17 +197,6 @@ impl StatementExecutor {
     }
 }
 
-/// Parses table names from files' names.
-fn parse_file_name_to_copy(e: &Entry) -> error::Result<String> {
-    Path::new(e.name())
-        .file_stem()
-        .and_then(|os_str| os_str.to_str())
-        .map(|s| s.to_string())
-        .context(error::InvalidTableNameSnafu {
-            table_name: e.name().to_string(),
-        })
-}
-
 /// Lists all files with expected suffix that can be imported to database.
 async fn list_files_to_copy(
     req: &CopyDatabaseRequest,
@@ -299,10 +219,9 @@ async fn list_files_to_copy(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     use common_datasource::object_store::LocalFileAccess;
-    use common_stat::get_total_cpu_cores;
     use object_store::ObjectStore;
     use object_store::services::Fs;
     use object_store::util::normalize_dir;
@@ -310,16 +229,15 @@ mod tests {
     use path_slash::PathExt;
     use table::requests::CopyDatabaseRequest;
 
-    use crate::statement::copy_database::{
-        list_files_to_copy, parse_file_name_to_copy, parse_parallelism_from_option_map,
-    };
+    use crate::statement::copy_database::list_files_to_copy;
+    use crate::statement::database_copy::database_import_source;
 
     #[tokio::test]
     async fn test_list_files_and_parse_table_name() {
         let dir = common_test_util::temp_dir::create_temp_dir("test_list_files_to_copy");
         let store_dir = normalize_dir(dir.path().to_str().unwrap());
         let builder = Fs::default().root(&store_dir);
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         object_store.write("a.parquet", "").await.unwrap();
         object_store.write("b.parquet", "").await.unwrap();
         object_store.write("c.csv", "").await.unwrap();
@@ -345,7 +263,11 @@ mod tests {
             .await
             .unwrap()
             .into_iter()
-            .map(|e| parse_file_name_to_copy(&e).unwrap())
+            .map(|e| {
+                database_import_source(&request.location, e.path())
+                    .unwrap()
+                    .0
+            })
             .collect::<HashSet<_>>();
 
         assert_eq!(
@@ -354,17 +276,5 @@ mod tests {
                 .collect::<HashSet<_>>(),
             listed
         );
-    }
-
-    #[test]
-    fn test_parse_parallelism_from_option_map() {
-        let options = HashMap::new();
-        assert_eq!(
-            parse_parallelism_from_option_map(&options),
-            get_total_cpu_cores()
-        );
-
-        let options = HashMap::from([("parallelism".to_string(), "0".to_string())]);
-        assert_eq!(parse_parallelism_from_option_map(&options), 1);
     }
 }

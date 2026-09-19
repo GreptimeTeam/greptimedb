@@ -265,9 +265,14 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
             .resource
             .map(|r| r.attributes)
             .unwrap_or_default();
+
+        // "service.name" is required; SDKs MUST provide a fallback when it is unset.
+        // This is in the specification:
+        // https://opentelemetry.io/docs/specs/semconv/resource/service/
+        // Tolerate missing names from senders without using unrelated attributes as names.
         let service_name = resource_attrs
             .iter()
-            .find_or_first(|kv| kv.key == KEY_SERVICE_NAME)
+            .find(|kv| kv.key == KEY_SERVICE_NAME)
             .and_then(|kv| kv.value.clone())
             .and_then(|v| match v.value {
                 Some(any_value::Value::StringValue(s)) => Some(s),

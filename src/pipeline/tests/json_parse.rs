@@ -23,6 +23,8 @@ use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
 use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use greptime_proto::v1::column_data_type_extension::TypeExt;
+use greptime_proto::v1::{ColumnDataTypeExtension, JsonNativeTypeExtension};
 
 const INPUT_VALUE_OBJ: &str = r#"
 [
@@ -132,13 +134,20 @@ transform:
       json2:
         - path: "commitAuthor"
           type: string
-          nullable: false
 "#;
 
     let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);
 
     assert_eq!(output.schema[0].datatype, ColumnDataType::Json as i32);
-    assert!(output.schema[0].datatype_extension.is_none());
+
+    let expected = Some(ColumnDataTypeExtension {
+        type_ext: Some(TypeExt::JsonNativeType(Box::new(JsonNativeTypeExtension {
+            datatype: ColumnDataType::Json as _,
+            datatype_extension: None,
+        }))),
+    });
+    assert_eq!(output.schema[0].datatype_extension, expected);
+
     assert_eq!(
         output.schema[0]
             .options

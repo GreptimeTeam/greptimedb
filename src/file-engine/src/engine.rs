@@ -396,9 +396,7 @@ mod tests {
     use crate::error::Error;
 
     fn build_fs_object_store() -> ObjectStore {
-        ObjectStore::new(Fs::default().root("/tmp"))
-            .unwrap()
-            .finish()
+        ObjectStore::new(Fs::default().root("/tmp")).unwrap()
     }
 
     fn build_s3_object_store() -> ObjectStore {
@@ -409,7 +407,6 @@ mod tests {
                 .disable_ec2_metadata(),
         )
         .unwrap()
-        .finish()
     }
 
     #[test]

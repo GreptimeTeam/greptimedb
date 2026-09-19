@@ -183,13 +183,21 @@ impl DatabaseWithPeer {
     /// Try sending a "SELECT 1" to the database
     async fn try_select_one(&self) -> Result<(), Error> {
         // notice here use `sql` for `SELECT 1` return 1 row
-        let _ = self
+        let output = self
             .database
             .sql("SELECT 1")
             .await
             .with_context(|_| InvalidRequestSnafu {
                 context: format!("Failed to handle `SELECT 1` request at {:?}", self.peer),
             })?;
+
+        if let OutputData::Stream(stream) = output.data {
+            common_recordbatch::util::collect(stream)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?;
+        }
+
         Ok(())
     }
 }
@@ -547,6 +555,81 @@ impl FrontendClient {
         }
     }
 
+    /// Handle an insert request with one attempt.
+    ///
+    /// Unlike [`Self::handle`], this does not use the batching retry policy. It
+    /// is intended for stateless streaming sinks, where retrying an insert can
+    /// duplicate rows.
+    pub(crate) async fn handle_insert_once(
+        &self,
+        req: api::v1::greptime_request::Request,
+        catalog: &str,
+        schema: &str,
+        peer_desc: &mut Option<PeerDesc>,
+    ) -> Result<u32, Error> {
+        match self {
+            FrontendClient::Distributed { .. } => {
+                let db = self.get_random_active_frontend(catalog, schema).await?;
+
+                *peer_desc = Some(PeerDesc::Dist {
+                    peer: db.peer.clone(),
+                });
+
+                db.database
+                    .handle(req.clone())
+                    .await
+                    .with_context(|_| InvalidRequestSnafu {
+                        context: format!("Failed to handle request at {:?}: {:?}", db.peer, req),
+                    })
+            }
+            FrontendClient::Standalone {
+                database_client,
+                query,
+            } => {
+                let ctx = QueryContextBuilder::default()
+                    .current_catalog(catalog.to_string())
+                    .current_schema(schema.to_string())
+                    .extensions(HashMap::from([(
+                        QUERY_PARALLELISM_HINT.to_string(),
+                        query.parallelism.to_string(),
+                    )]))
+                    .build();
+                let ctx = Arc::new(ctx);
+                let database_client = {
+                    database_client
+                        .handler
+                        .lock()
+                        .unwrap()
+                        .as_ref()
+                        .context(UnexpectedSnafu {
+                            reason: "Standalone's frontend instance is not set",
+                        })?
+                        .upgrade()
+                        .context(UnexpectedSnafu {
+                            reason: "Failed to upgrade database client",
+                        })?
+                };
+                let resp: common_query::Output = database_client
+                    .do_query(req, ctx)
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?;
+                match resp.data {
+                    common_query::OutputData::AffectedRows(rows) => rows.try_into().map_err(|_| {
+                        UnexpectedSnafu {
+                            reason: format!("Failed to convert rows to u32: {}", rows),
+                        }
+                        .build()
+                    }),
+                    _ => UnexpectedSnafu {
+                        reason: "Unexpected output data",
+                    }
+                    .fail(),
+                }
+            }
+        }
+    }
+
     /// Handle a request to frontend
     pub(crate) async fn handle(
         &self,
@@ -666,7 +749,7 @@ fn wrap_standalone_output_with_terminal_metrics(
 
 /// Describe a peer of frontend
 #[derive(Debug, Default, Clone)]
-pub(crate) enum PeerDesc {
+pub enum PeerDesc {
     /// The query failed before a frontend peer was selected.
     #[default]
     Unknown,
@@ -692,15 +775,18 @@ impl std::fmt::Display for PeerDesc {
 #[cfg(test)]
 mod tests {
     use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::{Context, Poll};
     use std::time::Duration;
 
     use api::v1::query_request::Query;
     use arrow_flight::flight_service_server::FlightServiceServer;
     use arrow_flight::{FlightData, Ticket};
+    use common_grpc::flight::FlightEncoder;
     use common_query::{Output, OutputData};
     use common_recordbatch::adapter::RecordBatchMetrics;
     use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream};
+    use datatypes::arrow::datatypes::Schema as ArrowSchema;
     use datatypes::prelude::{ConcreteDataType, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::Int32Vector;
@@ -764,6 +850,11 @@ mod tests {
     struct MetricsHandler;
 
     #[derive(Debug)]
+    struct InsertOnceHandler {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Debug)]
     struct ExtensionAwareHandler;
 
     #[derive(Debug)]
@@ -774,6 +865,14 @@ mod tests {
 
     #[derive(Debug)]
     struct SlowFlight;
+
+    struct DelayedEofFlight {
+        schema_sent: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[derive(Debug)]
+    struct LateStreamErrorFlight;
 
     struct WaitForConcurrentFlight {
         barrier: Arc<tokio::sync::Barrier>,
@@ -787,6 +886,18 @@ mod tests {
             _ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             Ok(Output::new_with_affected_rows(0))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GrpcQueryHandlerWithBoxedError for InsertOnceHandler {
+        async fn do_query(
+            &self,
+            _query: Request,
+            _ctx: QueryContextRef,
+        ) -> std::result::Result<Output, BoxedError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Output::new_with_affected_rows(1))
         }
     }
 
@@ -871,6 +982,45 @@ mod tests {
     }
 
     #[async_trait::async_trait]
+    impl FlightCraft for DelayedEofFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            let schema = FlightEncoder::default().encode_schema(&ArrowSchema::empty());
+            let schema_sent = self.schema_sent.lock().unwrap().take();
+            let schema_stream = futures::stream::once(async move {
+                if let Some(schema_sent) = schema_sent {
+                    let _ = schema_sent.send(());
+                }
+                Ok(schema)
+            });
+            let release = self.release.clone();
+            let delayed_eof = futures::stream::unfold(release, |release| async move {
+                release.notified().await;
+                None::<(std::result::Result<FlightData, Status>, _)>
+            });
+
+            Ok(TonicResponse::new(Box::pin(
+                schema_stream.chain(delayed_eof),
+            )))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FlightCraft for LateStreamErrorFlight {
+        async fn do_get(
+            &self,
+            _request: TonicRequest<Ticket>,
+        ) -> std::result::Result<TonicResponse<TonicStream<FlightData>>, Status> {
+            let schema = FlightEncoder::default().encode_schema(&ArrowSchema::empty());
+            let stream =
+                futures::stream::iter([Ok(schema), Err(Status::unavailable("late stream error"))]);
+            Ok(TonicResponse::new(Box::pin(stream)))
+        }
+    }
+
+    #[async_trait::async_trait]
     impl FlightCraft for WaitForConcurrentFlight {
         async fn do_get(
             &self,
@@ -940,6 +1090,31 @@ mod tests {
                 .await
                 .is_ok()
         );
+    }
+
+    #[tokio::test]
+    async fn test_handle_insert_once_calls_standalone_handler_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: Arc<dyn GrpcQueryHandlerWithBoxedError> = Arc::new(InsertOnceHandler {
+            calls: calls.clone(),
+        });
+        let client =
+            FrontendClient::from_grpc_handler(Arc::downgrade(&handler), QueryOptions::default());
+        let mut peer_desc = None;
+
+        let affected_rows = client
+            .handle_insert_once(
+                Request::RowInserts(api::v1::RowInsertRequests { inserts: vec![] }),
+                "greptime",
+                "public",
+                &mut peer_desc,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(affected_rows, 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(peer_desc.is_none());
     }
 
     #[tokio::test]
@@ -1054,6 +1229,71 @@ mod tests {
             .unwrap_err();
 
         assert!(format!("{err:?}").contains("Invalid value for flow.return_region_seq"));
+    }
+
+    #[tokio::test]
+    async fn test_try_select_one_waits_for_stream_eof() {
+        let (schema_sent, schema_sent_rx) = tokio::sync::oneshot::channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (addr, server) = start_flight_server(DelayedEofFlight {
+            schema_sent: Mutex::new(Some(schema_sent)),
+            release: release.clone(),
+        })
+        .await;
+        let database = Database::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            Client::with_urls([addr.as_str()]),
+        );
+        let db = DatabaseWithPeer::new(
+            database,
+            Peer {
+                id: 1,
+                addr: addr.clone(),
+            },
+        );
+        let mut probe = tokio::spawn(async move { db.try_select_one().await });
+
+        timeout(Duration::from_secs(1), schema_sent_rx)
+            .await
+            .expect("server should send the schema")
+            .expect("schema signal should be sent");
+        assert!(
+            timeout(Duration::from_millis(100), &mut probe)
+                .await
+                .is_err(),
+            "SELECT 1 must wait for the delayed stream tail and EOF"
+        );
+
+        release.notify_one();
+        timeout(Duration::from_secs(1), &mut probe)
+            .await
+            .expect("SELECT 1 should complete after EOF")
+            .expect("probe task should not panic")
+            .expect("SELECT 1 should succeed after EOF");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn test_try_select_one_propagates_late_stream_error() {
+        let (addr, server) = start_flight_server(LateStreamErrorFlight).await;
+        let database = Database::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            Client::with_urls([addr.as_str()]),
+        );
+        let db = DatabaseWithPeer::new(
+            database,
+            Peer {
+                id: 1,
+                addr: addr.clone(),
+            },
+        );
+
+        let err = db.try_select_one().await.unwrap_err();
+        server.abort();
+
+        assert!(format!("{err:?}").contains("late stream error"));
     }
 
     #[tokio::test]
