@@ -377,31 +377,9 @@ pub fn recordbatches_to_timeseries(
     }
 
     for ts in &mut timeseries {
-        ts.samples.sort_by_key(|s| s.timestamp);
+        ts.samples.sort_unstable_by_key(|s| s.timestamp);
     }
 
-    timeseries
-        .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
-    Ok(timeseries)
-}
-
-#[cfg(test)]
-fn recordbatch_to_timeseries(
-    table: &str,
-    timestamp_column_name: &str,
-    value_column_name: &str,
-    recordbatch: RecordBatch,
-) -> Result<Vec<TimeSeries>> {
-    let mut timeseries = Vec::new();
-    let mut timeseries_by_hash = HashMap::new();
-    append_recordbatch_to_timeseries(
-        table,
-        timestamp_column_name,
-        value_column_name,
-        recordbatch,
-        &mut timeseries,
-        &mut timeseries_by_hash,
-    )?;
     timeseries
         .sort_unstable_by(|left, right| compare_timeseries_labels(&left.labels, &right.labels));
     Ok(timeseries)
@@ -1360,7 +1338,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recordbatch_to_timeseries_groups_non_contiguous_series() {
+    fn test_recordbatches_to_timeseries_groups_non_contiguous_series() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 greptime_timestamp(),
@@ -1371,7 +1349,7 @@ mod tests {
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as _,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as _,
@@ -1380,11 +1358,12 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries(
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let timeseries = recordbatches_to_timeseries(
             "metric1",
             greptime_timestamp(),
             greptime_value(),
-            recordbatch,
+            recordbatches,
         )
         .unwrap();
 
@@ -1407,7 +1386,7 @@ mod tests {
     }
 
     #[test]
-    fn test_recordbatch_to_timeseries_arrow_label_types_and_nulls() {
+    fn test_recordbatches_to_timeseries_arrow_label_types_and_nulls() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 greptime_timestamp(),
@@ -1420,7 +1399,7 @@ mod tests {
             ColumnSchema::new("shard", ConcreteDataType::int32_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as _,
                 Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as _,
@@ -1437,11 +1416,12 @@ mod tests {
         )
         .unwrap();
 
-        let timeseries = recordbatch_to_timeseries(
+        let recordbatches = RecordBatches::try_new(schema, vec![recordbatch]).unwrap();
+        let timeseries = recordbatches_to_timeseries(
             "metric1",
             greptime_timestamp(),
             greptime_value(),
-            recordbatch,
+            recordbatches,
         )
         .unwrap();
 
