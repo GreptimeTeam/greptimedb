@@ -126,15 +126,20 @@ impl VersionControl {
     }
 
     /// Applies region option changes and generates a new version.
-    pub(crate) fn alter_options(&self, options: RegionOptions) {
-        let version = self.current().version;
-        let new_version = Arc::new(
-            VersionBuilder::from_version(version)
-                .options(options)
-                .build(),
-        );
+    pub(crate) fn alter_options(
+        &self,
+        options: RegionOptions,
+        memtable_builder: Option<MemtableBuilderRef>,
+    ) {
         let mut version_data = self.data.write().unwrap();
-        version_data.version = new_version;
+        let version = version_data.version.clone();
+        let mut version_builder = VersionBuilder::from_version(version.clone()).options(options);
+        if let Some(memtable_builder) = memtable_builder {
+            let mut memtables = (*version.memtables).clone();
+            memtables.mutable = Arc::new(memtables.mutable.with_memtable_builder(memtable_builder));
+            version_builder = version_builder.memtables(memtables);
+        }
+        version_data.version = Arc::new(version_builder.build());
     }
 
     /// Apply edit to current version.
