@@ -48,13 +48,13 @@ pub(super) fn v2_to_grpc_main_insert_requests(
 /// Builds the fixed row-oriented payload for the main v2 trace table.
 fn build_trace_table_data(spans: &[TraceSpan]) -> Result<TableData> {
     let mut writer = TableData::new(APPROXIMATE_COLUMN_COUNT, spans.len());
-    for span in spans.iter().cloned() {
+    for span in spans {
         write_span_to_row(&mut writer, span)?;
     }
     Ok(writer)
 }
 
-fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
+fn write_span_to_row(writer: &mut TableData, span: &TraceSpan) -> Result<()> {
     ensure!(
         span.start_in_nanosecond <= i64::MAX as u64,
         TimestampOverflowSnafu {
@@ -89,18 +89,21 @@ fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
             make_column_data(
                 DURATION_NANO_COLUMN,
                 ColumnDataType::Int64,
-                Some(ValueData::I64Value(span_duration_nano(&span))),
+                Some(ValueData::I64Value(span_duration_nano(span))),
             ),
-            make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id),
-            make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id)),
-            make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id)),
-            make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind)),
-            make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name)),
-            make_string_column_data(SPAN_STATUS_CODE, Some(span.span_status_code)),
-            make_string_column_data(SPAN_STATUS_MESSAGE_COLUMN, Some(span.span_status_message)),
-            make_string_column_data(TRACE_STATE_COLUMN, Some(span.trace_state)),
-            make_string_column_data(SCOPE_NAME_COLUMN, Some(span.scope_name)),
-            make_string_column_data(SCOPE_VERSION_COLUMN, Some(span.scope_version)),
+            make_string_column_data(PARENT_SPAN_ID_COLUMN, span.parent_span_id.clone()),
+            make_string_column_data(TRACE_ID_COLUMN, Some(span.trace_id.clone())),
+            make_string_column_data(SPAN_ID_COLUMN, Some(span.span_id.clone())),
+            make_string_column_data(SPAN_KIND_COLUMN, Some(span.span_kind.clone())),
+            make_string_column_data(SPAN_NAME_COLUMN, Some(span.span_name.clone())),
+            make_string_column_data(SPAN_STATUS_CODE, Some(span.span_status_code.clone())),
+            make_string_column_data(
+                SPAN_STATUS_MESSAGE_COLUMN,
+                Some(span.span_status_message.clone()),
+            ),
+            make_string_column_data(TRACE_STATE_COLUMN, Some(span.trace_state.clone())),
+            make_string_column_data(SCOPE_NAME_COLUMN, Some(span.scope_name.clone())),
+            make_string_column_data(SCOPE_VERSION_COLUMN, Some(span.scope_version.clone())),
         ]
         .into_iter(),
         &mut row,
@@ -114,7 +117,7 @@ fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
                 semantic_type: SemanticType::Tag as i32,
                 ..Default::default()
             },
-            span.service_name.map(ValueData::StringValue),
+            span.service_name.clone().map(ValueData::StringValue),
         )),
         &mut row,
     )?;
@@ -122,29 +125,34 @@ fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> {
     row_writer::write_json2(
         writer,
         SPAN_ATTRIBUTES_COLUMN,
-        span.span_attributes,
+        &span.span_attributes,
         &mut row,
     )?;
     row_writer::write_json2(
         writer,
         SCOPE_ATTRIBUTES_COLUMN,
-        span.scope_attributes,
+        span.scope_attributes.as_ref(),
         &mut row,
     )?;
     row_writer::write_json2(
         writer,
         RESOURCE_ATTRIBUTES_COLUMN,
-        span.resource_attributes,
+        span.resource_attributes.as_ref(),
         &mut row,
     )?;
 
     row_writer::write_json(
         writer,
         SPAN_EVENTS_COLUMN,
-        span.span_events.into(),
+        span.span_events.clone().into(),
         &mut row,
     )?;
-    row_writer::write_json(writer, "span_links", span.span_links.into(), &mut row)?;
+    row_writer::write_json(
+        writer,
+        "span_links",
+        span.span_links.clone().into(),
+        &mut row,
+    )?;
 
     writer.add_row(row);
     Ok(())

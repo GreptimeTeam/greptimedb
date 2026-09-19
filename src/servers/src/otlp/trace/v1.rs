@@ -23,9 +23,11 @@ use api::v1::{
 };
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
+use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 
 use crate::error::Result;
+#[cfg(test)]
 use crate::otlp::trace::attributes::Attributes;
 use crate::otlp::trace::span::TraceSpan;
 use crate::otlp::trace::{
@@ -436,7 +438,7 @@ fn write_span_to_row_inner(
     write_attributes_with_schema(
         writer,
         "span_attributes",
-        span.span_attributes,
+        span.span_attributes.take(),
         &mut row,
         row_index,
         batch_schema.as_deref_mut(),
@@ -444,7 +446,7 @@ fn write_span_to_row_inner(
     write_attributes_with_schema(
         writer,
         "scope_attributes",
-        span.scope_attributes,
+        span.scope_attributes.as_ref().get_ref().iter().cloned(),
         &mut row,
         row_index,
         batch_schema.as_deref_mut(),
@@ -452,7 +454,7 @@ fn write_span_to_row_inner(
     write_attributes_with_schema(
         writer,
         "resource_attributes",
-        span.resource_attributes,
+        span.resource_attributes.as_ref().get_ref().iter().cloned(),
         &mut row,
         row_index,
         batch_schema,
@@ -535,19 +537,19 @@ pub(crate) fn write_attributes(
     row: &mut Vec<Value>,
 ) -> Result<()> {
     let row_index = writer.num_rows();
-    write_attributes_with_schema(writer, prefix, attributes, row, row_index, None)
+    write_attributes_with_schema(writer, prefix, attributes.take(), row, row_index, None)
 }
 
 /// Writes flattened attributes without coercion and optionally records their actual types.
 fn write_attributes_with_schema(
     writer: &mut TableData,
     prefix: &str,
-    attributes: Attributes,
+    attributes: impl IntoIterator<Item = KeyValue>,
     row: &mut Vec<Value>,
     row_index: usize,
     mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<()> {
-    for attr in attributes.take().into_iter() {
+    for attr in attributes {
         let key_suffix = attr.key;
         // skip resource_attributes.service.name because its already copied to
         // top level as `SERVICE_NAME_COLUMN`
@@ -679,10 +681,10 @@ mod tests {
             trace_id: trace_id.to_string(),
             span_id: span_id.to_string(),
             parent_span_id: None,
-            resource_attributes: Attributes::from(vec![]),
+            resource_attributes: Attributes::from(vec![]).into(),
             scope_name: "scope".to_string(),
             scope_version: "v1".to_string(),
-            scope_attributes: Attributes::from(vec![]),
+            scope_attributes: Attributes::from(vec![]).into(),
             trace_state: String::new(),
             span_name: "op".to_string(),
             span_kind: "SPAN_KIND_SERVER".to_string(),
