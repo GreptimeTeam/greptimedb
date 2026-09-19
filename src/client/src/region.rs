@@ -30,7 +30,9 @@ use common_error::status_code::StatusCode;
 use common_grpc::flight::{FlightDecoder, FlightMessage};
 use common_meta::error::{self as meta_error, Result as MetaResult};
 use common_meta::node_manager::Datanode;
-use common_query::request::QueryRequest;
+use common_query::request::{
+    QUERY_INTERNAL_STAGE_EXTENSION_KEY, QueryRequest, mark_query_internal_stage,
+};
 use common_recordbatch::error::ExternalSnafu;
 use common_recordbatch::{RecordBatch, RecordBatchStreamWrapper, SendableRecordBatchStream};
 use common_telemetry::error;
@@ -85,7 +87,7 @@ impl Datanode for RegionRequester {
             .context(meta_error::ExternalSnafu)?
             .to_vec();
         let request = api::v1::region::QueryRequest {
-            header: request.header,
+            header: encode_region_request_header(request.header, request.internal),
             region_id: request.region_id.as_u64(),
             plan,
         };
@@ -98,6 +100,50 @@ impl Datanode for RegionRequester {
             .map_err(BoxedError::new)
             .context(meta_error::ExternalSnafu)
     }
+}
+
+/// Encodes the header of a region query, carrying [`QueryRequest::internal`] to the peer datanode.
+///
+/// The wire format of a region query (`api::v1::region::QueryRequest`) has no field for the marker,
+/// so an internal request (an execution stage of the plan the sender received) is marked with the
+/// [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] extension of the query context of the header, which the
+/// peer reads back in `RegionServer::handle_remote_read_inner`. Without it the peer can't tell an
+/// inner stage of another query from an independent query and takes a concurrency permit for it,
+/// which makes the outer query wait for the inner stage while the inner stage waits for the permit
+/// held by the outer query.
+///
+/// A header-less request keeps no header unless it is internal. An internal request that has no
+/// header is encoded with a header that carries the marker only, so the peer builds the query
+/// context of the request from that header, i.e. without a remote query id (the peer generates a
+/// fresh query context, with an id, only for a request that has no header at all). That only
+/// disables the remote dynamic filter cleanup of the request.
+fn encode_region_request_header(
+    header: Option<RegionRequestHeader>,
+    internal: bool,
+) -> Option<RegionRequestHeader> {
+    let mut header = match header {
+        Some(header) => header,
+        // A request that has no header is an independent query: it has no marker to carry.
+        None if !internal => return None,
+        None => RegionRequestHeader::default(),
+    };
+    if internal {
+        // Creates the query context if the caller didn't set one: the peer honors the marker only
+        // in the query context of the header.
+        mark_query_internal_stage(
+            &mut header
+                .query_context
+                .get_or_insert_with(api::v1::QueryContext::default)
+                .extensions,
+        );
+    } else if let Some(query_context) = header.query_context.as_mut() {
+        // [`QueryRequest::internal`] owns the marker: a header that carries it while the request
+        // claims to be an independent query must not make the peer skip its concurrency limiter.
+        query_context
+            .extensions
+            .remove(QUERY_INTERNAL_STAGE_EXTENSION_KEY);
+    }
+    Some(header)
 }
 
 impl RegionRequester {
@@ -846,5 +892,118 @@ mod test {
             "unexpected error: {err:?}"
         );
         assert!(recordbatches.next().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod internal_stage_test {
+    use std::collections::HashMap;
+
+    use common_query::request::{QUERY_INTERNAL_STAGE_EXTENSION_VALUE, is_internal_stage};
+
+    use super::*;
+
+    /// Reads the marker of a header the way the receiver does: `RegionServer::do_get` builds the
+    /// query context of the request from the header, `session::context::QueryContext` copies the
+    /// extensions of that context verbatim.
+    fn extensions_of(header: &RegionRequestHeader) -> HashMap<String, String> {
+        header
+            .query_context
+            .as_ref()
+            .map(|ctx| ctx.extensions.clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn test_encode_region_request_header_marks_internal_request() {
+        // An internal request carries the marker even when its caller set no header at all.
+        let header = encode_region_request_header(None, true).unwrap();
+
+        assert!(is_internal_stage(&extensions_of(&header)));
+    }
+
+    #[test]
+    fn test_encode_region_request_header_keeps_context_of_internal_request() {
+        let header = encode_region_request_header(
+            Some(RegionRequestHeader {
+                dbname: "greptime".to_string(),
+                query_context: Some(api::v1::QueryContext {
+                    current_schema: "public".to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(header.dbname, "greptime");
+        assert_eq!(
+            header
+                .query_context
+                .as_ref()
+                .map(|ctx| ctx.current_schema.as_str()),
+            Some("public")
+        );
+        assert!(is_internal_stage(&extensions_of(&header)));
+    }
+
+    #[test]
+    fn test_encode_region_request_header_does_not_mark_independent_request() {
+        // An independent request with no header keeps no header at all.
+        assert!(encode_region_request_header(None, false).is_none());
+
+        // A marker that a caller left in the header of an independent request is dropped: the
+        // marker is owned by `QueryRequest::internal`.
+        let header = encode_region_request_header(
+            Some(RegionRequestHeader {
+                query_context: Some(api::v1::QueryContext {
+                    extensions: HashMap::from([(
+                        QUERY_INTERNAL_STAGE_EXTENSION_KEY.to_string(),
+                        QUERY_INTERNAL_STAGE_EXTENSION_VALUE.to_string(),
+                    )]),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            false,
+        )
+        .unwrap();
+
+        assert!(!is_internal_stage(&extensions_of(&header)));
+    }
+
+    #[test]
+    fn test_internal_marker_survives_the_wire_format() {
+        let request = api::v1::region::QueryRequest {
+            header: encode_region_request_header(
+                Some(RegionRequestHeader {
+                    query_context: Some(api::v1::QueryContext {
+                        current_schema: "public".to_string(),
+                        extensions: HashMap::from([(
+                            "remote_query_id".to_string(),
+                            "1".to_string(),
+                        )]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                true,
+            ),
+            region_id: 1,
+            plan: Vec::new(),
+        };
+        let bytes = request.encode_to_vec();
+
+        // The receiver decodes the ticket and builds the query context of the request from the
+        // header of the decoded request.
+        let decoded = api::v1::region::QueryRequest::decode(bytes.as_slice()).unwrap();
+        let extensions = extensions_of(decoded.header.as_ref().unwrap());
+
+        assert!(is_internal_stage(&extensions));
+        assert_eq!(
+            extensions.get("remote_query_id").map(String::as_str),
+            Some("1")
+        );
     }
 }

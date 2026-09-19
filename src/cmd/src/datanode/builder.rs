@@ -14,10 +14,9 @@
 
 use std::sync::Arc;
 
-use cache::build_datanode_cache_registry;
+use cache::build_datanode_layered_cache_registry;
 use catalog::kvbackend::new_read_only_meta_kv_backend;
 use common_base::Plugins;
-use common_meta::cache::LayeredCacheRegistryBuilder;
 use common_telemetry::info;
 use common_version::{short_version, verbose_version};
 use datanode::datanode::DatanodeBuilder;
@@ -111,11 +110,9 @@ impl InstanceBuilder {
         let backend = new_read_only_meta_kv_backend(client.clone());
         let mut builder = DatanodeBuilder::new(dn_opts.clone(), plugins.clone(), backend.clone());
 
-        let registry = Arc::new(
-            LayeredCacheRegistryBuilder::default()
-                .add_cache_registry(build_datanode_cache_registry(backend))
-                .build(),
-        );
+        // The derived caches (table/partition caches) are put into the layer after the caches
+        // they are derived from, so they are invalidated only after them.
+        let registry = Arc::new(build_datanode_layered_cache_registry(backend));
         builder
             .with_cache_registry(registry)
             .with_meta_client(client.clone());
