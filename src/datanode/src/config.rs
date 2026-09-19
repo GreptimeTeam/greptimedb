@@ -356,6 +356,127 @@ mod tests {
         }
     }
 
+    /// Helper mirroring how the layered config sources hand `region_engine`
+    /// to the custom deserializer: as a JSON array (config file / defaults) or
+    /// as a JSON object keyed by engine name (environment variables).
+    fn deserialize_region_engine(
+        json: serde_json::Value,
+    ) -> std::result::Result<Vec<RegionEngineConfig>, serde_json::Error> {
+        deserialize_region_engine_options(json)
+    }
+
+    #[test]
+    fn test_deserialize_region_engine_from_array() {
+        // The existing config-file/default shape must keep working verbatim.
+        let engines = deserialize_region_engine(serde_json::json!([
+            {"mito": {"global_write_buffer_reject_size": "4GB"}},
+            {"metric": {"flush_metadata_region_interval": "1m"}},
+        ]))
+        .unwrap();
+
+        assert_eq!(engines.len(), 2);
+        match &engines[0] {
+            RegionEngineConfig::Mito(c) => {
+                assert_eq!(c.global_write_buffer_reject_size, ReadableSize::gb(4));
+            }
+            other => panic!("unexpected engine: {other:?}"),
+        }
+        match &engines[1] {
+            RegionEngineConfig::Metric(c) => {
+                assert_eq!(c.flush_metadata_region_interval, Duration::from_secs(60));
+            }
+            other => panic!("unexpected engine: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_deserialize_region_engine_from_object_merges_onto_defaults() {
+        // The environment-variable shape: a partial override for a single
+        // engine must not drop the other engines from the default list, and
+        // must not reset the overridden engine's other fields.
+        let engines = deserialize_region_engine(serde_json::json!({
+            "mito": {"global_write_buffer_reject_size": "4GB"},
+        }))
+        .unwrap();
+
+        let defaults = DatanodeOptions::default().region_engine;
+        assert_eq!(engines.len(), defaults.len());
+
+        let mito = engines
+            .iter()
+            .find_map(|e| match e {
+                RegionEngineConfig::Mito(c) => Some(c),
+                _ => None,
+            })
+            .expect("mito should be present");
+        // The overridden field is applied...
+        assert_eq!(mito.global_write_buffer_reject_size, ReadableSize::gb(4));
+        // ...while every other mito field stays at its default.
+        let mito_defaults = MitoConfig::default();
+        assert_eq!(
+            mito.global_write_buffer_size,
+            mito_defaults.global_write_buffer_size
+        );
+        assert_eq!(mito.num_workers, mito_defaults.num_workers);
+        // ...and the other default engine survives untouched.
+        assert!(
+            engines
+                .iter()
+                .any(|e| matches!(e, RegionEngineConfig::File(_))),
+            "file engine should survive: {engines:?}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_region_engine_object_appends_unlisted_engine() {
+        // `metric` is not part of the default list, so it is appended rather
+        // than replacing anything.
+        let engines = deserialize_region_engine(serde_json::json!({
+            "metric": {"flush_metadata_region_interval": "1m"},
+        }))
+        .unwrap();
+
+        let metric = engines
+            .iter()
+            .find_map(|e| match e {
+                RegionEngineConfig::Metric(c) => Some(c),
+                _ => None,
+            })
+            .expect("metric should be appended");
+        assert_eq!(
+            metric.flush_metadata_region_interval,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            engines.len(),
+            DatanodeOptions::default().region_engine.len() + 1
+        );
+    }
+
+    #[test]
+    fn test_deserialize_region_engine_rejects_unknown_engine() {
+        let err = deserialize_region_engine(serde_json::json!({
+            "not_an_engine": {"whatever": 1},
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("not_an_engine"),
+            "error should name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_region_engine_rejects_other_shapes() {
+        let err = deserialize_region_engine(serde_json::json!("mito"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("expected an array or an object"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[test]
     fn test_cache_config() {
         let toml_str = r#"

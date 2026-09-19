@@ -647,6 +647,62 @@ fn test_load_region_engine_options_from_env() {
 }
 
 #[test]
+fn test_load_metric_region_engine_options_from_env() {
+    // An engine that is not part of the default list (`metric`) must still be
+    // configurable through the environment: the override is merged onto that
+    // engine's own defaults and appended, without disturbing mito/file.
+    let env_prefix = "METRIC_REGION_ENGINE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "METRIC",
+        "FLUSH_METADATA_REGION_INTERVAL",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("1m"), || {
+        let opts =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        let metric = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Metric(c) => Some(c),
+                _ => None,
+            })
+            .expect("metric engine config should be appended");
+        assert_eq!(
+            metric.flush_metadata_region_interval,
+            Duration::from_secs(60)
+        );
+
+        // The engines from the default list are untouched.
+        let mito = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Mito(c) => Some(c),
+                _ => None,
+            })
+            .expect("mito engine config should be present");
+        assert_eq!(
+            mito.global_write_buffer_reject_size,
+            MitoConfig::default().global_write_buffer_reject_size
+        );
+        assert!(
+            opts.component
+                .region_engine
+                .iter()
+                .any(|c| matches!(c, RegionEngineConfig::File(_))),
+            "the file engine entry should survive the merge"
+        );
+    });
+}
+
+#[test]
 fn test_load_standalone_region_engine_options_from_env() {
     // Same reproduction as `test_load_region_engine_options_from_env`, but for
     // `StandaloneOptions`, which declares its own `region_engine` field and
