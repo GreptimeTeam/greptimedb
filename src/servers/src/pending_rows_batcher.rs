@@ -44,6 +44,8 @@ use common_runtime::spawn_global;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{debug, error, warn};
 use datatypes::timestamp::append_timestamps;
+use meter_core::data::MeterRecord;
+use meter_macros::write_meter;
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
 use partition::manager::PartitionRuleManagerRef;
 use partition::partition::PartitionRuleRef;
@@ -428,6 +430,21 @@ impl PendingRowsBatcher {
         if total_rows == 0 {
             return Ok(0);
         }
+
+        // Flushes dispatch directly to datanodes, so admit once before enqueueing.
+        write_meter!(MeterRecord::new(
+            ctx.current_catalog().to_string(),
+            ctx.current_schema(),
+            0,
+            ctx.write_rows_to_admit(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                total_rows as u64
+            ),
+            ctx.channel() as u8,
+        ))
+        .await
+        .context(error::WriteRejectedSnafu)?;
 
         let permit = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED

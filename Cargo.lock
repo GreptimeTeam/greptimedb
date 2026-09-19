@@ -8555,7 +8555,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f743c3a5fe8c1f57363eac5866c356b7d91f9b39#f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 dependencies = [
  "anymap2",
  "once_cell",
@@ -8566,7 +8566,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f743c3a5fe8c1f57363eac5866c356b7d91f9b39#f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 dependencies = [
  "meter-core",
 ]
@@ -13616,6 +13616,8 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "meter-core",
+ "meter-macros",
  "metric-engine",
  "mime_guess",
  "moka",

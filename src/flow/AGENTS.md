@@ -54,6 +54,8 @@ default, and sink-creation helpers.
 ## Public surface
 
 - gRPC `Flow` service in `src/flow/src/server.rs`.
+- Local streaming sink writes and batching query execution use `Channel::Internal`
+  so meter collectors can account for sink writes without charging ingestion quota.
 - `FlowEngine` trait in `src/flow/src/engine.rs`.
 - Started from the `cmd` crate via `FlownodeBuilder` / `FlownodeInstance`.
 
