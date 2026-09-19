@@ -27,6 +27,9 @@ use url::ParseError;
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum Error {
+    #[snafu(display("Invalid packed snapshot: {reason}"))]
+    InvalidPackedSnapshot { reason: String },
+
     #[snafu(display("Parquet write cancelled"))]
     ParquetWriteCancelled {},
 
@@ -285,6 +288,7 @@ impl ErrorExt for Error {
         use Error::*;
         match self {
             ParquetWriteCancelled {} => StatusCode::Cancelled,
+            InvalidPackedSnapshot { .. } => StatusCode::InvalidArguments,
             InvalidParquetWriterLimits {} => StatusCode::InvalidArguments,
             ParquetWriterResource { .. } => StatusCode::Suspended,
             BuildBackend { .. }

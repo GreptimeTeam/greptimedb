@@ -1378,6 +1378,12 @@ impl HttpServer {
     fn route_sql<S>(api_state: ApiState) -> Router<S> {
         Router::new()
             .route(
+                "/capabilities",
+                routing::get(|| async {
+                    axum::Json(serde_json::json!({"metric_packed_import": 1}))
+                }),
+            )
+            .route(
                 "/sql",
                 routing::get(handler::sql).post(handler::sql).layer(
                     middleware::from_fn_with_state(
@@ -1863,6 +1869,38 @@ mod test {
         assert!(!is_api_listener_path("/metrics"));
         assert!(!is_api_listener_path("/status/plugin"));
         assert!(!is_api_listener_path("/health"));
+    }
+
+    #[tokio::test]
+    async fn packed_capability_requires_auth_on_full_and_api_listeners() {
+        let (tx, _rx) = mpsc::channel(1);
+        let provider =
+            auth::static_user_provider_from_option("static_user_provider:cmd:user=password")
+                .unwrap();
+        let (full, api) = HttpServerBuilder::new(HttpOptions {
+            enable_api_server: true,
+            ..Default::default()
+        })
+        .with_sql_handler(Arc::new(DummyInstance { _tx: tx }))
+        .with_user_provider(Arc::new(provider))
+        .build_servers();
+        for server in [full, api.unwrap()] {
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            assert_eq!(
+                client.get("/v1/capabilities").send().await.status(),
+                StatusCode::UNAUTHORIZED
+            );
+            let response = client
+                .get("/v1/capabilities")
+                .header("Authorization", "Basic dXNlcjpwYXNzd29yZA==")
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response.json::<serde_json::Value>().await,
+                serde_json::json!({"metric_packed_import": 1})
+            );
+        }
     }
 
     #[tokio::test]
