@@ -185,7 +185,11 @@ nalgebra = "0.33"
 nix = { version = "0.30.1", default-features = false, features = ["event", "fs", "process"] }
 notify = "8.0"
 num_cpus = "1.16"
-object_store_opendal = "0.58"
+# Keep object_store 0.13 compatibility while using OpenDAL 0.59.
+# TODO(#9240): Switch back to the official bridge after the DataFusion/Arrow/Parquet
+# upgrade aligns object_store versions. Keep the bridge and OpenDAL releases compatible.
+# https://github.com/GreptimeTeam/greptimedb/issues/9240
+object_store_opendal = { git = "https://github.com/GreptimeTeam/opendal.git", rev = "c03e56802b47de3ccfc8fe028e59a459b278a0d2" }
 once_cell = "1.18"
 opentelemetry-proto = { version = "0.32", features = [
     "gen-tonic",
