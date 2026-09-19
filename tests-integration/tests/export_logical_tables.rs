@@ -908,7 +908,7 @@ async fn packed_copy_standalone_heterogeneous_streams() {
             "packed-reader/{}/",
             destination.path().file_name().unwrap().to_str().unwrap()
         );
-        let connection = std::collections::HashMap::from([
+        let mut connection = std::collections::HashMap::from([
             (
                 "access_key_id".into(),
                 std::env::var("GT_S3_ACCESS_KEY_ID").unwrap(),
@@ -918,11 +918,10 @@ async fn packed_copy_standalone_heterogeneous_streams() {
                 std::env::var("GT_S3_ACCESS_KEY").unwrap(),
             ),
             ("region".into(), std::env::var("GT_S3_REGION").unwrap()),
-            (
-                "endpoint".into(),
-                std::env::var("GT_S3_ENDPOINT_URL").unwrap(),
-            ),
         ]);
+        if let Ok(endpoint) = std::env::var("GT_S3_ENDPOINT_URL") {
+            connection.insert("endpoint".into(), endpoint);
+        }
         let location = format!("s3://{bucket}/{prefix}");
         let store = common_datasource::object_store::build_backend(
             &location,
