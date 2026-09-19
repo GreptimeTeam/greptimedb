@@ -19,6 +19,7 @@ use api::v1::region::compact_request;
 use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
 use serde::{Deserialize, Serialize};
+use store_api::metadata::RegionMetadataRef;
 
 use crate::compaction::compactor::CompactionRegion;
 use crate::compaction::last_non_null::LastNonNullPicker;
@@ -29,6 +30,7 @@ use crate::error::Result;
 use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
 use crate::sst::file::{FileHandle, FileMeta};
 use crate::sst::file_purger::FilePurger;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 use crate::sst::version::LevelMeta;
 
 #[async_trait::async_trait]
@@ -91,11 +93,14 @@ impl From<&PickerOutput> for SerializedPickerOutput {
 }
 
 impl PickerOutput {
-    /// Converts a [SerializedPickerOutput] to a [PickerOutput].
+    /// Converts a [SerializedPickerOutput] to a [PickerOutput], binding file PK
+    /// ranges to the metadata pinned by the compaction task.
     pub fn from_serialized(
         input: SerializedPickerOutput,
         file_purger: Arc<dyn FilePurger>,
+        metadata: RegionMetadataRef,
     ) -> Self {
+        let mapper = Arc::new(PrimaryKeyRangeMapper::new(metadata));
         let outputs = input
             .outputs
             .into_iter()
@@ -104,7 +109,10 @@ impl PickerOutput {
                 inputs: output
                     .inputs
                     .into_iter()
-                    .map(|file_meta| FileHandle::new(file_meta, file_purger.clone()))
+                    .map(|file_meta| {
+                        FileHandle::new(file_meta, file_purger.clone())
+                            .with_primary_key_mapper(mapper.clone())
+                    })
                     .collect(),
                 filter_deleted: output.filter_deleted,
                 output_time_range: output.output_time_range,
@@ -114,7 +122,10 @@ impl PickerOutput {
         let expired_ssts = input
             .expired_ssts
             .into_iter()
-            .map(|file_meta| FileHandle::new(file_meta, file_purger.clone()))
+            .map(|file_meta| {
+                FileHandle::new(file_meta, file_purger.clone())
+                    .with_primary_key_mapper(mapper.clone())
+            })
             .collect();
 
         Self {
@@ -226,8 +237,11 @@ mod tests {
             serde_json::to_string(&SerializedPickerOutput::from(&picker_output)).unwrap();
         let serialized_picker_output: SerializedPickerOutput =
             serde_json::from_str(&picker_output_str).unwrap();
-        let picker_output_from_serialized =
-            PickerOutput::from_serialized(serialized_picker_output, new_noop_file_purger());
+        let picker_output_from_serialized = PickerOutput::from_serialized(
+            serialized_picker_output,
+            new_noop_file_purger(),
+            crate::test_util::memtable_util::metadata_for_test(),
+        );
 
         picker_output
             .expired_ssts

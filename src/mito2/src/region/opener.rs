@@ -1664,7 +1664,9 @@ mod tests {
         let file_id = FileId::random();
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
-        let primary_key = Arc::new(BinaryArray::from_iter_values([b"a", b"b", b"c"])) as ArrayRef;
+        let keys =
+            ["a", "b", "c"].map(|tag| crate::test_util::sst_util::new_primary_key(&[tag, ""]));
+        let primary_key = Arc::new(BinaryArray::from_iter_values(&keys)) as ArrayRef;
         let batch = RecordBatch::try_from_iter([
             ("col", col),
             (
@@ -1694,7 +1696,12 @@ mod tests {
             num_series: 0,
             ..Default::default()
         };
-        let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger));
+        let mut metadata = sst_region_metadata();
+        metadata.region_id = region_id;
+        let file_handle = FileHandle::new(file_meta, Arc::new(NoopFilePurger))
+            .with_primary_key_mapper(Arc::new(
+                crate::sst::primary_key::PrimaryKeyRangeMapper::new(Arc::new(metadata)),
+            ));
 
         let table_dir = "test_table";
         let path_type = PathType::Bare;

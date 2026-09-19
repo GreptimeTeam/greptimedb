@@ -146,7 +146,7 @@ pub(crate) async fn compaction_region_with_ssts(
     let env = SchedulerEnv::new().await;
     let metadata = metadata_for_test();
     let manifest_ctx = env.mock_manifest_context(metadata.clone()).await;
-    let mut ssts = SstVersion::new();
+    let mut ssts = SstVersion::new(metadata.clone());
     ssts.add_files(
         Arc::new(crate::sst::file_purger::NoopFilePurger),
         files.into_iter(),

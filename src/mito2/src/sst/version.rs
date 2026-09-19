@@ -18,25 +18,41 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_time::{TimeToLive, Timestamp};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
 use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// A version of all SSTs in a region.
 #[derive(Debug, Clone)]
 pub(crate) struct SstVersion {
     /// SST metadata organized by levels.
     levels: LevelMetaArray,
+    primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
 }
 
 pub(crate) type SstVersionRef = Arc<SstVersion>;
 
 impl SstVersion {
     /// Returns a new [SstVersion].
-    pub(crate) fn new() -> SstVersion {
+    pub(crate) fn new(metadata: RegionMetadataRef) -> SstVersion {
         SstVersion {
             levels: new_level_meta_vec(),
+            primary_key_mapper: Arc::new(PrimaryKeyRangeMapper::new(metadata)),
+        }
+    }
+
+    /// Rebinds only schema views, preserving old snapshots and shared file state.
+    pub(crate) fn set_metadata(&mut self, metadata: RegionMetadataRef) {
+        self.primary_key_mapper = Arc::new(self.primary_key_mapper.with_metadata(metadata));
+        for level in &mut self.levels {
+            for file in level.files.values_mut() {
+                *file = file
+                    .clone()
+                    .with_primary_key_mapper(self.primary_key_mapper.clone());
+            }
         }
     }
 
@@ -85,11 +101,13 @@ impl SstVersion {
                         }
                     } else {
                         // include case like old file have no index or index is outdated
-                        *f = FileHandle::new(file.clone(), file_purger.clone());
+                        *f = FileHandle::new(file.clone(), file_purger.clone())
+                            .with_primary_key_mapper(self.primary_key_mapper.clone());
                     }
                 })
                 .or_insert_with(|| {
                     FileHandle::new(file.clone(), file_purger.clone())
+                            .with_primary_key_mapper(self.primary_key_mapper.clone())
                 });
         }
     }
@@ -268,7 +286,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         // files[1] is added multiple times, and that's ok.
         version.add_files(purger.clone(), files[..=1].iter().cloned());
         version.add_files(purger, files[1..].iter().cloned());
@@ -292,7 +310,7 @@ mod tests {
             },
             purger.clone(),
         );
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         version.add_files(
             purger,
             [
@@ -344,7 +362,7 @@ mod tests {
             },
         ];
 
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         version.add_files(purger, files.iter().cloned());
 
         assert_eq!(3, version.owned_num_rows(region_id));
