@@ -64,6 +64,24 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
+        // Retain the compaction fence while the DDL later waits for flush.
+        let (sender, partition_directive) = match self.compaction_scheduler.try_cancel_and_add_ddl(
+            region_id,
+            sender,
+            partition_directive,
+            |partition_directive| {
+                DdlRequest::EnterStaging(EnterStagingRequest {
+                    partition_directive,
+                })
+            },
+        ) {
+            Ok(()) => {
+                self.listener.on_compaction_cancel_requested(region_id);
+                return;
+            }
+            Err(request) => request,
+        };
+
         let version = region.version();
         if !version.memtables.is_empty() {
             // If memtable is not empty, we can't enter staging directly and need to flush
@@ -97,23 +115,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
             return;
         }
-
-        let (sender, partition_directive) = match self.compaction_scheduler.try_cancel_and_add_ddl(
-            region_id,
-            sender,
-            partition_directive,
-            |partition_directive| {
-                DdlRequest::EnterStaging(EnterStagingRequest {
-                    partition_directive,
-                })
-            },
-        ) {
-            Ok(()) => {
-                self.listener.on_compaction_cancel_requested(region_id);
-                return;
-            }
-            Err(request) => request,
-        };
 
         self.handle_enter_staging(region, partition_directive, sender);
     }

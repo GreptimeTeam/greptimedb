@@ -84,6 +84,9 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Lock ordering: take the manifest lock before updating `version_control`; the
   reverse deadlocks against concurrent flush/compaction.
 - All region I/O runs on tokio workers; never `block_on` inside a worker.
+- Loaded regions have resident compaction state, including `Idle` and handed-off
+  DDLs. Publish create/open/catchup results through the worker's `register_region`;
+  only close/drop unregisters them. See `compaction/scheduler/state.rs`.
 
 ## Maintenance contract
 
