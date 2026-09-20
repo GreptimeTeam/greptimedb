@@ -208,6 +208,7 @@ async fn test_strict_window_output_file_size(
 
     let version = engine.get_region(region_id).unwrap().version();
     assert!(version.ssts.levels()[0].files.is_empty());
+    let primary_key_mapper = version.ssts.primary_key_mapper();
     let files = version.ssts.levels()[1].files().collect::<Vec<_>>();
     assert_eq!(
         6000,
@@ -231,7 +232,7 @@ async fn test_strict_window_output_file_size(
         }
         let mut ranges = window_files
             .iter()
-            .map(|file| file.primary_key_range().unwrap())
+            .map(|file| file.primary_key_range(&primary_key_mapper).unwrap())
             .collect::<Vec<_>>();
         ranges.sort_unstable();
         assert!(ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
@@ -539,6 +540,313 @@ async fn assert_partial_compaction_preserves_delete_order(flat_format: bool) {
         after.len(),
         reopened.len()
     );
+}
+
+/// Real-engine regression for the tombstone resurrection chain described in
+/// https://greptime.feishu.cn/wiki/L2WYwIM40iG9tckowrnctyw8nQc.
+/// No synthetic file sizes, PK ranges, or manually selected compaction inputs.
+#[rstest::rstest]
+#[tokio::test]
+async fn test_cross_schema_compaction_keeps_rows_deleted(
+    #[values(false, true)] flat_format: bool,
+    #[values(false, true)] cross_window: bool,
+    #[values(None, Some(""))] tag_default: Option<&str>,
+) {
+    use api::v1::SemanticType;
+    use api::v1::value::ValueData;
+    use datatypes::prelude::{ConcreteDataType, Value};
+    use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema as DataColumnSchema};
+    use store_api::metadata::ColumnMetadata;
+    use store_api::region_request::{AddColumn, AddColumnLocation, AlterKind};
+
+    let mut env = TestEnv::new().await;
+    let region_id = RegionId::new(1, 1);
+    let (engine, mut columns) = env_for_manual_compaction_with_window(
+        &mut env,
+        region_id,
+        flat_format,
+        if cross_window { "2h" } else { "1h" },
+    )
+    .await;
+    let (target_ts, other_ts) = if cross_window { (3500, 3700) } else { (10, 1) };
+
+    // Incompressible, distinct a* keys keep the old SST large enough for a
+    // partial pick to leave it behind. Its maximum PK is exactly the victim b.
+    let mut old_rows = build_rows_for_key("b", target_ts, target_ts + 1, 0);
+    let mut rng = <rand::rngs::StdRng as rand::SeedableRng>::seed_from_u64(0);
+    for _ in 0..3000 {
+        old_rows.extend(build_rows_for_key(
+            &format!("a{:032x}", rand::Rng::random::<u128>(&mut rng)),
+            other_ts,
+            other_ts + 1,
+            0,
+        ));
+    }
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: columns.clone(),
+            rows: old_rows,
+        },
+    )
+    .await;
+    flush(&engine, region_id).await;
+    let old_version = engine.get_region(region_id).unwrap().version();
+    let old_files = old_version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect::<Vec<_>>();
+    assert_eq!(1, old_files.len());
+    let old_file = old_files[0];
+    if cross_window {
+        // This real SST crosses the new one-hour boundary. TWCS assigns it by
+        // max_ts=3700 to window 7200, unlike Delete(b,3500) in window 3600.
+        set_compaction_window(&engine, region_id, "1h").await;
+    }
+
+    let added = ColumnMetadata {
+        column_id: 3,
+        semantic_type: SemanticType::Tag,
+        column_schema: DataColumnSchema::new("tag_1", ConcreteDataType::string_datatype(), true)
+            .with_default_constraint(
+                tag_default.map(|value| ColumnDefaultConstraint::Value(Value::from(value))),
+            )
+            .unwrap(),
+    };
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: AlterKind::AddColumns {
+                    columns: vec![AddColumn {
+                        column_metadata: added.clone(),
+                        location: Some(AddColumnLocation::First),
+                    }],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    columns.push(column_metadata_to_column_schema(&added));
+    let append_tag = |mut rows: Vec<api::v1::Row>| {
+        for row in &mut rows {
+            row.values.push(api::v1::Value {
+                value_data: tag_default.map(|value| ValueData::StringValue(value.to_string())),
+            });
+        }
+        Rows {
+            schema: columns.clone(),
+            rows,
+        }
+    };
+    let deletes = ["b", "c"]
+        .into_iter()
+        .flat_map(|key| build_rows_for_key(key, target_ts, target_ts + 1, 0))
+        .collect();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Delete(RegionDeleteRequest {
+                rows: append_tag(deletes),
+                hint: None,
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    flush(&engine, region_id).await;
+    for ts in target_ts + 10..target_ts + 25 {
+        put_rows(
+            &engine,
+            region_id,
+            append_tag(build_rows_for_key("c", ts, ts + 1, 0)),
+        )
+        .await;
+        flush(&engine, region_id).await;
+    }
+
+    let region = engine.get_region(region_id).unwrap();
+    let table_dir = region.table_dir().to_string();
+    let version = region.version();
+    let files = version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect::<Vec<_>>();
+    assert_eq!(17, files.len());
+    assert_eq!(vec![0, 3], version.metadata.primary_key);
+    let new_ids = files
+        .iter()
+        .filter(|file| file.file_id() != old_file.file_id())
+        .map(|file| file.file_id())
+        .collect::<HashSet<_>>();
+    for file in files
+        .iter()
+        .filter(|file| new_ids.contains(&file.file_id()))
+    {
+        assert!(old_file.meta_ref().primary_key_max < file.meta_ref().primary_key_min);
+        assert!(file.time_range().1 < Timestamp::new_second(3600));
+    }
+    assert_eq!(
+        cross_window,
+        old_file.time_range().1 > Timestamp::new_second(3600)
+    );
+
+    let picked = preview_regular_compaction(&engine, region_id).await;
+    assert_eq!(1, picked.outputs.len());
+    let output = &picked.outputs[0];
+    assert_eq!(
+        new_ids,
+        output.inputs.iter().map(|file| file.file_id()).collect()
+    );
+    let filter_deleted = output.filter_deleted;
+    let before = sorted_scan_timestamps(&engine, region_id).await;
+    assert_eq!(3015, before.len());
+    assert!(!before.contains(&(target_ts as i64 * 1000)));
+
+    compact(&engine, region_id).await;
+
+    let after_version = region.version();
+    let after_files = after_version
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .collect::<Vec<_>>();
+    assert_eq!(2, after_files.len());
+    assert!(
+        after_files
+            .iter()
+            .any(|file| file.file_id() == old_file.file_id())
+    );
+    let output_file = after_files
+        .into_iter()
+        .find(|file| file.file_id() != old_file.file_id())
+        .unwrap();
+    assert!(!new_ids.contains(&output_file.file_id()));
+    let output_rows = output_file.meta_ref().num_rows;
+    let output_deletes = count_sst_deletes(&engine, region_id, output_file).await;
+    let after = sorted_scan_timestamps(&engine, region_id).await;
+
+    let config = MitoConfig {
+        default_flat_format: flat_format,
+        min_compaction_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let engine = env.reopen_engine(engine, config).await;
+    crate::test_util::reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let reopened = sorted_scan_timestamps(&engine, region_id).await;
+    // Do not fail on filter_deleted before actually executing compaction/reopen:
+    // the negative-control run must demonstrate data resurrection, not just a bad plan.
+    assert!(
+        !filter_deleted
+            && output_rows == 17
+            && output_deletes == 2
+            && after == before
+            && reopened == before,
+        "cross-schema tombstone loss: flat_format={flat_format}, cross_window={cross_window}, default={tag_default:?}, selected={}, filter_deleted={filter_deleted}, output_rows={output_rows}, output_deletes={output_deletes}, before={}, after={}, reopened={}, resurrected_after={}, resurrected_reopen={}",
+        new_ids.len(),
+        before.len(),
+        after.len(),
+        reopened.len(),
+        after.contains(&(target_ts as i64 * 1000)),
+        reopened.contains(&(target_ts as i64 * 1000)),
+    );
+}
+
+async fn count_sst_deletes(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    file: &crate::sst::file::FileHandle,
+) -> usize {
+    use api::v1::OpType;
+    use datatypes::arrow::datatypes::UInt8Type;
+
+    let region = engine.get_region(region_id).unwrap();
+    let mut reader = region
+        .access_layer
+        .read_sst(file.clone())
+        .build()
+        .await
+        .unwrap()
+        .unwrap();
+    let mut deletes = 0;
+    while let Some(batch) = reader.next_record_batch().await.unwrap() {
+        deletes += batch
+            .column(batch.num_columns() - 1)
+            .as_primitive::<UInt8Type>()
+            .values()
+            .iter()
+            .filter(|op| **op == OpType::Delete as u8)
+            .count();
+    }
+    deletes
+}
+
+async fn set_compaction_window(engine: &MitoEngine, region_id: RegionId, window: &str) {
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Alter(RegionAlterRequest {
+                kind: SetRegionOptions {
+                    options: vec![SetRegionOption::Twsc(
+                        "compaction.twcs.time_window".into(),
+                        window.into(),
+                    )],
+                },
+            }),
+        )
+        .await
+        .unwrap();
+}
+
+async fn sorted_scan_timestamps(engine: &MitoEngine, region_id: RegionId) -> Vec<i64> {
+    let stream = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .scan()
+        .await
+        .unwrap();
+    let mut timestamps = collect_stream_ts(stream).await;
+    timestamps.sort_unstable();
+    timestamps
+}
+
+async fn preview_regular_compaction(
+    engine: &MitoEngine,
+    region_id: RegionId,
+) -> crate::compaction::picker::PickerOutput {
+    use crate::compaction::compactor::CompactionRegion;
+    use crate::compaction::picker::new_picker;
+
+    let region = engine.get_region(region_id).unwrap();
+    let version = region.version();
+    let picker = new_picker(
+        &RegionCompactRequest::default().options,
+        &version.options,
+        None,
+        None,
+    );
+    let compaction_region = CompactionRegion {
+        region_id,
+        region_options: version.options.clone(),
+        engine_config: Arc::new(MitoConfig::default()),
+        region_metadata: version.metadata.clone(),
+        cache_manager: engine.cache_manager(),
+        access_layer: region.access_layer.clone(),
+        manifest_ctx: region.manifest_ctx.clone(),
+        current_version: version.into(),
+        file_purger: None,
+        ttl: None,
+        max_parallelism: 1,
+        plugins: common_base::Plugins::new(),
+    };
+    picker.pick(&compaction_region).await.unwrap().unwrap()
 }
 
 struct CompactionListenerGuard(Option<Arc<CompactionListener>>);
@@ -1791,6 +2099,15 @@ async fn env_for_manual_compaction(
     region_id: RegionId,
     flat_format: bool,
 ) -> (MitoEngine, Vec<ColumnSchema>) {
+    env_for_manual_compaction_with_window(env, region_id, flat_format, "1h").await
+}
+
+async fn env_for_manual_compaction_with_window(
+    env: &mut TestEnv,
+    region_id: RegionId,
+    flat_format: bool,
+    time_window: &str,
+) -> (MitoEngine, Vec<ColumnSchema>) {
     let engine = env
         .create_engine(MitoConfig {
             default_flat_format: flat_format,
@@ -1812,7 +2129,7 @@ async fn env_for_manual_compaction(
 
     let request = CreateRequestBuilder::new()
         .insert_option("compaction.type", "twcs")
-        .insert_option("compaction.twcs.time_window", "1h")
+        .insert_option("compaction.twcs.time_window", time_window)
         .build();
     let column_schemas = request
         .column_metadatas

@@ -332,7 +332,7 @@ mod tests {
         let metadata = metadata_for_test();
         let file_purger_ref = Arc::new(NoopFilePurger);
 
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(metadata.clone());
 
         ssts.add_files(
             file_purger_ref,
