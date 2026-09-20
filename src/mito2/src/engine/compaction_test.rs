@@ -40,6 +40,7 @@ use tokio::sync::{Notify, Semaphore};
 use crate::config::MitoConfig;
 use crate::engine::MitoEngine;
 use crate::engine::listener::{CompactionListener, EventListener};
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows_for_key, column_metadata_to_column_schema, put_rows,
 };
@@ -135,6 +136,120 @@ async fn collect_stream_ts(stream: SendableRecordBatchStream) -> Vec<i64> {
         res.extend((0..ts_col.len()).map(|i| ts_col.value(i)));
     }
     res
+}
+
+#[rstest::rstest]
+#[case::split("1B", true)]
+#[case::unlimited("0B", false)]
+#[tokio::test]
+async fn test_strict_window_output_file_size(
+    #[values(false, true)] flat_format: bool,
+    #[case] max_output_file_size: &str,
+    #[case] expect_split: bool,
+) {
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.max_output_file_size", max_output_file_size)
+        .insert_option("max_row_group_row_count", "50")
+        .build();
+    let columns = crate::test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    // Each input SST spans both windows. Each series is large enough to exceed
+    // the tiny threshold, and must remain intact within its output window.
+    for key in ["a", "b", "c"] {
+        let rows = [0, 3600]
+            .into_iter()
+            .flat_map(|start| build_rows_for_key(key, start, start + 1000, start))
+            .collect();
+        put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: columns.clone(),
+                rows,
+            },
+        )
+        .await;
+        flush(&engine, region_id).await;
+    }
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let before = RecordBatches::try_collect(stream).await.unwrap();
+
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow {
+                        window_seconds: 3600,
+                    },
+                ),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+
+    let version = engine.get_region(region_id).unwrap().version();
+    assert!(version.ssts.levels()[0].files.is_empty());
+    let files = version.ssts.levels()[1].files().collect::<Vec<_>>();
+    assert_eq!(
+        6000,
+        files
+            .iter()
+            .map(|file| file.meta_ref().num_rows)
+            .sum::<u64>()
+    );
+    for start in [0, 3600] {
+        let window_files = files
+            .iter()
+            .filter(|file| {
+                let (min, max) = file.time_range();
+                min >= Timestamp::new_second(start) && max < Timestamp::new_second(start + 3600)
+            })
+            .collect::<Vec<_>>();
+        if expect_split {
+            assert!(window_files.len() > 1, "each window must split by size");
+        } else {
+            assert_eq!(1, window_files.len(), "zero must disable size splitting");
+        }
+        let mut ranges = window_files
+            .iter()
+            .map(|file| file.primary_key_range().unwrap())
+            .collect::<Vec<_>>();
+        ranges.sort_unstable();
+        assert!(ranges.windows(2).all(|pair| pair[0].1 < pair[1].0));
+    }
+    assert!(files.iter().all(|file| {
+        let (min, max) = file.time_range();
+        min.value() / 3_600_000 == max.value() / 3_600_000
+    }));
+
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let after = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        sort_batches_and_print(&before, &["tag_0", "ts"]),
+        sort_batches_and_print(&after, &["tag_0", "ts"])
+    );
 }
 
 /// Flush may collapse versions within one file, but compaction must not promote
