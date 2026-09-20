@@ -714,7 +714,7 @@ impl HttpServerBuilder {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/influxdb"),
-                HttpServer::route_influxdb(handler),
+                HttpServer::route_influxdb(handler, self.memory_limiter.clone()),
             ),
             ..self
         }
@@ -736,6 +736,7 @@ impl HttpServerBuilder {
             prom_validation_mode,
             experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
+            memory_limiter: self.memory_limiter.clone(),
         };
 
         Self {
@@ -770,6 +771,7 @@ impl HttpServerBuilder {
                     handler,
                     with_metric_engine,
                     experimental_enable_exponential_histogram,
+                    self.memory_limiter.clone(),
                 ),
             ),
             ..self
@@ -804,23 +806,23 @@ impl HttpServerBuilder {
 
         let router = self.router.nest(
             &format!("/{HTTP_API_VERSION}"),
-            HttpServer::route_pipelines(log_state.clone()),
+            HttpServer::route_pipelines(log_state.clone(), self.memory_limiter.clone()),
         );
         // deprecated since v0.11.0. Use `/logs` and `/pipelines` instead.
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/events"),
             #[allow(deprecated)]
-            HttpServer::route_log_deprecated(log_state.clone()),
+            HttpServer::route_log_deprecated(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/loki"),
-            HttpServer::route_loki(log_state.clone()),
+            HttpServer::route_loki(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/elasticsearch"),
-            HttpServer::route_elasticsearch(log_state.clone()),
+            HttpServer::route_elasticsearch(log_state.clone(), self.memory_limiter.clone()),
         );
 
         let router = router.nest(
@@ -832,7 +834,7 @@ impl HttpServerBuilder {
 
         let router = router.nest(
             &format!("/{HTTP_API_VERSION}/splunk"),
-            HttpServer::route_splunk(log_state),
+            HttpServer::route_splunk(log_state, self.memory_limiter.clone()),
         );
 
         Self { router, ..self }
@@ -863,7 +865,7 @@ impl HttpServerBuilder {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/dashboards"),
-                HttpServer::route_dashboard(handler),
+                HttpServer::route_dashboard(handler, self.memory_limiter.clone()),
             ),
             ..self
         }
@@ -1183,9 +1185,13 @@ impl HttpServer {
             .with_state(metrics_handler)
     }
 
-    fn route_loki<S>(log_state: LogState) -> Router<S> {
+    fn route_loki<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route("/api/v1/push", routing::post(loki::loki_ingest))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1197,7 +1203,7 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_splunk<S>(log_state: LogState) -> Router<S> {
+    fn route_splunk<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route(
                 "/services/collector/health",
@@ -1225,6 +1231,10 @@ impl HttpServer {
                 "/services/collector/raw/1.0",
                 routing::post(splunk::handle_raw),
             )
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1236,7 +1246,10 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_elasticsearch<S>(log_state: LogState) -> Router<S> {
+    fn route_elasticsearch<S>(
+        log_state: LogState,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             // Return fake responsefor HEAD '/' request.
             .route(
@@ -1308,6 +1321,10 @@ impl HttpServer {
                     axum::Json(serde_json::json!({})),
                 )),
             )
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(ServiceBuilder::new().layer(RequestDecompressionLayer::new()))
             .layer(middleware::from_fn_with_state(
                 BatchingProtocol::Elasticsearch,
@@ -1317,7 +1334,10 @@ impl HttpServer {
     }
 
     #[deprecated(since = "0.11.0", note = "Use `route_pipelines()` instead.")]
-    fn route_log_deprecated<S>(log_state: LogState) -> Router<S> {
+    fn route_log_deprecated<S>(
+        log_state: LogState,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             .route("/logs", routing::post(event::log_ingester))
             .route(
@@ -1333,6 +1353,10 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/dryrun", routing::post(event::pipeline_dryrun))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1344,7 +1368,7 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_pipelines<S>(log_state: LogState) -> Router<S> {
+    fn route_pipelines<S>(log_state: LogState, memory_limiter: ServerMemoryLimiter) -> Router<S> {
         Router::new()
             .route("/ingest", routing::post(event::log_ingester))
             .route(
@@ -1364,6 +1388,10 @@ impl HttpServer {
                 routing::delete(event::delete_pipeline),
             )
             .route("/pipelines/_dryrun", routing::post(event::pipeline_dryrun))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1456,10 +1484,17 @@ impl HttpServer {
             .with_state(state)
     }
 
-    fn route_influxdb<S>(influxdb_handler: InfluxdbLineProtocolHandlerRef) -> Router<S> {
+    fn route_influxdb<S>(
+        influxdb_handler: InfluxdbLineProtocolHandlerRef,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new()
             .route("/write", routing::post(influxdb_write_v1))
             .route("/api/v2/write", routing::post(influxdb_write_v2))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1487,11 +1522,16 @@ impl HttpServer {
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
         experimental_enable_exponential_histogram: bool,
+        memory_limiter: ServerMemoryLimiter,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
             .route("/v1/traces", routing::post(otlp::traces))
             .route("/v1/logs", routing::post(otlp::logs))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1533,13 +1573,20 @@ impl HttpServer {
     }
 
     #[cfg(feature = "dashboard")]
-    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+    fn route_dashboard<S>(
+        handler: DashboardHandlerRef,
+        memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         use crate::http::dashboard::{add_dashboard, delete_dashboard, list_dashboards};
 
         Router::new()
             .route("/", routing::get(list_dashboards))
             .route("/{dashboard_name}", routing::post(add_dashboard))
             .route("/{dashboard_name}", routing::delete(delete_dashboard))
+            .layer(middleware::from_fn_with_state(
+                memory_limiter,
+                memory_limit::decoded_body_accounting_middleware,
+            ))
             .layer(
                 ServiceBuilder::new()
                     .layer(RequestDecompressionLayer::new().pass_through_unaccepted(true)),
@@ -1548,7 +1595,10 @@ impl HttpServer {
     }
 
     #[cfg(not(feature = "dashboard"))]
-    fn route_dashboard<S>(handler: DashboardHandlerRef) -> Router<S> {
+    fn route_dashboard<S>(
+        handler: DashboardHandlerRef,
+        _memory_limiter: ServerMemoryLimiter,
+    ) -> Router<S> {
         Router::new().with_state(DashboardState { handler })
     }
 }

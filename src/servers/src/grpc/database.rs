@@ -24,6 +24,7 @@ use prost::Message;
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::grpc::greptime_handler::GreptimeRequestHandler;
+use crate::grpc::memory_limit::PreDecodeMemoryReservation;
 use crate::grpc::{TonicResult, cancellation};
 use crate::hint_headers;
 use crate::request_memory_limiter::ServerMemoryLimiter;
@@ -51,7 +52,16 @@ impl GreptimeDatabase for DatabaseService {
             remote_addr, hints
         );
 
-        let _guard = if let Some(limiter) = request.extensions().get::<ServerMemoryLimiter>() {
+        let _guard = if request
+            .extensions()
+            .get::<PreDecodeMemoryReservation>()
+            .is_some()
+        {
+            // Compressed requests already reserved the worst-case decoded
+            // size before tonic decompressed the message; skip the exact
+            // post-decode charge to avoid double accounting.
+            None
+        } else if let Some(limiter) = request.extensions().get::<ServerMemoryLimiter>() {
             let message_size = request.get_ref().encoded_len() as u64;
             Some(limiter.acquire(message_size).await?)
         } else {
@@ -106,6 +116,13 @@ impl GreptimeDatabase for DatabaseService {
         );
 
         let limiter = request.extensions().get::<ServerMemoryLimiter>().cloned();
+        // For compressed streams the whole stream's decoding memory was
+        // reserved before tonic started decompressing; messages are decoded
+        // one at a time, so the reservation covers each of them.
+        let pre_reserved = request
+            .extensions()
+            .get::<PreDecodeMemoryReservation>()
+            .is_some();
 
         let handler = self.handler.clone();
         let request_future = async move {
@@ -115,7 +132,9 @@ impl GreptimeDatabase for DatabaseService {
             while let Some(request) = stream.next().await {
                 let request = request?;
 
-                let _guard = if let Some(limiter_ref) = &limiter {
+                let _guard = if pre_reserved {
+                    None
+                } else if let Some(limiter_ref) = &limiter {
                     let message_size = request.encoded_len() as u64;
                     Some(limiter_ref.acquire(message_size).await?)
                 } else {

@@ -311,6 +311,18 @@ pub enum Error {
         error: std::io::Error,
     },
 
+    #[snafu(display(
+        "Decompressed request body is too large: {} bytes exceeds the limit {} bytes",
+        size,
+        limit
+    ))]
+    DecompressedBodyTooLarge {
+        size: u64,
+        limit: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to compress prometheus remote request"))]
     CompressPromRemoteRequest {
         #[snafu(implicit)]
@@ -777,6 +789,7 @@ impl ErrorExt for Error {
             | DecompressSnappyPromRemoteRequest { .. }
             | DecompressSnappyLokiRequest { .. }
             | DecompressZstdPromRemoteRequest { .. }
+            | DecompressedBodyTooLarge { .. }
             | InvalidPromRemoteRequest { .. }
             | InvalidFlightTicket { .. }
             | InvalidPrepareStatement { .. }

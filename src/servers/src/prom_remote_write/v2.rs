@@ -50,12 +50,13 @@ use table::requests::{
 use crate::error::{self, Result};
 use crate::prom_remote_write::row_builder::PromCtx;
 use crate::prom_remote_write::validation::validate_label_name;
-use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, try_decompress};
+use crate::prom_remote_write::{REMOTE_WRITE_V2_VERSION, decompress_remote_write_body};
 #[allow(deprecated)]
 use crate::prom_store::{
     DATABASE_LABEL, DATABASE_LABEL_ALT, METRIC_NAME_LABEL, PHYSICAL_TABLE_LABEL,
     PHYSICAL_TABLE_LABEL_ALT, SCHEMA_LABEL,
 };
+use crate::request_memory_limiter::ServerMemoryLimiter;
 use crate::row_writer::{self, TableData};
 use crate::semantic::{
     METRIC_TYPE_COUNTER, METRIC_TYPE_GAUGE, METRIC_TYPE_GAUGE_HISTOGRAM, METRIC_TYPE_HISTOGRAM,
@@ -127,22 +128,19 @@ pub(crate) struct RemoteWriteV2WriteRequests {
     pub semantic_index: SemanticIndexes,
 }
 
-pub(crate) fn decode_remote_write_v2(
+pub(crate) async fn decode_remote_write_v2(
     is_zstd: bool,
     body: Bytes,
     native_histograms_enabled: bool,
+    limiter: &ServerMemoryLimiter,
 ) -> Result<RemoteWriteV2WriteRequests> {
     let decode_timer = crate::metrics::METRIC_HTTP_PROM_STORE_CODEC_ELAPSED
         .with_label_values(&["decode", REMOTE_WRITE_V2_VERSION])
         .start_timer();
 
-    // Match the v1 decoder's VictoriaMetrics fallback: some clients may send a
-    // mismatched content-encoding header, so try the other compression on failure.
-    let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
-        buf
-    } else {
-        try_decompress(!is_zstd, &body[..])?
-    };
+    // Holds the memory permits for the decompressed bytes until the protobuf
+    // decoding and conversion below are finished.
+    let buf = decompress_remote_write_body(is_zstd, &body[..], limiter).await?;
     // Decompression copied the payload out, so the compressed body is no longer needed.
     drop(body);
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
@@ -801,8 +799,9 @@ pub mod test_util {
     use snafu::ResultExt;
 
     use crate::error::{self, Result};
-    use crate::prom_remote_write::try_decompress;
+    use crate::prom_remote_write::decompress_remote_write_body;
     use crate::prom_store::snappy_compress;
+    use crate::request_memory_limiter::ServerMemoryLimiter;
 
     pub fn request_with_labels_and_samples(
         labels: Vec<(&str, &str)>,
@@ -819,12 +818,22 @@ pub mod test_util {
     }
 
     pub fn decode_request(is_zstd: bool, body: Bytes) -> Result<Request> {
-        let buf = if let Ok(buf) = try_decompress(is_zstd, &body[..]) {
-            buf
-        } else {
-            try_decompress(!is_zstd, &body[..])?
-        };
+        let buf = block_on_decode(is_zstd, body)?;
         Request::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
+    }
+
+    /// Runs the charged decompression on a throwaway runtime so plain `#[test]`
+    /// callers can stay synchronous.
+    fn block_on_decode(is_zstd: bool, body: Bytes) -> Result<Vec<u8>> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                decompress_remote_write_body(is_zstd, &body[..], &ServerMemoryLimiter::default())
+                    .await
+                    .map(|buf| buf.to_vec())
+            })
     }
 
     pub fn write_requests(
@@ -839,7 +848,16 @@ pub mod test_util {
         body: Bytes,
         native_histograms_enabled: bool,
     ) -> Result<(Vec<RowInsertRequest>, Vec<RowInsertRequest>, u64, u64)> {
-        let requests = super::decode_remote_write_v2(is_zstd, body, native_histograms_enabled)?;
+        let requests = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(super::decode_remote_write_v2(
+                is_zstd,
+                body,
+                native_histograms_enabled,
+                &ServerMemoryLimiter::default(),
+            ))?;
         Ok((
             requests.samples.all_req().collect(),
             requests.histograms.all_req().collect(),
@@ -954,7 +972,7 @@ mod tests {
         assert_eq!(decoded.timeseries[0].samples[0].value, 42.0);
         assert_eq!(decoded.timeseries[0].metadata.as_ref().unwrap().r#type, 1);
         assert_eq!(
-            decode_remote_write_v2(true, body, true)
+            decode_v2_on_test_runtime(true, body, true)
                 .unwrap()
                 .sample_count,
             1
@@ -2031,7 +2049,26 @@ mod tests {
         native_histograms_enabled: bool,
     ) -> Result<RemoteWriteV2WriteRequests> {
         let body = Bytes::from(crate::prom_store::snappy_compress(wire).unwrap());
-        decode_remote_write_v2(false, body, native_histograms_enabled)
+        decode_v2_on_test_runtime(false, body, native_histograms_enabled)
+    }
+
+    /// Runs the async (charged) v2 decoder on a throwaway runtime so plain
+    /// `#[test]` callers can stay synchronous.
+    fn decode_v2_on_test_runtime(
+        is_zstd: bool,
+        body: Bytes,
+        native_histograms_enabled: bool,
+    ) -> Result<RemoteWriteV2WriteRequests> {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(decode_remote_write_v2(
+                is_zstd,
+                body,
+                native_histograms_enabled,
+                &ServerMemoryLimiter::default(),
+            ))
     }
 
     fn decode_wire_error(wire: &[u8], native_histograms_enabled: bool, name: &str) -> error::Error {
@@ -2113,7 +2150,7 @@ mod tests {
     ) -> Result<RemoteWriteV2WriteRequests> {
         let body =
             Bytes::from(crate::prom_store::snappy_compress(&request.encode_to_vec()).unwrap());
-        decode_remote_write_v2(false, body, native_histograms_enabled)
+        decode_v2_on_test_runtime(false, body, native_histograms_enabled)
     }
 
     fn assert_invalid(name: &str, request: Request, expected: &str) {
