@@ -1025,12 +1025,13 @@ async fn packed_copy_standalone_heterogeneous_streams() {
         servers::http::test_helpers::TestClient::new(server.build(server.make_app()).unwrap())
             .await;
     let state_path = root.join("import-state.json");
+    let snapshot_uri = url::Url::from_file_path(root).unwrap();
     let command = cli::import_v2::ImportV2Command::parse_from([
         "import-v2",
         "--addr",
         client.base_url().trim_start_matches("http://"),
         "--from",
-        &format!("file://{}", root.display()),
+        snapshot_uri.as_str(),
         "--state-path",
         state_path.to_str().unwrap(),
         "--auth-basic",

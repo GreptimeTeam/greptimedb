@@ -139,16 +139,17 @@ mod tests {
 
     #[tokio::test]
     async fn packed_membership_uses_literal_names_and_excludes_physical_and_views() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = OpenDalStorage::from_uri(
-            &format!("file://{}", dir.path().display()),
-            &Default::default(),
-        )
-        .unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("packed snapshot # ")
+            .tempdir()
+            .unwrap();
+        let uri = url::Url::from_file_path(dir.path()).unwrap();
+        let storage = OpenDalStorage::from_uri(uri.as_str(), &Default::default()).unwrap();
         storage.write_text("schema/ddl/public.sql", "CREATE TABLE p (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(physical_metric_table=''); CREATE TABLE \"logical.name\" (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH(on_physical_table='p'); CREATE VIEW v AS SELECT * FROM \"logical.name\";").await.unwrap();
         let path = "data/public/1/pack-index.json";
         let index = serde_json::json!({"version":1,"objects":[{"path":"pack-0.bin","kind":"pack","length":12}],"tables":[{"table_name":"logical.name","object":"pack-0.bin","offset":0,"length":12,"row_count":0}]});
         storage.write_text(path, &index.to_string()).await.unwrap();
+        assert!(dir.path().join(path).is_file());
         let mut manifest = Manifest::new_schema_only("greptime".into(), vec!["public".into()]);
         let mut chunk = ChunkMeta::new(1, TimeRange::unbounded());
         chunk.mark_completed(vec![path.into(), "data/public/1/pack-0.bin".into()], None);
