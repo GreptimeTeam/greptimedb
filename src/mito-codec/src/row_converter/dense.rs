@@ -435,6 +435,8 @@ impl DensePrimaryKeyCodec {
     /// Dense keys contain neither column ids nor types: callers must ensure that
     /// existing fields have the same order and types. Only EOF between fields is
     /// accepted; truncated fields and bytes beyond the schema return an error.
+    /// Field boundaries are checked in all builds; full value validation is only
+    /// enabled in debug builds and this crate's unit tests.
     pub fn decode_prefix_len(&self, bytes: &[u8]) -> Result<usize> {
         let mut deserializer = Deserializer::new(bytes);
         for (index, (_, field)) in self.ordered_primary_key_columns.iter().enumerate() {
@@ -443,7 +445,8 @@ impl DensePrimaryKeyCodec {
             }
             let start = deserializer.position();
             let len = field.encoded_field_len(&bytes[start..])?;
-            // Validate values too (e.g. UTF-8 and booleans), now with safe bounds.
+            // Production range mapping only needs boundaries, not allocated field values.
+            #[cfg(any(debug_assertions, test))]
             field.deserialize(&mut Deserializer::new(&bytes[start..start + len]))?;
             deserializer.advance(len);
         }
@@ -716,6 +719,17 @@ mod tests {
         let empty = DensePrimaryKeyCodec::with_fields(vec![]);
         assert_eq!(0, empty.decode_prefix_len(&[]).unwrap());
         assert!(empty.decode_prefix_len(&[0]).is_err());
+    }
+
+    #[test]
+    fn test_prefix_len_validates_values_in_unit_tests() {
+        let codec = DensePrimaryKeyCodec::with_fields(vec![(
+            0,
+            SortField::new(ConcreteDataType::boolean_datatype()),
+        )]);
+        // The field is complete, but 2 is not a boolean. Even release unit tests
+        // retain value validation through cfg(test).
+        assert!(codec.decode_prefix_len(&[1, 2]).is_err());
     }
 
     #[test]
