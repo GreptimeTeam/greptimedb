@@ -37,7 +37,7 @@ use datafusion::physical_plan::filter_pushdown::{
 use datafusion::physical_plan::metrics::{ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties,
-    RecordBatchStream as DfRecordBatchStream, apply_expression_roots,
+    RecordBatchStream as DfRecordBatchStream, StatisticsArgs, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -491,8 +491,12 @@ impl ExecutionPlan for RegionScanExec {
         Ok(self)
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DfResult<Arc<Statistics>> {
-        if partition.is_some() || !self.append_mode {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> DfResult<Arc<Statistics>> {
+        if args.partition().is_some() || !self.append_mode {
             return Ok(Arc::new(Statistics::new_unknown(self.schema().as_ref())));
         }
 
@@ -679,6 +683,7 @@ mod test {
         ChildFilterPushdownResult, ChildPushdownResult,
     };
     use datafusion::physical_plan::metrics::MetricValue;
+    use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion::prelude::SessionContext;
     use datatypes::arrow::array::Array;
     use datatypes::data_type::ConcreteDataType;
@@ -853,7 +858,6 @@ mod test {
     }
 
     #[test]
-    #[allow(deprecated)]
     fn test_count_statistics_require_exact_source_rows() {
         for (append_mode, exact, expected) in [
             (true, false, Precision::Absent),
@@ -871,9 +875,18 @@ mod test {
                 dynamic_filters: Arc::new(Mutex::new(Vec::new())),
             });
             let plan = RegionScanExec::new(scanner, ScanRequest::default(), None).unwrap();
-            assert_eq!(plan.partition_statistics(None).unwrap().num_rows, expected);
             assert_eq!(
-                plan.partition_statistics(Some(0)).unwrap().num_rows,
+                StatisticsContext::new()
+                    .compute(&plan, &StatisticsArgs::new())
+                    .unwrap()
+                    .num_rows,
+                expected,
+            );
+            assert_eq!(
+                StatisticsContext::new()
+                    .compute(&plan, &StatisticsArgs::new().with_partition(Some(0)))
+                    .unwrap()
+                    .num_rows,
                 Precision::Absent,
             );
         }

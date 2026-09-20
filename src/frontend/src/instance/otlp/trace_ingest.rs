@@ -28,20 +28,20 @@ use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::{debug, warn};
 use datatypes::prelude::ConcreteDataType;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use pipeline::{GreptimePipelineParams, PipelineWay};
+use pipeline::PipelineWay;
 use servers::error::{self, Result as ServerResult};
 use servers::otlp;
 use servers::otlp::coerce::{coerce_value_data, is_supported_trace_coercion, trace_value_datatype};
 use servers::otlp::trace::span::{TraceSpan, TraceSpanGroup};
 use servers::otlp::trace::v1::{TraceBatchSchema, TraceBinaryType, TraceRetryColumns};
 use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
-use servers::query_handler::{PipelineHandlerRef, TraceIngestOutcome};
+use servers::query_handler::TraceIngestOutcome;
 use session::context::QueryContextRef;
 use snafu::{IntoError, ResultExt};
 use table::requests::{
     SEMANTIC_ENTITY_SERVICE_ID, SEMANTIC_PIPELINE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE,
     SEMANTIC_TRACE_CONVENTIONS, SEMANTIC_VALUE_MIXED, SEMANTIC_VALUE_UNKNOWN, SIGNAL_TYPE_TRACE,
-    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1,
+    SOURCE_OPENTELEMETRY, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
 };
 
 use crate::instance::Instance;
@@ -53,6 +53,22 @@ use crate::instance::otlp::trace_types::{
     truncate_for_diagnostics,
 };
 use crate::metrics::{OTLP_TRACES_FAILURE_COUNT, OTLP_TRACES_ROWS};
+
+/// Merge converted V2 rows only when their fixed schemas agree.
+fn merge_trace_v2_rows(rows: &mut Rows, batch: Rows) -> ServerResult<()> {
+    if rows.schema.is_empty() {
+        rows.schema = batch.schema;
+    } else {
+        snafu::ensure!(
+            rows.schema == batch.schema,
+            error::InternalSnafu {
+                err_msg: "Trace V2 schema mismatch while merging spans",
+            }
+        );
+    }
+    rows.rows.extend(batch.rows);
+    Ok(())
+}
 
 const TRACE_FAILURE_MESSAGE_LIMIT: usize = 4;
 
@@ -79,11 +95,8 @@ impl ChunkFailureReaction {
 
 /// Shared dependencies and request metadata used while ingesting trace chunks.
 struct TraceChunkIngestContext<'a> {
-    pipeline_handler: PipelineHandlerRef,
     pipeline: &'a PipelineWay,
-    pipeline_params: &'a GreptimePipelineParams,
     table_name: &'a str,
-    is_trace_v1_model: bool,
 }
 
 /// Accumulates trace outcomes, auxiliary rows, and bounded failure details.
@@ -855,18 +868,20 @@ impl TraceColumnRequestSchema {
 impl Instance {
     /// Ingest OTLP trace spans with chunk-level writes and span-level fallback on
     /// deterministic chunk failures.
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn ingest_trace_spans(
         &self,
-        pipeline_handler: PipelineHandlerRef,
         pipeline: &PipelineWay,
-        pipeline_params: &GreptimePipelineParams,
         table_name: String,
         groups: Vec<TraceSpanGroup>,
         conventions: &str,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
         let is_trace_v1_model = matches!(pipeline, PipelineWay::OtlpTraceDirectV1);
+        let data_model = match pipeline {
+            PipelineWay::OtlpTraceDirectV1 => Some(TABLE_DATA_MODEL_TRACE_V1),
+            PipelineWay::OtlpTraceDirectV2 => Some(TABLE_DATA_MODEL_TRACE_V2),
+            _ => None,
+        };
 
         // Only the main span table gets the identity; the derived `_services` /
         // `_operations` lookup tables keep the unstamped `ctx`.
@@ -877,19 +892,30 @@ impl Instance {
             // `service_name` is a tag column in both trace models, so the main span
             // table declares the logical `service` entity (Layer 1 auto-stamp).
             c.set_extension(SEMANTIC_ENTITY_SERVICE_ID, SERVICE_NAME_COLUMN);
-            if is_trace_v1_model {
-                c.set_extension(SEMANTIC_PIPELINE, TABLE_DATA_MODEL_TRACE_V1);
+            if let Some(data_model) = data_model {
+                c.set_extension(SEMANTIC_PIPELINE, data_model);
                 c.set_extension(SEMANTIC_TRACE_CONVENTIONS, conventions);
             }
             Arc::new(c)
         };
 
+        if data_model.is_some()
+            && let Some(table) = self
+                .catalog_manager
+                .table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &table_name,
+                    None,
+                )
+                .await?
+        {
+            operator::insert::validate_trace_table_model(&table.table_info(), &main_ctx)?;
+        }
+
         let ingest_ctx = TraceChunkIngestContext {
-            pipeline_handler,
             pipeline,
-            pipeline_params,
             table_name: &table_name,
-            is_trace_v1_model,
         };
         let mut ingest_state = TraceIngestState {
             aux_data: TraceAuxData::default(),
@@ -975,7 +1001,7 @@ impl Instance {
             match aux_requests {
                 Ok((aux_requests, _)) if !aux_requests.inserts.is_empty() => {
                     match self
-                        .insert_trace_requests(aux_requests, ingest_ctx.is_trace_v1_model, ctx)
+                        .insert_trace_requests(aux_requests, ingest_ctx.pipeline, ctx)
                         .await
                     {
                         Ok(output) => {
@@ -1055,23 +1081,71 @@ impl Instance {
     async fn ingest_trace_chunk(
         &self,
         ingest_ctx: &TraceChunkIngestContext<'_>,
-        chunk: Vec<TraceSpan>,
+        mut chunk: Vec<TraceSpan>,
         ctx: QueryContextRef,
         ingest_state: &mut TraceIngestState,
     ) -> ServerResult<()> {
         // Try the fast path first so healthy batches keep their original
         // throughput and write amplification stays low.
-        let (requests, chunk_rows) = otlp::trace::to_grpc_insert_requests_from_spans(
-            &chunk,
-            ingest_ctx.pipeline,
-            ingest_ctx.pipeline_params,
-            ingest_ctx.table_name,
-            &ctx,
-            ingest_ctx.pipeline_handler.clone(),
-        )?;
+        let convert = |spans: &[TraceSpan]| {
+            otlp::trace::to_grpc_insert_requests_from_spans(
+                spans,
+                ingest_ctx.pipeline,
+                ingest_ctx.table_name,
+            )
+        };
+        let (requests, chunk_rows) = match convert(&chunk) {
+            Ok(x) => x,
+            Err(_) if matches!(ingest_ctx.pipeline, PipelineWay::OtlpTraceDirectV2) => {
+                let mut rows = Rows {
+                    rows: Vec::with_capacity(chunk.len()),
+                    ..Default::default()
+                };
+
+                for span in std::mem::take(&mut chunk) {
+                    let result = convert(std::slice::from_ref(&span));
+                    match result {
+                        Ok((requests, _)) => {
+                            // V2 must always emit the same table and fixed column order.
+                            for batch in requests.inserts.into_iter().filter_map(|r| r.rows) {
+                                merge_trace_v2_rows(&mut rows, batch)?;
+                            }
+                            chunk.push(span);
+                        }
+                        Err(err) => {
+                            ingest_state.outcome.rejected_spans += 1;
+
+                            let (cause, shown_cause) = Self::trace_failure_cause(&err);
+                            Self::push_trace_failure_message(
+                                &mut ingest_state.failure_messages,
+                                "span_rejected",
+                                &cause,
+                                format!(
+                                    "Rejected span {}:{}: {}",
+                                    span.trace_id, span.span_id, shown_cause
+                                ),
+                            );
+                        }
+                    }
+                }
+
+                if rows.rows.is_empty() {
+                    return Ok(());
+                }
+                let chunk_rows = rows.rows.len();
+                let requests = RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: ingest_ctx.table_name.to_string(),
+                        rows: Some(rows),
+                    }],
+                };
+                (requests, chunk_rows)
+            }
+            Err(e) => return Err(e),
+        };
 
         let output = match self
-            .insert_trace_requests(requests, ingest_ctx.is_trace_v1_model, ctx)
+            .insert_trace_requests(requests, ingest_ctx.pipeline, ctx)
             .await
         {
             Ok(output) => output,
@@ -1364,12 +1438,17 @@ impl Instance {
     async fn insert_trace_requests(
         &self,
         mut requests: RowInsertRequests,
-        is_trace_v1_model: bool,
+        pipeline: &PipelineWay,
         ctx: QueryContextRef,
     ) -> ServerResult<Output> {
-        if is_trace_v1_model {
+        if matches!(pipeline, PipelineWay::OtlpTraceDirectV1) {
             self.reconcile_trace_column_types(&mut requests, &ctx)
                 .await?;
+        }
+        if matches!(
+            pipeline,
+            PipelineWay::OtlpTraceDirectV1 | PipelineWay::OtlpTraceDirectV2
+        ) {
             self.handle_trace_inserts(requests, ctx)
                 .await
                 .map_err(BoxedError::new)
@@ -1394,6 +1473,9 @@ impl Instance {
             .catalog_manager
             .table(catalog, &schema, table_name, None)
             .await?;
+        if let Some(table) = &table {
+            operator::insert::validate_trace_table_model(&table.table_info(), ctx)?;
+        }
         let table_schema = table.as_ref().map(|table| table.schema());
         let exclusions = request_schema.incompatible_schema_observations(table_schema.as_deref());
         if !exclusions.is_empty() {

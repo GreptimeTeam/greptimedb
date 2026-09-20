@@ -1335,3 +1335,34 @@ fn test_trace_conventions() {
     };
     assert_eq!(trace_conventions(&conflicting), "mixed");
 }
+
+#[test]
+fn test_merge_trace_v2_rows() -> servers::error::Result<()> {
+    let batch = Rows {
+        schema: vec![ColumnSchema {
+            column_name: "trace_id".to_string(),
+            datatype: ColumnDataType::String as i32,
+            ..Default::default()
+        }],
+        rows: vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue("trace".to_string())),
+            }],
+        }],
+    };
+    let mut rows = Rows::default();
+    super::merge_trace_v2_rows(&mut rows, batch.clone())?;
+    super::merge_trace_v2_rows(&mut rows, batch.clone())?;
+    assert_eq!(rows.rows.len(), 2);
+
+    let before = rows.clone();
+    let mut incompatible = batch;
+    incompatible.schema[0].column_name = "span_id".to_string();
+    let result = super::merge_trace_v2_rows(&mut rows, incompatible);
+    assert!(matches!(
+        result,
+        Err(servers::error::Error::Internal { .. })
+    ));
+    assert_eq!(rows, before);
+    Ok(())
+}

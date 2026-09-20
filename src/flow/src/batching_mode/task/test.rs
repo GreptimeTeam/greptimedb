@@ -15,6 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -57,6 +58,329 @@ fn incremental_batch_opts() -> Arc<BatchingModeOptions> {
         experimental_enable_incremental_read: true,
         ..Default::default()
     })
+}
+
+struct CountingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for CountingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        _guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let active = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        ExecuteOnceOutcome {
+            new_query: None,
+            result: Ok(None),
+        }
+    }
+}
+
+struct RetainingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    finished: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for RetainingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+            return ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            };
+        }
+
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let finished = self.finished.clone();
+        let child = tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            drop(guard);
+            finished.notify_one();
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
+        });
+        match child.await {
+            Ok(outcome) => outcome,
+            Err(err) => ExecuteOnceOutcome {
+                new_query: None,
+                result: Err(Error::Unexpected {
+                    reason: format!("retaining test child failed: {err}"),
+                    location: snafu::location!(),
+                }),
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_execution_delegate_dispatch_is_serialized() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(CountingExecution {
+        calls: Default::default(),
+        active: Default::default(),
+        max_active: Default::default(),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first = task.execute_once_serialized(&query_engine, &frontend, None);
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap(), None);
+    assert_eq!(second.unwrap(), None);
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        execution
+            .max_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the existing execution_lock must span delegate execution"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_guard_survives_caller_cancellation_until_child_finishes() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first_task = task.clone();
+    let first_engine = query_engine.clone();
+    let first_frontend = frontend.clone();
+    let first = tokio::spawn(async move {
+        first_task
+            .execute_once_serialized(&first_engine, &first_frontend, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("delegate child did not retain the guard");
+    first.abort();
+    assert!(
+        first
+            .await
+            .expect_err("caller cancellation should abort")
+            .is_cancelled()
+    );
+
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    futures::pin_mut!(second);
+    assert!(
+        matches!(futures::poll!(second.as_mut()), Poll::Pending),
+        "the next round must remain pending while the retained guard is held"
+    );
+    assert_eq!(
+        execution.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the pending waiter must not enter the collaborator"
+    );
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("delegate child did not release its guard");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("next round should proceed after child release")
+            .unwrap(),
+        None
+    );
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_scheduled_context_is_retained_until_delegate_child_releases_guard() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+    let scheduled = 1_700_000_000;
+
+    let task_to_run = task.clone();
+    let engine_to_run = query_engine.clone();
+    let frontend_to_run = frontend.clone();
+    let execution_call = tokio::spawn(async move {
+        task_to_run
+            .execute_once_serialized_at_scheduled_time(&engine_to_run, &frontend_to_run, scheduled)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("scheduled delegate child did not start");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored before the delegate child released the guard"
+    );
+    execution_call.abort();
+    match execution_call.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("scheduled caller cancellation should abort"),
+    }
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored after caller cancellation but before child release"
+    );
+
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("scheduled delegate child did not release its guard");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None,
+        "scheduled context was not restored when child released guard"
+    );
+}
+
+struct BlockingDefaultExecutionHandler {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    dropped: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+struct DropAck(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropAck {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.0.take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for BlockingDefaultExecutionHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let _ack = DropAck(self.dropped.lock().unwrap().take());
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn test_default_execution_remains_inline_and_cancellable() {
+    let query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
+                 FROM numbers_with_ts GROUP BY time_window, number";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(query).await;
+    register_twe_sink(&query_engine, "missing_sink", 9200);
+    task.mark_all_windows_as_dirty().unwrap();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(BlockingDefaultExecutionHandler {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            dropped: std::sync::Mutex::new(Some(dropped_tx)),
+        });
+    let frontend = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let task_to_cancel = task.clone();
+    let engine_to_cancel = query_engine.clone();
+    let frontend_to_cancel = frontend.clone();
+    let caller = tokio::spawn(async move {
+        task_to_cancel
+            .execute_once_serialized(&engine_to_cancel, &frontend_to_cancel, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered_rx)
+        .await
+        .expect("default execution did not dispatch a frontend query")
+        .expect("default execution handler entry notification dropped");
+    caller.abort();
+    match caller.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("default caller cancellation should abort"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("cancelling default execution did not drop the active frontend future")
+        .expect("default execution drop acknowledgement was not sent");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        task.execution_lock.clone().lock_owned(),
+    )
+    .await
+    .expect("default execution must not leave an owned child holding the lock");
 }
 
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
@@ -2073,6 +2397,62 @@ async fn test_full_snapshot_seeding_applies_expire_after_retention_filter() {
 }
 
 #[tokio::test]
+async fn test_force_full_snapshot_retains_expiration_and_reversible_dirty_capture() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    register_twe_sink(&query_engine, "missing_sink", 9201);
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+
+    let plan = task
+        .gen_insert_plan_with_values_unlocked(&query_engine, Some(1), &BTreeMap::new(), true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
+    assert!(
+        plan.plan
+            .to_string()
+            .contains("Filter: ts >= TimestampMillisecond(")
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+    task.restore_dirty_windows(&plan.dirty_restore);
+    assert_eq!(task.state.read().unwrap().dirty_time_windows.len(), 1);
+
+    task.state.write().unwrap().dirty_time_windows.clean();
+    let no_dirty_plan = task
+        .gen_insert_plan_with_values_unlocked(&query_engine, Some(1), &BTreeMap::new(), true)
+        .await
+        .unwrap()
+        .expect("forced full snapshot must bypass the dirty-window notification gate");
+    assert!(matches!(
+        no_dirty_plan.coverage,
+        QueryCoverage::UnfilteredFull
+    ));
+    assert!(
+        no_dirty_plan
+            .plan
+            .to_string()
+            .contains("Filter: ts >= TimestampMillisecond(")
+    );
+}
+
+#[tokio::test]
 async fn test_incremental_plan_does_not_add_dirty_window_filter() {
     let TestTaskParts {
         task,
@@ -2189,19 +2569,38 @@ async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
         Arc::downgrade(&handler),
         QueryOptions::default(),
     ));
-    task.execute_logical_plan_unlocked(
-        &frontend_client,
-        &plan_info.plan,
-        &plan_info.dirty_restore,
-        &plan_info.coverage,
-    )
-    .await
-    .expect_err("the dispatched exact delta must fail through the injected frontend handler");
+    let raw = task
+        .execute_plan_unlocked(
+            &query_engine,
+            &frontend_client,
+            &plan_info.plan,
+            &plan_info.dirty_restore,
+            &plan_info.coverage,
+        )
+        .await
+        .expect("raw executor should return the dispatched execution result")
+        .expect("raw executor should dispatch the exact delta");
+    assert!(
+        raw.0.is_err(),
+        "the dispatched exact delta must fail through the injected frontend handler"
+    );
     assert!(
         handler_invoked.load(Ordering::SeqCst),
         "the injected frontend handler must receive the exact delta"
     );
-    task.handle_executed_query_failure(Some(&plan_info));
+    // The raw executor is a delegate-safe primitive: it logs failures but does not change
+    // checkpoint state. Restore the consumed work, then let the default wrapper make its one
+    // failure transition and restore it again.
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    }
+    task.restore_dirty_windows(&plan_info.dirty_restore);
+    let outcome = task
+        .execute_once_default_unlocked(&query_engine, &frontend_client, Some(1))
+        .await;
+    assert!(outcome.result.is_err());
 
     {
         let state = task.state.read().unwrap();
@@ -2459,6 +2858,7 @@ async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
     for _ in 0..2 {
         let err = task
             .execute_logical_plan_unlocked(
+                &query_engine,
                 &frontend_client,
                 &dml_plan,
                 &DirtyRestore::Unscoped(dirty_range(10, 15)),
@@ -2544,7 +2944,10 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -2621,6 +3024,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
 
     let result = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &Arc::new(frontend_client),
             &dml_plan,
             &dirty_restore,
@@ -2707,7 +3111,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
 
     let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan)
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
         .await
         .unwrap()
         .expect("plain GROUP BY is incremental-safe without a rewrite");
@@ -2752,7 +3156,10 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);

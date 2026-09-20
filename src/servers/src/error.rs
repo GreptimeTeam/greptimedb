@@ -687,6 +687,13 @@ pub enum Error {
     },
 
     #[snafu(transparent)]
+    Operator {
+        source: operator::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(transparent)]
     GreptimeProto {
         source: api::error::Error,
         #[snafu(implicit)]
@@ -853,6 +860,7 @@ impl ErrorExt for Error {
             GreptimeProto { source, .. } => source.status_code(),
             Partition { source, .. } => source.status_code(),
             MetricEngine { source, .. } => source.status_code(),
+            Operator { source, .. } => source.status_code(),
             SubmitBatch { source, .. } => source.status_code(),
         }
     }
@@ -887,6 +895,7 @@ impl ErrorExt for Error {
             GreptimeProto { source, .. } => source.retry_hint(),
             Partition { source, .. } => source.retry_hint(),
             MetricEngine { source, .. } => source.retry_hint(),
+            Operator { source, .. } => source.retry_hint(),
             SubmitBatch { source, .. } => source.retry_hint(),
 
             MemoryLimitExceeded { source, .. } => source.retry_hint(),

@@ -79,6 +79,9 @@ pub struct QueryContext {
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
+    /// Local-only write batching selection; never transported in protobuf extensions.
+    #[builder(default)]
+    batching_enabled: bool,
     /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
@@ -430,6 +433,16 @@ impl QueryContext {
         &self.configuration_parameter
     }
 
+    /// Whether the local HTTP entry point selected write batching.
+    pub fn batching_enabled(&self) -> bool {
+        self.batching_enabled
+    }
+
+    /// Sets local write batching selection without adding a wire-visible extension.
+    pub fn set_batching_enabled(&mut self, enabled: bool) {
+        self.batching_enabled = enabled;
+    }
+
     pub fn channel(&self) -> Channel {
         self.channel
     }
@@ -594,6 +607,7 @@ impl QueryContextBuilder {
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
+            batching_enabled: self.batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
             protocol_ctx: self.protocol_ctx.unwrap_or_default(),
@@ -709,9 +723,8 @@ mod test {
 
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
-    use super::*;
     use crate::Session;
-    use crate::context::Channel;
+    use crate::context::{Channel, *};
 
     #[test]
     fn test_session() {
@@ -859,5 +872,19 @@ mod test {
 
         ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "another-query-id");
         assert!(!ctx.live_analyze_metrics_enabled());
+    }
+    #[test]
+    fn test_batching_selection_is_local_only() {
+        let mut ctx = QueryContextBuilder::default().build();
+        assert!(!ctx.batching_enabled());
+        ctx.set_batching_enabled(true);
+        assert!(ctx.clone().batching_enabled());
+        assert!(ctx.fork().batching_enabled());
+        let wire: api::v1::QueryContext = ctx.into();
+        assert!(!QueryContext::from(wire).batching_enabled());
+        let ctx = QueryContextBuilder::default()
+            .set_extension("batching_enabled".to_string(), "true".to_string())
+            .build();
+        assert!(!ctx.batching_enabled());
     }
 }

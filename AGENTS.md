@@ -69,10 +69,10 @@ a module map, read/write paths, change-coupling points, and gotchas:
 - [`tests/compatibility/AGENTS.md`](tests/compatibility/AGENTS.md)
 - [`tests/perf/AGENTS.md`](tests/perf/AGENTS.md)
 
-## Rust imports
+## Rust style
 
-Prefer crate-rooted imports (`use crate::...`) over `use super::...` in
-production code. Relative imports using `super` are allowed in tests.
+Follow [`docs/style-guide.md`](docs/style-guide.md) for Rust style, module
+design, naming, and reuse guidance.
 
 ## Read before changing code
 
@@ -140,7 +140,12 @@ blast radius requires it.
 10. When creating or updating a pull request, follow
    [`.github/pull_request_template.md`](.github/pull_request_template.md): include
    the CLA statement, fill the change-intention section with enough detail, and
-   update checklist items accurately.
+   update checklist items accurately. "This PR requires documentation updates"
+   refers to the official docs site repository
+   ([`GreptimeTeam/docs`](https://github.com/GreptimeTeam/docs)), not to rustdoc
+   or comments in this repo. Check it only when that site would be wrong or
+   incomplete without a matching change; a change users cannot observe does not
+   need it.
 11. If the change must also land on release branches, add the matching
    `backport-<target>` labels (e.g. `backport-v1.3` targets `release/v1.3`). The
    Backport workflow (`.github/workflows/backport.yml`) cherry-picks a merged PR

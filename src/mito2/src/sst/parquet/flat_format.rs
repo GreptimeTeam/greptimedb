@@ -40,7 +40,14 @@ use datatypes::arrow::compute::kernels::take::take;
 use datatypes::arrow::datatypes::{Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec, build_primary_key_codec};
+use datatypes::value::ValueRef;
+use datatypes::vectors::MutableVector;
+use mito_codec::row_converter::sparse::{
+    RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
+};
+use mito_codec::row_converter::{
+    CompositeValues, PrimaryKeyCodec, SparseOffsetsCache, build_primary_key_codec,
+};
 use parquet::file::metadata::RowGroupMetaData;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
@@ -669,7 +676,9 @@ pub(crate) fn sst_column_id_indices(metadata: &RegionMetadata) -> HashMap<Column
 /// Decodes primary keys from a batch and returns decoded primary key information.
 ///
 /// The batch must contain a primary key column at the expected index.
-pub(crate) fn decode_primary_keys(
+/// Sparse primary keys stay encoded: tag values are extracted lazily per column
+/// in [`DecodedPrimaryKeys::get_tag_column`] without decoding every label.
+pub fn decode_primary_keys(
     codec: &dyn PrimaryKeyCodec,
     batch: &RecordBatch,
 ) -> Result<DecodedPrimaryKeys> {
@@ -691,67 +700,142 @@ pub(crate) fn decode_primary_keys(
 
     let keys = pk_dict_array.keys();
 
-    // Decodes primary key values by iterating through keys, reusing decoded values for duplicate keys.
-    // Maps original key index -> new decoded value index
-    let mut key_to_decoded_index = Vec::with_capacity(keys.len());
-    let mut decoded_pk_values = Vec::new();
-    let mut prev_key: Option<u32> = None;
-
-    // The parquet reader may read the whole dictionary page into the dictionary values, so
-    // we may decode many primary keys not in this batch if we decode the values array directly.
+    // Collects consecutive runs of identical dictionary keys, preserving their
+    // row order. Maps original key index -> new decoded value index.
+    // The parquet reader may read the whole dictionary page into the dictionary
+    // values, so we may decode many primary keys not in this batch if we decode
+    // the values array directly.
     let pk_indices = keys.values();
+    let mut key_to_decoded_index = Vec::with_capacity(keys.len());
+    let mut distinct_keys: Vec<u32> = Vec::new();
+    let mut prev_key: Option<u32> = None;
     for &current_key in pk_indices.iter().take(keys.len()) {
         // Check if current key is the same as previous key
         if let Some(prev) = prev_key
             && prev == current_key
         {
             // Reuse the last decoded index
-            key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+            key_to_decoded_index.push((distinct_keys.len() - 1) as u32);
             continue;
         }
 
-        // New key, decodes the value
-        let pk_bytes = pk_values_array.value(current_key as usize);
-        let decoded_value = codec.decode(pk_bytes).context(DecodeSnafu)?;
-
-        decoded_pk_values.push(decoded_value);
-        key_to_decoded_index.push((decoded_pk_values.len() - 1) as u32);
+        distinct_keys.push(current_key);
+        key_to_decoded_index.push((distinct_keys.len() - 1) as u32);
         prev_key = Some(current_key);
     }
 
-    // Create the keys array from key_to_decoded_index
-    let keys_array = UInt32Array::from(key_to_decoded_index);
+    let inner = match codec.encoding() {
+        PrimaryKeyEncoding::Sparse => DecodedKeysInner::Sparse {
+            values: pk_values_array.clone(),
+            distinct_keys,
+        },
+        PrimaryKeyEncoding::Dense => {
+            let mut decoded_pk_values = Vec::with_capacity(distinct_keys.len());
+            for key in &distinct_keys {
+                let pk_bytes = pk_values_array.value(*key as usize);
+                let decoded_value = codec.decode(pk_bytes).context(DecodeSnafu)?;
+                decoded_pk_values.push(decoded_value);
+            }
+            DecodedKeysInner::Dense(decoded_pk_values)
+        }
+    };
 
     Ok(DecodedPrimaryKeys {
-        decoded_pk_values,
-        keys_array,
+        inner,
+        keys_array: UInt32Array::from(key_to_decoded_index),
+        pk_offsets: SparseOffsetsCache::new(),
+        value_buf: Vec::new(),
     })
 }
 
-/// Holds decoded primary key values and their indices.
-pub(crate) struct DecodedPrimaryKeys {
-    /// Decoded primary key values for unique keys in the dictionary.
-    decoded_pk_values: Vec<CompositeValues>,
+/// Eagerly decoded dense primary keys or lazily extracted sparse primary keys.
+enum DecodedKeysInner {
+    /// Dense primary keys are decoded once and shared by all tag columns.
+    Dense(Vec<CompositeValues>),
+    /// Sparse primary keys stay encoded; each tag column extracts only its own
+    /// values from the raw keys.
+    Sparse {
+        /// Dictionary values of the primary key array.
+        values: BinaryArray,
+        /// Dictionary key of each distinct consecutive run, in first-appearance order.
+        distinct_keys: Vec<u32>,
+    },
+}
+
+/// Holds decoded primary key values for unique keys and their indices.
+pub struct DecodedPrimaryKeys {
+    inner: DecodedKeysInner,
     /// Prebuilt keys array for creating dictionary arrays.
     keys_array: UInt32Array,
+    /// Scratch offsets shared when extracting sparse tag values.
+    pk_offsets: SparseOffsetsCache,
+    /// Reusable buffer for extracting sparse tag values.
+    value_buf: Vec<u8>,
+}
+
+/// Pushes the value of `column_id` in `pk` into `builder`.
+fn push_sparse_tag_value(
+    pk: &[u8],
+    column_id: ColumnId,
+    builder: &mut dyn MutableVector,
+    pk_offsets: &mut SparseOffsetsCache,
+    value_buf: &mut Vec<u8>,
+) -> Result<()> {
+    let mut view = SparsePrimaryKeyView::new(pk, pk_offsets).context(DecodeSnafu)?;
+    push_sparse_tag_value_in_view(&mut view, column_id, builder, value_buf)
+}
+
+/// Pushes the value of `column_id` into `builder` using an existing view, so
+/// multiple columns of the same key share offset discovery.
+fn push_sparse_tag_value_in_view(
+    view: &mut SparsePrimaryKeyView,
+    column_id: ColumnId,
+    builder: &mut dyn MutableVector,
+    value_buf: &mut Vec<u8>,
+) -> Result<()> {
+    match column_id {
+        RESERVED_COLUMN_ID_TABLE_ID => builder.push_value_ref(&ValueRef::UInt32(view.table_id())),
+        RESERVED_COLUMN_ID_TSID => builder.push_value_ref(&ValueRef::UInt64(view.tsid())),
+        _ => {
+            let value = view.label(column_id, value_buf).context(DecodeSnafu)?;
+            match value {
+                None => builder.push_null(),
+                Some(value) => builder.push_value_ref(&ValueRef::String(value)),
+            }
+        }
+    }
+    Ok(())
 }
 
 impl DecodedPrimaryKeys {
     /// Gets a tag column array by column id and data type.
     ///
-    /// For sparse encoding, uses column_id to lookup values.
-    /// For dense encoding, uses pk_index to get values.
-    pub(crate) fn get_tag_column(
-        &self,
+    /// For sparse encoding, extracts the column lazily from the encoded keys.
+    /// For dense encoding, uses pk_index to get values from the decoded keys.
+    pub fn get_tag_column(
+        &mut self,
         column_id: ColumnId,
         pk_index: Option<usize>,
         column_type: &ConcreteDataType,
     ) -> Result<ArrayRef> {
+        let Self {
+            inner,
+            keys_array,
+            pk_offsets,
+            value_buf,
+        } = self;
+
         // Gets values from the primary key.
-        let mut builder = column_type.create_mutable_vector(self.decoded_pk_values.len());
-        for decoded in &self.decoded_pk_values {
-            match decoded {
-                CompositeValues::Dense(dense) => {
+        let values_vector = match inner {
+            DecodedKeysInner::Dense(decoded_pk_values) => {
+                let mut builder = column_type.create_mutable_vector(decoded_pk_values.len());
+                for decoded in decoded_pk_values {
+                    let CompositeValues::Dense(dense) = decoded else {
+                        return InvalidRecordBatchSnafu {
+                            reason: "expected dense primary key values",
+                        }
+                        .fail();
+                    };
                     let pk_idx = pk_index.expect("pk_index required for dense encoding");
                     if pk_idx < dense.len() {
                         builder.push_value_ref(&dense[pk_idx].1.as_value_ref());
@@ -759,28 +843,93 @@ impl DecodedPrimaryKeys {
                         builder.push_null();
                     }
                 }
-                CompositeValues::Sparse(sparse) => {
-                    let value = sparse.get_or_null(column_id);
-                    builder.push_value_ref(&value.as_value_ref());
+                builder.to_vector()
+            }
+            DecodedKeysInner::Sparse {
+                values,
+                distinct_keys,
+            } => {
+                let mut builder = column_type.create_mutable_vector(distinct_keys.len());
+                for &key in distinct_keys.iter() {
+                    let pk = values.value(key as usize);
+                    push_sparse_tag_value(pk, column_id, &mut *builder, pk_offsets, value_buf)?;
                 }
-            };
-        }
-
-        let values_vector = builder.to_vector();
+                builder.to_vector()
+            }
+        };
         let values_array = values_vector.to_arrow_array();
 
         // Only creates dictionary array for string types, otherwise take values by keys
         if column_type.is_string() {
             // Creates dictionary array using the same keys for string types
             // Note that the dictionary values may have nulls.
-            let dict_array = DictionaryArray::new(self.keys_array.clone(), values_array);
+            let dict_array = DictionaryArray::new(keys_array.clone(), values_array);
             Ok(Arc::new(dict_array))
         } else {
             // For non-string types, takes values by keys indices to create a regular array
-            let taken_array =
-                take(&values_array, &self.keys_array, None).context(ComputeArrowSnafu)?;
+            let taken_array = take(&values_array, keys_array, None).context(ComputeArrowSnafu)?;
             Ok(taken_array)
         }
+    }
+
+    /// Gets multiple sparse tag column arrays in one pass over the distinct keys,
+    /// sharing each key's offset discovery between the columns.
+    ///
+    /// Must only be called for sparse primary keys. Columns hold their values in
+    /// the order of `columns`, whose entries are tag column ids and data types.
+    pub fn get_sparse_tag_columns(
+        &mut self,
+        columns: &[(ColumnId, ConcreteDataType)],
+    ) -> Result<Vec<ArrayRef>> {
+        let Self {
+            inner,
+            keys_array,
+            pk_offsets,
+            value_buf,
+        } = self;
+        let DecodedKeysInner::Sparse {
+            values,
+            distinct_keys,
+        } = inner
+        else {
+            return InvalidRecordBatchSnafu {
+                reason: "expected sparse primary key values",
+            }
+            .fail();
+        };
+
+        let mut builders: Vec<_> = columns
+            .iter()
+            .map(|(_, column_type)| column_type.create_mutable_vector(distinct_keys.len()))
+            .collect();
+        for &key in distinct_keys.iter() {
+            let pk = values.value(key as usize);
+            let mut view = SparsePrimaryKeyView::new(pk, pk_offsets).context(DecodeSnafu)?;
+            // Visit all columns before moving to the next key so offset
+            // discovery is shared between columns.
+            for ((column_id, _), builder) in columns.iter().zip(&mut builders) {
+                push_sparse_tag_value_in_view(&mut view, *column_id, &mut **builder, value_buf)?;
+            }
+        }
+
+        columns
+            .iter()
+            .zip(builders)
+            .map(|((_, column_type), mut builder)| {
+                let values_array = builder.to_vector().to_arrow_array();
+                if column_type.is_string() {
+                    // Note that the dictionary values may have nulls.
+                    Ok(
+                        Arc::new(DictionaryArray::new(keys_array.clone(), values_array))
+                            as ArrayRef,
+                    )
+                } else {
+                    take(&values_array, keys_array, None)
+                        .context(ComputeArrowSnafu)
+                        .map(|array| array as ArrayRef)
+                }
+            })
+            .collect()
     }
 }
 
@@ -839,18 +988,32 @@ impl FlatConvertFormat {
             return Ok(batch);
         }
 
-        let decoded_pks = decode_primary_keys(self.codec.as_ref(), &batch)?;
+        let mut decoded_pks = decode_primary_keys(self.codec.as_ref(), &batch)?;
 
         // Builds decoded tag column arrays.
         let mut decoded_columns = Vec::new();
-        for (column_id, pk_index, column_index) in &self.projected_primary_keys {
-            let column_metadata = &self.metadata.column_metadatas[*column_index];
-            let tag_column = decoded_pks.get_tag_column(
-                *column_id,
-                Some(*pk_index),
-                &column_metadata.column_schema.data_type,
-            )?;
-            decoded_columns.push(tag_column);
+        if self.codec.encoding() == PrimaryKeyEncoding::Sparse {
+            // Extract all projected tag columns in one pass over the distinct
+            // keys, sharing offset discovery between the columns.
+            let columns: Vec<_> = self
+                .projected_primary_keys
+                .iter()
+                .map(|(column_id, _, column_index)| {
+                    let column_metadata = &self.metadata.column_metadatas[*column_index];
+                    (*column_id, column_metadata.column_schema.data_type.clone())
+                })
+                .collect();
+            decoded_columns.extend(decoded_pks.get_sparse_tag_columns(&columns)?);
+        } else {
+            for (column_id, pk_index, column_index) in &self.projected_primary_keys {
+                let column_metadata = &self.metadata.column_metadatas[*column_index];
+                let tag_column = decoded_pks.get_tag_column(
+                    *column_id,
+                    Some(*pk_index),
+                    &column_metadata.column_schema.data_type,
+                )?;
+                decoded_columns.push(tag_column);
+            }
         }
 
         // Builds new columns: decoded tag columns first, then original columns

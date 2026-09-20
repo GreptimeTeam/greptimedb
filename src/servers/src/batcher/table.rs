@@ -225,6 +225,7 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::num::NonZeroUsize;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
@@ -238,19 +239,23 @@ mod tests {
     use arrow::array::{Int32Array, TimestampMillisecondArray};
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::record_batch::RecordBatch;
+    use catalog::memory::MemoryCatalogManager;
     use common_batcher::flush_limiter::FlushLimiter;
     use common_batcher::flush_policy::timing::TimingFlushPolicy;
     use common_batcher::request_limiter::RequestLimiter;
     use common_batcher::worker_registry::WorkerRegistry;
+    use common_catalog::consts::default_engine;
     use common_grpc::flight::FlightDecoder;
     use common_meta::error::Result as MetaResult;
     use common_meta::peer::Peer;
     use common_meta::test_util::{MockDatanodeHandler, MockDatanodeManager};
+    use common_query::OutputData;
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use common_telemetry::info;
     use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
     use datatypes::value::Value as DtValue;
+    use datatypes::vectors::{Int32Vector, TimestampMillisecondVector, VectorRef};
     use operator::batcher::PendingRowsBatcher;
     use operator::error::Error;
     use operator::insert::Inserter;
@@ -261,7 +266,9 @@ mod tests {
     };
     use session::context::{Channel, QueryContext};
     use store_api::storage::RegionId;
+    use table::dist_table::DistTable;
     use table::metadata::TableInfoRef;
+    use table::requests::InsertRequest;
     use tokio::sync::{broadcast, mpsc, oneshot};
     use tokio::time::timeout;
 
@@ -364,14 +371,15 @@ mod tests {
             expected_schema: schema_name.clone(),
         }));
         let inserter = Arc::new(Inserter::new(
-            catalog::memory::MemoryCatalogManager::new(),
-            partitions,
-            nodes,
+            MemoryCatalogManager::new(),
+            partitions.clone(),
+            nodes.clone(),
             mock_table_flownode_cache(1, vec![]).await,
             true,
         ));
         let mut table = new_test_table_info(1, "table_1", [1, 2, 3].into_iter());
         table.schema_name = schema_name;
+        table.meta.engine = default_engine().to_string();
         let mut columns = table.meta.schema.column_schemas().to_vec();
         columns[2] = columns[2]
             .clone()
@@ -399,32 +407,67 @@ mod tests {
             inserter,
         )
         .unwrap();
-        let influx_ctx = Arc::new(QueryContext::with_channel(
-            "greptime",
-            &table.schema_name,
-            Channel::Influx,
-        ));
-        let opentsdb_ctx = Arc::new(QueryContext::with_channel(
-            "greptime",
-            &table.schema_name,
-            Channel::Opentsdb,
-        ));
+        let context = |channel| {
+            let mut ctx = QueryContext::with_channel("greptime", &table.schema_name, channel);
+            ctx.set_batching_enabled(true);
+            Arc::new(ctx)
+        };
+        let influx_ctx = context(Channel::Influx);
+        let opentsdb_ctx = context(Channel::Opentsdb);
         let ingest_count =
             DIST_INGEST_ROW_COUNT.with_label_values(&[influx_ctx.get_db_string().as_str()]);
         assert_eq!(0, ingest_count.get());
         influx_ctx.set_skip_wal(skip_wal);
         opentsdb_ctx.set_skip_wal(skip_wal);
-        let first_permit = batcher.acquire().await.unwrap();
-        let second_permit = if shared_request {
-            first_permit.clone()
-        } else {
-            batcher.acquire().await.unwrap()
-        };
         let (first_result, second_result) = timeout(Duration::from_secs(5), async {
-            tokio::join!(
-                batcher.submit(table.clone(), first, influx_ctx, first_permit),
-                batcher.submit(table.clone(), second, opentsdb_ctx, second_permit),
-            )
+            if shared_request {
+                let permit = batcher.acquire().await.unwrap();
+                tokio::join!(
+                    batcher.submit(table.clone(), first, influx_ctx, permit.clone()),
+                    batcher.submit(table.clone(), second, opentsdb_ctx, permit),
+                )
+            } else {
+                let inserter = Inserter::new(
+                    MemoryCatalogManager::new_with_table(DistTable::table(table.clone())),
+                    partitions,
+                    nodes,
+                    mock_table_flownode_cache(1, vec![]).await,
+                    true,
+                )
+                .with_pending_rows_batcher(Some(batcher));
+                let request = |value: i32| InsertRequest {
+                    catalog_name: table.catalog_name.clone(),
+                    schema_name: table.schema_name.clone(),
+                    table_name: table.name.clone(),
+                    columns_values: HashMap::from([
+                        (
+                            "a".to_string(),
+                            Arc::new(Int32Vector::from_slice([value])) as VectorRef,
+                        ),
+                        (
+                            "ts".to_string(),
+                            Arc::new(TimestampMillisecondVector::from_slice([
+                                1000 + i64::from(value)
+                            ])) as VectorRef,
+                        ),
+                    ]),
+                    skip_wal,
+                };
+                let (first, second) = tokio::join!(
+                    inserter.handle_table_insert(request(1), influx_ctx),
+                    inserter.handle_table_insert(request(2), opentsdb_ctx),
+                );
+                (
+                    first.map(|output| match output.data {
+                        OutputData::AffectedRows(rows) => rows,
+                        _ => panic!("expected affected rows"),
+                    }),
+                    second.map(|output| match output.data {
+                        OutputData::AffectedRows(rows) => rows,
+                        _ => panic!("expected affected rows"),
+                    }),
+                )
+            }
         })
         .await
         .expect("the row threshold did not dispatch the combined bulk insert");
@@ -474,7 +517,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_submit_combines_then_routes_bulk_with_defaults() {
+    async fn test_inserter_counts_batched_rows_once() {
         for report_missing_row in [false, true] {
             assert_eq!(1, run_bulk_case(2, report_missing_row, false).await);
         }
@@ -583,7 +626,7 @@ mod tests {
                 FlowNotifier::new(cache.clone(), nodes.clone(), NonZeroUsize::new(16).unwrap())
                     .unwrap();
             let inserter = Arc::new(Inserter::new(
-                catalog::memory::MemoryCatalogManager::new(),
+                MemoryCatalogManager::new(),
                 partitions,
                 nodes,
                 cache,

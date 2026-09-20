@@ -13,23 +13,33 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use ahash::{HashMap as AHashMap, HashMapExt};
+use api::helper::encode_json_value;
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::helper::time_index_column_schema;
 use api::v1::value::ValueData;
 use api::v1::{
-    ColumnDataType, ColumnDataTypeExtension, ColumnSchema, JsonTypeExtension, Row,
+    ColumnDataType, ColumnDataTypeExtension, ColumnOptions, ColumnSchema, JsonTypeExtension, Row,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
+};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
 use common_grpc::precision::Precision;
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
 use common_time::timestamp::TimeUnit::Nanosecond;
+use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+use datatypes::json::JsonSettings;
+use datatypes::value::Value as DataValue;
+use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::error::{
-    IncompatibleSchemaSnafu, Result, RowWriterSnafu, TimePrecisionSnafu, TimestampOverflowSnafu,
+    ConvertScalarValueSnafu, IncompatibleSchemaSnafu, InternalSnafu, Result, RowWriterSnafu,
+    TimePrecisionSnafu, TimestampOverflowSnafu, ToJsonSnafu,
 };
 
 /// The intermediate data structure for building the write request.
@@ -312,6 +322,56 @@ pub fn write_json(
         std::iter::once((
             build_json_column_schema(name),
             Some(ValueData::BinaryValue(value.to_vec())),
+        )),
+        one_row,
+    )
+}
+
+fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
+    let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::new_v2())));
+    let mut options = ColumnOptions::default();
+    options.options.insert(
+        EXTENSION_TYPE_NAME_KEY.to_string(),
+        Json2ExtensionType::NAME.to_string(),
+    );
+    if let Some(metadata) = extension.serialize_metadata() {
+        options
+            .options
+            .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), metadata);
+    }
+
+    ColumnSchema {
+        column_name: name.to_string(),
+        datatype: ColumnDataType::Json as i32,
+        semantic_type: SemanticType::Field as i32,
+        options: Some(options),
+        ..Default::default()
+    }
+}
+
+/// Writes a serializable value into a JSON2 field using the default v2 layout.
+pub(crate) fn write_json2(
+    table_data: &mut TableData,
+    name: impl ToString,
+    value: impl Serialize,
+    one_row: &mut Vec<Value>,
+) -> Result<()> {
+    let json = serde_json::to_value(value).context(ToJsonSnafu)?;
+    let value = JsonSettings::new_v2()
+        .encode(json)
+        .context(ConvertScalarValueSnafu)?;
+    let DataValue::Json(value) = value else {
+        return InternalSnafu {
+            err_msg: "JSON2 encoding returned a non-JSON value",
+        }
+        .fail();
+    };
+
+    write_by_schema(
+        table_data,
+        std::iter::once((
+            build_json2_column_schema(name),
+            Some(ValueData::JsonValue(encode_json_value(*value))),
         )),
         one_row,
     )

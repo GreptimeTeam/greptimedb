@@ -151,6 +151,11 @@ harness = false
 required-features = ["testing"]
 
 [[bench]]
+name = "bench_pk_tag_column"
+harness = false
+required-features = ["testing"]
+
+[[bench]]
 name = "bench_dense_index_update"
 harness = false
 required-features = ["testing"]

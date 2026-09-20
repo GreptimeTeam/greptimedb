@@ -24,8 +24,6 @@ use api::v1::{
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
-use pipeline::{GreptimePipelineParams, PipelineWay};
-use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::otlp::trace::attributes::Attributes;
@@ -34,10 +32,9 @@ use crate::otlp::trace::{
     DURATION_NANO_COLUMN, KEY_SERVICE_NAME, PARENT_SPAN_ID_COLUMN, SCOPE_NAME_COLUMN,
     SCOPE_VERSION_COLUMN, SERVICE_NAME_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
     SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_MESSAGE_COLUMN,
-    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN, TraceAuxData,
+    TIMESTAMP_COLUMN, TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN, TraceAuxData,
 };
 use crate::otlp::utils::any_value_to_jsonb;
-use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 30;
@@ -78,7 +75,7 @@ impl FixedTraceColumnIndexes {
 
         Ok(Self {
             timestamp,
-            timestamp_end: field("timestamp_end", ColumnDataType::TimestampNanosecond)?,
+            timestamp_end: field(TIMESTAMP_END_COLUMN, ColumnDataType::TimestampNanosecond)?,
             duration_nano: field(DURATION_NANO_COLUMN, ColumnDataType::Int64)?,
             parent_span_id: field(PARENT_SPAN_ID_COLUMN, ColumnDataType::String)?,
             trace_id: field(TRACE_ID_COLUMN, ColumnDataType::String)?,
@@ -249,11 +246,7 @@ impl TraceBatchSchema {
 /// caller can update them only after the main span write succeeds.
 pub fn v1_to_grpc_main_insert_requests(
     spans: &[TraceSpan],
-    _pipeline: &PipelineWay,
-    _pipeline_params: &GreptimePipelineParams,
     table_name: &str,
-    _query_ctx: &QueryContextRef,
-    _pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     let requests = v1_to_grpc_main_insert_requests_from_iter(spans.iter().cloned(), table_name)?;
     Ok((requests, spans.len()))
@@ -352,7 +345,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
 /// that does not fit `i64` saturates at `i64::MAX`. Clamping at the source
 /// keeps new Int64 tables and existing UInt64 tables behaving identically:
 /// the written value is always a non-negative, in-range `i64`.
-fn span_duration_nano(span: &TraceSpan) -> i64 {
+pub(super) fn span_duration_nano(span: &TraceSpan) -> i64 {
     span.end_in_nanosecond
         .saturating_sub(span.start_in_nanosecond)
         .min(i64::MAX as u64) as i64
@@ -756,7 +749,7 @@ mod tests {
                 Some(ValueData::TimestampNanosecondValue(1)),
             ),
             (
-                "timestamp_end",
+                TIMESTAMP_END_COLUMN,
                 Some(ValueData::TimestampNanosecondValue(2)),
             ),
             (DURATION_NANO_COLUMN, Some(ValueData::I64Value(1))),

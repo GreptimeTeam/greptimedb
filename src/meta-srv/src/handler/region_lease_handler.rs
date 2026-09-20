@@ -182,6 +182,8 @@ mod test {
             written_bytes: 0,
             query_cpu_time: 0,
             query_scanned_bytes: 0,
+            min_timestamp: None,
+            max_timestamp: None,
         }
     }
 

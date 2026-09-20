@@ -29,6 +29,7 @@ use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::scalars::anomaly::AnomalyFunction;
+use crate::scalars::avg_calc::AvgCalcFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -215,6 +216,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
+    AvgCalcFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
     UddSketchRankFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
