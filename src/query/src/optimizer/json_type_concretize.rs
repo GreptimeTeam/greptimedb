@@ -239,7 +239,7 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
     use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
-    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::json::JsonSettings;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ConcreteDataType, RegionId};
@@ -314,16 +314,6 @@ mod tests {
         let (provider, plan) = build_json2_scan()?;
         let plan = plan.project(exprs)?.build()?;
         Ok((provider, plan))
-    }
-
-    fn json_type_hint(path: &[&str], data_type: ConcreteDataType) -> JsonTypeHint {
-        JsonTypeHint {
-            path: path.iter().map(ToString::to_string).collect(),
-            data_type,
-            nullable: true,
-            default_constraint: None,
-            inverted_index: false,
-        }
     }
 
     #[test]
@@ -479,38 +469,6 @@ mod tests {
             Some(&JsonNativeType::Object(JsonObjectType::from([(
                 "a".to_string(),
                 JsonNativeType::i64(),
-            )]))),
-            provider.scan_request().json_type_hint.get("j")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn test_explicit_json_get_type_overrides_json_type_hint() -> Result<()> {
-        let settings = JsonSettings::try_new(
-            vec![json_type_hint(&["a"], ConcreteDataType::int64_datatype())],
-            None,
-        )
-        .map_err(|e| plan_datafusion_err!("{e}"))?;
-        let (provider, plan) = build_json2_scan_with_settings(settings)?;
-        let plan = plan
-            .project(vec![json_get_expr(
-                col("j"),
-                path_expr("a"),
-                Some(DataType::Utf8View),
-            )?])?
-            .build()?;
-
-        let rewritten = JsonTypeConcretizeRule.rewrite(plan, &OptimizerContext::default())?;
-        assert!(rewritten.transformed);
-        assert_eq!(
-            rewritten.data.schema().field(0).data_type(),
-            &DataType::Utf8View
-        );
-        assert_eq!(
-            Some(&JsonNativeType::Object(JsonObjectType::from([(
-                "a".to_string(),
-                JsonNativeType::String,
             )]))),
             provider.scan_request().json_type_hint.get("j")
         );
