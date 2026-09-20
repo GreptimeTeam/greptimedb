@@ -201,6 +201,8 @@ impl AsyncScalarUDFImpl for JevFunction {
                 }
             })
             .collect();
+        // This limit is per expression/batch invocation, not per query or process.
+        // Concurrent partitions and queries can each have their own in-flight requests.
         let matches: Vec<Option<bool>> = stream::iter(requests).buffered(8).try_collect().await?;
         Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(matches))))
     }

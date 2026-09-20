@@ -61,9 +61,11 @@ Any null argument produces SQL `NULL`, which `WHERE` excludes, without an API ca
 - Each non-null row makes one HTTP request: the text is `state`, and the statement
   is a `noul` question's `instructions`. The returned `noul` probability is compared
   with the threshold locally; this is not the separate Choice/Score confidence.
-- Up to eight requests run concurrently per evaluated batch, with a 30-second
-  timeout per request. Errors (including rate limits and invalid responses) fail
-  the query. There is no automatic retry or cross-query cache.
+- Up to eight requests run concurrently per expression/batch invocation, not per
+  query or process. Concurrent partitions and queries can exceed eight requests
+  in total. Each request has a 30-second timeout. Errors (including rate limits
+  and invalid responses) fail the query. There is no automatic retry or
+  cross-query cache.
 - Start with small, time-bounded queries. Ordinary SQL predicates can reduce the
   candidate set, but SQL does not guarantee left-to-right predicate evaluation or
   that `LIMIT` bounds the number of API calls.
@@ -73,6 +75,17 @@ Any null argument produces SQL `NULL`, which `WHERE` excludes, without an API ca
   the environment on every node evaluating the function and separate validation.
 
 API reference: <https://docs.typesafe.ai/api>
+
+## Before stabilizing
+
+The experimental MVP still needs the following controls before stabilization:
+
+- A process-wide concurrency limit shared by Jev invocations, such as a semaphore.
+- Bounded retries with exponential backoff for HTTP `429` and `529`, following
+  TypeSafe's rate-limit guidance.
+- Request budgets and metrics for API calls, latency, retries, and rate-limit errors.
+
+These are follow-up work, not guarantees provided by the current implementation.
 
 ## Validation
 
