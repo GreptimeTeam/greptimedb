@@ -918,7 +918,9 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
         )
     } else {
         (
-            format!("file://{}", destination.path().display()),
+            url::Url::from_file_path(destination.path())
+                .unwrap()
+                .to_string(),
             object_store::ObjectStore::new(
                 object_store::services::Fs::default().root(destination.path().to_str().unwrap()),
             )
@@ -1071,7 +1073,9 @@ async fn metric_export_v2_disabled_and_legacy_cli() {
         .await;
     let (addr, server) = export_http(source.fe_instance().clone()).await;
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
-    let uri = format!("file://{}", destination.path().display());
+    let uri = url::Url::from_file_path(destination.path())
+        .unwrap()
+        .to_string();
     let manifest = destination.path().join("manifest.json");
     std::fs::write(&manifest, b"preserve-before-capability-check").unwrap();
     let args = [
@@ -1196,7 +1200,7 @@ async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force()
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let destination = tempfile::tempdir().unwrap();
         let snapshot = destination.path().join("snapshot");
-        let uri = format!("file://{}", snapshot.display());
+        let uri = url::Url::from_file_path(&snapshot).unwrap().to_string();
         let args = [
             "export-v2",
             "create",
