@@ -19,10 +19,9 @@ use common_base::secrets::{ExposeSecret, ExposeSecretMut, SecretString};
 use either::Either;
 use serde::Serialize;
 use sqlparser::ast::{Visit, VisitMut, Visitor, VisitorMut};
+use table::requests::{REDACTED_VALUE, is_redacted_table_option};
 
 use crate::util::OptionValue;
-
-const REDACTED_OPTIONS: [&str; 2] = ["access_key_id", "secret_access_key"];
 
 /// Options hashmap.
 #[derive(Clone, Debug, Default, Serialize)]
@@ -36,7 +35,7 @@ impl OptionMap {
     pub fn new<I: IntoIterator<Item = (String, OptionValue)>>(options: I) -> Self {
         let (secrets, options): (Vec<_>, Vec<_>) = options
             .into_iter()
-            .partition(|(k, _)| REDACTED_OPTIONS.contains(&k.as_str()));
+            .partition(|(k, _)| is_redacted_table_option(k));
         Self {
             options: options.into_iter().collect(),
             secrets: secrets
@@ -62,7 +61,7 @@ impl OptionMap {
     }
 
     pub fn insert(&mut self, k: String, v: String) {
-        if REDACTED_OPTIONS.contains(&k.as_str()) {
+        if is_redacted_table_option(&k) {
             self.secrets.insert(k, SecretString::new(Box::new(v)));
         } else {
             self.options.insert(k, v.into());
@@ -70,7 +69,7 @@ impl OptionMap {
     }
 
     pub fn insert_options(&mut self, key: &str, value: OptionValue) {
-        if REDACTED_OPTIONS.contains(&key) {
+        if is_redacted_table_option(key) {
             self.secrets.insert(
                 key.to_string(),
                 SecretString::new(Box::new(value.to_string())),
@@ -153,9 +152,9 @@ impl OptionMap {
         }
         for (k, _) in self.secrets.iter() {
             if k.contains(".") {
-                result.push(format!("'{k}' = '******'"));
+                result.push(format!("'{k}' = '{REDACTED_VALUE}'"));
             } else {
-                result.push(format!("{k} = '******'"));
+                result.push(format!("{k} = '{REDACTED_VALUE}'"));
             }
         }
         result
@@ -169,7 +168,7 @@ impl OptionMap {
         let secrets = self
             .secrets
             .keys()
-            .map(|k| (k.as_str(), Either::Right("******")));
+            .map(|k| (k.as_str(), Either::Right(REDACTED_VALUE)));
         std::iter::chain(options, secrets)
     }
 }
