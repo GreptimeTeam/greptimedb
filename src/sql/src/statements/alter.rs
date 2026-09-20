@@ -88,6 +88,12 @@ pub enum AlterTableOperation {
         target_type: DataType,
         json2_options: Option<Json2Options>,
     },
+    /// `MODIFY <column_name> JSON2 [json2_options]`
+    SetJsonSettings {
+        column_name: Ident,
+        target_type: DataType,
+        json2_options: Option<Json2Options>,
+    },
     /// `SET <table attrs key> = <table attr value>`
     SetTableOptions {
         options: Vec<KeyValueOption>,
@@ -255,6 +261,17 @@ impl Display for AlterTableOperation {
                 write!(f, r#"RENAME {new_table_name}"#)
             }
             AlterTableOperation::ModifyColumnType {
+                column_name,
+                target_type,
+                json2_options,
+            } => {
+                write!(f, r#"MODIFY COLUMN {column_name} {target_type}"#)?;
+                if let Some(options) = json2_options {
+                    write!(f, "{options}")?;
+                }
+                Ok(())
+            }
+            AlterTableOperation::SetJsonSettings {
                 column_name,
                 target_type,
                 json2_options,
@@ -433,8 +450,10 @@ impl Display for AlterDatabaseOperation {
 mod tests {
     use std::assert_matches;
 
+    use super::AlterTableOperation;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::{ParseOptions, ParserContext};
+    use crate::statements::create::Json2Options;
     use crate::statements::statement::Statement;
 
     #[test]
@@ -503,7 +522,7 @@ ALTER TABLE monitor ADD COLUMN app STRING DEFAULT 'shop' PRIMARY KEY, ADD COLUMN
         }
 
         let sql = r"alter table monitor modify column load_15 string;";
-        let stmts =
+        let mut stmts =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
                 .unwrap();
         assert_eq!(1, stmts.len());
@@ -522,6 +541,25 @@ ALTER TABLE monitor MODIFY COLUMN load_15 STRING"#,
                 unreachable!();
             }
         }
+
+        let Statement::AlterTable(alter_table) = &mut stmts[0] else {
+            unreachable!();
+        };
+        let AlterTableOperation::ModifyColumnType { json2_options, .. } =
+            alter_table.alter_operation_mut()
+        else {
+            unreachable!();
+        };
+        *json2_options = Some(Json2Options {
+            max_auto_expanded_paths: Some(1),
+            type_hints: vec![],
+        });
+        assert_eq!(
+            r#"ALTER TABLE monitor MODIFY COLUMN load_15 STRING(
+    max_auto_expanded_paths = 1
+  )"#,
+            alter_table.to_string()
+        );
 
         let sql = r"alter table monitor drop column load_15;";
         let stmts =
