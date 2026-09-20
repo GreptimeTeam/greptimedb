@@ -34,6 +34,7 @@ use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::ip::IpFunctions;
+use crate::scalars::jev::JevFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
@@ -226,6 +227,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     // Full text search function
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
+    JevFunction::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
