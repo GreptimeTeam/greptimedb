@@ -66,6 +66,7 @@ a module map, read/write paths, change-coupling points, and gotchas:
 - [`src/flow/AGENTS.md`](src/flow/AGENTS.md)
 - [`src/frontend/AGENTS.md`](src/frontend/AGENTS.md)
 - [`src/meta-srv/AGENTS.md`](src/meta-srv/AGENTS.md)
+- [`tests-integration/AGENTS.md`](tests-integration/AGENTS.md)
 - [`tests/compatibility/AGENTS.md`](tests/compatibility/AGENTS.md)
 - [`tests/perf/AGENTS.md`](tests/perf/AGENTS.md)
 
@@ -116,6 +117,10 @@ blast radius requires it.
 | Public configuration | Update example TOMLs, loading/serialization snapshots, and docs; run `make config-docs` |
 | Query regression harness or DSL | Follow `tests/perf/AGENTS.md` |
 | Enterprise-gated code | Build/test with `--features enterprise` where applicable and run `make check-enterprise-license` |
+
+For import/export, COPY, or snapshot-storage changes, follow the Windows
+portability and validation guidance in
+[`tests-integration/AGENTS.md`](tests-integration/AGENTS.md).
 
 ## Before opening a PR
 
