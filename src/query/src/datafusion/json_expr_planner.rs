@@ -34,7 +34,6 @@ use datafusion_expr::{
 use datatypes::extension::json::{
     Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
 };
-use datatypes::json::JsonSettings;
 use datatypes::types::json_type::JsonNativeType;
 use sqlparser::ast::BinaryOperator;
 
@@ -66,13 +65,13 @@ impl ExprPlanner for JsonExprPlanner {
             mut right,
         } = expr;
 
-        let Some(expr_op) = parse_sql_op(&op) else {
-            return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
-        };
-
         if !is_untyped_json_get(&left) && !is_untyped_json_get(&right) {
             return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
         }
+
+        let Some(expr_op) = parse_sql_op(&op) else {
+            return Ok(PlannerResult::Original(RawBinaryExpr { op, left, right }));
+        };
 
         let left_type = left.get_type(schema)?;
         let right_type = right.get_type(schema)?;
@@ -199,26 +198,23 @@ impl ExprPlanner for JsonExprPlanner {
 
 /// Returns the configured native type for an exact JSON2 object path.
 fn json_type_hint(field: &Field, path: &[String]) -> Result<Option<JsonNativeType>> {
-    Ok(json2_settings(field)?.and_then(|settings| {
+ f  let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
+        let extension = field
+            .try_extension_type::<Json2ExtensionType>()
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
+        Some(extension.metadata().json_settings().clone())
+    } else {
+        parse_legacy_json2_settings(field.metadata())
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?
+    };
+
+    Ok(settings.and_then(|settings| {
         settings
             .type_hints()
             .iter()
             .find(|hint| hint.path == path)
             .map(|hint| JsonNativeType::from(&hint.data_type))
     }))
-}
-
-/// Returns JSON2 settings from the field's extension metadata.
-fn json2_settings(field: &Field) -> Result<Option<JsonSettings>> {
-    if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
-        let extension = field
-            .try_extension_type::<Json2ExtensionType>()
-            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
-        Ok(Some(extension.metadata().json_settings().clone()))
-    } else {
-        parse_legacy_json2_settings(field.metadata())
-            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))
-    }
 }
 
 /// Quotes field names containing JSONPath punctuation, preserving literal keys.

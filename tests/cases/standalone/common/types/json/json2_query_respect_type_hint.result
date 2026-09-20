@@ -103,6 +103,19 @@ FROM json2_query_respect_type_hint;
 |               |                                                                                                                                                                                                                                                                                                                                                                                                 |
 +---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
+-- A STRING type hint is respected, so numeric arithmetic requires an explicit cast.
+SELECT j.b + exponent
+FROM json2_query_respect_type_hint;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Utf8View + Float64 to valid types
+
+-- An explicit cast changes the expression type while preserving the STRING native read type.
+-- The invalid string value still reports a normal SQL cast error.
+SELECT j.b::DOUBLE + exponent
+FROM json2_query_respect_type_hint;
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'three' to value of Float64 type
+
 DROP TABLE json2_query_respect_type_hint;
 
 Affected Rows: 0

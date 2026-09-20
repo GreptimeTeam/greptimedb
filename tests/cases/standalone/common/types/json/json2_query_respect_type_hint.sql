@@ -43,4 +43,13 @@ ORDER BY ts;
 EXPLAIN SELECT coalesce(j.b, exponent)
 FROM json2_query_respect_type_hint;
 
+-- A STRING type hint is respected, so numeric arithmetic requires an explicit cast.
+SELECT j.b + exponent
+FROM json2_query_respect_type_hint;
+
+-- An explicit cast changes the expression type while preserving the STRING native read type.
+-- The invalid string value still reports a normal SQL cast error.
+SELECT j.b::DOUBLE + exponent
+FROM json2_query_respect_type_hint;
+
 DROP TABLE json2_query_respect_type_hint;
