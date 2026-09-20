@@ -11,6 +11,7 @@ RUN apt-get update && \
 # Install dependencies.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
+    libatomic1 \
     tzdata \
     curl \
     unzip \
@@ -34,6 +35,18 @@ elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
 fi
 RUN mv protoc3/bin/* /usr/local/bin/
 RUN mv protoc3/include/* /usr/local/include/
+
+# Install mold and make it the default linker (the equivalent of
+# rui314/setup-mold with its default options on GitHub-hosted runners), so
+# every link inside this image -- binaries, test executables, build scripts,
+# proc macros -- goes through mold for lower peak memory usage. The prebuilt
+# binaries require GLIBC 2.18+.
+ARG MOLD_VERSION=2.42.1
+RUN arch="$(uname -m)" && \
+    curl -fsSL -o /tmp/mold.tar.gz https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-${arch}-linux.tar.gz && \
+    tar -C /usr/local --strip-components=1 -xzf /tmp/mold.tar.gz && \
+    rm /tmp/mold.tar.gz && \
+    ln -sf /usr/local/bin/mold "$(readlink -f /usr/bin/ld)"
 
 # Silence all `safe.directory` warnings, to avoid the "detect dubious repository" error when building with submodules.
 # Disabling the safe directory check here won't pose extra security issues, because in our usage for this dev build
