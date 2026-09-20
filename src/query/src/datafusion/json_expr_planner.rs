@@ -678,8 +678,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["payload".to_string(), "cpu".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,
