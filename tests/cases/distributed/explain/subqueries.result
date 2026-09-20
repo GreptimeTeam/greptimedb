@@ -652,3 +652,72 @@ DROP TABLE t2;
 
 Affected Rows: 0
 
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+-- nested scalar subqueries must get a MergeScan inside every subquery level.
+CREATE TABLE nested_scalar (k INT, v BIGINT, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+INSERT INTO nested_scalar VALUES (1, 10, '2024-01-01 00:00:00'), (2, NULL, '2024-01-01 00:00:01');
+
+Affected Rows: 2
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Projection: (<subquery>) AS m_|
+|_|_Subquery:_|
+|_|_Projection: (<subquery>)_|
+|_|_Subquery:_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Projection: max(nested_scalar.v)_|
+|_|_Aggregate: groupBy=[[]], aggr=[[max(nested_scalar.v)]]_|
+|_|_TableScan: nested_scalar_|
+|_| ]]_|
+|_|_EmptyRelation: rows=1_|
+|_|_Projection:_|
+|_|_Limit: skip=0, fetch=1_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| TableScan: nested_scalar_|
+|_| ]]_|
+| physical_plan | ScalarSubqueryExec: subqueries=1_|
+|_|_ProjectionExec: expr=[scalar_subquery(<pending>) as m]_|
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_ProjectionExec: expr=[]_|
+|_|_GlobalLimitExec: skip=0, fetch=1_|
+|_|_MergeScanExec: REDACTED
+|_|_ScalarSubqueryExec: subqueries=1_|
+|_|_ProjectionExec: expr=[scalar_subquery(<pending>) as max(nested_scalar.v)] |
+|_|_PlaceholderRowExec_|
+|_|_CooperativeExec_|
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT (SELECT MAX(v) FROM nested_scalar WHERE v > (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
++---+
+| m |
++---+
+|   |
++---+
+
+SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
++----+
+| m  |
++----+
+| 10 |
++----+
+
+DROP TABLE nested_scalar;
+
+Affected Rows: 0
+

@@ -62,3 +62,26 @@ SELECT * FROM (SELECT * FROM (SELECT 42 a), (SELECT 43 b)) JOIN (SELECT 44 c) ON
 -- https://github.com/GreptimeTeam/greptimedb/issues/5012
 -- SELECT * FROM (SELECT unnamed_subquery.a FROM (SELECT 42 a)), (SELECT unnamed_subquery.b FROM (SELECT 43 b));
 -- SELECT unnamed_subquery.a, unnamed_subquery2.b FROM (SELECT 42 a), (SELECT 43 b);
+
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+-- nested scalar subqueries in the projection must not hit
+-- "Unsupported operation: get stream from a distributed table".
+CREATE TABLE nested_scalar (k INT, v BIGINT, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO nested_scalar VALUES (1, 10, '2024-01-01 00:00:00'), (2, NULL, '2024-01-01 00:00:01');
+
+-- control group: single-level scalar subqueries
+SELECT (SELECT MAX(v) FROM nested_scalar) AS m FROM nested_scalar LIMIT 1;
+
+SELECT (SELECT MAX(v) FROM nested_scalar WHERE k = 1) AS m FROM nested_scalar LIMIT 1;
+
+-- scalar subquery nested inside another scalar subquery's filter
+SELECT (SELECT MAX(v) FROM nested_scalar WHERE v > (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+-- scalar subquery nested one level deeper
+SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+-- three levels deep
+SELECT (SELECT (SELECT (SELECT MAX(v) FROM nested_scalar))) AS m FROM nested_scalar LIMIT 1;
+
+DROP TABLE nested_scalar;

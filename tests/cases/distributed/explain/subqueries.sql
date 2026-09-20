@@ -202,3 +202,22 @@ EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 DROP TABLE t;
 DROP TABLE t1;
 DROP TABLE t2;
+
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+-- nested scalar subqueries must get a MergeScan inside every subquery level.
+CREATE TABLE nested_scalar (k INT, v BIGINT, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO nested_scalar VALUES (1, 10, '2024-01-01 00:00:00'), (2, NULL, '2024-01-01 00:00:01');
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+SELECT (SELECT MAX(v) FROM nested_scalar WHERE v > (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+DROP TABLE nested_scalar;
