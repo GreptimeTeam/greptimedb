@@ -195,6 +195,12 @@ jobs:
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
 
+      - name: Verify Jev is not registered by default
+        run: cargo nextest run -p common-function -E 'test(test_jev_registration_matches_feature)'
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          CARGO_INCREMENTAL: 0
+
       - name: Setup external services
         working-directory: tests-integration/fixtures
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
@@ -252,6 +258,12 @@ jobs:
         uses: taiki-e/install-action@nextest
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Verify Jev is not registered by default
+        run: cargo nextest run -p common-function -E 'test(test_jev_registration_matches_feature)'
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          CARGO_INCREMENTAL: 0
 
       - name: Setup external services
         working-directory: tests-integration/fixtures
