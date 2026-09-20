@@ -3042,11 +3042,17 @@ fn expand_nested_scalar_subquery() {
         3, merge_scan_count,
         "expected 3 MergeScan nodes (main + 2 subquery levels) in plan:\n{result_str}"
     );
-    // No bare TableScan may remain outside a MergeScan remote input.
-    for line in result_str.lines() {
-        assert!(
-            !line.trim_start().starts_with("TableScan: t") || result_str.contains("remote_input=["),
-            "unwrapped TableScan in plan:\n{result_str}"
-        );
-    }
+    // No bare TableScan may remain outside a MergeScan remote input. The
+    // subquery-aware walk still visits subquery plans, but cannot see into a
+    // MergeScan's hidden remote input (`MergeScanLogicalPlan::inputs()` is
+    // empty), so any TableScan it reaches was not wrapped.
+    result
+        .apply_with_subqueries(|node| {
+            assert!(
+                !matches!(node, LogicalPlan::TableScan(_)),
+                "unwrapped TableScan in plan:\n{result_str}"
+            );
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
 }
