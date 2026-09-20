@@ -99,6 +99,10 @@ pub(crate) struct RangeResultMemoryLimiter {
     semaphore: Arc<tokio::sync::Semaphore>,
     permit_bytes: usize,
     total_permits: usize,
+    /// Number of acquisitions that found too few permits and parked. Test-only
+    /// signal to synchronize with a caller waiting inside [Self::acquire].
+    #[cfg(test)]
+    waited_acquires: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for RangeResultMemoryLimiter {
@@ -120,12 +124,20 @@ impl RangeResultMemoryLimiter {
             semaphore: Arc::new(tokio::sync::Semaphore::new(total_permits)),
             permit_bytes,
             total_permits,
+            #[cfg(test)]
+            waited_acquires: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn permit_bytes(&self) -> usize {
         self.permit_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waited_acquires(&self) -> usize {
+        self.waited_acquires
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -144,6 +156,14 @@ impl RangeResultMemoryLimiter {
             }
             .fail();
         }
+        // Nothing awaits between this check and the parking below, so an observed
+        // increment means the caller is about to wait for the missing permits.
+        #[cfg(test)]
+        if self.semaphore.available_permits() < permits {
+            self.waited_acquires
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+
         self.semaphore
             .acquire_many(permits as u32)
             .await

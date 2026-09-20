@@ -1606,6 +1606,16 @@ mod tests {
         buffer.push(batch).unwrap();
         // Both batches were handed to the task instead of staying in the buffer.
         assert!(buffer.buffered_batches.is_empty());
+
+        // Cancel only once the task is parked on the permit, otherwise the abort
+        // could land on a task that was never polled.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while limiter.waited_acquires() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("concat task must wait for a memory permit");
         drop(buffer);
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
