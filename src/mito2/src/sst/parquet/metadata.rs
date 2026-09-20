@@ -144,6 +144,11 @@ pub(crate) fn extract_primary_key_range(
             return None;
         };
 
+        // Truncated bounds can end at a field boundary and masquerade as an
+        // older Dense schema. Only complete endpoints can be schema-normalized.
+        if !stats.min_is_exact() || !stats.max_is_exact() {
+            return None;
+        }
         let row_group_min = Bytes::copy_from_slice(stats.min_bytes_opt()?);
         let row_group_max = Bytes::copy_from_slice(stats.max_bytes_opt()?);
         min = Some(match min {
@@ -318,6 +323,16 @@ mod tests {
         assert_eq!(
             Some((Bytes::from_static(b"aaa"), Bytes::from_static(b"zzz"))),
             extract_primary_key_range(&metadata, &region_metadata)
+        );
+    }
+
+    #[test]
+    fn test_extract_primary_key_range_rejects_truncated_statistics() {
+        let key = vec![b'a'; 1024];
+        let metadata = build_test_metadata(true, &[&key], &[1], EnabledStatistics::Page);
+        assert_eq!(
+            None,
+            extract_primary_key_range(&metadata, &sst_region_metadata())
         );
     }
 

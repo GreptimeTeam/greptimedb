@@ -15,7 +15,7 @@
 use std::collections::{HashMap, HashSet};
 
 use snafu::ResultExt;
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::SequenceNumber;
 
 use crate::compaction::CompactionOutput;
@@ -122,7 +122,7 @@ pub(super) fn inputs_precede_memtables(
 fn build_closed_outputs(
     seeds: Vec<CompactionOutput>,
     files: Vec<FileHandle>,
-    metadata: &RegionMetadata,
+    metadata: &RegionMetadataRef,
 ) -> Vec<CompactionOutput> {
     // Maps every seed input to its seed, so a closure that reaches that input
     // can absorb the rest of the seed instead of letting it schedule separately.
@@ -406,12 +406,12 @@ mod tests {
     #[case("dense_with_external", 1024)]
     #[case("time_dense_pk_disjoint", 1)]
     fn test_large_snapshot_closure(#[case] shape: &str, #[case] expected_count: usize) {
-        use bytes::Bytes;
+        use crate::compaction::test_util::{
+            new_file_handle_with_size_sequence_and_primary_key_range, pk_range,
+            primary_key_metadata_for_test,
+        };
 
-        use crate::compaction::test_util::new_file_handle_with_size_sequence_and_primary_key_range;
-
-        let mut metadata = (*metadata_for_test()).clone();
-        metadata.region_id = 0.into();
+        let metadata = primary_key_metadata_for_test();
         let files = (0..2048)
             .map(|i| {
                 let (start, end, pk) = match shape {
@@ -419,8 +419,8 @@ mod tests {
                     "dense_with_external" if i < 1024 => (0, 1, None),
                     "dense_with_external" => (i, i, None),
                     "time_dense_pk_disjoint" => {
-                        let pk = Bytes::copy_from_slice(&(i as u32).to_be_bytes());
-                        (0, 1, Some((pk.clone(), pk)))
+                        let key = i.to_string();
+                        (0, 1, pk_range(key.as_bytes(), key.as_bytes()))
                     }
                     _ => unreachable!(),
                 };

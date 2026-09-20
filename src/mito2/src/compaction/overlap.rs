@@ -16,10 +16,11 @@ use std::collections::HashMap;
 use std::ops::Range;
 
 use common_time::Timestamp;
-use store_api::metadata::RegionMetadata;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 
 use crate::compaction::run::primary_key_ranges_overlap;
 use crate::sst::file::{FileHandle, RegionFileId};
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Snapshot-local overlap candidates, ordered by start time. Each subtree stores
 /// its maximum active end. Removing visited files prunes dense internal overlaps.
@@ -28,6 +29,7 @@ use crate::sst::file::{FileHandle, RegionFileId};
 pub(super) struct FileOverlapIndex<'a> {
     /// Current region metadata used to decide whether PK bounds can safely exclude overlaps.
     metadata: &'a RegionMetadata,
+    primary_key_mapper: PrimaryKeyRangeMapper,
     /// Candidates in original snapshot order, retained after removal so their
     /// indices remain stable and drained matches can preserve merge input order.
     files: Vec<FileHandle>,
@@ -54,7 +56,7 @@ struct OverlapQuery<'a> {
 }
 
 impl<'a> FileOverlapIndex<'a> {
-    pub(super) fn new(files: Vec<FileHandle>, metadata: &'a RegionMetadata) -> Self {
+    pub(super) fn new(files: Vec<FileHandle>, metadata: &'a RegionMetadataRef) -> Self {
         let mut by_start: Vec<_> = (0..files.len()).collect();
         by_start.sort_unstable_by_key(|&i| (files[i].time_range().0, i));
         // A single empty leaf also handles an empty snapshot.
@@ -70,6 +72,7 @@ impl<'a> FileOverlapIndex<'a> {
         }
         Self {
             metadata,
+            primary_key_mapper: PrimaryKeyRangeMapper::new(metadata.clone()),
             files,
             by_start,
             positions,
@@ -127,7 +130,13 @@ impl<'a> FileOverlapIndex<'a> {
         }
         if leaves.len() == 1 {
             let i = self.by_start[leaves.start];
-            return files_may_overlap(query.input, &self.files[i], self.metadata).then_some(i);
+            return files_may_overlap(
+                query.input,
+                &self.files[i],
+                self.metadata,
+                &self.primary_key_mapper,
+            )
+            .then_some(i);
         }
         let mid = leaves.start + leaves.len() / 2;
         self.find_in_subtree(2 * node, leaves.start..mid, query)
@@ -137,7 +146,12 @@ impl<'a> FileOverlapIndex<'a> {
 
 /// SST bounds are inclusive. Missing statistics, foreign encodings and schema
 /// evolution must not exclude a possible logical-key dependency.
-fn files_may_overlap(lhs: &FileHandle, rhs: &FileHandle, metadata: &RegionMetadata) -> bool {
+fn files_may_overlap(
+    lhs: &FileHandle,
+    rhs: &FileHandle,
+    metadata: &RegionMetadata,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
     let (lhs_start, lhs_end) = lhs.time_range();
     let (rhs_start, rhs_end) = rhs.time_range();
     if lhs_start.max(rhs_start) > lhs_end.min(rhs_end) {
@@ -155,7 +169,7 @@ fn files_may_overlap(lhs: &FileHandle, rhs: &FileHandle, metadata: &RegionMetada
     {
         return true;
     }
-    match (lhs.primary_key_range(), rhs.primary_key_range()) {
+    match (lhs.primary_key_range(mapper), rhs.primary_key_range(mapper)) {
         (Some(lhs), Some(rhs)) if lhs.0 <= lhs.1 && rhs.0 <= rhs.1 => {
             primary_key_ranges_overlap(&lhs, &rhs)
         }
@@ -166,12 +180,13 @@ fn files_may_overlap(lhs: &FileHandle, rhs: &FileHandle, metadata: &RegionMetada
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
+    use std::sync::Arc;
 
-    use bytes::Bytes;
     use rand::{Rng, SeedableRng};
     use store_api::storage::FileId;
 
     use super::*;
+    use crate::compaction::test_util::{pk_range, primary_key_metadata_for_test};
     use crate::sst::file::FileMeta;
     use crate::test_util::memtable_util::metadata_for_test;
     use crate::test_util::new_noop_file_purger;
@@ -187,12 +202,7 @@ mod tests {
                 ..Default::default()
             },
             new_noop_file_purger(),
-            pk.map(|(start, end)| {
-                (
-                    Bytes::copy_from_slice(start.as_bytes()),
-                    Bytes::copy_from_slice(end.as_bytes()),
-                )
-            }),
+            pk.and_then(|(start, end)| pk_range(start.as_bytes(), end.as_bytes())),
         )
     }
 
@@ -212,9 +222,11 @@ mod tests {
         #[case] foreign: bool,
         #[case] expected: bool,
     ) {
-        let mut metadata = (*metadata_for_test()).clone();
+        let mut metadata = (*primary_key_metadata_for_test()).clone();
         metadata.region_id = 0.into();
         metadata.schema_version = schema_version;
+        let metadata = Arc::new(metadata);
+        let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
         let lhs = file(0, 10, Some(("a", "b")));
         let mut rhs = file(start, start + 10, pk);
         if foreign {
@@ -223,11 +235,11 @@ mod tests {
             rhs = FileHandle::new_with_primary_key_range(
                 meta,
                 new_noop_file_purger(),
-                rhs.primary_key_range(),
+                rhs.raw_primary_key_range(),
             );
         }
-        assert_eq!(expected, files_may_overlap(&lhs, &rhs, &metadata));
-        assert_eq!(expected, files_may_overlap(&rhs, &lhs, &metadata));
+        assert_eq!(expected, files_may_overlap(&lhs, &rhs, &metadata, &ranges));
+        assert_eq!(expected, files_may_overlap(&rhs, &lhs, &metadata, &ranges));
     }
 
     #[test]
@@ -247,8 +259,8 @@ mod tests {
 
     #[test]
     fn test_index_matches_linear_scan_after_removals() {
-        let mut metadata = (*metadata_for_test()).clone();
-        metadata.region_id = 0.into();
+        let metadata = primary_key_metadata_for_test();
+        let ranges = PrimaryKeyRangeMapper::new(metadata.clone());
         let mut rng = rand::rngs::StdRng::seed_from_u64(9146);
         for count in [0, 1, 7, 32, 127] {
             let files: Vec<_> = (0..count)
@@ -276,7 +288,8 @@ mod tests {
                 let expected: Vec<_> = files
                     .iter()
                     .filter(|f| {
-                        !removed.contains(&f.file_id()) && files_may_overlap(&query, f, &metadata)
+                        !removed.contains(&f.file_id())
+                            && files_may_overlap(&query, f, &metadata, &ranges)
                     })
                     .map(FileHandle::file_id)
                     .collect();
