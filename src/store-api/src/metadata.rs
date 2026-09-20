@@ -838,22 +838,22 @@ impl RegionMetadataBuilder {
 
     fn set_json_settings(
         &mut self,
-        column_name: String,
+        col_name: String,
         settings: datatypes::json::JsonSettings,
     ) -> Result<()> {
-        let Some(column_meta) = self
+        let Some(col_meta) = self
             .column_metadatas
             .iter_mut()
-            .find(|col| col.column_schema.name == column_name)
+            .find(|col| col.column_schema.name == col_name)
         else {
             return InvalidRegionRequestSnafu {
                 region_id: self.region_id,
-                err: format!("column {column_name} not found"),
+                err: format!("column {col_name} not found"),
             }
             .fail();
         };
 
-        let old_metadata = column_meta.column_schema.metadata();
+        let old_metadata = col_meta.column_schema.metadata();
         let new_metadata =
             json2_metadata_with_updated_settings(old_metadata, settings).map_err(|err| {
                 InvalidRegionRequestSnafu {
@@ -863,10 +863,7 @@ impl RegionMetadataBuilder {
                 .build()
             })?;
 
-        column_meta.column_schema = column_meta
-            .column_schema
-            .clone()
-            .with_metadata(new_metadata);
+        col_meta.column_schema = col_meta.column_schema.clone().with_metadata(new_metadata);
         Ok(())
     }
 

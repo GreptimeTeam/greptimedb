@@ -462,12 +462,11 @@ impl ParserContext<'_> {
                         .context(error::SyntaxSnafu)?;
                     self.parse_alter_table_drop_default(column_name)
                 } else {
-                    if let Some((data_type, json2_options)) =
+                    if let Some((_, json2_options)) =
                         parse_json2_type_and_options(&mut self.parser)?
                     {
                         return Ok(AlterTableOperation::SetJsonSettings {
                             column_name,
-                            target_type: data_type,
                             json2_options,
                         });
                     }
@@ -1579,7 +1578,6 @@ MODIFY COLUMN attrs JSON2 (
         };
         let AlterTableOperation::SetJsonSettings {
             column_name,
-            target_type,
             json2_options: Some(options),
         } = alter_table.alter_operation()
         else {
@@ -1587,7 +1585,6 @@ MODIFY COLUMN attrs JSON2 (
         };
 
         assert_eq!("attrs", column_name.value);
-        assert_eq!("JSON2", target_type.to_string());
         assert_eq!(Some(2000), options.max_auto_expanded_paths);
         assert_eq!(4, options.type_hints.len());
         assert_eq!(vec!["user", "id"], options.type_hints[1].path);

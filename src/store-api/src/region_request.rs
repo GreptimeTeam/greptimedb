@@ -1101,9 +1101,8 @@ impl AlterKind {
             AlterKind::SetJsonSettings {
                 column_name,
                 settings,
-            } => metadata.column_by_name(column_name).is_some_and(|column| {
-                column
-                    .column_schema
+            } => metadata.column_by_name(column_name).is_some_and(|col| {
+                col.column_schema
                     .extension_type::<Json2ExtensionType>()
                     .ok()
                     .flatten()
@@ -1198,42 +1197,43 @@ impl AlterKind {
     }
 
     fn validate_set_json_settings(
-        column_name: &String,
+        col_name: &String,
         settings: &JsonSettings,
         metadata: &RegionMetadata,
     ) -> Result<()> {
-        let column = metadata
-            .column_by_name(column_name)
+        let region_id = metadata.region_id;
+
+        let col = metadata
+            .column_by_name(col_name)
             .context(InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!("column {} not found", column_name),
+                region_id,
+                err: format!("column {} not found", col_name),
             })?;
 
         ensure!(
-            column.semantic_type == SemanticType::Field,
+            col.semantic_type == SemanticType::Field,
             InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!("column {} is not a field column", column_name),
+                region_id,
+                err: format!("column {} is not a field column", col_name),
             }
         );
         ensure!(
-            column.column_schema.data_type.is_json2(),
+            col.column_schema.data_type.is_json2(),
             InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!("column {} is not a JSON2 column", column_name),
+                region_id,
+                err: format!("column {} is not a JSON2 column", col_name),
             }
         );
-        column
-            .column_schema
+        col.column_schema
             .clone()
             .with_metadata(
                 json2_metadata_with_updated_settings(
-                    column.column_schema.metadata(),
+                    col.column_schema.metadata(),
                     settings.clone(),
                 )
                 .map_err(|err| {
                     InvalidRegionRequestSnafu {
-                        region_id: metadata.region_id,
+                        region_id,
                         err: err.to_string(),
                     }
                     .build()
@@ -1242,17 +1242,14 @@ impl AlterKind {
             .extension_type::<Json2ExtensionType>()
             .map_err(|err| {
                 InvalidRegionRequestSnafu {
-                    region_id: metadata.region_id,
+                    region_id,
                     err: err.to_string(),
                 }
                 .build()
             })?
             .context(InvalidRegionRequestSnafu {
-                region_id: metadata.region_id,
-                err: format!(
-                    "missing JSON2 extension metadata for column {}",
-                    column_name
-                ),
+                region_id,
+                err: format!("missing JSON2 extension metadata for column {}", col_name),
             })?;
 
         Ok(())

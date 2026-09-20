@@ -884,19 +884,8 @@ pub(crate) fn to_alter_table_expr(
         }
         AlterTableOperation::SetJsonSettings {
             column_name,
-            target_type,
             json2_options,
         } => {
-            let target_type =
-                sql_data_type_to_concrete_data_type(&target_type).context(ParseSqlSnafu)?;
-
-            ensure!(
-                target_type.is_json2(),
-                NotSupportedSnafu {
-                    feat: "ALTER TABLE MODIFY JSON settings for non-JSON2 type",
-                }
-            );
-
             let settings = match json2_options {
                 Some(options) => options.build_json_settings().context(ParseSqlSnafu)?,
                 None => datatypes::json::JsonSettings::new_v2(),

@@ -68,10 +68,6 @@ impl TransformRule for TypeAliasTransformRule {
                     alter_table.alter_operation_mut()
                 {
                     replace_type_alias(target_type)
-                } else if let AlterTableOperation::SetJsonSettings { target_type, .. } =
-                    alter_table.alter_operation_mut()
-                {
-                    replace_type_alias(target_type)
                 } else if let AlterTableOperation::AddColumns { add_columns, .. } =
                     alter_table.alter_operation_mut()
                 {

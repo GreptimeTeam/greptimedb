@@ -1191,45 +1191,47 @@ impl TableMeta {
     fn set_json_settings(
         &self,
         table_name: &str,
-        request: &SetJsonSettingsRequest,
+        req: &SetJsonSettingsRequest,
     ) -> Result<TableMetaBuilder> {
         let table_schema = &self.schema;
-        let index = table_schema
-            .column_index_by_name(&request.column_name)
+        let idx = table_schema
+            .column_index_by_name(&req.column_name)
             .with_context(|| error::ColumnNotExistsSnafu {
-                column_name: &request.column_name,
+                column_name: &req.column_name,
                 table_name,
             })?;
-        let column = &table_schema.column_schemas()[index];
+        let col = &table_schema.column_schemas()[idx];
 
         ensure!(
-            !self.primary_key_indices.contains(&index)
-                && table_schema.timestamp_index() != Some(index),
+            !self.primary_key_indices.contains(&idx) && table_schema.timestamp_index() != Some(idx),
             error::InvalidAlterRequestSnafu {
                 table: table_name,
                 err: format!(
                     "Not allowed to change JSON settings for key or timestamp column '{}'",
-                    column.name
+                    col.name
                 ),
             }
         );
         ensure!(
-            column.data_type.is_json2(),
+            col.data_type.is_json2(),
             error::InvalidAlterRequestSnafu {
                 table: table_name,
-                err: format!("column '{}' is not a JSON2 column", column.name),
+                err: format!("column '{}' is not a JSON2 column", col.name),
             }
         );
+
         let target_metadata =
-            json2_metadata_with_updated_settings(column.metadata(), request.settings.clone())
-                .map_err(|err| {
+            json2_metadata_with_updated_settings(col.metadata(), req.settings.clone()).map_err(
+                |err| {
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: err.to_string(),
                     }
                     .build()
-                })?;
-        validate_json2_metadata(column, &target_metadata).map_err(|err| {
+                },
+            )?;
+
+        validate_json2_metadata(col, &target_metadata).map_err(|err| {
             error::InvalidAlterRequestSnafu {
                 table: table_name,
                 err,
@@ -1237,21 +1239,23 @@ impl TableMeta {
             .build()
         })?;
 
-        let mut columns = table_schema.column_schemas().to_vec();
-        columns[index] = column.clone().with_metadata(target_metadata);
+        let mut cols = table_schema.column_schemas().to_vec();
+        cols[idx] = col.clone().with_metadata(target_metadata);
 
-        let mut builder = SchemaBuilder::try_from_columns(columns)
+        let mut builder = SchemaBuilder::try_from_columns(cols)
             .with_context(|_| error::SchemaBuildSnafu {
                 msg: format!("Failed to convert column schemas into schema for table {table_name}"),
             })?
             .version(table_schema.version() + 1);
+
         for (k, v) in table_schema.metadata().iter() {
             builder = builder.add_metadata(k, v);
         }
+
         let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
             msg: format!(
                 "Table {table_name} cannot change JSON settings for column {}",
-                request.column_name
+                req.column_name
             ),
         })?;
 
