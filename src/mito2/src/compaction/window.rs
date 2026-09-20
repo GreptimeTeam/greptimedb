@@ -145,7 +145,7 @@ impl Picker for WindowedCompactionPicker {
         let picker = self.clone();
         let region_id = compaction_region.current_version.metadata.region_id;
         let current_version = compaction_region.current_version.clone();
-        let CompactionOptions::Twcs(options) = &current_version.options.compaction;
+        let CompactionOptions::Twcs(options) = &compaction_region.region_options.compaction;
         // Use the same output size threshold as TWCS, including zero meaning unlimited.
         let max_file_size = options
             .max_output_file_size
@@ -388,7 +388,7 @@ mod tests {
         let picker = WindowedCompactionPicker::new(Some(3600));
 
         for (size, expected) in [(None, None), (Some(0), None), (Some(1024), Some(1024))] {
-            let CompactionOptions::Twcs(options) = &mut region.current_version.options.compaction;
+            let CompactionOptions::Twcs(options) = &mut region.region_options.compaction;
             options.max_output_file_size = size.map(ReadableSize);
 
             let output = picker.pick(&region).await.unwrap().unwrap();
