@@ -77,6 +77,7 @@ pub(crate) fn spawn_series_index_tasks(
     purge_receiver: UnboundedReceiver<PurgeRequest>,
     interval: Duration,
     time_provider: TimeProviderRef,
+    enable_range_index: bool,
 ) -> JoinHandle<()> {
     // Snapshots may retain senders after the worker stops; purge until all senders drop.
     common_runtime::spawn_compact(run_index_purge_task(
@@ -94,6 +95,7 @@ pub(crate) fn spawn_series_index_tasks(
             state,
             interval,
             time_provider,
+            enable_range_index,
         }
         .run()
         .await;
@@ -110,6 +112,7 @@ struct SeriesIndexTask {
     state: Arc<SeriesIndexTaskState>,
     interval: Duration,
     time_provider: TimeProviderRef,
+    enable_range_index: bool,
 }
 
 impl SeriesIndexTask {
@@ -154,6 +157,7 @@ impl SeriesIndexTask {
                 self.bucket_width,
                 self.time_provider.current_time_millis(),
                 self.purger.clone(),
+                self.enable_range_index,
             )
             .await
             {
@@ -211,6 +215,7 @@ mod tests {
             state: Arc::new(SeriesIndexTaskState::new()),
             interval: Duration::from_secs(3600),
             time_provider: Arc::new(crate::time_provider::StdTimeProvider),
+            enable_range_index: true,
         };
         task.maintain().await;
         assert_eq!(
