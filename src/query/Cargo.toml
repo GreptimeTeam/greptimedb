@@ -9,6 +9,7 @@ workspace = true
 
 [features]
 enterprise = ["sql/enterprise"]
+jev = ["common-function/jev"]
 vector_index = []
 
 [dependencies]

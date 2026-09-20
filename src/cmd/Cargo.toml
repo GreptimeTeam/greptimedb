@@ -30,6 +30,7 @@ enterprise = ["common-meta/enterprise", "frontend/enterprise", "meta-srv/enterpr
 # Developer-only helper binaries and diagnostic datanode commands.
 # Kept out of `default` so normal/release builds don't compile them.
 dev-tools = []
+jev = ["query/jev"]
 mysql-object-store = ["object-store/mysql-object-store"]
 tokio-console = ["common-telemetry/tokio-console"]
 vector_index = ["mito2/vector_index", "query/vector_index"]

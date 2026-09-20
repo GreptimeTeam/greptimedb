@@ -6,18 +6,22 @@ It is an asynchronous SQL scalar function usable in `WHERE` and `SELECT`.
 
 ## Start GreptimeDB
 
-Set these environment variables in the process that starts GreptimeDB:
+Jev is **not compiled or registered by default**. Build with the opt-in Cargo
+feature `jev`, then enable API evaluation in the server process:
 
 ```sh
 export GREPTIMEDB_EXPERIMENTAL_JEV=true
 export JEV_API_KEY='<your TypeSafe API key>'
-cargo run -- standalone start
+cargo run -p cmd --features jev -- standalone start
 ```
 
 If your key is already exported in `~/.zshrc`, run `source ~/.zshrc` first.
 The optional `JEV_MODEL` defaults to `jev-latest`; `JEV_ENDPOINT` defaults to
 `https://api.typesafe.ai/v1/systemone` (the full evaluation endpoint URL).
 The MVP uses environment variables rather than TOML configuration.
+The Cargo feature enables the SQL function; the runtime environment variables
+enable and configure its API calls. Setting the environment variables alone
+does not enable Jev in a default build.
 
 ## Query
 
@@ -72,16 +76,29 @@ API reference: <https://docs.typesafe.ai/api>
 
 ## Validation
 
-The regular crate tests use a local HTTP server and need no API key:
+Check both the default build (where `jev` is absent from the function registry)
+and the feature-enabled build. Jev's regular tests use a local HTTP server and
+need no API key:
 
 ```sh
 cargo nextest run -p common-function
+cargo nextest run -p common-function --features jev
 ```
+
+The sqlness runner explicitly enables `jev` when building its test binary:
+
+```sh
+cargo sqlness bare -t jev
+```
+
+If using `--bins-dir`, provide a binary built with `--features jev`.
+The unit-test and sqlness CI builds also opt in explicitly; normal and release
+builds keep the feature disabled by default.
 
 An opt-in test calls the real service on synthetic payment events:
 
 ```sh
 source ~/.zshrc
-GREPTIMEDB_EXPERIMENTAL_JEV=true cargo nextest run -p common-function \
+GREPTIMEDB_EXPERIMENTAL_JEV=true cargo nextest run -p common-function --features jev \
   -E 'test(test_jev_live)' --run-ignored ignored-only
 ```
