@@ -1484,11 +1484,15 @@ impl CompactDispatcher {
     fn dispatch_compact(&self, task: MemCompactTask) {
         let semaphore = self.semaphore.clone();
         common_runtime::spawn_global(async move {
-            let Ok(_permit) = semaphore.acquire().await else {
+            let Ok(permit) = semaphore.acquire_owned().await else {
                 return;
             };
 
             common_runtime::spawn_blocking_global(move || {
+                // The async task above returns as soon as the blocking task is
+                // submitted, so the permit has to travel with it to bound the
+                // compaction that actually runs.
+                let _permit = permit;
                 if let Err(e) = task.compact() {
                     common_telemetry::error!(e; "Failed to compact memtable, region: {}", task.metadata.region_id);
                 }
