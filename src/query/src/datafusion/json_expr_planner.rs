@@ -198,7 +198,7 @@ impl ExprPlanner for JsonExprPlanner {
 
 /// Returns the configured native type for an exact JSON2 object path.
 fn json_type_hint(field: &Field, path: &[String]) -> Result<Option<JsonNativeType>> {
- f  let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
+    let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
         let extension = field
             .try_extension_type::<Json2ExtensionType>()
             .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
