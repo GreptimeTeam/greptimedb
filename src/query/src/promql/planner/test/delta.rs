@@ -524,7 +524,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
 }
 
 #[tokio::test]
-async fn temporality_matchers_treat_null_as_absent() {
+async fn matchers_read_absent_labels_as_empty() {
     let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
     let schema = Arc::new(ArrowSchema::new(vec![Field::new(
         marker,
@@ -596,31 +596,82 @@ async fn temporality_matchers_treat_null_as_absent() {
         );
     }
 
-    let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+    // The rule is about NULL, not about the marker: any nullable label column
+    // can be NULL where the series does not carry the label. A non-nullable one
+    // has nothing to normalize.
+    for (nullable, wants_coalesce) in [(true, true), (false, false)] {
+        let ordinary_schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "label",
+            ArrowDataType::Utf8,
+            nullable,
+        )]));
+        let ordinary_scan = LogicalPlanBuilder::scan(
+            "ordinary_labels",
+            provider_as_source(Arc::new(
+                MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+            )),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        let PromExpr::VectorSelector(selector) =
+            parser::parse(r#"metric{label!="delta"}"#).unwrap()
+        else {
+            unreachable!()
+        };
+        let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+            .unwrap()
+            .iter()
+            .map(ToString::to_string)
+            .join(" AND ");
+        assert_eq!(
+            wants_coalesce,
+            expressions.contains("coalesce"),
+            "nullable={nullable}: {expressions}"
+        );
+    }
+
+    // The other way a label goes absent is having no column for it at all. The
+    // literal standing in for the label has to be usable as a predicate.
+    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
         "label",
         ArrowDataType::Utf8,
         true,
     )]));
-    let ordinary_scan = LogicalPlanBuilder::scan(
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(StringArray::from(vec![Some("value")]))],
+    )
+    .unwrap();
+    let scan = LogicalPlanBuilder::scan(
         "ordinary_labels",
         provider_as_source(Arc::new(
-            MemTable::try_new(ordinary_schema, vec![vec![]]).unwrap(),
+            MemTable::try_new(schema, vec![vec![batch]]).unwrap(),
         )),
         None,
     )
     .unwrap()
     .build()
     .unwrap();
-    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{label!="delta"}"#).unwrap()
+    let PromExpr::VectorSelector(selector) = parser::parse(r#"metric{absent!="delta"}"#).unwrap()
     else {
         unreachable!()
     };
-    let expressions = PromPlanner::matchers_to_expr(selector.matchers, ordinary_scan.schema())
+    let expressions = PromPlanner::matchers_to_expr(selector.matchers, scan.schema()).unwrap();
+    assert_eq!(
+        r#"Utf8("") != Utf8("delta")"#,
+        expressions.iter().map(ToString::to_string).join(" AND ")
+    );
+
+    let plan = LogicalPlanBuilder::from(scan)
+        .filter(conjunction(expressions).unwrap())
         .unwrap()
-        .iter()
-        .map(ToString::to_string)
-        .join(" AND ");
-    assert!(!expressions.contains("coalesce"), "{expressions}");
+        .build()
+        .unwrap();
+    let (_, batches) = execute(plan, &build_query_engine_state()).await;
+    let rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>();
+    assert_eq!(1, rows);
 }
 
 #[tokio::test]
