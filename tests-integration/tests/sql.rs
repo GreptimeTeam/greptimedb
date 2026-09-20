@@ -96,6 +96,7 @@ macro_rules! sql_tests {
                 test_mysql_prepare_tql_and_show,
                 test_postgres_extended_query_row_returning_statements,
                 test_postgres_native_histogram,
+                test_postgres_struct_types,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
             );
@@ -1033,6 +1034,55 @@ pub async fn test_postgres_native_histogram(store_type: StorageType) {
             "zero_threshold": 0.002
         })
     );
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_struct_types(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_struct_types").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    async fn query_one(client: &Client, sql: &str) -> String {
+        let messages = client.simple_query(sql).await.unwrap();
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(|v| v.to_string()),
+                _ => None,
+            })
+            .next()
+            .unwrap()
+    }
+
+    // Struct and list-of-struct columns are serialized as JSON. View-typed
+    // struct fields must not fail row extraction, and a null struct inside a
+    // list stays null instead of becoming a struct of null fields.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
+
+    // '0102' casts to its UTF-8 bytes when interpreted as BinaryView.
+    let row = query_one(&client, "SELECT struct(arrow_cast('0102', 'BinaryView'))").await;
+    assert_eq!(row, "{\"c0\":[48,49,48,50]}");
+
+    let row = query_one(&client, "SELECT struct([struct(1), NULL])").await;
+    assert_eq!(row, "{\"c0\":[{\"c0\":1},null]}");
+
+    // Top-level control: the same null element in a bare list stays null too.
+    let row = query_one(&client, "SELECT [struct(1), NULL]").await;
+    assert_eq!(row, "[{\"c0\":1},null]");
 
     drop(client);
     rx.await.unwrap();

@@ -1152,12 +1152,13 @@ impl TryFrom<ScalarValue> for Value {
             ScalarValue::UInt16(u) => Value::from(u),
             ScalarValue::UInt32(u) => Value::from(u),
             ScalarValue::UInt64(u) => Value::from(u),
-            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) => {
+            ScalarValue::Utf8(s) | ScalarValue::LargeUtf8(s) | ScalarValue::Utf8View(s) => {
                 Value::from(s.map(StringBytes::from))
             }
             ScalarValue::Binary(b)
             | ScalarValue::LargeBinary(b)
-            | ScalarValue::FixedSizeBinary(_, b) => Value::from(b.map(Bytes::from)),
+            | ScalarValue::FixedSizeBinary(_, b)
+            | ScalarValue::BinaryView(b) => Value::from(b.map(Bytes::from)),
             ScalarValue::List(array) => {
                 // this is for item type
                 let datatype = ConcreteDataType::try_from(&array.value_type())?;
@@ -1221,6 +1222,12 @@ impl TryFrom<ScalarValue> for Value {
                 .map(|v| Value::Decimal128(Decimal128::new(v, p, s)))
                 .unwrap_or(Value::Null),
             ScalarValue::Struct(struct_array) => {
+                // A struct scalar carries a single element; a null (or empty)
+                // element means the struct itself is null, for example a null
+                // struct inside a list.
+                if struct_array.is_empty() || struct_array.is_null(0) {
+                    return Ok(Value::Null);
+                }
                 let struct_type = StructType::from(struct_array.fields());
                 let items = struct_array
                     .columns()
@@ -1244,8 +1251,6 @@ impl TryFrom<ScalarValue> for Value {
             | ScalarValue::LargeListView(_)
             | ScalarValue::Union(_, _, _)
             | ScalarValue::Float16(_)
-            | ScalarValue::Utf8View(_)
-            | ScalarValue::BinaryView(_)
             | ScalarValue::Map(_)
             | ScalarValue::Date64(_)
             | ScalarValue::RunEndEncoded(_, _, _) => {
@@ -2157,6 +2162,29 @@ pub(crate) mod tests {
             Value::Struct(struct_value),
             scalar_struct_value.try_into().unwrap()
         );
+
+        // view-typed strings and binaries convert like their non-view forms
+        assert_eq!(
+            Value::String("abc".into()),
+            ScalarValue::Utf8View(Some("abc".into()))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(Value::Null, ScalarValue::Utf8View(None).try_into().unwrap());
+        assert_eq!(
+            Value::Binary(Bytes::from(vec![1, 2])),
+            ScalarValue::BinaryView(Some(vec![1, 2]))
+                .try_into()
+                .unwrap()
+        );
+        assert_eq!(
+            Value::Null,
+            ScalarValue::BinaryView(None).try_into().unwrap()
+        );
+
+        // a null struct scalar is a null value, not a struct of null fields
+        let null_struct = ScalarStructBuilder::new_null(build_struct_type().as_arrow_fields());
+        assert_eq!(Value::Null, null_struct.try_into().unwrap());
     }
 
     #[test]
