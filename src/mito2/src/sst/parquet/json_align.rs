@@ -18,12 +18,11 @@ use std::task::{Context, Poll};
 
 use datafusion_common::cast_column;
 use datafusion_common::format::DEFAULT_CAST_OPTIONS;
-use datatypes::arrow::array::{ArrayRef, BooleanArray, new_null_array};
-use datatypes::arrow::compute::filter_record_batch;
+use datatypes::arrow::array::{ArrayRef, new_null_array};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JsonMetadata, is_json2_extension_type};
-use datatypes::json::JsonSettings;
+use datatypes::json::{JsonSettings, TypeHintMismatchPolicy};
 use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use futures::Stream;
@@ -32,8 +31,7 @@ use serde_json::from_str;
 use snafu::{ResultExt, ensure};
 
 use crate::error::{
-    CastColumnSnafu, ComputeArrowSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result,
-    UnexpectedSnafu,
+    CastColumnSnafu, DataTypeMismatchSnafu, NewRecordBatchSnafu, Result, UnexpectedSnafu,
 };
 use crate::sst::parquet::Json2TargetLayout;
 
@@ -190,7 +188,6 @@ fn align_projected_batch(
     );
 
     let mut cols = Vec::with_capacity(projected_root_presence.len());
-    let mut valid_rows = vec![true; rb.num_rows()];
     let mut idx = 0;
     let input_schema = rb.schema_ref();
 
@@ -205,14 +202,7 @@ fn align_projected_batch(
                 align_array(rb.column(idx), input_schema.field(idx), field)?
             }
             ResolvedAlignMode::Rewrite { columns } => match columns.get(field.name()) {
-                Some(settings) => {
-                    let (array, column_valid_rows) =
-                        rewrite_array(rb.column(idx), input_schema.field(idx), settings)?;
-                    for (valid, column_valid) in valid_rows.iter_mut().zip(column_valid_rows) {
-                        *valid &= column_valid;
-                    }
-                    array
-                }
+                Some(settings) => rewrite_array(rb.column(idx), input_schema.field(idx), settings)?,
                 None => rb.column(idx).clone(),
             },
         };
@@ -220,12 +210,7 @@ fn align_projected_batch(
         idx += 1;
     }
 
-    let batch = RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)?;
-    if valid_rows.iter().all(|valid| *valid) {
-        return Ok(batch);
-    }
-
-    filter_record_batch(&batch, &BooleanArray::from(valid_rows)).context(ComputeArrowSnafu)
+    RecordBatch::try_new(output_schema.clone(), cols).context(NewRecordBatchSnafu)
 }
 
 fn align_array(
@@ -264,12 +249,13 @@ fn rewrite_array(
     source_array: &ArrayRef,
     source_field: &Field,
     settings: &RewriteSettings,
-) -> Result<(ArrayRef, Vec<bool>)> {
+) -> Result<ArrayRef> {
     JsonArray::from(source_array)
-        .rewrite_to_v2_discard_invalid(
+        .rewrite_to_v2_with_type_hint_mismatch_policy(
             source_field,
             &settings.logical_settings,
             &settings.target_layout,
+            TypeHintMismatchPolicy::EncodeAsNull,
         )
         .context(DataTypeMismatchSnafu)
 }
@@ -801,7 +787,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rewrite_discards_rows_with_invalid_json2_settings() {
+    async fn test_rewrite_keeps_rows_with_invalid_json2_settings() {
         let settings = JsonSettings::try_new(
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
@@ -848,7 +834,7 @@ mod tests {
         .unwrap();
 
         let output = aligner.next().await.unwrap().unwrap();
-        assert_eq!(1, output.num_rows());
+        assert_eq!(2, output.num_rows());
         assert_eq!(
             10,
             output
@@ -857,6 +843,15 @@ mod tests {
                 .downcast_ref::<Int64Array>()
                 .unwrap()
                 .value(0)
+        );
+        assert_eq!(
+            20,
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(1)
         );
     }
 

@@ -93,6 +93,15 @@ pub struct JsonTypeHint {
     pub inverted_index: bool,
 }
 
+/// Specifies how encoding handles a value that does not match its JSON2 type hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeHintMismatchPolicy {
+    /// Returns an error for a type hint mismatch.
+    Reject,
+    /// Encodes a type hint mismatch as a null value.
+    EncodeAsNull,
+}
+
 /// Context for JSON encoding/decoding that tracks the current key path.
 #[derive(Clone, Debug)]
 pub struct JsonContext<'a> {
@@ -146,6 +155,15 @@ impl JsonSettings {
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
+        self.encode_with_type_hint_mismatch_policy(json, TypeHintMismatchPolicy::Reject)
+    }
+
+    /// Encodes a serde_json::Value using the given type hint mismatch policy.
+    pub fn encode_with_type_hint_mismatch_policy(
+        &self,
+        json: Json,
+        policy: TypeHintMismatchPolicy,
+    ) -> Result<Value> {
         if let Json::Object(object) = &json
             && object.contains_key(JSON2_REMAINDER_FIELD_NAME)
         {
@@ -160,7 +178,7 @@ impl JsonSettings {
             path: Vec::new(),
             settings: self,
         };
-        encode_json_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
+        encode_json_with_context(json, &mut context, policy).map(|v| Value::Json(Box::new(v)))
     }
 }
 
@@ -272,36 +290,41 @@ fn with_key_context<T>(
 }
 
 /// Main encoding function with key path tracking
-fn encode_json_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+fn encode_json_with_context(
+    json: Json,
+    context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
+) -> Result<JsonValue> {
     if context.path.is_empty() && !matches!(json, Json::Object(_)) {
         return UnsupportedJsonTypeSnafu.fail();
     }
 
     match json {
-        Json::Object(json_object) => encode_json_object_with_context(json_object, context),
-        Json::Array(json_array) => encode_json_array_with_context(json_array, context),
-        _ => encode_json_value_with_context(json, context),
+        Json::Object(json_object) => encode_json_object_with_context(json_object, context, policy),
+        Json::Array(json_array) => encode_json_array_with_context(json_array, context, policy),
+        _ => encode_json_value_with_context(json, context, policy),
     }
 }
 
 fn encode_json_object_with_context<'a>(
     json_object: Map<String, Json>,
     context: &mut JsonContext<'a>,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     let mut object = BTreeMap::new();
     for (key, value) in json_object {
         let value = with_key_context(context, &key, |context| {
             if let Some(hint) = context.type_hint() {
-                encode_json_value_with_hint(value, hint, context)
+                encode_json_value_with_hint(value, hint, context, policy)
             } else {
-                encode_json_value_with_context(value, context)
+                encode_json_value_with_context(value, context, policy)
             }
         })?;
 
         object.insert(key, value.into_variant());
     }
 
-    fill_missing_type_hints(&mut object, context)?;
+    fill_missing_type_hints(&mut object, context, policy)?;
 
     Ok(JsonValue::new(JsonVariant::Object(object)))
 }
@@ -309,13 +332,14 @@ fn encode_json_object_with_context<'a>(
 fn fill_missing_type_hints(
     object: &mut BTreeMap<String, JsonVariant>,
     context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<()> {
     for hint in &context.settings.type_hints {
         if hint.path.len() > context.path.len() && hint.path.starts_with(&context.path) {
             let depth = context.path.len();
             let key = &hint.path[depth];
             with_key_context(context, key, |context| {
-                insert_missing_type_hint(object, context, hint, depth)
+                insert_missing_type_hint(object, context, hint, depth, policy)
             })?;
         }
     }
@@ -327,6 +351,7 @@ fn insert_missing_type_hint(
     field_context: &mut JsonContext,
     hint: &JsonTypeHint,
     depth: usize,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<()> {
     let key = &hint.path[depth];
     let is_leaf = depth + 1 == hint.path.len();
@@ -341,7 +366,11 @@ fn insert_missing_type_hint(
     match object.entry(key.clone()) {
         Entry::Occupied(mut entry) => match entry.get_mut() {
             JsonVariant::Object(child) => {
-                insert_missing_type_hint(child, field_context, hint, depth + 1)
+                insert_missing_type_hint(child, field_context, hint, depth + 1, policy)
+            }
+            _ if policy == TypeHintMismatchPolicy::EncodeAsNull => {
+                entry.insert(JsonValue::null().into_variant());
+                Ok(())
             }
             _ => error::InvalidJsonSnafu {
                 value: format!(
@@ -354,7 +383,7 @@ fn insert_missing_type_hint(
         },
         Entry::Vacant(entry) => {
             let mut child = BTreeMap::new();
-            insert_missing_type_hint(&mut child, field_context, hint, depth + 1)?;
+            insert_missing_type_hint(&mut child, field_context, hint, depth + 1, policy)?;
             entry.insert(JsonVariant::Object(child));
             Ok(())
         }
@@ -365,20 +394,22 @@ fn encode_json_value_with_hint(
     json: Json,
     hint: &JsonTypeHint,
     context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     if json.is_null() {
         return Ok(JsonValue::null());
     }
 
-    let invalid_type = || {
-        error::InvalidJsonSnafu {
+    let invalid_type = || match policy {
+        TypeHintMismatchPolicy::Reject => error::InvalidJsonSnafu {
             value: format!(
                 "JSON value at {} does not match JSON2 type hint {}",
                 context.path.join("."),
                 hint.data_type
             ),
         }
-        .fail()
+        .fail(),
+        TypeHintMismatchPolicy::EncodeAsNull => Ok(JsonValue::null()),
     };
 
     match (&hint.data_type, json) {
@@ -417,13 +448,14 @@ fn encode_json_value_with_hint(
 fn encode_json_array_with_context<'a>(
     json_array: Vec<Json>,
     context: &mut JsonContext<'a>,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     let json_array_len = json_array.len();
     let mut items = Vec::with_capacity(json_array_len);
 
     for (index, value) in json_array.into_iter().enumerate() {
         let item_value = with_key_context(context, &index.to_string(), |context| {
-            encode_json_value_with_context(value, context)
+            encode_json_value_with_context(value, context, policy)
         })?;
         items.push(item_value);
     }
@@ -458,7 +490,11 @@ fn encode_json_array_with_context<'a>(
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
-fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+fn encode_json_value_with_context(
+    json: Json,
+    context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
+) -> Result<JsonValue> {
     if context.path.len() >= JSON2_MAX_STRUCTURED_DEPTH
         && matches!(&json, Json::Object(_) | Json::Array(_))
     {
@@ -487,8 +523,8 @@ fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Resu
             }
         }
         Json::String(s) => Ok(s.into()),
-        Json::Array(arr) => encode_json_array_with_context(arr, context),
-        Json::Object(obj) => encode_json_object_with_context(obj, context),
+        Json::Array(arr) => encode_json_array_with_context(arr, context, policy),
+        Json::Object(obj) => encode_json_object_with_context(obj, context, policy),
     }
 }
 
@@ -753,6 +789,64 @@ mod tests {
                 "{name}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_encode_as_null_on_type_hint_mismatch() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )?;
+
+        let result = settings
+            .encode_with_type_hint_mismatch_policy(
+                json!({"kind": "invalid", "message": "kept"}),
+                TypeHintMismatchPolicy::EncodeAsNull,
+            )?
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(struct_field_value(&root, "kind"), &Value::Null);
+        assert_eq!(
+            struct_field_value(&root, "message"),
+            &Value::String("kept".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_encode_as_null_on_nested_type_hint_structure_mismatch() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["user".to_string(), "age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )?;
+
+        let result = settings
+            .encode_with_type_hint_mismatch_policy(
+                json!({"user": "invalid", "message": "kept"}),
+                TypeHintMismatchPolicy::EncodeAsNull,
+            )?
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(struct_field_value(&root, "user"), &Value::Null);
+        assert_eq!(
+            struct_field_value(&root, "message"),
+            &Value::String("kept".into())
+        );
+        Ok(())
     }
 
     #[test]

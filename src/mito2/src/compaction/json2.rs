@@ -19,7 +19,9 @@ use arrow_schema::extension::ExtensionType;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, JsonMetadata};
-use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings, JsonTypeHint};
+use datatypes::json::{
+    JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings, JsonTypeHint, TypeHintMismatchPolicy,
+};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::json::array::JsonArray;
@@ -327,7 +329,12 @@ pub(crate) fn rewrite_json2_batch(
         };
 
         let array = JsonArray::from(array)
-            .rewrite_to_v2(field, &plan.logical_settings, &plan.target_layout)
+            .rewrite_to_v2_with_type_hint_mismatch_policy(
+                field,
+                &plan.logical_settings,
+                &plan.target_layout,
+                TypeHintMismatchPolicy::EncodeAsNull,
+            )
             .context(ConvertValueSnafu)?;
         debug_assert_eq!(
             &json2_physical_data_type(&plan.target_layout),
