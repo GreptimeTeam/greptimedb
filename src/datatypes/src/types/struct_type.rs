@@ -19,6 +19,7 @@ use arrow::datatypes::{DataType as ArrowDataType, Field};
 use arrow_schema::Fields;
 use serde::{Deserialize, Serialize};
 
+use crate::error::Result;
 use crate::prelude::{ConcreteDataType, DataType, LogicalTypeId};
 use crate::value::Value;
 use crate::vectors::StructVectorBuilder;
@@ -98,6 +99,24 @@ impl StructType {
         StructType {
             fields: fields.clone(),
         }
+    }
+
+    /// Like the `From<&Fields>` impl, but returns an error for arrow field
+    /// types greptimedb cannot represent instead of panicking.
+    pub fn try_from_arrow_fields(fields: &Fields) -> Result<Self> {
+        let struct_fields = fields
+            .iter()
+            .map(|field| {
+                Ok(StructField::new(
+                    field.name().clone(),
+                    ConcreteDataType::try_from(field.data_type())?,
+                    field.is_nullable(),
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(StructType {
+            fields: Arc::new(struct_fields),
+        })
     }
 
     pub fn fields(&self) -> Arc<Vec<StructField>> {

@@ -1084,6 +1084,25 @@ pub async fn test_postgres_struct_types(store_type: StorageType) {
     let row = query_one(&client, "SELECT [struct(1), NULL]").await;
     assert_eq!(row, "[{\"c0\":1},null]");
 
+    // Unsupported arrow field types surface as query errors instead of
+    // dropping the connection.
+    let error = client
+        .simple_query("SELECT struct(arrow_cast('1', 'Decimal256(38, 10)'))")
+        .await
+        .unwrap_err();
+    let message = match error.as_db_error() {
+        Some(db_error) => db_error.message().to_string(),
+        None => error.to_string(),
+    };
+    assert!(
+        message.contains("Unsupported arrow data type"),
+        "unexpected error message: {message}"
+    );
+
+    // The connection stays usable after the error.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
+
     drop(client);
     rx.await.unwrap();
 

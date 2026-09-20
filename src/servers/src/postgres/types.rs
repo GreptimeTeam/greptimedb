@@ -37,7 +37,7 @@ use datatypes::json::JsonSettings;
 use datatypes::prelude::{ConcreteDataType, DataType as _, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
-use datatypes::vectors::Helper;
+use datatypes::value::try_value_from_array;
 use futures::Stream;
 use pg_interval::Interval as PgInterval;
 use pgwire::api::Type;
@@ -260,6 +260,10 @@ fn encode_struct<S: Encoder>(
 
 /// Encodes one row of a structured column (`Struct`, or `List` of `Struct`) as
 /// a PostgreSQL `json` value.
+///
+/// Returns an error for arrow field types greptimedb cannot represent
+/// (e.g. `Decimal256`) instead of panicking, so the client receives a proper
+/// error response.
 fn encode_structured_json<S: Encoder>(
     query_ctx: &QueryContextRef,
     column: &ArrayRef,
@@ -267,8 +271,8 @@ fn encode_structured_json<S: Encoder>(
     encoder: &mut S,
     pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
-    let vector = Helper::try_into_vector(column.clone()).map_err(convert_err)?;
-    encode_struct(query_ctx, vector.get(i), encoder, pg_field)
+    let value = try_value_from_array(column.as_ref(), i).map_err(convert_err)?;
+    encode_struct(query_ctx, value, encoder, pg_field)
 }
 
 pub(crate) struct RecordBatchRowStream<S, B>
@@ -1946,6 +1950,7 @@ mod test {
     fn test_encode_list_of_struct_as_json() {
         use datatypes::types::{StructField, StructType};
         use datatypes::value::{ListValue, StructValue};
+        use datatypes::vectors::Helper;
         use pgwire::messages::data::DataRow;
 
         // struct type: {a: int32, b: float64}
@@ -2052,6 +2057,7 @@ mod test {
         use common_query::native_histogram::{
             encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
         };
+        use datatypes::vectors::Helper;
         use pgwire::messages::data::DataRow;
 
         fn histogram_value(histogram: &Histogram) -> Value {

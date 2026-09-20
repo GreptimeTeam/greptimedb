@@ -1228,7 +1228,9 @@ impl TryFrom<ScalarValue> for Value {
                 if struct_array.is_empty() || struct_array.is_null(0) {
                     return Ok(Value::Null);
                 }
-                let struct_type = StructType::from(struct_array.fields());
+                // Build the struct type fallibly: an unrepresentable arrow
+                // field type must surface as an error, not a panic.
+                let struct_type = StructType::try_from_arrow_fields(struct_array.fields())?;
                 let items = struct_array
                     .columns()
                     .iter()
@@ -1262,6 +1264,21 @@ impl TryFrom<ScalarValue> for Value {
         };
         Ok(v)
     }
+}
+
+/// Converts the value at `index` of an arrow array into a [`Value`].
+///
+/// Unlike the unchecked conversion in [`crate::vectors::StructVector`]'s `get`,
+/// this propagates conversion errors (for example arrow types greptimedb
+/// cannot represent, such as `Decimal256`) instead of panicking, so callers
+/// can surface a proper error to the user.
+pub fn try_value_from_array(array: &dyn Array, index: usize) -> Result<Value> {
+    if array.is_null(index) {
+        return Ok(Value::Null);
+    }
+    let scalar =
+        ScalarValue::try_from_array(array, index).context(ConvertArrowArrayToScalarsSnafu)?;
+    Value::try_from(scalar)
 }
 
 impl From<ValueRef<'_>> for Value {
@@ -2185,6 +2202,50 @@ pub(crate) mod tests {
         // a null struct scalar is a null value, not a struct of null fields
         let null_struct = ScalarStructBuilder::new_null(build_struct_type().as_arrow_fields());
         assert_eq!(Value::Null, null_struct.try_into().unwrap());
+    }
+
+    #[test]
+    fn test_try_value_from_array() {
+        use arrow_array::Int32Array;
+        use datafusion_common::arrow::datatypes::i256;
+
+        let array = Int32Array::from(vec![Some(1), None]);
+        assert_eq!(Value::Int32(1), try_value_from_array(&array, 0).unwrap());
+        assert_eq!(Value::Null, try_value_from_array(&array, 1).unwrap());
+
+        // a struct with representable fields converts
+        let supported = ScalarStructBuilder::new()
+            .with_name_and_scalar("i", ScalarValue::Int32(Some(7)))
+            .build()
+            .unwrap();
+        let ScalarValue::Struct(array) = supported else {
+            unreachable!();
+        };
+        assert_eq!(
+            Value::Struct(StructValue::new(
+                vec![Value::Int32(7)],
+                StructType::new(std::sync::Arc::new(vec![StructField::new(
+                    "i",
+                    ConcreteDataType::int32_datatype(),
+                    false,
+                )]))
+            )),
+            try_value_from_array(array.as_ref(), 0).unwrap()
+        );
+
+        // an unsupported arrow field type errors instead of panicking
+        let unsupported = ScalarStructBuilder::new()
+            .with_name_and_scalar(
+                "d",
+                ScalarValue::Decimal256(Some(i256::from_i128(1)), 38, 10),
+            )
+            .build()
+            .unwrap();
+        let ScalarValue::Struct(array) = unsupported else {
+            unreachable!();
+        };
+        let error = try_value_from_array(array.as_ref(), 0).unwrap_err();
+        assert!(error.to_string().contains("Unsupported arrow data type"));
     }
 
     #[test]
