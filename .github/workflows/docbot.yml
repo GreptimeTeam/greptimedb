@@ -4,7 +4,7 @@ on:
     types: [opened, edited, closed]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.action }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:

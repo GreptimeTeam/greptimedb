@@ -36,20 +36,27 @@ async function main() {
     }
 
     const payload = context.payload as PullRequestEvent
-    const { owner, repo, number, actor, title, html_url } = {
+    const { owner, repo, number, actor } = {
         owner: payload.pull_request.base.user.login,
         repo: payload.pull_request.base.repo.name,
         number: payload.pull_request.number,
-        title: payload.pull_request.title,
-        html_url: payload.pull_request.html_url,
         actor: payload.pull_request.user.login,
     }
 
     switch (payload.action) {
-        case "opened":
-        case "edited": {
+        case "opened": {
             const client = obtainClient("GITHUB_TOKEN")
-            await updateDocsLabels(client, owner, repo, number, checkPullRequestEvent(payload))
+            await updateDocsLabels(client, owner, repo, number, checkPullRequestOpenedEvent(payload as PullRequestOpenedEvent))
+            break
+        }
+        case "edited": {
+            const followUpDocs = checkPullRequestEditedEvent(payload as PullRequestEditedEvent)
+            if (followUpDocs === undefined) {
+                core.info("Docs checkbox state unchanged; leaving labels as-is.")
+                return
+            }
+            const client = obtainClient("GITHUB_TOKEN")
+            await updateDocsLabels(client, owner, repo, number, followUpDocs)
             break
         }
         case "closed": {
@@ -58,15 +65,19 @@ async function main() {
                 core.info("PR closed without merging; no docs issue needed.")
                 return
             }
-            const hasDocsLabel = event.pull_request.labels.some((label) =>
-                (typeof label === "string" ? label : label.name) === labelDocsRequired
-            )
-            if (!hasDocsLabel) {
-                core.info(`Label ${labelDocsRequired} not present; no docs issue needed.`)
+            // Re-read the live PR state instead of trusting the event payload's
+            // label snapshot: a concurrent edit run may not have applied the
+            // docs-required label yet when the PR is merged.
+            const client = obtainClient("GITHUB_TOKEN")
+            const { data: pr } = await client.rest.pulls.get({ owner, repo, pull_number: number })
+            const hasDocsLabel = pr.labels.some((label) => label.name === labelDocsRequired)
+            const checkboxChecked = pr.body?.includes(needFollowUpDocs) ?? false
+            if (!hasDocsLabel && !checkboxChecked) {
+                core.info(`Neither label ${labelDocsRequired} nor the docs checkbox is present; no docs issue needed.`)
                 return
             }
             const docsClient = obtainClient("DOCS_REPO_TOKEN")
-            await createDocsIssue(docsClient, title, html_url, actor)
+            await createDocsIssue(docsClient, pr.title, pr.html_url, actor)
             break
         }
         default:
@@ -130,27 +141,24 @@ async function createDocsIssue(docsClient: ReturnType<typeof obtainClient>, titl
     })
 }
 
-function checkPullRequestEvent(payload: PullRequestEvent) {
-    switch (payload.action) {
-        case "opened":
-            return checkPullRequestOpenedEvent(payload as PullRequestOpenedEvent)
-        case "edited":
-            return checkPullRequestEditedEvent(payload as PullRequestEditedEvent)
-        default:
-            throw new Error(`${payload.action} is unsupported.`)
-    }
-}
-
 function checkPullRequestOpenedEvent(event: PullRequestOpenedEvent): boolean {
     // @ts-ignore
     return event.pull_request.body?.includes(needFollowUpDocs)
 }
 
-function checkPullRequestEditedEvent(event: PullRequestEditedEvent): boolean {
-    const previous = event.changes.body?.from.includes(needFollowUpDocs)
-    const current = event.pull_request.body?.includes(needFollowUpDocs)
-    // from docs-not-need to docs-required
-    return (!previous) && current
+// Returns undefined when the checkbox state did not change in this edit, so the
+// caller leaves the labels untouched (preserving manual label overrides).
+function checkPullRequestEditedEvent(event: PullRequestEditedEvent): boolean | undefined {
+    if (!event.changes.body) {
+        // The body was not part of this edit (e.g. title-only edit).
+        return undefined
+    }
+    const previous = event.changes.body.from.includes(needFollowUpDocs)
+    const current = event.pull_request.body?.includes(needFollowUpDocs) ?? false
+    if (previous === current) {
+        return undefined
+    }
+    return current
 }
 
 main().catch(handleError)
