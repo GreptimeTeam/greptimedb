@@ -125,6 +125,14 @@ pub enum Error {
         source: BoxedError,
     },
 
+    #[snafu(display("Write rejected: {error}"))]
+    WriteRejected {
+        #[snafu(source)]
+        error: meter_core::collect::WriteRejected,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to insert data"))]
     RequestInserts {
         #[snafu(implicit)]
@@ -1069,6 +1077,7 @@ impl ErrorExt for Error {
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
             Error::BatchFlush { source, .. } => source.status_code(),
+            Error::WriteRejected { .. } => StatusCode::RateLimited,
             Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
@@ -1127,7 +1136,7 @@ impl ErrorExt for Error {
     fn retry_hint(&self) -> RetryHint {
         match self {
             Error::ReadObject { error, .. } => retry_hint_from_opendal_error(error),
-            Error::ReadParquetMetadata { .. } => RetryHint::Retryable,
+            Error::ReadParquetMetadata { .. } | Error::WriteRejected { .. } => RetryHint::Retryable,
             Error::InvalidateTableCache { source, .. }
             | Error::ExecuteDdl { source, .. }
             | Error::RequestInserts { source, .. }

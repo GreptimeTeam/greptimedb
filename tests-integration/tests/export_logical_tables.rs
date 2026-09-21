@@ -1383,3 +1383,487 @@ async fn packed_copy_large_column_in_middle_stream() {
         );
     }
 }
+
+#[derive(clap::Parser)]
+struct ExportDataCli {
+    #[command(subcommand)]
+    command: cli::DataCommand,
+}
+
+async fn run_data_cli(args: &[&str]) -> Result<(), common_error::ext::BoxedError> {
+    use clap::Parser;
+    ExportDataCli::try_parse_from(std::iter::once("greptime-data").chain(args.iter().copied()))
+        .unwrap()
+        .command
+        .build()
+        .await?
+        .do_work()
+        .await
+}
+
+async fn export_http(instance: Arc<Instance>) -> (String, tokio::task::JoinHandle<()>) {
+    let server = servers::http::HttpServerBuilder::new(servers::http::HttpOptions::default())
+        .with_sql_handler(instance)
+        .build();
+    let app = server.build(server.make_app()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let task = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (addr, task)
+}
+
+struct FailSecondChunk {
+    fail: std::sync::atomic::AtomicBool,
+    copies: std::sync::atomic::AtomicUsize,
+}
+
+impl servers::interceptor::SqlQueryInterceptor for FailSecondChunk {
+    type Error = frontend::error::Error;
+
+    fn pre_execute(
+        &self,
+        statement: Option<&sql::statements::statement::Statement>,
+        _plan: Option<&datafusion_expr::LogicalPlan>,
+        _ctx: session::context::QueryContextRef,
+    ) -> Result<(), Self::Error> {
+        use sql::statements::copy::{Copy, CopyDatabase};
+        use sql::statements::statement::Statement;
+        if let Some(Statement::Copy(Copy::CopyDatabase(CopyDatabase::To(arg)))) = statement {
+            self.copies
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if arg.location.ends_with("/z_later/2/")
+                && self.fail.swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(operator::error::InvalidDatabaseExportSnafu {
+                    reason: "injected terminated COPY failure",
+                }
+                .build()
+                .into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn metric_export_v2_cli_resume_roundtrip() {
+    metric_export_v2_cli_roundtrip(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires GT_S3_* credentials and an S3-compatible test bucket"]
+async fn metric_export_v2_cli_s3_resume_roundtrip() {
+    metric_export_v2_cli_roundtrip(true).await;
+}
+
+async fn metric_export_v2_cli_roundtrip(s3: bool) {
+    use servers::interceptor::SqlQueryInterceptorRef;
+    let plugins = common_base::Plugins::new();
+    let faults = Arc::new(FailSecondChunk {
+        fail: std::sync::atomic::AtomicBool::new(true),
+        copies: std::sync::atomic::AtomicUsize::new(0),
+    });
+    plugins.insert::<SqlQueryInterceptorRef<frontend::error::Error>>(faults.clone());
+    let source = GreptimeDbStandaloneBuilder::new("metric_v2_source")
+        .with_experimental_metric_export()
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let instance = source.fe_instance();
+    let mut names = Vec::new();
+    for physical in ["v2_a", "v2_b"] {
+        let (logical, _, renamed) =
+            create_metric_export_source_tables(instance, physical, "dense").await;
+        sql(
+            instance,
+            &format!("ALTER TABLE {renamed} RENAME {physical}"),
+        )
+        .await;
+        names.extend(logical);
+        names.push(format!("{physical}_excluded"));
+    }
+    sql(
+        instance,
+        "CREATE TABLE audit (host STRING PRIMARY KEY, val DOUBLE, ts TIMESTAMP TIME INDEX)",
+    )
+    .await;
+    sql(instance, "INSERT INTO audit VALUES ('a',1,1),('z',NULL,3)").await;
+    sql(instance, "CREATE VIEW dashboard AS SELECT * FROM audit").await;
+    sql(instance, "CREATE DATABASE z_later").await;
+    sql(
+        instance,
+        "CREATE TABLE z_later.events (ts TIMESTAMP TIME INDEX, val BIGINT)",
+    )
+    .await;
+    sql(instance, "INSERT INTO z_later.events VALUES (1,10),(3,20)").await;
+    names.push("audit".into());
+    if s3 {
+        sql(
+            instance,
+            "CREATE TABLE bulk (host STRING PRIMARY KEY, payload STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await;
+        for batch in 0..64 {
+            let rows = (0..64)
+                .map(|row| {
+                    let payload = (0..128)
+                        .map(|_| uuid::Uuid::new_v4().simple().to_string())
+                        .collect::<String>();
+                    format!("('{}','{payload}',1)", batch * 64 + row)
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            sql(instance, &format!("INSERT INTO bulk VALUES {rows}")).await;
+        }
+        names.push("bulk".into());
+    }
+    let (addr, server) = export_http(instance.clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let (uri, store, storage_args) = if s3 {
+        let endpoint = std::env::var("GT_S3_ENDPOINT_URL").unwrap();
+        let bucket = std::env::var("GT_S3_BUCKET").unwrap();
+        let region = std::env::var("GT_S3_REGION").unwrap();
+        let key = std::env::var("GT_S3_ACCESS_KEY_ID").unwrap();
+        let secret = std::env::var("GT_S3_ACCESS_KEY").unwrap();
+        let root = format!("pr04b-{}", uuid::Uuid::new_v4());
+        let store = object_store::ObjectStore::new(
+            object_store::services::S3::default()
+                .endpoint(&endpoint)
+                .bucket(&bucket)
+                .root(&root)
+                .region(&region)
+                .access_key_id(&key)
+                .secret_access_key(&secret),
+        )
+        .unwrap();
+        (
+            format!("s3://{bucket}/{root}"),
+            store,
+            vec![
+                "--s3".into(),
+                "--s3-endpoint".into(),
+                endpoint,
+                "--s3-region".into(),
+                region,
+                "--s3-access-key-id".into(),
+                key,
+                "--s3-secret-access-key".into(),
+                secret,
+            ],
+        )
+    } else {
+        (
+            url::Url::from_file_path(destination.path())
+                .unwrap()
+                .to_string(),
+            object_store::ObjectStore::new(
+                object_store::services::Fs::default().root(destination.path().to_str().unwrap()),
+            )
+            .unwrap(),
+            Vec::<String>::new(),
+        )
+    };
+    let mut args = vec![
+        "export-v2",
+        "create",
+        "--addr",
+        &addr,
+        "--to",
+        &uri,
+        "--schemas",
+        "public,z_later",
+        "--experimental-metric-export",
+        "--no-proxy",
+        "--start-time",
+        "1970-01-01T00:00:00Z",
+        "--end-time",
+        "1970-01-01T00:00:00.006Z",
+        "--chunk-time-window",
+        "3ms",
+        "--progress",
+        "never",
+    ];
+    args.extend(storage_args.iter().map(String::as_str));
+    assert!(run_data_cli(&args).await.is_err());
+    let before: cli::export_v2::manifest::Manifest =
+        serde_json::from_slice(&store.read("manifest.json").await.unwrap().to_vec()).unwrap();
+    assert_eq!(
+        before.chunks[0].status,
+        cli::export_v2::manifest::ChunkStatus::Completed
+    );
+    assert_eq!(
+        before.chunks[1].status,
+        cli::export_v2::manifest::ChunkStatus::Failed
+    );
+    if s3 {
+        assert!(
+            store
+                .stat("data/public/1/bulk.parquet")
+                .await
+                .unwrap()
+                .content_length()
+                > 5 * 1024 * 1024
+        );
+    }
+    let mut preserved = Vec::new();
+    for path in &before.chunks[0].files {
+        preserved.push((path.clone(), store.read(path).await.unwrap().to_vec()));
+    }
+    assert!(store.exists("data/public/2/audit.parquet").await.unwrap());
+    store
+        .write("data/public/2/unknown.txt", "keep")
+        .await
+        .unwrap();
+    let copies = faults.copies.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(run_data_cli(&args).await.is_err());
+    assert_eq!(
+        faults.copies.load(std::sync::atomic::Ordering::SeqCst),
+        copies
+    );
+    assert_eq!(
+        store
+            .read("data/public/2/unknown.txt")
+            .await
+            .unwrap()
+            .to_vec(),
+        b"keep"
+    );
+    store.delete("data/public/2/unknown.txt").await.unwrap();
+    run_data_cli(&args).await.unwrap();
+    let after: cli::export_v2::manifest::Manifest =
+        serde_json::from_slice(&store.read("manifest.json").await.unwrap().to_vec()).unwrap();
+    assert!(after.is_complete());
+    assert_eq!(
+        serde_json::to_value(&before.chunks[0]).unwrap(),
+        serde_json::to_value(&after.chunks[0]).unwrap()
+    );
+    for (path, bytes) in preserved {
+        assert_eq!(bytes, store.read(&path).await.unwrap().to_vec());
+    }
+    let mut verify = vec!["export-v2", "verify", "--snapshot", &uri];
+    verify.extend(storage_args.iter().map(String::as_str));
+    run_data_cli(&verify).await.unwrap();
+    let target = GreptimeDbStandaloneBuilder::new("metric_v2_target")
+        .build()
+        .await;
+    for id in 0..24 {
+        sql(
+            target.fe_instance(),
+            &format!("CREATE TABLE occupied_{id} (ts TIMESTAMP TIME INDEX)"),
+        )
+        .await;
+    }
+    let (target_addr, target_server) = export_http(target.fe_instance().clone()).await;
+    let state = destination.path().join("restore-state.json");
+    let mut import = vec![
+        "import-v2",
+        "--addr",
+        &target_addr,
+        "--from",
+        &uri,
+        "--no-proxy",
+        "--state-path",
+        state.to_str().unwrap(),
+        "--progress",
+        "never",
+    ];
+    import.extend(storage_args.iter().map(String::as_str));
+    run_data_cli(&import).await.unwrap();
+    for name in names {
+        let source_table = table(instance, &name).await;
+        let target_table = table(target.fe_instance(), &name).await;
+        assert_ne!(
+            source_table.table_info().table_id(),
+            target_table.table_info().table_id()
+        );
+        assert_eq!(
+            source_table.schema().column_schemas(),
+            target_table.schema().column_schemas()
+        );
+        let query = format!("SELECT * FROM \"{name}\" ORDER BY ts,host");
+        assert_eq!(
+            values(instance, &query).await,
+            values(target.fe_instance(), &query).await
+        );
+    }
+    assert_eq!(
+        values(instance, "SELECT * FROM z_later.events ORDER BY ts").await,
+        values(
+            target.fe_instance(),
+            "SELECT * FROM z_later.events ORDER BY ts"
+        )
+        .await
+    );
+    server.abort();
+    target_server.abort();
+    if s3 {
+        store.delete_with("/").recursive(true).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn metric_export_v2_disabled_and_legacy_cli() {
+    let source = GreptimeDbStandaloneBuilder::new("metric_v2_disabled")
+        .build()
+        .await;
+    let (addr, server) = export_http(source.fe_instance().clone()).await;
+    let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    let uri = url::Url::from_file_path(destination.path())
+        .unwrap()
+        .to_string();
+    let manifest = destination.path().join("manifest.json");
+    std::fs::write(&manifest, b"preserve-before-capability-check").unwrap();
+    let args = [
+        "export-v2",
+        "create",
+        "--addr",
+        &addr,
+        "--to",
+        &uri,
+        "--force",
+        "--experimental-metric-export",
+        "--no-proxy",
+        "--progress",
+        "never",
+    ];
+    assert!(run_data_cli(&args).await.is_err());
+    assert_eq!(
+        std::fs::read(&manifest).unwrap(),
+        b"preserve-before-capability-check"
+    );
+    std::fs::remove_file(&manifest).unwrap();
+    sql(
+        source.fe_instance(),
+        "CREATE TABLE ordinary (ts TIMESTAMP TIME INDEX, val BIGINT)",
+    )
+    .await;
+    sql(source.fe_instance(), "INSERT INTO ordinary VALUES (1,2)").await;
+    run_data_cli(&[
+        "export-v2",
+        "create",
+        "--addr",
+        &addr,
+        "--to",
+        &uri,
+        "--schemas",
+        "public",
+        "--no-proxy",
+        "--progress",
+        "never",
+    ])
+    .await
+    .unwrap();
+    run_data_cli(&["export-v2", "verify", "--snapshot", &uri])
+        .await
+        .unwrap();
+    server.abort();
+}
+
+#[tokio::test]
+async fn metric_export_v2_refuses_missing_or_malformed_capability_before_force() {
+    use axum::http::StatusCode;
+    use serde_json::json;
+    let column = json!({"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "String"});
+    let records = |rows, columns| {
+        json!({"records": {
+            "schema": {"column_schemas": columns},
+            "rows": rows
+        }})
+    };
+    let valid = records(json!([["true"]]), json!([column.clone()]));
+    let mut responses = [
+        (StatusCode::BAD_REQUEST, json!([])),
+        (StatusCode::OK, json!([])),
+        (StatusCode::OK, json!([[true]])),
+        (StatusCode::OK, json!([["true", "extra"]])),
+        (StatusCode::OK, json!([["true"], ["true"]])),
+    ]
+    .map(|(status, rows)| (status, json!([records(rows, json!([column.clone()]))])))
+    .to_vec();
+    responses.extend([
+        (
+            StatusCode::OK,
+            json!([
+                valid.clone(),
+                records(json!([["false"]]), json!([column.clone()]))
+            ]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(json!([["true"]]), json!([]))]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(json!([["true"]]), json!([column.clone(), column]))]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(
+                json!([["true"]]),
+                json!([{"name": "EXPERIMENTAL_METRIC_EXPORT", "data_type": "Boolean"}])
+            )]),
+        ),
+        (
+            StatusCode::OK,
+            json!([records(
+                json!([["true"]]),
+                json!([{"name": "OTHER", "data_type": "String"}])
+            )]),
+        ),
+    ]);
+    for (status, output) in responses {
+        let app =
+            axum::Router::new().route(
+                "/v1/sql",
+                axum::routing::post(
+                    move |axum::Form(form): axum::Form<
+                        std::collections::HashMap<String, String>,
+                    >| async move {
+                        assert_eq!(form["sql"], "SHOW VARIABLES experimental_metric_export");
+                        (
+                            status,
+                            axum::Json(json!({
+                                "execution_time_ms": 0,
+                                "output": output
+                            })),
+                        )
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let destination = tempfile::tempdir().unwrap();
+        let snapshot = destination.path().join("snapshot");
+        let uri = url::Url::from_file_path(&snapshot).unwrap().to_string();
+        let args = [
+            "export-v2",
+            "create",
+            "--addr",
+            &addr,
+            "--to",
+            &uri,
+            "--experimental-metric-export",
+            "--force",
+            "--no-proxy",
+            "--progress",
+            "never",
+        ];
+        let error = run_data_cli(&args).await.unwrap_err();
+        if status == StatusCode::OK {
+            assert!(
+                error.to_string().contains("Metric export requires"),
+                "{error}"
+            );
+        }
+        assert!(!snapshot.exists());
+        std::fs::create_dir(&snapshot).unwrap();
+        let manifest = snapshot.join("manifest.json");
+        std::fs::write(&manifest, b"preserve").unwrap();
+        assert!(run_data_cli(&args).await.is_err());
+        assert_eq!(std::fs::read(manifest).unwrap(), b"preserve");
+        server.abort();
+    }
+}

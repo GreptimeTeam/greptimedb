@@ -30,6 +30,7 @@ use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use operator::insert::{admit_row_insert_batches, admit_write};
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
@@ -141,6 +142,10 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
+        let ctx = admit_write(rows as u64, &ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
@@ -239,6 +244,12 @@ impl OpenTelemetryProtocolHandler for Instance {
         let targets = trace_permission_targets(&table_name, &spans, &ctx);
         self.check_table_permission(&ctx, PermissionReq::Action(OTLP_WRITE), targets)
             .context(AuthSnafu)?;
+        // Count the external spans once, before chunking, retries, or derived tables.
+        let rows = spans.iter().map(|group| group.spans.len() as u64).sum();
+        let ctx = admit_write(rows, &ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         self.ingest_trace_spans(&pipeline, table_name, spans, &conventions, ctx)
             .await
     }
@@ -284,11 +295,15 @@ impl OpenTelemetryProtocolHandler for Instance {
         )
         .await?;
 
-        let batches = opt_req.as_req_iter(ctx).collect::<Vec<_>>();
+        let mut batches = opt_req.as_req_iter(ctx).collect::<Vec<_>>();
         for (temp_ctx, requests) in &batches {
             self.check_row_insert_permission(requests, temp_ctx, PermissionReq::Action(OTLP_WRITE))
                 .context(AuthSnafu)?;
         }
+        admit_row_insert_batches(&mut batches)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let mut outputs = Vec::with_capacity(batches.len());
         for (temp_ctx, requests) in batches {

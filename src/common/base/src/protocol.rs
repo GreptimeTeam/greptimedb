@@ -14,7 +14,7 @@
 
 use std::fmt::{Display, Formatter};
 
-/// The protocol through which a query is received.
+/// The protocol or internal subsystem through which a query is received.
 #[derive(Debug, PartialEq, Default, Clone, Copy, strum::FromRepr)]
 #[repr(u8)]
 pub enum Channel {
@@ -35,6 +35,8 @@ pub enum Channel {
     Log = 12,
     Promql = 13,
     Splunk = 14,
+    /// Trusted internal requests and local subsystem execution.
+    Internal = 255,
 }
 
 impl From<u32> for Channel {
@@ -70,6 +72,7 @@ impl AsRef<str> for Channel {
             Self::Log => "log",
             Self::Promql => "promql",
             Self::Splunk => "splunk",
+            Self::Internal => "internal",
         }
     }
 }
@@ -95,6 +98,7 @@ mod tests {
             (12, "log"),
             (13, "promql"),
             (14, "splunk"),
+            (255, "internal"),
         ];
 
         for (value, name) in expected {
@@ -102,5 +106,6 @@ mod tests {
         }
         assert_eq!("unknown", Channel::from(0).as_ref());
         assert_eq!("unknown", Channel::from(15).as_ref());
+        assert_eq!("unknown", Channel::from(256).as_ref());
     }
 }

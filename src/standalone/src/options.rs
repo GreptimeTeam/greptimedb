@@ -44,6 +44,8 @@ pub struct StandaloneOptions {
     /// Upper bound: when `false`, missing tables are never auto-created even if a
     /// request sets the `auto_create_table` hint to `true`. Default: `true`.
     pub auto_create_table: bool,
+    /// Enables experimental Parquet database exports using shared Metric scans.
+    pub experimental_metric_export: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -91,6 +93,7 @@ impl Default for StandaloneOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            experimental_metric_export: false,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -154,6 +157,7 @@ impl StandaloneOptions {
         FrontendOptions {
             default_timezone: cloned_opts.default_timezone,
             auto_create_table: cloned_opts.auto_create_table,
+            experimental_metric_export: cloned_opts.experimental_metric_export,
             max_in_flight_write_bytes: cloned_opts.max_in_flight_write_bytes,
             write_bytes_exhausted_policy: cloned_opts.write_bytes_exhausted_policy,
             http: cloned_opts.http,
@@ -306,6 +310,9 @@ flow_notification_queue_capacity = 17
     #[test]
     fn test_query_options_propagated_to_components() {
         let mut options = StandaloneOptions::default();
+        assert!(!options.frontend_options().experimental_metric_export);
+        options.experimental_metric_export = true;
+        assert!(options.frontend_options().experimental_metric_export);
         options.query.parallelism = 4;
 
         assert_eq!(options.frontend_options().query.parallelism, 4);

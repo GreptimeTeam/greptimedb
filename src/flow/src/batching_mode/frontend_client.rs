@@ -34,7 +34,7 @@ use query::options::{FlowQueryExtensions, QueryOptions};
 use rand::rng;
 use rand::seq::SliceRandom;
 use servers::query_handler::grpc::GrpcQueryHandler;
-use session::context::{QueryContextBuilder, QueryContextRef};
+use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::hints::READ_PREFERENCE_HINT;
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::SetOnce;
@@ -521,6 +521,7 @@ impl FrontendClient {
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
                     .extensions(extensions_map)
+                    .channel(Channel::Internal)
                     .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs.clone())))
                     .build();
                 let ctx = Arc::new(ctx);
@@ -589,6 +590,7 @@ impl FrontendClient {
                 let ctx = QueryContextBuilder::default()
                     .current_catalog(catalog.to_string())
                     .current_schema(schema.to_string())
+                    .channel(Channel::Internal)
                     .extensions(HashMap::from([(
                         QUERY_PARALLELISM_HINT.to_string(),
                         query.parallelism.to_string(),
@@ -894,8 +896,9 @@ mod tests {
         async fn do_query(
             &self,
             _query: Request,
-            _ctx: QueryContextRef,
+            ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
+            assert_eq!(ctx.channel(), Channel::Internal);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(Output::new_with_affected_rows(1))
         }
@@ -941,6 +944,7 @@ mod tests {
             ctx: QueryContextRef,
         ) -> std::result::Result<Output, BoxedError> {
             assert_eq!(ctx.extension("flow.return_region_seq"), Some("true"));
+            assert_eq!(ctx.channel(), Channel::Internal);
             Ok(Output::new_with_affected_rows(1))
         }
     }

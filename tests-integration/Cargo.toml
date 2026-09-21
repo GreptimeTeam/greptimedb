@@ -29,6 +29,7 @@ cache.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 clap.workspace = true
+cli.workspace = true
 client.workspace = true
 cmd.workspace = true
 common-base.workspace = true

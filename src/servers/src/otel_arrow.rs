@@ -84,9 +84,14 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
     ) -> Result<Response<Self::ArrowMetricsStream>, Status> {
         let (mut sender, receiver) = futures::channel::mpsc::channel(100);
 
-        let (headers, _, mut incoming_requests) = request.into_parts();
+        let (headers, extensions, mut incoming_requests) = request.into_parts();
 
-        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        // OTEL Arrow is currently used only for external ingestion. Its service bypasses
+        // the frontend router middleware, so even the internal listener defaults to
+        // Channel::Grpc and remains rate-limited. Before using this path internally,
+        // propagate the server-owned Channel::Internal marker to this service.
+        let query_ctx =
+            context_auth::create_query_context_from_grpc_metadata(&headers, &extensions)?;
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
         let query_ctx = {
             let mut ctx = query_ctx.fork();

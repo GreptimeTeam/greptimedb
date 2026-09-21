@@ -87,6 +87,7 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    experimental_metric_export: bool,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -106,7 +107,15 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            experimental_metric_export: false,
         }
+    }
+
+    /// Enables experimental Metric export for the standalone test instance.
+    #[must_use]
+    pub fn with_experimental_metric_export(mut self) -> Self {
+        self.experimental_metric_export = true;
+        self
     }
 
     #[must_use]
@@ -367,6 +376,7 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            experimental_metric_export: self.experimental_metric_export,
             // Tests cover the descriptor, so they run with it enabled.
             otlp: frontend::service_config::OtlpOptions {
                 experimental_enable_resource_info: true,
