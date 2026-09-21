@@ -1051,6 +1051,125 @@ async fn packed_copy_standalone_heterogeneous_streams() {
         "never",
     ]);
     let importer = command.build().await.unwrap();
+    #[derive(clap::Parser)]
+    struct VerifyArgs {
+        #[command(subcommand)]
+        command: cli::export_v2::ExportV2Command,
+    }
+    let verifier =
+        VerifyArgs::parse_from(["export-v2", "verify", "--snapshot", snapshot_uri.as_str()])
+            .command
+            .build()
+            .await
+            .unwrap();
+    verifier.do_work().await.unwrap();
+    let original = serde_json::to_value(&manifest).unwrap();
+    let initial_tables = values(instance, "SHOW TABLES").await;
+    let pack_path = directory.join("pack-0.bin");
+    let pack_bytes = std::fs::read(&pack_path).unwrap();
+    for case in [
+        "schema_only",
+        "missing_chunks",
+        "missing_files",
+        "manifest_checksum",
+        "chunk_checksum",
+        "duplicate",
+        "extra",
+        "missing_object",
+        "truncated_object",
+    ] {
+        let mut invalid = original.clone();
+        let expected_error = match case {
+            "schema_only" => {
+                invalid["schema_only"] = true.into();
+                "schema_only"
+            }
+            "missing_chunks" => {
+                invalid.as_object_mut().unwrap().remove("chunks");
+                "chunks array"
+            }
+            "missing_files" => {
+                invalid["chunks"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("files");
+                "files array"
+            }
+            "manifest_checksum" => {
+                invalid["checksum"] = "unsupported".into();
+                "checksums"
+            }
+            "chunk_checksum" => {
+                invalid["chunks"][0]["checksum"] = "unsupported".into();
+                "checksums"
+            }
+            "duplicate" => {
+                let file = invalid["chunks"][0]["files"][0].clone();
+                invalid["chunks"][0]["files"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(file);
+                "duplicate"
+            }
+            "extra" => {
+                std::fs::write(directory.join("extra.bin"), b"extra").unwrap();
+                invalid["chunks"][0]["files"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push("data/public/1/extra.bin".into());
+                "inventory"
+            }
+            "missing_object" => {
+                std::fs::remove_file(&pack_path).unwrap();
+                "expected length"
+            }
+            "truncated_object" => {
+                std::fs::write(&pack_path, &pack_bytes[..pack_bytes.len() - 1]).unwrap();
+                "expected length"
+            }
+            _ => unreachable!(),
+        };
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&invalid).unwrap(),
+        )
+        .unwrap();
+        for resumed in [false, true] {
+            if resumed {
+                std::fs::write(&state_path, b"state must not be read or changed").unwrap();
+            }
+            let error = importer.do_work().await.unwrap_err();
+            assert!(
+                format!("{error:?}").contains(expected_error),
+                "{case}: {error:?}"
+            );
+            assert_eq!(
+                values(instance, "SHOW TABLES").await,
+                initial_tables,
+                "{case}"
+            );
+            if resumed {
+                assert_eq!(
+                    std::fs::read(&state_path).unwrap(),
+                    b"state must not be read or changed"
+                );
+                std::fs::remove_file(&state_path).unwrap();
+            } else {
+                assert!(!state_path.exists(), "{case}");
+            }
+        }
+        assert!(verifier.do_work().await.is_err(), "{case}");
+        std::fs::write(&pack_path, &pack_bytes).unwrap();
+        if case == "extra" {
+            std::fs::remove_file(directory.join("extra.bin")).unwrap();
+        }
+    }
+    std::fs::write(
+        root.join("manifest.json"),
+        serde_json::to_vec(&manifest).unwrap(),
+    )
+    .unwrap();
+    verifier.do_work().await.unwrap();
     importer.do_work().await.unwrap();
     assert!(!state_path.exists());
     for (i, old_id) in physical_ids.iter().enumerate() {
@@ -1087,6 +1206,15 @@ async fn packed_copy_standalone_heterogeneous_streams() {
         serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
     assert_eq!(failed["ddl_completed"], true);
     assert_eq!(failed["tasks"][0]["status"], "failed");
+    let saved_state = std::fs::read(&state_path).unwrap();
+    std::fs::write(&pack_path, &pack_bytes[..pack_bytes.len() - 1]).unwrap();
+    let preflight_error = importer.do_work().await.unwrap_err();
+    assert!(
+        format!("{preflight_error:?}").contains("expected length"),
+        "{preflight_error:?}"
+    );
+    assert_eq!(std::fs::read(&state_path).unwrap(), saved_state);
+    std::fs::write(&pack_path, &pack_bytes).unwrap();
     let failed_copy = servers::query_handler::sql::SqlQueryHandler::do_query(
         instance.as_ref(),
         &statement,

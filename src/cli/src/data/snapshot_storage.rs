@@ -267,6 +267,9 @@ pub trait SnapshotStorage: Send + Sync {
     /// Reads the manifest file.
     async fn read_manifest(&self) -> Result<Manifest>;
 
+    /// Returns file length, or None for a missing path or directory.
+    async fn file_size(&self, path: &str) -> Result<Option<u64>>;
+
     /// Writes the manifest file.
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()>;
 
@@ -653,7 +656,17 @@ impl SnapshotStorage for OpenDalStorage {
         ensure_snapshot_exists(self).await?;
 
         let data = self.read_file(MANIFEST_FILE).await?;
-        serde_json::from_slice(&data).context(ManifestParseSnafu)
+        Manifest::from_json(&data).context(ManifestParseSnafu)
+    }
+
+    async fn file_size(&self, path: &str) -> Result<Option<u64>> {
+        match self.object_store.stat(path).await {
+            Ok(metadata) => Ok(metadata.is_file().then(|| metadata.content_length())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|_| StorageOperationSnafu {
+                operation: format!("stat {path}"),
+            }),
+        }
     }
 
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()> {

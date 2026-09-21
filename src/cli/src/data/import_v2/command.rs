@@ -697,6 +697,13 @@ mod tests {
             Ok(self.manifest.clone())
         }
 
+        async fn file_size(
+            &self,
+            _path: &str,
+        ) -> crate::data::export_v2::error::Result<Option<u64>> {
+            unimplemented!("not needed in import_v2::command tests")
+        }
+
         async fn write_manifest(
             &self,
             _manifest: &Manifest,

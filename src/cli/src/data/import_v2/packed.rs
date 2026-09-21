@@ -31,6 +31,21 @@ pub(crate) async fn validate_snapshot(
     manifest: &Manifest,
     schemas: &[String],
 ) -> Result<()> {
+    manifest
+        .validate_layout()
+        .map_err(|reason| InvalidPackedSnapshotSnafu { reason }.build())?;
+    if manifest.schema_only
+        && !storage
+            .list_files_recursive("data/")
+            .await
+            .context(SnapshotStorageSnafu)?
+            .is_empty()
+    {
+        return InvalidPackedSnapshotSnafu {
+            reason: "schema-only snapshot contains data objects",
+        }
+        .fail();
+    }
     for schema in schemas {
         let ddl = storage
             .read_text(&ddl_path_for_schema(schema))
@@ -107,14 +122,18 @@ pub(crate) async fn validate_snapshot(
                 .build()
             })?;
             let prefix = data_dir_for_schema_chunk(schema, chunk.id);
-            if !chunk.files.contains(&path)
-                || index
-                    .objects
-                    .iter()
-                    .any(|o| !chunk.files.contains(&format!("{prefix}{}", o.path)))
-            {
+            let expected: HashSet<_> = std::iter::once(path)
+                .chain(index.objects.iter().map(|o| format!("{prefix}{}", o.path)))
+                .collect();
+            let actual: HashSet<_> = chunk
+                .files
+                .iter()
+                .filter(|file| file.starts_with(&prefix))
+                .cloned()
+                .collect();
+            if actual != expected {
                 return InvalidPackedSnapshotSnafu {
-                    reason: "chunk manifest omits indexed objects",
+                    reason: "chunk manifest inventory differs from indexed objects",
                 }
                 .fail();
             }
@@ -126,6 +145,22 @@ pub(crate) async fn validate_snapshot(
                     }
                     .build()
                 })?;
+            for object in &index.objects {
+                let path = format!("{prefix}{}", object.path);
+                let length = storage
+                    .file_size(&path)
+                    .await
+                    .context(SnapshotStorageSnafu)?;
+                if length != Some(object.length) {
+                    return InvalidPackedSnapshotSnafu {
+                        reason: format!(
+                            "object {path}: expected length {}, actual {length:?}",
+                            object.length
+                        ),
+                    }
+                    .fail();
+                }
+            }
         }
     }
     Ok(())
@@ -150,9 +185,16 @@ mod tests {
         let index = serde_json::json!({"version":1,"objects":[{"path":"pack-0.bin","kind":"pack","length":12}],"tables":[{"table_name":"logical.name","object":"pack-0.bin","offset":0,"length":12,"row_count":0}]});
         storage.write_text(path, &index.to_string()).await.unwrap();
         assert!(dir.path().join(path).is_file());
+        storage
+            .write_text("data/public/1/pack-0.bin", "abcdefghijkl")
+            .await
+            .unwrap();
         let mut manifest = Manifest::new_schema_only("greptime".into(), vec!["public".into()]);
         let mut chunk = ChunkMeta::new(1, TimeRange::unbounded());
         chunk.mark_completed(vec![path.into(), "data/public/1/pack-0.bin".into()], None);
+        manifest.version = 2;
+        manifest.data_layout = Some("metric-parquet-packs".into());
+        manifest.schema_only = false;
         manifest.chunks.push(chunk);
         validate_snapshot(&storage, &manifest, &manifest.schemas)
             .await

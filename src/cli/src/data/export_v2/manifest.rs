@@ -14,6 +14,7 @@
 
 //! Manifest data structures for Export/Import V2.
 
+use std::collections::HashSet;
 use std::time::Duration;
 use std::{fmt, str};
 
@@ -261,11 +262,68 @@ pub struct Manifest {
 }
 
 impl Manifest {
+    /// Decodes version-specific required fields without changing version-1 defaults.
+    pub fn from_json(data: &[u8]) -> serde_json::Result<Self> {
+        use serde::de::Error;
+
+        let value: serde_json::Value = serde_json::from_slice(data)?;
+        if value["version"] == 2 {
+            let chunks = value["chunks"].as_array().ok_or_else(|| {
+                serde_json::Error::custom("version-2 manifest requires a chunks array")
+            })?;
+            for chunk in chunks {
+                if !chunk["files"].is_array() {
+                    return Err(serde_json::Error::custom(
+                        "version-2 chunk requires a files array",
+                    ));
+                }
+            }
+        }
+        serde_json::from_value(value)
+    }
+
     /// Validates the encoding contract before any snapshot operation.
     pub fn validate_layout(&self) -> std::result::Result<(), String> {
         match (self.version, self.data_layout.as_deref(), self.format) {
             (1, None, _) => Ok(()),
             (2, Some(common_datasource::packed_snapshot::PACKED_LAYOUT), DataFormat::Parquet) => {
+                if self.checksum.is_some() || self.chunks.iter().any(|c| c.checksum.is_some()) {
+                    return Err("version-2 checksums are unsupported".into());
+                }
+                if self.schema_only != self.chunks.is_empty() {
+                    return Err("version-2 schema_only requires empty chunks; data snapshots require chunks".into());
+                }
+                let schemas: HashSet<_> = self.schemas.iter().collect();
+                if schemas.len() != self.schemas.len() {
+                    return Err("duplicate version-2 schemas".into());
+                }
+                let mut ids = HashSet::new();
+                for chunk in &self.chunks {
+                    if chunk.id == 0 || !ids.insert(chunk.id) {
+                        return Err("version-2 chunk IDs must be unique and positive".into());
+                    }
+                    let files: HashSet<_> = chunk.files.iter().collect();
+                    if files.len() != chunk.files.len() {
+                        return Err("duplicate version-2 chunk files".into());
+                    }
+                    if chunk.status == ChunkStatus::Skipped && !chunk.files.is_empty() {
+                        return Err("skipped version-2 chunks must have no files".into());
+                    }
+                    for file in &chunk.files {
+                        if file.contains('\\')
+                            || file
+                                .split('/')
+                                .any(|part| part.is_empty() || part == "." || part == "..")
+                            || !self.schemas.iter().any(|schema| {
+                                file.starts_with(&crate::data::path::data_dir_for_schema_chunk(
+                                    schema, chunk.id,
+                                ))
+                            })
+                        {
+                            return Err(format!("invalid version-2 chunk file: {file}"));
+                        }
+                    }
+                }
                 Ok(())
             }
             _ => Err(format!(
@@ -451,6 +509,60 @@ mod tests {
         assert!(manifest.validate_layout().is_err());
         manifest.version = 1;
         assert!(manifest.validate_layout().is_err());
+    }
+
+    #[test]
+    fn packed_required_fields_and_checksums_preserve_v1_defaults() {
+        let mut manifest =
+            super::Manifest::new_schema_only("greptime".into(), vec!["public".into()]);
+        manifest
+            .chunks
+            .push(super::ChunkMeta::new(1, super::TimeRange::unbounded()));
+        let legacy = serde_json::to_value(manifest).unwrap();
+        for version in [1, 2] {
+            let mut value = legacy.clone();
+            value["version"] = version.into();
+            if version == 2 {
+                value["data_layout"] = "metric-parquet-packs".into();
+                value["schema_only"] = false.into();
+            }
+            for field in ["chunks", "files"] {
+                let mut missing = value.clone();
+                if field == "chunks" {
+                    missing.as_object_mut().unwrap().remove(field);
+                } else {
+                    missing["chunks"][0].as_object_mut().unwrap().remove(field);
+                }
+                assert_eq!(
+                    super::Manifest::from_json(&serde_json::to_vec(&missing).unwrap()).is_ok(),
+                    version == 1
+                );
+            }
+            for checksum in [
+                None,
+                Some(serde_json::Value::Null),
+                Some("".into()),
+                Some("sha256:abc".into()),
+            ] {
+                for chunk_level in [false, true] {
+                    let mut candidate = value.clone();
+                    if let Some(checksum) = &checksum {
+                        if chunk_level {
+                            candidate["chunks"][0]["checksum"] = checksum.clone();
+                        } else {
+                            candidate["checksum"] = checksum.clone();
+                        }
+                    }
+                    let decoded =
+                        super::Manifest::from_json(&serde_json::to_vec(&candidate).unwrap())
+                            .unwrap();
+                    assert_eq!(
+                        decoded.validate_layout().is_ok(),
+                        version == 1 || checksum.as_ref().is_none_or(serde_json::Value::is_null)
+                    );
+                }
+            }
+        }
     }
 
     use std::time::Duration;
