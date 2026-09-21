@@ -255,7 +255,7 @@ fn rewrite_array(
             source_field,
             &settings.logical_settings,
             &settings.target_layout,
-            TypeHintMismatchPolicy::EncodeAsNull,
+            TypeHintMismatchPolicy::CoerceOrNull,
         )
         .context(DataTypeMismatchSnafu)
 }

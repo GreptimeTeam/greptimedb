@@ -333,7 +333,7 @@ pub(crate) fn rewrite_json2_batch(
                 field,
                 &plan.logical_settings,
                 &plan.target_layout,
-                TypeHintMismatchPolicy::EncodeAsNull,
+                TypeHintMismatchPolicy::CoerceOrNull,
             )
             .context(ConvertValueSnafu)?;
         debug_assert_eq!(
