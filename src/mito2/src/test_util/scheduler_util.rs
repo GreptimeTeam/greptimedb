@@ -93,13 +93,21 @@ impl SchedulerEnv {
         &self,
         request_sender: Sender<WorkerRequestWithTime>,
     ) -> CompactionScheduler {
+        self.mock_compaction_scheduler_with_config(request_sender, MitoConfig::default())
+    }
+
+    pub(crate) fn mock_compaction_scheduler_with_config(
+        &self,
+        request_sender: Sender<WorkerRequestWithTime>,
+        config: MitoConfig,
+    ) -> CompactionScheduler {
         let scheduler = self.get_scheduler();
 
         CompactionScheduler::new(
             scheduler,
             request_sender,
             Arc::new(CacheManager::default()),
-            Arc::new(MitoConfig::default()),
+            Arc::new(config),
             WorkerListener::default(),
             Plugins::new(),
             Arc::new(new_compaction_memory_manager(0)),

@@ -29,6 +29,7 @@ use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
+use object_store::ObjectStore;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
@@ -153,6 +154,8 @@ pub struct MitoRegion {
     pub(crate) version_control: VersionControlRef,
     /// Snapshot controller for range and series indexes.
     pub(crate) series_index_version_control: SeriesIndexVersionControl,
+    /// Store containing the region's series indexes.
+    pub(crate) series_index_store: Option<ObjectStore>,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Context to maintain manifest for this region.
@@ -242,7 +245,6 @@ impl StagingPartitionInfo {
 
 impl MitoRegion {
     /// Returns the current immutable series-index snapshot.
-    #[allow(dead_code)] // Used by the upcoming query integration.
     pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
         self.series_index_version_control.current()
     }
@@ -699,6 +701,13 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
         let file_removed_cnt = self.stats.file_removed_cnt();
 
+        let time_range = match (version.ssts.time_range(), version.memtables.time_range()) {
+            (Some((sst_min, sst_max)), Some((mem_min, mem_max))) => {
+                Some((sst_min.min(mem_min), sst_max.max(mem_max)))
+            }
+            (range, None) | (None, range) => range,
+        };
+
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.region_stats.written_bytes.load(Ordering::Relaxed);
         let query_cpu_time = self.region_stats.query_cpu_time.load(Ordering::Relaxed);
@@ -725,6 +734,8 @@ impl MitoRegion {
             written_bytes,
             query_cpu_time,
             query_scanned_bytes,
+            min_timestamp: time_range.map(|(min, _)| min),
+            max_timestamp: time_range.map(|(_, max)| max),
         }
     }
 
@@ -2050,6 +2061,7 @@ mod tests {
             region_id: metadata.region_id,
             version_control,
             series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             file_purger: crate::test_util::new_noop_file_purger(),
@@ -2554,6 +2566,7 @@ mod tests {
             region_id: metadata.region_id,
             version_control,
             series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer,
             manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),

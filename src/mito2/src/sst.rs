@@ -47,6 +47,7 @@ pub mod file_ref;
 pub mod index;
 pub mod location;
 pub mod parquet;
+pub(crate) mod primary_key;
 pub mod range_index;
 pub(crate) mod version;
 
@@ -1079,9 +1080,7 @@ mod tests {
             &builder.parquet_schema().root_schema().get_fields()[0].get_fields()[0];
         assert_eq!(
             parquet_remainder.get_basic_info().logical_type_ref(),
-            Some(&LogicalType::Variant {
-                specification_version: None,
-            })
+            Some(&LogicalType::variant(None))
         );
 
         let ArrowDataType::Struct(children) = builder.schema().field_with_name("data")?.data_type()

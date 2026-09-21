@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::fmt;
 use std::pin::Pin;
@@ -31,10 +30,12 @@ use common_query::{Output, OutputData};
 use common_recordbatch::adapter::RecordBatchMetrics;
 use common_recordbatch::{OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream};
 use datafusion::execution::TaskContext;
-use datafusion::physical_expr::{EquivalenceProperties, Partitioning};
+use datafusion::physical_expr::{EquivalenceProperties, Partitioning, PhysicalExpr};
 use datafusion::physical_plan::execution_plan::{Boundedness, EmissionType};
+use datafusion::physical_plan::metrics::MetricsSet;
 use datafusion::physical_plan::{DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties};
 use datafusion_common::Result as DfResult;
+use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::LogicalPlan;
 use datatypes::schema::SchemaRef;
 use futures::Stream;
@@ -141,16 +142,19 @@ impl ExecutionPlan for PanickingMetricsExec {
         "PanickingMetricsExec"
     }
 
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-
     fn properties(&self) -> &Arc<PlanProperties> {
         &self.properties
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
         vec![]
+    }
+
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> DfResult<TreeNodeRecursion>,
+    ) -> DfResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn with_new_children(
@@ -168,11 +172,11 @@ impl ExecutionPlan for PanickingMetricsExec {
         unimplemented!("test plan is never executed")
     }
 
-    fn metrics(&self) -> Option<datafusion::physical_plan::metrics::MetricsSet> {
+    fn metrics(&self) -> Option<MetricsSet> {
         if self.metrics_calls.fetch_add(1, Ordering::Relaxed) >= self.panic_after {
             panic!("metrics collection panicked")
         }
-        Some(datafusion::physical_plan::metrics::MetricsSet::new())
+        Some(MetricsSet::new())
     }
 }
 
@@ -979,4 +983,103 @@ async fn get_body(response: Response) -> Bytes {
     axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn test_http_skip_wal_header() {
+    struct SkipWalSqlHandler {
+        inner: ServerSqlQueryHandlerRef,
+        observed: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl SqlQueryHandler for SkipWalSqlHandler {
+        async fn do_query(&self, query: &str, ctx: QueryContextRef) -> Vec<Result<Output>> {
+            self.observed
+                .store(usize::from(ctx.skip_wal()), Ordering::Relaxed);
+            self.inner.do_query(query, ctx).await
+        }
+
+        async fn do_analyze_stream_query(
+            &self,
+            query: &str,
+            ctx: QueryContextRef,
+        ) -> Result<Output> {
+            self.inner.do_analyze_stream_query(query, ctx).await
+        }
+
+        async fn do_exec_plan(
+            &self,
+            plan: LogicalPlan,
+            stmt: Option<Statement>,
+            ctx: QueryContextRef,
+        ) -> Result<Output> {
+            self.inner.do_exec_plan(plan, stmt, ctx).await
+        }
+
+        async fn do_promql_query(
+            &self,
+            query: &PromQuery,
+            ctx: QueryContextRef,
+        ) -> Vec<Result<Output>> {
+            self.inner.do_promql_query(query, ctx).await
+        }
+
+        async fn do_describe(
+            &self,
+            stmt: Statement,
+            ctx: QueryContextRef,
+        ) -> Result<Option<DescribeResult>> {
+            self.inner.do_describe(stmt, ctx).await
+        }
+
+        async fn is_valid_schema(&self, catalog: &str, schema: &str) -> Result<bool> {
+            self.inner.is_valid_schema(catalog, schema).await
+        }
+    }
+
+    let handler = Arc::new(SkipWalSqlHandler {
+        inner: create_testing_sql_query_handler(MemTable::default_numbers_table()),
+        observed: AtomicUsize::new(2),
+    });
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(handler.clone())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    for (header, expected) in [
+        (Some(("x-greptime-insert-skip-wal", "true")), Some(true)),
+        (Some(("x-greptime-insert-skip-wal", "false")), Some(false)),
+        (None, Some(false)),
+        (Some(("x-greptime-insert-skip-wal", "yes")), None),
+        (Some(("x-greptime-insert-skip-wal", "1")), None),
+        (Some(("x-greptime-insert-skip-wal", "")), None),
+        (Some(("x-greptime-skip-wal", "true")), Some(false)),
+        (Some(("x-greptime-hints", "skip_wal=true")), Some(false)),
+        (
+            Some(("x-greptime-hints", "insert_skip_wal=true")),
+            Some(false),
+        ),
+    ] {
+        // Sentinel also proves invalid values are rejected before the SQL handler.
+        handler.observed.store(2, Ordering::Relaxed);
+        let mut request = client.get("/v1/sql?sql=SELECT%201");
+        if let Some((key, value)) = header {
+            request = request.header(key, value);
+        }
+        let response = request.send().await;
+        match expected {
+            Some(expected) => {
+                assert_eq!(response.status(), StatusCode::OK, "{header:?}");
+                assert_eq!(
+                    handler.observed.load(Ordering::Relaxed),
+                    usize::from(expected),
+                    "{header:?}"
+                );
+            }
+            None => {
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{header:?}");
+                assert_eq!(handler.observed.load(Ordering::Relaxed), 2);
+            }
+        }
+    }
 }

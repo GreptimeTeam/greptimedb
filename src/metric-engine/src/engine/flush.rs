@@ -90,6 +90,7 @@ mod tests {
                 let schema = row_schema_with_tags(&["job"]);
                 let rows = build_rows(1, 10);
                 let request = RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
                     rows: Rows { schema, rows },
                     hint: None,
                     partition_expr_version: None,

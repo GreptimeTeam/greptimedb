@@ -135,6 +135,9 @@ lazy_static! {
         GLOBAL_STATUS,
         SESSION_STATUS,
         PARTITIONS,
+        PLUGINS,
+        USER_PRIVILEGES,
+        PROCESSLIST,
     ];
 }
 
@@ -237,6 +240,9 @@ impl SystemSchemaProviderInner for InformationSchemaProvider {
             TABLE_PRIVILEGES => setup_memory_table!(TABLE_PRIVILEGES),
             GLOBAL_STATUS => setup_memory_table!(GLOBAL_STATUS),
             SESSION_STATUS => setup_memory_table!(SESSION_STATUS),
+            PLUGINS => setup_memory_table!(PLUGINS),
+            USER_PRIVILEGES => setup_memory_table!(USER_PRIVILEGES),
+            PROCESSLIST => setup_memory_table!(PROCESSLIST),
             KEY_COLUMN_USAGE => Some(Arc::new(InformationSchemaKeyColumnUsage::new(
                 self.catalog_name.clone(),
                 self.catalog_manager.clone(),

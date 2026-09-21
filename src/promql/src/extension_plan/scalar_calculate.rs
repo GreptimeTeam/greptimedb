@@ -12,25 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use datafusion::common::stats::Precision;
-use datafusion::common::{DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics};
+use datafusion::common::tree_node::TreeNodeRecursion;
+use datafusion::common::{
+    DFSchema, DFSchemaRef, Result as DataFusionResult, Statistics, TableReference,
+};
 use datafusion::error::DataFusionError;
 use datafusion::execution::context::TaskContext;
 use datafusion::logical_expr::{EmptyRelation, LogicalPlan, UserDefinedLogicalNodeCore};
 use datafusion::physical_expr::EquivalenceProperties;
 use datafusion::physical_plan::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
 use datafusion::physical_plan::{
-    DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, Partitioning, PlanProperties,
-    RecordBatchStream, SendableRecordBatchStream,
+    ChildStats, DisplayAs, DisplayFormatType, Distribution, ExecutionPlan,
+    InputDistributionRequirements, Partitioning, PhysicalExpr, PlanProperties, RecordBatchStream,
+    SendableRecordBatchStream, StatisticsArgs,
 };
 use datafusion::prelude::Expr;
-use datafusion::sql::TableReference;
 use datafusion_expr::col;
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
@@ -129,7 +131,10 @@ impl ScalarCalculate {
             .output_schema
             .fields()
             .iter()
-            .map(|field| Field::new(field.name(), field.data_type().clone(), field.is_nullable()))
+            .map(|field| {
+                Field::new(field.name(), field.data_type().clone(), field.is_nullable())
+                    .with_metadata(field.metadata().clone())
+            })
             .collect();
         let input_schema = exec_input.schema();
         let ts_index = input_schema
@@ -138,7 +143,10 @@ impl ScalarCalculate {
         let val_index = input_schema
             .index_of(&self.field_column)
             .map_err(|e| DataFusionError::ArrowError(Box::new(e), None))?;
-        let schema = Arc::new(Schema::new(fields));
+        let schema = Arc::new(Schema::new_with_metadata(
+            fields,
+            input_schema.metadata().clone(),
+        ));
         let properties = exec_input.properties();
         let properties = Arc::new(PlanProperties::new(
             EquivalenceProperties::new(schema.clone()),
@@ -389,8 +397,11 @@ struct ScalarCalculateExec {
 }
 
 impl ExecutionPlan for ScalarCalculateExec {
-    fn as_any(&self) -> &dyn Any {
-        self
+    fn apply_expressions(
+        &self,
+        _f: &mut dyn FnMut(&Arc<dyn PhysicalExpr>) -> datafusion_common::Result<TreeNodeRecursion>,
+    ) -> DataFusionResult<TreeNodeRecursion> {
+        Ok(TreeNodeRecursion::Continue)
     }
 
     fn schema(&self) -> SchemaRef {
@@ -405,8 +416,8 @@ impl ExecutionPlan for ScalarCalculateExec {
         vec![true; self.children().len()]
     }
 
-    fn required_input_distribution(&self) -> Vec<Distribution> {
-        vec![Distribution::SinglePartition]
+    fn input_distribution_requirements(&self) -> InputDistributionRequirements {
+        InputDistributionRequirements::new(vec![Distribution::SinglePartition])
     }
 
     fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
@@ -469,8 +480,16 @@ impl ExecutionPlan for ScalarCalculateExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> DataFusionResult<Statistics> {
-        let input_stats = self.input.partition_statistics(partition)?;
+    fn child_stats_requests(&self, partition: Option<usize>) -> Vec<ChildStats> {
+        vec![ChildStats::At(partition)]
+    }
+
+    fn statistics_from_inputs(
+        &self,
+        input_stats: &[Arc<Statistics>],
+        _args: &StatisticsArgs,
+    ) -> DataFusionResult<Arc<Statistics>> {
+        let input_stats = &input_stats[0];
 
         let estimated_row_num = (self.end - self.start) as f64 / self.interval as f64;
         let estimated_total_bytes = input_stats
@@ -482,12 +501,12 @@ impl ExecutionPlan for ScalarCalculateExec {
             })
             .unwrap_or_default();
 
-        Ok(Statistics {
+        Ok(Arc::new(Statistics {
             num_rows: Precision::Inexact(estimated_row_num as _),
             total_byte_size: estimated_total_bytes,
             // TODO(ruihang): support this column statistics
             column_statistics: Statistics::unknown_column(&self.schema()),
-        })
+        }))
     }
 
     fn name(&self) -> &str {

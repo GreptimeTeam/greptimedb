@@ -225,6 +225,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         // so the engine (and thus the GC worker) can fire `on_region_gc`.
         let region_hook = self.plugins.get::<RegionHookRef>();
         let workers = WorkerGroup::start(
+            self.data_home,
             config.clone(),
             self.log_store.clone(),
             self.object_store_manager,
@@ -770,7 +771,7 @@ fn prepare_batch_open_requests(
                     .or_default()
                     .push((region_id, request));
             }
-            WalOptions::RaftEngine | WalOptions::Noop => {
+            WalOptions::RaftEngine | WalOptions::Noop | WalOptions::ObjectStore(_) => {
                 remaining_regions.push((region_id, request));
             }
         }
@@ -1052,6 +1053,15 @@ impl EngineInner {
         let query_start = Instant::now();
         // Reading a region doesn't need to go through the region worker thread.
         let region = self.find_region(region_id)?;
+        // Pin the index before the data snapshot: compaction and index publication
+        // could otherwise give us a newer index that omits series still visible
+        // in the query's older SST snapshot.
+        let series_index = region.series_index_store.as_ref().map(|store| {
+            crate::series_index::SeriesIndexReadContext {
+                store: store.clone(),
+                version: region.series_index_version(),
+            }
+        });
         let version_data = region.version_control.current();
         let version = version_data.version;
 
@@ -1145,6 +1155,8 @@ impl EngineInner {
             request,
             CacheStrategy::EnableAll(cache_manager),
         )
+        .with_series_index(series_index)
+        .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
@@ -1620,6 +1632,7 @@ impl MitoEngine {
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
+                    data_home,
                     config.clone(),
                     log_store,
                     object_store_manager,

@@ -22,9 +22,11 @@ use async_trait::async_trait;
 use catalog::CatalogManagerRef;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_telemetry::debug;
+use datafusion::catalog::Session;
 use datafusion::common::Result;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::context::SessionState;
+use datafusion::logical_expr::physical_planning_context::PhysicalPlanningContext;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::physical_planner::{ExtensionPlanner, PhysicalPlanner};
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion, TreeNodeVisitor};
@@ -37,6 +39,7 @@ use partition::manager::{PartitionRuleManagerRef, create_partitions_from_region_
 use session::context::QueryContext;
 use snafu::{OptionExt, ResultExt};
 use store_api::storage::RegionId;
+use table::TableRef;
 use table::metadata::TableInfo;
 pub use table::metadata::TableType;
 use table::table::adapter::DfTableProviderAdapter;
@@ -60,15 +63,21 @@ pub struct MergeSortExtensionPlanner {}
 
 impl MergeSortExtensionPlanner {
     fn ordering(
-        session_state: &SessionState,
+        planner: &dyn PhysicalPlanner,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
         merge_sort: &MergeSortLogicalPlan,
     ) -> Result<LexOrdering> {
         let ordering = merge_sort
             .expr
             .iter()
             .map(|sort_expr| {
-                let physical_expr = session_state
-                    .create_physical_expr(sort_expr.expr.clone(), merge_sort.input.schema())?;
+                let physical_expr = planner.create_physical_expr(
+                    &sort_expr.expr,
+                    merge_sort.input.schema(),
+                    session,
+                    planning_ctx,
+                )?;
                 Ok(PhysicalSortExpr::new(
                     physical_expr,
                     SortOptions {
@@ -91,11 +100,12 @@ impl MergeSortExtensionPlanner {
 impl ExtensionPlanner for MergeSortExtensionPlanner {
     async fn plan_extension(
         &self,
-        _planner: &dyn PhysicalPlanner,
+        planner: &dyn PhysicalPlanner,
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        session: &dyn Session,
+        planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         if let Some(merge_sort) = node.as_any().downcast_ref::<MergeSortLogicalPlan>() {
             if let LogicalPlan::Extension(ext) = &merge_sort.input.as_ref()
@@ -110,14 +120,14 @@ impl ExtensionPlanner for MergeSortExtensionPlanner {
                         "Expect MergeSort to have one physical input".to_string(),
                     )
                 })?;
-                if input.as_any().downcast_ref::<MergeScanExec>().is_none() {
+                if input.downcast_ref::<MergeScanExec>().is_none() {
                     return Err(DataFusionError::Internal(format!(
                         "Expect MergeSort's input is a MergeScanExec, found {:?}",
                         physical_inputs
                     )));
                 }
 
-                let ordering = Self::ordering(session_state, merge_sort)?;
+                let ordering = Self::ordering(planner, session, planning_ctx, merge_sort)?;
                 Ok(Some(Arc::new(MergeSortExec::new(
                     ordering,
                     input,
@@ -163,7 +173,8 @@ impl ExtensionPlanner for DistExtensionPlanner {
         node: &dyn UserDefinedLogicalNode,
         _logical_inputs: &[&LogicalPlan],
         _physical_inputs: &[Arc<dyn ExecutionPlan>],
-        session_state: &SessionState,
+        session: &dyn Session,
+        _planning_ctx: &PhysicalPlanningContext,
     ) -> Result<Option<Arc<dyn ExecutionPlan>>> {
         let Some(merge_scan) = node.as_any().downcast_ref::<MergeScanLogicalPlan>() else {
             return Ok(None);
@@ -171,9 +182,9 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         let input_plan = merge_scan.input();
         let fallback = |logical_plan| async move {
-            let optimized_plan = self.optimize_input_logical_plan(session_state, logical_plan)?;
+            let optimized_plan = self.optimize_input_logical_plan(session, logical_plan)?;
             planner
-                .create_physical_plan(&optimized_plan, session_state)
+                .create_physical_plan(&optimized_plan, session)
                 .await
                 .map(Some)
         };
@@ -196,6 +207,14 @@ impl ExtensionPlanner for DistExtensionPlanner {
 
         // TODO(ruihang): generate different execution plans for different variant merge operation
         let schema = merge_scan.schema().as_arrow();
+        let session_state = session
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Internal(
+                    "MergeScan requires a SessionState for physical planning".to_string(),
+                )
+            })?;
         let query_ctx = session_state
             .config()
             .get_extension()
@@ -208,7 +227,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
             schema,
             self.region_query_handler.clone(),
             query_ctx,
-            session_state.config().target_partitions(),
+            session.config().target_partitions(),
             merge_scan.partition_cols().clone(),
             merge_scan.remote_dyn_filter_producer_id(),
             self.enable_per_region_metrics,
@@ -220,7 +239,7 @@ impl ExtensionPlanner for DistExtensionPlanner {
 impl DistExtensionPlanner {
     /// Extract fully resolved table name from logical plan
     fn extract_full_table_name(plan: &LogicalPlan) -> Result<Option<TableName>> {
-        let mut extractor = TableNameExtractor::default();
+        let mut extractor = TableScanExtractor::default();
         let _ = plan.visit(&mut extractor)?;
         Ok(extractor.table_name)
     }
@@ -230,19 +249,25 @@ impl DistExtensionPlanner {
         table_name: &TableName,
         logical_plan: &LogicalPlan,
     ) -> Result<Vec<RegionId>> {
-        let table = self
-            .catalog_manager
-            .table(
-                &table_name.catalog_name,
-                &table_name.schema_name,
-                &table_name.table_name,
-                None,
-            )
-            .await
-            .context(CatalogSnafu)?
-            .with_context(|| TableNotFoundSnafu {
-                table: table_name.to_string(),
-            })?;
+        let mut extractor = TableScanExtractor::default();
+        let _ = logical_plan.visit(&mut extractor)?;
+        // Resolving by name again could bind an authorized scan to a replacement table.
+        let table = match extractor.captured_table {
+            Some(table) => table,
+            None => self
+                .catalog_manager
+                .table(
+                    &table_name.catalog_name,
+                    &table_name.schema_name,
+                    &table_name.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)?
+                .with_context(|| TableNotFoundSnafu {
+                    table: table_name.to_string(),
+                })?,
+        };
 
         let table_info = table.table_info();
         let (physical_table_id, physical_table_route) = self
@@ -420,11 +445,21 @@ impl DistExtensionPlanner {
     /// Input logical plan is analyzed. Thus only call logical optimizer to optimize it.
     fn optimize_input_logical_plan(
         &self,
-        session_state: &SessionState,
+        session: &dyn Session,
         plan: &LogicalPlan,
     ) -> Result<LogicalPlan> {
-        let state = session_state.clone();
-        state.optimizer().optimize(plan.clone(), &state, |_, _| {})
+        let session_state = session
+            .as_any()
+            .downcast_ref::<SessionState>()
+            .ok_or_else(|| {
+                DataFusionError::Internal(
+                    "MergeScan requires a SessionState for logical optimization".to_string(),
+                )
+            })?;
+
+        session_state
+            .optimizer()
+            .optimize(plan.clone(), session_state, |_, _| {})
     }
 }
 
@@ -436,25 +471,26 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
-/// Visitor to extract table name from logical plan (TableScan node)
+/// Extract the scan name and captured table identity from a logical plan.
 #[derive(Default)]
-struct TableNameExtractor {
+struct TableScanExtractor {
     pub table_name: Option<TableName>,
+    captured_table: Option<TableRef>,
 }
 
-impl TreeNodeVisitor<'_> for TableNameExtractor {
+impl TreeNodeVisitor<'_> for TableScanExtractor {
     type Node = LogicalPlan;
 
     fn f_down(&mut self, node: &Self::Node) -> Result<TreeNodeRecursion> {
         match node {
             LogicalPlan::TableScan(scan) => {
-                if let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
+                if let Some(source) = scan.source.downcast_ref::<DefaultTableSource>()
                     && let Some(provider) = source
                         .table_provider
-                        .as_any()
                         .downcast_ref::<DfTableProviderAdapter>()
                 {
                     if provider.table().table_type() == TableType::Base {
+                        self.captured_table = Some(provider.table());
                         let info = provider.table().table_info();
                         self.table_name = Some(TableName::new(
                             info.catalog_name.clone(),
@@ -743,6 +779,16 @@ mod tests {
                     .and(partition_col("rack").gt_eq(Value::String("n".into()))),
             ),
         ]
+    }
+
+    #[tokio::test]
+    async fn region_routing_uses_captured_table() {
+        let (mut planner, plan, table_name) = planner_and_plan(vec![0], vec![None]).await;
+        planner.catalog_manager = MemoryCatalogManager::with_default_setup();
+        assert_eq!(
+            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
+            planner.get_regions(&table_name, &plan).await.unwrap()
+        );
     }
 
     #[tokio::test]

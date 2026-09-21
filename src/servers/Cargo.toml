@@ -24,7 +24,7 @@ api.workspace = true
 arrow.workspace = true
 arrow-flight.workspace = true
 arrow-ipc.workspace = true
-arrow-pg = "0.14"
+arrow-pg = "0.15"
 arrow-schema.workspace = true
 async-trait.workspace = true
 auth.workspace = true
@@ -36,6 +36,7 @@ bytes.workspace = true
 catalog.workspace = true
 chrono.workspace = true
 common-base.workspace = true
+common-batcher.workspace = true
 common-catalog.workspace = true
 common-decimal.workspace = true
 common-error.workspace = true
@@ -146,13 +147,14 @@ vrl.workspace = true
 zstd.workspace = true
 
 [target.'cfg(not(windows))'.dependencies]
-tikv-jemalloc-ctl = { version = "0.6", features = ["use_std", "stats"] }
+tikv-jemalloc-ctl = { version = "0.7", features = ["use_std", "stats"] }
 
 [dev-dependencies]
 auth = { workspace = true, features = ["testing"] }
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
+common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 criterion = "0.5"
 json5 = "0.4"
@@ -160,6 +162,7 @@ moka.workspace = true
 mysql_async = { version = "0.37", default-features = false, features = [
     "default-rustls",
 ] }
+operator = { workspace = true, features = ["testing"] }
 permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
@@ -172,7 +175,10 @@ tokio-postgres.workspace = true
 tokio-postgres-rustls = "0.14"
 
 [target.'cfg(unix)'.dev-dependencies]
-pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
+pprof = { version = "0.15", features = ["criterion", "flamegraph"] }
+
+[target.'cfg(not(windows))'.dev-dependencies]
+tikv-jemallocator = "0.7"
 
 [build-dependencies]
 common-version.workspace = true
@@ -188,6 +194,10 @@ required-features = ["testing"]
 
 [[bench]]
 name = "to_http_output"
+harness = false
+
+[[bench]]
+name = "prometheus_response"
 harness = false
 
 [[bench]]

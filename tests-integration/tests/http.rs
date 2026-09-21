@@ -56,10 +56,12 @@ use opentelemetry_proto::tonic::collector::metrics::v1::{
 use opentelemetry_proto::tonic::collector::trace::v1::{
     ExportTraceServiceRequest, ExportTraceServiceResponse,
 };
-use pipeline::GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME;
+use pipeline::{
+    GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME, GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
+};
 use prost::Message;
+use rstest_reuse::apply;
 use serde_json::{Value, json};
-use servers::http::GreptimeQueryOutput;
 use servers::http::handler::HealthResponse;
 use servers::http::header::constants::{
     GREPTIME_LOG_EXTRACT_KEYS_HEADER_NAME, GREPTIME_LOG_TABLE_NAME_HEADER_NAME,
@@ -72,20 +74,23 @@ use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
 use servers::http::test_helpers::{TestClient, TestResponse};
+use servers::http::{GreptimeQueryOutput, HttpOptions, HttpServerBuilder};
 use servers::prom_remote_write::v2::test_util as remote_write_v2;
+use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    StorageType, setup_test_http_app, setup_test_http_app_with_frontend,
-    setup_test_http_app_with_frontend_and_slow_query_threshold,
+    MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
+    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
 
+use crate::both_deployment_cases;
 use crate::event_recorder_test_util::assert_procedure_actor_by_table;
 
 #[macro_export]
@@ -101,7 +106,12 @@ macro_rules! http_test {
                     async fn [< $test >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
-                            let _ = $crate::http::$test(store_type).await;
+                            // Support both unit tests and fallible tests without discarding errors.
+                            let result = $crate::http::$test(store_type).await;
+                            assert_eq!(
+                                std::process::Termination::report(result),
+                                std::process::ExitCode::SUCCESS,
+                            );
                         }
                     }
                 )*
@@ -168,6 +178,7 @@ macro_rules! http_tests {
                 test_otlp_metrics_resource_info_conflicts,
                 test_otlp_traces_v0,
                 test_otlp_traces_v1,
+                test_otlp_traces_v2,
                 test_otlp_traces_v1_entity_graph,
                 test_otlp_logs,
                 test_loki_pb_logs,
@@ -183,6 +194,7 @@ macro_rules! http_tests {
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
+                test_jaeger_query_api_for_trace_v2,
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
@@ -442,6 +454,33 @@ pub async fn test_cors() {
     );
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_sql_skip_wal(distributed: bool) {
+    let mut cases = vec![HttpWalCase::new(
+        "SQL",
+        "/v1/sql",
+        "application/x-www-form-urlencoded",
+        "sql=INSERT+INTO+wal_sql+VALUES+(1%2C-1)%2C(2%2C1)",
+    )];
+    let mut sql_get = HttpWalCase::new(
+        "SQL GET",
+        "/v1/sql?sql=INSERT%20INTO%20wal_sql%20VALUES%20(1%2C-1)%2C(2%2C1)",
+        "application/x-www-form-urlencoded",
+        Vec::new(),
+    );
+    sql_get.get = true;
+    cases.push(sql_get);
+    for case in &mut cases {
+        case.create_table = Some(if distributed {
+            "CREATE TABLE IF NOT EXISTS wal_sql (ts TIMESTAMP TIME INDEX, v INT) PARTITION ON COLUMNS (v) (v < 0, v >= 0)"
+        } else {
+            "CREATE TABLE IF NOT EXISTS wal_sql (ts TIMESTAMP TIME INDEX, v INT)"
+        });
+        case.expected_written_nodes = distributed.then_some(2);
+    }
+    check_http_skip_wal("sql", &cases, distributed).await;
 }
 
 pub async fn test_sql_api(store_type: StorageType) {
@@ -1486,6 +1525,117 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // query `__name__` by a matcher on an ordinary label: the metric engine
+    // physical tables are scanned, so only metrics carrying the label value are
+    // returned. `demo_metrics` shares `phy` with `demo` but has no `host` value.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    let status = res.status();
+    let text = res.text().await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let prom_resp = serde_json::from_str::<PrometheusJsonResponse>(&text).unwrap();
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
+    // `__name__` matchers narrow the names the data resolved: `multi_labels`
+    // also carries `idc="idc1"` but its name does not match.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\"demo.*\", idc=\"idc1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    // The time range selects the series: `demo` carries `host="host2"` only at
+    // t=600, so narrowing the range drops it while `multi_labels` at t=0 stays.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=300")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["multi_labels"])).unwrap()
+    );
+
+    // Logical metrics sharing a physical table have NULL in the label columns
+    // they don't use. Prometheus reads a label a series doesn't carry as the
+    // empty string, so `demo_metrics` and `demo_metrics_with_nanos` — neither of
+    // which has a `host` label — match both of these.
+    //
+    // `.%2B` is `.+`; a bare `+` decodes to a space in a query string. Grafana
+    // encodes it the same way.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host=\"\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host!=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+            "multi_labels",
+        ]))
+        .unwrap()
+    );
+
+    // A pre-epoch RFC3339 bound is a valid range, not a panic.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=1969-12-31T23:59:59Z&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
     // buildinfo
     let res = client
         .get("/v1/prometheus/api/v1/status/buildinfo")
@@ -1626,6 +1776,25 @@ pub async fn test_splunk_health_is_public(store_type: StorageType) {
         .send()
         .await;
     assert_eq!(StatusCode::OK, res.status());
+}
+
+#[apply(both_deployment_cases)]
+async fn test_splunk_skip_wal(distributed: bool) {
+    let cases = vec![
+        HttpWalCase::new(
+            "Splunk event",
+            "/v1/splunk/services/collector/event",
+            "application/json",
+            r#"{"event":"wal test","time":1700000000,"index":"wal_splunk"}"#,
+        ),
+        HttpWalCase::new(
+            "Splunk raw",
+            "/v1/splunk/services/collector/raw?index=wal_splunk_raw&time=1700000000",
+            "text/plain",
+            "wal test",
+        ),
+    ];
+    check_http_skip_wal("splunk", &cases, distributed).await;
 }
 
 pub async fn test_splunk_logs(store_type: StorageType) {
@@ -2257,6 +2426,15 @@ enable = true
 enable = true
 default_merge_mode = "last_non_null"
 
+[pending_rows_batcher]
+protocols = []
+pending_rows_flush_interval = "0s"
+max_batch_rows = 100000
+max_concurrent_flushes = 256
+worker_channel_capacity = 65526
+max_inflight_requests = 3000
+flow_notification_queue_capacity = 1024
+
 [jaeger]
 enable = true
 
@@ -2332,8 +2510,10 @@ manifest_checkpoint_distance = 10
 experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
-experimental_series_index_root = ""
+experimental_enable_series_index = false
+experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
+experimental_series_index_bucket_width = "5days"
 experimental_compaction_memory_limit = "unlimited"
 experimental_compaction_on_exhausted = "wait"
 auto_flush_interval = "10m"
@@ -2648,6 +2828,43 @@ pub async fn test_dashboard_api(store_type: StorageType) {
 
 #[cfg(not(feature = "dashboard"))]
 pub async fn test_dashboard_api(_: StorageType) {}
+
+#[apply(both_deployment_cases)]
+async fn test_prometheus_skip_wal(distributed: bool) {
+    let mut cases = Vec::new();
+    let prom = api::prom_store::remote::WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let mut prom_case = HttpWalCase::new(
+        "Prometheus v1",
+        "/v1/prometheus/write",
+        "application/x-protobuf",
+        prom_store::snappy_compress(&prom.encode_to_vec()).unwrap(),
+    );
+    prom_case.headers.push(("content-encoding", "snappy"));
+    cases.push(prom_case);
+    let prom_v2 = servers::prom_remote_write::v2::test_util::request_with_labels_and_samples(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "wal_prom_v2"),
+            ("host", "a"),
+        ],
+        vec![api::greptime_proto::io::prometheus::write::v2::Sample {
+            value: 1.0,
+            timestamp: 1700000000000,
+            start_timestamp: 0,
+        }],
+    );
+    let mut prom_v2_case = HttpWalCase::new(
+        "Prometheus v2",
+        "/v1/prometheus/write",
+        "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        prom_store::snappy_compress(&prom_v2.encode_to_vec()).unwrap(),
+    );
+    prom_v2_case.headers.push(("content-encoding", "snappy"));
+    cases.push(prom_v2_case);
+    check_http_skip_wal("prometheus", &cases, distributed).await;
+}
 
 pub async fn test_prometheus_remote_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
@@ -3222,6 +3439,94 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     .await;
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_prometheus_remote_write_batched_skip_wal(distributed: bool) {
+    check_prometheus_remote_write_batched_skip_wal(distributed, false).await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_prometheus_remote_write_v2_batched_skip_wal(distributed: bool) {
+    check_prometheus_remote_write_batched_skip_wal(distributed, true).await;
+}
+
+async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut instance =
+        MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
+    let server = build_test_prom_server(instance.frontend(), true, false).build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+    write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
+    wait_for_data(&client, "SELECT count(*) FROM wal_prom_bulk", "[[1]]").await;
+    let mut before = instance.flush_and_snapshot_wal().await;
+    // Reuse the same batcher across policy transitions to detect leaked policy.
+    for (index, hint) in [None, Some("true"), Some("false"), None]
+        .into_iter()
+        .enumerate()
+    {
+        write_prometheus_skip_wal_sample(&client, v2, (index as i64 + 2) * 1000, hint).await;
+        wait_for_data(
+            &client,
+            "SELECT count(*) FROM wal_prom_bulk",
+            &format!("[[{}]]", index + 2),
+        )
+        .await;
+        let after = instance.flush_and_snapshot_wal().await;
+        assert_wal_delta(&before, &after, hint == Some("true"));
+        before = after;
+    }
+    instance.shutdown().await;
+}
+
+async fn write_prometheus_skip_wal_sample(
+    client: &TestClient,
+    v2: bool,
+    timestamp: i64,
+    hint: Option<&str>,
+) {
+    let payload = if v2 {
+        remote_write_v2::request_with_labels_and_samples(
+            vec![(prom_store::METRIC_NAME_LABEL, "wal_prom_bulk")],
+            vec![RemoteWriteV2Sample {
+                value: 1.0,
+                timestamp,
+                start_timestamp: 0,
+            }],
+        )
+        .encode_to_vec()
+    } else {
+        WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "wal_prom_bulk".to_string(),
+                }],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp,
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .encode_to_vec()
+    };
+    let mut request = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(prom_store::snappy_compress(&payload).unwrap());
+    if v2 {
+        request = request.header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        );
+    }
+    if let Some(hint) = hint {
+        request = request.header("x-greptime-insert-skip-wal", hint);
+    }
+    assert_eq!(request.send().await.status(), StatusCode::NO_CONTENT);
 }
 
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
@@ -4133,6 +4438,25 @@ transform:
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_json_logs_skip_wal(distributed: bool) {
+    let cases = vec![
+        HttpWalCase::new(
+            "JSON logs",
+            "/v1/ingest?table=wal_logs&pipeline_name=greptime_identity",
+            "application/json",
+            r#"[{"message":"wal test"}]"#,
+        ),
+        HttpWalCase::new(
+            "Events logs",
+            "/v1/events/logs?table=wal_events&pipeline_name=greptime_identity",
+            "application/json",
+            r#"[{"message":"wal test"}]"#,
+        ),
+    ];
+    check_http_skip_wal("json_logs", &cases, distributed).await;
 }
 
 pub async fn test_identity_pipeline(store_type: StorageType) {
@@ -5343,6 +5667,25 @@ transform:
     guard.remove_all().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_influxdb_skip_wal(distributed: bool) {
+    let cases = vec![
+        HttpWalCase::new(
+            "InfluxDB v1",
+            "/v1/influxdb/write?db=public",
+            "text/plain",
+            "wal_influx,host=a value=1 1700000000000000000",
+        ),
+        HttpWalCase::new(
+            "InfluxDB v2",
+            "/v1/influxdb/api/v2/write?bucket=public",
+            "text/plain",
+            "wal_influx_v2,host=a value=1 1700000000000000000",
+        ),
+    ];
+    check_http_skip_wal("influxdb", &cases, distributed).await;
+}
+
 pub async fn test_influxdb_write_with_hints(storage_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -6523,6 +6866,21 @@ pub async fn test_pipeline_auto_transform_with_select(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_otlp_metrics_skip_wal(distributed: bool) {
+    let mut cases = Vec::new();
+    let metrics: ExportMetricsServiceRequest = serde_json::from_value(json!({
+        "resourceMetrics":[{"scopeMetrics":[{"metrics":[{"name":"wal_otlp", "gauge":{"dataPoints":[{"timeUnixNano":"1700000000000000000","asDouble":1.0}]}}]}]}]
+    })).unwrap();
+    cases.push(HttpWalCase::new(
+        "OTLP metrics",
+        "/v1/otlp/v1/metrics",
+        "application/x-protobuf",
+        metrics.encode_to_vec(),
+    ));
+    check_http_skip_wal("otlp_metrics", &cases, distributed).await;
+}
+
 pub async fn test_otlp_metrics_new(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
@@ -7318,6 +7676,42 @@ pub async fn test_otlp_metrics_resource_info_conflicts(store_type: StorageType) 
     guard.remove_all().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_otlp_traces_skip_wal(distributed: bool) {
+    let mut cases = Vec::new();
+    let traces = make_trace_v1_request(
+        "wal-test",
+        vec![json!({
+            "traceId":"0102030405060708090a0b0c0d0e0f10",
+            "spanId":"0102030405060708", "name":"wal test",
+            "startTimeUnixNano":"1700000000000000000",
+            "endTimeUnixNano":"1700000001000000000"
+        })],
+    );
+    let mut traces_case = HttpWalCase::new(
+        "OTLP traces",
+        "/v1/otlp/v1/traces",
+        "application/x-protobuf",
+        traces.encode_to_vec(),
+    );
+    traces_case
+        .headers
+        .push(("x-greptime-pipeline-name", "greptime_trace_v0"));
+    cases.push(traces_case);
+    let mut traces_v1 = HttpWalCase::new(
+        "OTLP traces v1",
+        "/v1/otlp/v1/traces",
+        "application/x-protobuf",
+        traces.encode_to_vec(),
+    );
+    traces_v1.headers = vec![
+        ("x-greptime-pipeline-name", "greptime_trace_v1"),
+        ("x-greptime-trace-table-name", "wal_traces_v1"),
+    ];
+    cases.push(traces_v1);
+    check_http_skip_wal("otlp_traces", &cases, distributed).await;
+}
+
 pub async fn test_otlp_traces_v0(store_type: StorageType) {
     // init
     common_telemetry::init_default_ut_logging();
@@ -7452,6 +7846,133 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     .await;
 
     guard.remove_all().await;
+}
+
+/// Exercises v2 protobuf ingestion and JSON2 paths.
+pub(crate) async fn test_otlp_traces_v2(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    common_telemetry::init_default_ut_logging();
+
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_traces_v2").await;
+    let client = TestClient::new(app).await;
+    let table_name = "trace_v2_spans";
+
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {
+                "attributes": [
+                    make_string_attr("service.name", "frontend"),
+                    make_string_attr("deployment.environment", "production")
+                ]
+            },
+            "scopeSpans": [{
+                "scope": {
+                    "name": "trace-v2-test",
+                    "version": "1.0.0",
+                    "attributes": [make_bool_attr("enabled", true)]
+                },
+                "spans": [{
+                    "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "spanId": "9630f2916e2f7909",
+                    "name": "GET /api",
+                    "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000",
+                    "attributes": [
+                        make_int_attr("http.status_code", 200),
+                        make_string_attr("http.route", "/api"),
+                        {"key": "ratio", "value": {"doubleValue": 1.5}},
+                        make_string_attr("a\"b", "quoted"),
+                        make_string_attr("a\\b", "backslash")
+                    ],
+                    "events": [{
+                        "timeUnixNano": "1736480942444400000",
+                        "name": "cache.hit",
+                        "attributes": [make_int_attr("event.code", 7)]
+                    }],
+                    "links": [{
+                        "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                        "spanId": "8f847259b0f6e1ab",
+                        "attributes": [make_string_attr("link.type", "follows_from")]
+                    }],
+                    "status": { "message": "", "code": 1 }
+                }]
+            }],
+            "schemaUrl": "https://opentelemetry.io/schemas/1.4.0"
+        }]
+    }))?;
+
+    let response = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static(table_name),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        request.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, response.status());
+
+    validate_data(
+        "otlp_traces_v2_json2",
+        &client,
+        "select service_name, span_attributes.\"http.status_code\"::BIGINT, \
+         resource_attributes.\"deployment.environment\"::STRING, \
+         scope_attributes.enabled::BOOLEAN from trace_v2_spans;",
+        r#"[["frontend",200,"production",true]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_fixed_schema",
+        &client,
+        "select count(*) from information_schema.columns where table_name = 'trace_v2_spans' \
+         and column_name like 'span_attributes.%';",
+        "[[0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_events_links",
+        &client,
+        r#"select json_get_string(span_events, '$[0].name'),
+                  json_get_int(span_events, '$[0].attributes."event.code"'),
+                  json_get_string(span_links, '$[0].trace_id'),
+                  json_get_string(span_links, '$[0].attributes."link.type"')
+           from trace_v2_spans;"#,
+        r#"[["cache.hit",7,"cc9e0991a2e63d274984bd44ee669203","follows_from"]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_escaped_keys",
+        &client,
+        r#"select span_attributes."a""b"::STRING, span_attributes."a\b"::STRING from trace_v2_spans;"#,
+        r#"[["quoted","backslash"]]"#,
+    ).await;
+    validate_data(
+        "otlp_traces_v2_semantics",
+        &client,
+        "select count(*) from information_schema.tables where table_name = 'trace_v2_spans' \
+         and create_options like '%table_data_model=greptime_trace_v2%' \
+         and create_options like '%greptime.semantic.pipeline=greptime_trace_v2%';",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+    Ok(())
 }
 
 /// One real OTLP export must come out of `semantic_relationships` as the
@@ -8388,6 +8909,22 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_otlp_logs_skip_wal(distributed: bool) {
+    let mut cases = Vec::new();
+    let logs = make_log_request(vec![json!({
+        "timeUnixNano": "1700000000000000000",
+        "body": {"stringValue": "wal test"}
+    })]);
+    cases.push(HttpWalCase::new(
+        "OTLP logs",
+        "/v1/otlp/v1/logs",
+        "application/x-protobuf",
+        logs.encode_to_vec(),
+    ));
+    check_http_skip_wal("otlp_logs", &cases, distributed).await;
+}
+
 pub async fn test_otlp_logs(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app_with_frontend(store_type, "test_otlp_logs").await;
@@ -8676,6 +9213,37 @@ pub async fn test_otlp_logs(store_type: StorageType) {
     }
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_loki_skip_wal(distributed: bool) {
+    let mut cases = vec![HttpWalCase::new(
+        "Loki JSON",
+        "/v1/loki/api/v1/push",
+        "application/json",
+        r#"{"streams":[{"stream":{"host":"a"},"values":[["1700000000000000000","wal test"]]}]}"#,
+    )];
+    let loki = loki_proto::logproto::PushRequest {
+        streams: vec![loki_proto::logproto::StreamAdapter {
+            labels: r#"{host="a"}"#.to_string(),
+            entries: vec![loki_proto::logproto::EntryAdapter {
+                timestamp: Some(loki_proto::prost_types::Timestamp {
+                    seconds: 1700000000,
+                    nanos: 0,
+                }),
+                line: "wal test".to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    cases.push(HttpWalCase::new(
+        "Loki protobuf",
+        "/v1/loki/api/v1/push",
+        "application/x-protobuf",
+        prom_store::snappy_compress(&loki.encode_to_vec()).unwrap(),
+    ));
+    check_http_skip_wal("loki", &cases, distributed).await;
 }
 
 pub async fn test_loki_pb_logs(store_type: StorageType) {
@@ -9084,6 +9652,17 @@ processors:
     .await;
 
     guard.remove_all().await;
+}
+
+#[apply(both_deployment_cases)]
+async fn test_elasticsearch_skip_wal(distributed: bool) {
+    let cases = vec![HttpWalCase::new(
+        "Elasticsearch",
+        "/v1/elasticsearch/_bulk",
+        "application/json",
+        "{\"create\":{\"_index\":\"wal_elastic\"}}\n{\"message\":\"wal test\"}\n",
+    )];
+    check_http_skip_wal("elasticsearch", &cases, distributed).await;
 }
 
 pub async fn test_elasticsearch_logs(store_type: StorageType) {
@@ -9826,6 +10405,193 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     assert_eq!(resp, expected);
 
     guard.remove_all().await;
+}
+
+pub async fn test_jaeger_query_api_for_trace_v2(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    common_telemetry::init_default_ut_logging();
+
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_query_api_v2").await;
+    let client = TestClient::new(app).await;
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [
+                make_string_attr("service.name", "jaeger-v2"),
+                make_string_attr("region", "west"),
+                make_string_attr("shared", "resource"),
+                make_string_attr("nullable", "resource"),
+                make_int_attr("count", 7),
+                make_int_attr("complex", 7)
+            ]},
+            "scopeSpans": [{
+                "scope": {"name": "v2-scope", "version": "1.0"},
+                "spans": [{
+                    "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "spanId": "9630f2916e2f7909", "parentSpanId": "8f847259b0f6e1ab",
+                    "name": "op", "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000",
+                    "attributes": [
+                        make_string_attr("shared", "span"),
+                        {"key": "nullable"},
+                        make_string_attr("a\"b\\c.d", "escaped"),
+                        make_int_attr("http.status_code", 500),
+                        make_bool_attr("enabled", true),
+                        {"key": "ratio", "value": {"doubleValue": 1.5}},
+                        make_string_attr("count", "invalid"),
+                        {"key": "complex", "value": {"arrayValue": {"values": [{"intValue":"7"}]}}}
+                    ],
+                    "events": [{"name": "cache.hit", "timeUnixNano": "1736480942444400000",
+                        "attributes": [make_int_attr("event.code", 7)]}],
+                    "links": [{"traceId": "cc9e0991a2e63d274984bd44ee669203",
+                        "spanId": "8f847259b0f6e1ab"}],
+                    "status": {"code": 2, "message": "failure"}
+                }, {
+                    "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                    "spanId": "8f847259b0f6e1ab", "name": "op", "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000"
+                }]
+            }]
+        }]
+    }))?;
+    let response = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static("jaeger_v2"),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        request.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for (path, expected) in [
+        ("/v1/jaeger/api/services", json!(["jaeger-v2"])),
+        (
+            "/v1/jaeger/api/operations?service=jaeger-v2",
+            json!([{"name":"op", "spanKind":"server"}]),
+        ),
+        (
+            "/v1/jaeger/api/services/jaeger-v2/operations",
+            json!(["op"]),
+        ),
+    ] {
+        let response = client
+            .get(path)
+            .header("x-greptime-trace-table-name", "jaeger_v2")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["data"], expected, "{path}: {body}");
+    }
+
+    for flushed in [false, true] {
+        if flushed {
+            let response = client
+                .post("/v1/sql")
+                .form(&[("sql", "ADMIN FLUSH_TABLE('jaeger_v2')")])
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        for (tags, expected) in [
+            (json!({"shared":"span"}), 1),
+            (json!({"shared":"resource"}), 1),
+            (json!({"region":"west"}), 2),
+            (json!({"nullable":"resource"}), 2),
+            (json!({"count":7}), 2),
+            (json!({"complex":7}), 2),
+            (json!({"a\"b\\c.d":"escaped"}), 1),
+            (
+                json!({"http.status_code":500, "enabled":true, "ratio":1.5}),
+                1,
+            ),
+            (json!({"error":true}), 1),
+            (json!({"missing":"absent"}), 0),
+            (json!({"missing":null}), 2),
+            (json!({"count":u64::MAX}), 0),
+        ] {
+            let url = format!(
+                "/v1/jaeger/api/traces?service=jaeger-v2&start=1736480942444376&end=1736480942444500&tags={}",
+                encode(&tags.to_string())
+            );
+            let response = client
+                .get(&url)
+                .header("user-agent", if flushed { "Grafana" } else { "Jaeger" })
+                .header("x-greptime-trace-table-name", "jaeger_v2")
+                .send()
+                .await;
+            let status = response.status();
+            let body: Value = serde_json::from_str(&response.text().await)?;
+            assert_eq!(status, StatusCode::OK, "{tags}: {body}");
+            assert_eq!(
+                body["data"].as_array().map_or(0, Vec::len),
+                expected,
+                "{tags}: {body}"
+            );
+        }
+        let response = client
+            .get("/v1/jaeger/api/traces/c05d7a4ec8e1f231f02ed6e8da8655b4")
+            .header("x-greptime-trace-table-name", "jaeger_v2")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        let process = &body["data"][0]["processes"]["p1"];
+        assert_eq!(process["serviceName"], "jaeger-v2");
+        assert!(
+            process["tags"]
+                .as_array()
+                .ok_or("Expected process tags")?
+                .iter()
+                .any(|tag| tag["key"] == "region" && tag["value"] == "west")
+        );
+        let span = &body["data"][0]["spans"][0];
+        assert_eq!(span["startTime"], 1736480942444376u64);
+        assert_eq!(span["duration"], 123);
+        assert_eq!(
+            span["references"],
+            json!([
+                {"refType":"CHILD_OF", "traceID":"c05d7a4ec8e1f231f02ed6e8da8655b4", "spanID":"8f847259b0f6e1ab"},
+                {"refType":"FOLLOWS_FROM", "traceID":"cc9e0991a2e63d274984bd44ee669203", "spanID":"8f847259b0f6e1ab"},
+            ])
+        );
+        assert_eq!(span["logs"][0]["timestamp"], 1736480942444400u64);
+        assert!(
+            span["logs"][0]["fields"]
+                .as_array()
+                .ok_or("Expected event fields")?
+                .iter()
+                .any(|field| field["key"] == "event.code" && field["value"] == 7)
+        );
+        assert!(
+            span["tags"]
+                .as_array()
+                .ok_or("Expected span tags")?
+                .iter()
+                .any(|tag| tag["key"] == "http.status_code"
+                    && tag["type"] == "int64"
+                    && tag["value"] == 500)
+        );
+    }
+    guard.remove_all().await;
+    Ok(())
 }
 
 pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
@@ -10789,6 +11555,17 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+#[apply(both_deployment_cases)]
+async fn test_opentsdb_skip_wal(distributed: bool) {
+    let cases = vec![HttpWalCase::new(
+        "OpenTSDB",
+        "/v1/opentsdb/api/put",
+        "application/json",
+        r#"{"metric":"wal_tsdb","timestamp":1700000000,"value":1,"tags":{"host":"a"}}"#,
+    )];
+    check_http_skip_wal("opentsdb", &cases, distributed).await;
+}
+
 pub async fn test_influxdb_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -10895,6 +11672,123 @@ async fn execute_sql(client: &TestClient, sql: &str) -> TestResponse {
         .get(format!("/v1/sql?sql={encoded_sql}").as_str())
         .send()
         .await
+}
+
+struct HttpWalCase {
+    name: &'static str,
+    get: bool,
+    create_table: Option<&'static str>,
+    expected_written_nodes: Option<usize>,
+    path: &'static str,
+    content_type: &'static str,
+    body: Vec<u8>,
+    headers: Vec<(&'static str, &'static str)>,
+}
+
+impl HttpWalCase {
+    fn new(
+        name: &'static str,
+        path: &'static str,
+        content_type: &'static str,
+        body: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self {
+            name,
+            get: false,
+            create_table: None,
+            expected_written_nodes: None,
+            path,
+            content_type,
+            body: body.into(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: bool) {
+    common_telemetry::init_default_ut_logging();
+    let mut instance = MockInstanceImpl::new(&format!("http_skip_wal_{name}"), distributed).await;
+    let fe = instance.frontend();
+    let server = HttpServerBuilder::new(HttpOptions::default())
+        .with_sql_handler(fe.clone())
+        .with_influxdb_handler(fe.clone())
+        .with_opentsdb_handler(fe.clone())
+        .with_log_ingest_handler(fe.clone(), None, None)
+        .with_otlp_handler(fe.clone(), true, false)
+        // The pending batcher uses BulkInsert, deliberately outside this PR.
+        .with_prom_handler(
+            fe.clone(),
+            Some(fe),
+            true,
+            PromValidationMode::Strict,
+            false,
+            None,
+        )
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    for case in cases {
+        if let Some(create_table) = case.create_table {
+            let response = execute_sql(&client, create_table).await;
+            assert!(response.status().is_success(), "{}", response.text().await);
+        }
+        // Warm up schema-on-write, then change only the request hint. Reusing
+        // the same payload also verifies policy is not persisted on the table.
+        for (round, hint) in [None, Some("true"), Some("false"), None]
+            .into_iter()
+            .enumerate()
+        {
+            common_telemetry::info!("Protocol WAL case: {}, hint: {:?}", case.name, hint);
+            let before = instance.flush_and_snapshot_wal().await;
+            let mut headers = vec![(
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static(case.content_type),
+            )];
+            headers.extend(case.headers.iter().map(|(key, value)| {
+                (
+                    HeaderName::from_static(key),
+                    HeaderValue::from_static(value),
+                )
+            }));
+            if let Some(value) = hint {
+                headers.push((
+                    HeaderName::from_static("x-greptime-insert-skip-wal"),
+                    HeaderValue::from_static(value),
+                ));
+            }
+            let response = if case.get {
+                let mut request = client.get(case.path).body(case.body.clone());
+                for (key, value) in headers {
+                    request = request.header(key, value);
+                }
+                request.send().await
+            } else {
+                send_req(&client, headers, case.path, case.body.clone(), false).await
+            };
+            let status = response.status();
+            let body = response.text().await;
+            assert!(status.is_success(), "{}: {status}: {body}", case.name);
+            let after = instance.flush_and_snapshot_wal().await;
+            if before.keys().eq(after.keys()) {
+                assert_wal_delta(&before, &after, hint == Some("true"));
+                if let Some(expected_written_nodes) = case.expected_written_nodes {
+                    let written_nodes = after
+                        .iter()
+                        .filter(|(key, (flushed_sequence, _))| *flushed_sequence > before[*key].0)
+                        .map(|((node_id, _), _)| *node_id)
+                        .collect::<std::collections::BTreeSet<_>>();
+                    assert_eq!(
+                        written_nodes.len(),
+                        expected_written_nodes,
+                        "{}: unexpected number of written datanodes",
+                        case.name
+                    );
+                }
+            } else {
+                assert!(round == 0, "only warmup may create regions: {}", case.name);
+            }
+        }
+    }
+    instance.shutdown().await;
 }
 
 async fn send_req(

@@ -21,6 +21,7 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::parse_catalog_and_schema_from_db_string;
 use common_error::ext::ErrorExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
+use session::hints::INSERT_SKIP_WAL_HINT;
 use snafu::{OptionExt, ResultExt};
 use tonic::Status;
 use tonic::metadata::MetadataMap;
@@ -28,6 +29,7 @@ use tonic::metadata::MetadataMap;
 use crate::error::Error::UnsupportedAuthScheme;
 use crate::error::{AuthSnafu, InvalidParameterSnafu, NotFoundAuthHeaderSnafu, Result};
 use crate::grpc::TonicResult;
+use crate::hint_headers;
 use crate::http::AUTHORIZATION_HEADER;
 use crate::http::header::constants::GREPTIME_DB_HEADER_NAME;
 use crate::metrics::METRIC_AUTH_FAILURE;
@@ -45,13 +47,26 @@ pub fn create_query_context_from_grpc_metadata(
         )
     };
 
-    Ok(Arc::new(
-        QueryContextBuilder::default()
-            .current_catalog(catalog)
-            .current_schema(schema)
-            .channel(Channel::Grpc)
-            .build(),
-    ))
+    let ctx = QueryContextBuilder::default()
+        .current_catalog(catalog)
+        .current_schema(schema)
+        .channel(Channel::Grpc)
+        .build();
+    // OTEL Arrow uses ordinary inserts. Accept only its request-level WAL hint,
+    // leaving unrelated hints and reserved internal extensions unchanged.
+    if let Some((key, value)) = hint_headers::extract_hints(headers)
+        .into_iter()
+        .find(|(key, _)| key == INSERT_SKIP_WAL_HINT)
+    {
+        let skip_wal = value.parse::<bool>().map_err(|_| {
+            InvalidParameterSnafu {
+                reason: format!("Invalid {key} hint: expected true or false, got {value:?}"),
+            }
+            .build()
+        })?;
+        ctx.set_skip_wal(skip_wal);
+    }
+    Ok(Arc::new(ctx))
 }
 
 /// Helper function to extract a header from the metadata map.
@@ -160,4 +175,59 @@ pub async fn auth(
             .with_label_values(&[e.status_code().as_ref()])
             .inc();
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use session::hints::{HINTS_KEY, REMOTE_QUERY_ID_EXTENSION_KEY, RESERVED_EXTENSION_KEYS};
+
+    use super::*;
+
+    #[test]
+    fn test_arrow_insert_hint_does_not_accept_reserved_extensions() {
+        let mut headers = MetadataMap::new();
+        assert_eq!(
+            create_query_context_from_grpc_metadata(&headers)
+                .unwrap()
+                .extension(INSERT_SKIP_WAL_HINT),
+            None
+        );
+        for (value, expected) in [("true", true), ("false", false)] {
+            let mut hints = format!("insert_skip_wal={value},ttl=7d");
+            for key in RESERVED_EXTENSION_KEYS {
+                hints.push_str(&format!(",{key}=external"));
+            }
+            headers.insert(HINTS_KEY, hints.parse().unwrap());
+            let ctx = create_query_context_from_grpc_metadata(&headers).unwrap();
+            assert_eq!(ctx.skip_wal(), expected);
+            assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+            assert_eq!(ctx.extension("ttl"), None);
+            for key in RESERVED_EXTENSION_KEYS {
+                if key == REMOTE_QUERY_ID_EXTENSION_KEY {
+                    // The builder generates this ID; external hints must not replace it.
+                    assert!(ctx.remote_query_id().is_some());
+                    assert_ne!(ctx.extension(key), Some("external"));
+                } else {
+                    assert_eq!(ctx.extension(key), None);
+                }
+            }
+        }
+        // Only the first matching hint is parsed and applied.
+        for (hints, expected) in [
+            ("insert_skip_wal=true,insert_skip_wal=false", true),
+            ("insert_skip_wal=false,insert_skip_wal=true", false),
+            ("insert_skip_wal=true,insert_skip_wal=invalid", true),
+        ] {
+            headers.insert(HINTS_KEY, hints.parse().unwrap());
+            let ctx = create_query_context_from_grpc_metadata(&headers).unwrap();
+            assert_eq!(ctx.skip_wal(), expected);
+        }
+        for value in ["", "TRUE", "1", "invalid"] {
+            headers.insert(
+                HINTS_KEY,
+                format!("insert_skip_wal={value}").parse().unwrap(),
+            );
+            assert!(create_query_context_from_grpc_metadata(&headers).is_err());
+        }
+    }
 }

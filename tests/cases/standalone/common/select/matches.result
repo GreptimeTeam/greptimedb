@@ -80,13 +80,17 @@ select fox from fox where matches(fox, 'fox AND lazy') order by ts;
 
 select fox from fox where matches(fox, '-over -lazy') order by ts;
 
-++
-++
++-----+
+| fox |
++-----+
++-----+
 
 select fox from fox where matches(fox, '-over AND -lazy') order by ts;
 
-++
-++
++-----+
+| fox |
++-----+
++-----+
 
 select fox from fox where matches(fox, 'fox AND jumps OR over') order by ts;
 
@@ -228,8 +232,10 @@ select fox from fox where matches(fox, '+(fox jumps) AND over') order by ts;
 
 select fox from fox where matches(fox, 'over -(fox jumps)') order by ts;
 
-++
-++
++-----+
+| fox |
++-----+
++-----+
 
 select fox from fox where matches(fox, 'over -(fox AND jumps)') order by ts;
 

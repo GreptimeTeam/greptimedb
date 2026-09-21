@@ -24,15 +24,19 @@ use std::sync::Arc;
 
 use api::v1::SemanticType;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use datafusion_common::ScalarValue;
 use datafusion_expr::Expr;
 use datatypes::arrow::array::{Array, BinaryArray, BooleanArray, BooleanBufferBuilder};
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::prelude::ConcreteDataType;
+use datatypes::value::Value;
 use futures::StreamExt;
 use mito_codec::row_converter::{PrimaryKeyCodec, PrimaryKeyFilter, build_primary_key_codec};
 use parquet::arrow::ProjectionMask;
-use parquet::arrow::arrow_reader::RowSelection;
+use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+use parquet::file::metadata::ParquetMetaData;
 use parquet::schema::types::SchemaDescriptor;
 use smallvec::{SmallVec, smallvec};
 use snafu::{OptionExt, ResultExt};
@@ -47,7 +51,7 @@ use crate::error::{
 };
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::flat_format::FlatReadFormat;
-use crate::sst::parquet::format::PrimaryKeyArray;
+use crate::sst::parquet::format::{PrimaryKeyArray, StatValues};
 use crate::sst::parquet::reader::{
     MaybeFilter, PhysicalFilterContext, RowGroupBuildContext, RowGroupReaderBuilder,
     SimpleFilterContext,
@@ -398,6 +402,7 @@ pub(crate) fn build_bulk_filter_plan(
 /// the prefilter pass. A caller can postpone simple timestamp filters to the normal
 /// precise-filter path when the scan time range covers the SST. When predicate
 /// prefiltering is disabled, all simple filters remain on the normal path instead.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_reader_filter_plan(
     predicate: Option<&Predicate>,
     expected_metadata: Option<&RegionMetadata>,
@@ -406,6 +411,7 @@ pub(crate) fn build_reader_filter_plan(
     postpone_time_index_filter: bool,
     read_format: &FlatReadFormat,
     codec: &Arc<dyn PrimaryKeyCodec>,
+    parquet_metadata: &ParquetMetaData,
 ) -> ReaderFilterPlan {
     let Some(predicate) = predicate else {
         return ReaderFilterPlan {
@@ -533,6 +539,7 @@ pub(crate) fn build_reader_filter_plan(
         prefilter_simple_filters.clone(),
         prefilter_physical_filters,
         schema_version,
+        parquet_metadata,
     );
 
     if prefilter_builder.is_some() {
@@ -567,6 +574,8 @@ pub(crate) struct PrefilterContext {
     pk_filter_expr_strs: Option<SmallVec<[String; 1]>>,
     /// Arrow schema used to build narrowed prefilter projections.
     arrow_schema: SchemaRef,
+    /// Simple filters already proven SQL-true by this row group's statistics.
+    proven_simple_filters: Vec<bool>,
 }
 
 /// Pre-built state for constructing [PrefilterContext] per row group.
@@ -583,6 +592,8 @@ pub(crate) struct PrefilterContextBuilder {
     metadata: RegionMetadataRef,
     schema_version: u64,
     arrow_schema: SchemaRef,
+    /// Per-row-group simple filters already proven SQL-true by column statistics.
+    proven_simple_filters: Vec<Vec<bool>>,
 }
 
 impl PrefilterContextBuilder {
@@ -592,6 +603,7 @@ impl PrefilterContextBuilder {
     /// - The read format doesn't use flat layout
     /// - No prefilter columns are selected
     /// - Prefilter would read the full projection without any PK filter
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         read_format: &FlatReadFormat,
         codec: &Arc<dyn PrimaryKeyCodec>,
@@ -600,6 +612,7 @@ impl PrefilterContextBuilder {
         filters: Vec<SimpleFilterContext>,
         physical_filters: Vec<PhysicalFilterContext>,
         schema_version: u64,
+        parquet_metadata: &ParquetMetaData,
     ) -> Option<Self> {
         let metadata = read_format.metadata();
         let use_raw_tag_columns = read_format.batch_has_raw_pk_columns();
@@ -646,6 +659,9 @@ impl PrefilterContextBuilder {
             return None;
         }
 
+        let proven_simple_filters =
+            simple_filter_stats_proofs(read_format, parquet_metadata.row_groups(), &filters);
+
         Some(Self {
             pk_filters,
             pk_filter_expr_strs,
@@ -655,11 +671,12 @@ impl PrefilterContextBuilder {
             metadata: metadata.clone(),
             schema_version,
             arrow_schema: read_format.arrow_schema().clone(),
+            proven_simple_filters,
         })
     }
 
     /// Builds a [PrefilterContext] for a specific row group.
-    pub(crate) fn build(&self) -> PrefilterContext {
+    pub(crate) fn build(&self, row_group_idx: usize) -> PrefilterContext {
         let pk_filter = self
             .build_primary_key_filter()
             .map(|filter| Box::new(filter) as Box<dyn PrimaryKeyFilter>);
@@ -670,6 +687,11 @@ impl PrefilterContextBuilder {
             schema_version: self.schema_version,
             pk_filter_expr_strs: self.pk_filter_expr_strs.clone(),
             arrow_schema: self.arrow_schema.clone(),
+            proven_simple_filters: self
+                .proven_simple_filters
+                .get(row_group_idx)
+                .cloned()
+                .unwrap_or_else(|| vec![false; self.filters.len()]),
         }
     }
 
@@ -686,6 +708,114 @@ impl PrefilterContextBuilder {
 
 const PREFILTER_COLUMN_RATIO_THRESHOLD: f64 = 0.5;
 const PREFILTER_MIN_REMAINING_COLUMNS: usize = 2;
+
+/// Returns row-group-major proof bits for simple filters. Statistics are
+/// extracted once per eligible filter across all row groups.
+fn simple_filter_stats_proofs(
+    read_format: &FlatReadFormat,
+    row_groups: &[parquet::file::metadata::RowGroupMetaData],
+    filters: &[SimpleFilterContext],
+) -> Vec<Vec<bool>> {
+    let mut proofs = vec![vec![false; filters.len()]; row_groups.len()];
+    for (filter_idx, filter_ctx) in filters.iter().enumerate() {
+        let Some((filter, literal)) = eligible_simple_filter(read_format, filter_ctx) else {
+            continue;
+        };
+        let (StatValues::Values(mins), StatValues::Values(maxs), StatValues::Values(null_counts)) = (
+            read_format.min_values(row_groups, filter_ctx.column_id()),
+            read_format.max_values(row_groups, filter_ctx.column_id()),
+            read_format.null_counts(row_groups, filter_ctx.column_id()),
+        ) else {
+            continue;
+        };
+        for (row_group_idx, proof) in proofs.iter_mut().enumerate() {
+            proof[filter_idx] = simple_filter_is_true_by_values(
+                filter,
+                &literal,
+                stat_value_at(&mins, row_group_idx),
+                stat_value_at(&maxs, row_group_idx),
+                stat_value_at(&null_counts, row_group_idx),
+            );
+        }
+    }
+    proofs
+}
+
+fn eligible_simple_filter<'a>(
+    read_format: &FlatReadFormat,
+    filter_ctx: &'a SimpleFilterContext,
+) -> Option<(&'a SimpleFilterEvaluator, Value)> {
+    if filter_ctx.semantic_type() != SemanticType::Field {
+        return None;
+    }
+    let filter = filter_ctx.filter().as_filter()?;
+    let literal = filter.literal_value()?;
+    let column = read_format
+        .metadata()
+        .column_by_id(filter_ctx.column_id())?;
+    column_type_matches_literal(&column.column_schema.data_type, &literal)
+        .then_some((filter, literal))
+}
+
+fn simple_filter_is_true_by_values(
+    filter: &SimpleFilterEvaluator,
+    literal: &Value,
+    min: Option<Value>,
+    max: Option<Value>,
+    null_count: Option<Value>,
+) -> bool {
+    let (Some(min), Some(max), Some(null_count)) = (min, max, null_count) else {
+        return false;
+    };
+    if null_count != Value::UInt64(0)
+        || !same_supported_value_type(&min, literal)
+        || !same_supported_value_type(&max, literal)
+        || min > max
+    {
+        return false;
+    }
+
+    if filter.is_gt() {
+        min > *literal
+    } else if filter.is_gt_eq() {
+        min >= *literal
+    } else if filter.is_lt() {
+        max < *literal
+    } else if filter.is_lt_eq() {
+        max <= *literal
+    } else if filter.is_eq() {
+        min == *literal && max == *literal
+    } else if filter.is_not_eq() {
+        max < *literal || min > *literal
+    } else {
+        false
+    }
+}
+
+fn column_type_matches_literal(data_type: &ConcreteDataType, literal: &Value) -> bool {
+    matches!(
+        (data_type, literal),
+        (ConcreteDataType::Int32(_), Value::Int32(_))
+            | (ConcreteDataType::UInt32(_), Value::UInt32(_))
+            | (ConcreteDataType::Int64(_), Value::Int64(_))
+            | (ConcreteDataType::UInt64(_), Value::UInt64(_))
+    )
+}
+
+fn same_supported_value_type(left: &Value, right: &Value) -> bool {
+    matches!(
+        (left, right),
+        (Value::Int32(_), Value::Int32(_))
+            | (Value::UInt32(_), Value::UInt32(_))
+            | (Value::Int64(_), Value::Int64(_))
+            | (Value::UInt64(_), Value::UInt64(_))
+    )
+}
+
+fn stat_value_at(values: &datatypes::arrow::array::ArrayRef, index: usize) -> Option<Value> {
+    let scalar = ScalarValue::try_from_array(values, index).ok()?;
+    Value::try_from(scalar).ok()
+}
 
 /// Result of prefiltering a row group.
 pub(crate) struct PrefilterResult {
@@ -941,6 +1071,9 @@ async fn execute_prefilter_by_reading_columns(
     build_ctx: &RowGroupBuildContext<'_>,
 ) -> Result<PrefilterResult> {
     let entries = all_prefilter_entries(prefilter_ctx);
+    if entries.is_empty() {
+        return Ok(identity_prefilter_result(reader_builder, build_ctx));
+    }
     let (mask, rows_before_filter) =
         build_prefilter_masks(prefilter_ctx, reader_builder, build_ctx, &entries).await?;
 
@@ -965,6 +1098,13 @@ fn all_prefilter_entries(prefilter_ctx: &PrefilterContext) -> Vec<PrefilterEntry
             .filters
             .iter()
             .enumerate()
+            .filter(|(idx, _)| {
+                !prefilter_ctx
+                    .proven_simple_filters
+                    .get(*idx)
+                    .copied()
+                    .unwrap_or(false)
+            })
             .map(|(idx, _)| PrefilterEntry::without_cache(PrefilterEntryKind::Simple(idx))),
     );
     entries.extend(
@@ -1006,6 +1146,14 @@ fn build_prefilter_cache_entries(
     let mut entries = Vec::new();
 
     for (idx, filter_ctx) in prefilter_ctx.filters.iter().enumerate() {
+        if prefilter_ctx
+            .proven_simple_filters
+            .get(idx)
+            .copied()
+            .unwrap_or(false)
+        {
+            continue;
+        }
         entries.push(PrefilterEntry {
             kind: PrefilterEntryKind::Simple(idx),
             key: Some(PrefilterKey::new(
@@ -1050,6 +1198,29 @@ fn build_prefilter_cache_entries(
     }
 
     entries
+}
+
+fn identity_prefilter_result(
+    reader_builder: &RowGroupReaderBuilder,
+    build_ctx: &RowGroupBuildContext<'_>,
+) -> PrefilterResult {
+    let row_count = reader_builder
+        .parquet_metadata()
+        .row_group(build_ctx.row_group_idx)
+        .num_rows() as usize;
+    PrefilterResult {
+        refined_selection: identity_row_selection(&build_ctx.row_selection, row_count),
+        filtered_rows: 0,
+    }
+}
+
+fn identity_row_selection(
+    original_selection: &Option<RowSelection>,
+    row_count: usize,
+) -> RowSelection {
+    original_selection
+        .clone()
+        .unwrap_or_else(|| RowSelection::from(vec![RowSelector::select(row_count)]))
 }
 
 fn rows_before_filter(
@@ -1200,15 +1371,24 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use bytes::Bytes;
     use common_recordbatch::filter::SimpleFilterEvaluator;
     use datafusion_common::ScalarValue;
     use datafusion_expr::{col, lit};
     use datatypes::arrow::array::{
-        ArrayRef, DictionaryArray, TimestampMillisecondArray, UInt8Array, UInt32Array, UInt64Array,
+        ArrayRef, DictionaryArray, Int32Array, TimestampMillisecondArray, UInt8Array, UInt32Array,
+        UInt64Array,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Schema, UInt32Type};
+    use datatypes::arrow::record_batch::RecordBatch;
+    use datatypes::prelude::ConcreteDataType;
+    use datatypes::value::Value;
     use mito_codec::row_converter::{PrimaryKeyFilter, build_primary_key_codec};
+    use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::{ParquetRecordBatchReaderBuilder, RowSelector};
     use store_api::codec::PrimaryKeyEncoding;
+    use store_api::metadata::RegionMetadataBuilder;
+    use store_api::region_request::{AlterKind, ModifyColumnType};
 
     use super::*;
     use crate::read::read_columns::ReadColumns;
@@ -1266,6 +1446,83 @@ mod tests {
             .iter()
             .filter_map(|expr| SimpleFilterContext::new_opt(metadata, None, expr))
             .collect()
+    }
+
+    fn stats_metadata_with_options(
+        values: &[Vec<u64>],
+        nulls: Option<&[bool]>,
+        writer_options: Option<parquet::file::properties::WriterProperties>,
+    ) -> Arc<ParquetMetaData> {
+        let first = new_record_batch_with_custom_sequence(&["a", "x"], 0, values[0].len(), 1);
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, first.schema(), writer_options).unwrap();
+        for (idx, values) in values.iter().enumerate() {
+            let has_null = nulls.and_then(|nulls| nulls.get(idx)).copied() == Some(true);
+            let batch = new_record_batch_with_custom_sequence(
+                &["a", "x"],
+                0,
+                if has_null {
+                    values.len().max(2)
+                } else {
+                    values.len()
+                },
+                1,
+            );
+            let mut columns = batch.columns().to_vec();
+            columns[2] = Arc::new(if has_null {
+                UInt64Array::from(vec![Some(values[0]), None])
+            } else {
+                UInt64Array::from_iter_values(values.iter().copied())
+            });
+            writer
+                .write(&RecordBatch::try_new(batch.schema(), columns).unwrap())
+                .unwrap();
+            writer.flush().unwrap();
+        }
+        writer.close().unwrap();
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+            .unwrap()
+            .metadata()
+            .clone()
+    }
+
+    fn stats_metadata(values: &[Vec<u64>], nulls: Option<&[bool]>) -> Arc<ParquetMetaData> {
+        stats_metadata_with_options(values, nulls, None)
+    }
+
+    fn int32_stats_metadata(values: &[i32]) -> Arc<ParquetMetaData> {
+        let batch = new_record_batch_with_custom_sequence(&["a", "x"], 0, values.len(), 1);
+        let mut fields = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.as_ref().clone())
+            .collect::<Vec<_>>();
+        fields[2].set_data_type(DataType::Int32);
+        let mut columns = batch.columns().to_vec();
+        columns[2] = Arc::new(Int32Array::from(values.to_vec()));
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, batch.schema(), None).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        ParquetRecordBatchReaderBuilder::try_new(Bytes::from(bytes))
+            .unwrap()
+            .metadata()
+            .clone()
+    }
+
+    fn metadata_with_field_type(data_type: ConcreteDataType) -> RegionMetadataRef {
+        let mut builder = RegionMetadataBuilder::from_existing(sst_region_metadata());
+        builder
+            .alter(AlterKind::ModifyColumnTypes {
+                columns: vec![ModifyColumnType {
+                    column_name: "field_0".to_string(),
+                    target_type: data_type,
+                }],
+            })
+            .unwrap();
+        Arc::new(builder.build().unwrap())
     }
 
     fn new_physical_filter_contexts(
@@ -1502,8 +1759,290 @@ mod tests {
             Vec::new(),
             Vec::new(),
             metadata.schema_version,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(builder.is_none());
+    }
+
+    #[test]
+    fn test_simple_filter_stats_uses_real_metadata() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let parquet_metadata = stats_metadata(&[vec![i64::MAX as u64 + 2]], None);
+        let filters = new_simple_filter_contexts(
+            &metadata,
+            &[
+                col("field_0").gt(lit(i64::MAX as u64 + 1)),
+                col("field_0").gt(lit(i64::MAX as u64 + 2)),
+                lit(i64::MAX as u64 + 1).lt(col("field_0")),
+            ],
+        );
+
+        let proofs =
+            simple_filter_stats_proofs(&read_format, parquet_metadata.row_groups(), &filters);
+        assert_eq!(proofs, vec![vec![true, false, true]]);
+    }
+
+    #[test]
+    fn test_simple_filter_stats_retain_narrow_or_incomplete_metadata() {
+        let parquet_metadata = stats_metadata(&[vec![2]], Some(&[true]));
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let filter = new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]);
+        assert_eq!(
+            simple_filter_stats_proofs(&read_format, parquet_metadata.row_groups(), &filter),
+            vec![vec![false]],
+        );
+        let missing_stats = stats_metadata_with_options(
+            &[vec![2]],
+            None,
+            Some(
+                parquet::file::properties::WriterProperties::builder()
+                    .set_statistics_enabled(parquet::file::properties::EnabledStatistics::None)
+                    .build(),
+            ),
+        );
+        assert_eq!(
+            simple_filter_stats_proofs(&read_format, missing_stats.row_groups(), &filter),
+            vec![vec![false]],
+        );
+
+        // Parquet INT32 stats decode as Value::Int32; without the actual SST
+        // type gate this Int8 field would be incorrectly proven true.
+        let narrow_metadata = metadata_with_field_type(ConcreteDataType::int8_datatype());
+        let narrow_read_format = FlatReadFormat::new(
+            narrow_metadata.clone(),
+            ReadColumns::new(
+                narrow_metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let narrow_filter =
+            new_simple_filter_contexts(&narrow_metadata, &[col("field_0").gt(lit(1_i32))]);
+        let narrow_stats = int32_stats_metadata(&[2]);
+        assert_eq!(
+            simple_filter_stats_proofs(
+                &narrow_read_format,
+                narrow_stats.row_groups(),
+                &narrow_filter,
+            ),
+            vec![vec![false]],
+        );
+    }
+
+    #[test]
+    fn test_prefilter_builder_uses_row_group_proofs_by_index() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let builder = PrefilterContextBuilder::new(
+            &read_format,
+            &codec,
+            None,
+            None,
+            new_simple_filter_contexts(&metadata, &[col("field_0").gt(lit(1_u64))]),
+            Vec::new(),
+            metadata.schema_version,
+            &stats_metadata(&[vec![2], vec![1]], None),
+        )
+        .unwrap();
+
+        assert!(builder.build(0).proven_simple_filters[0]);
+        assert!(!builder.build(1).proven_simple_filters[0]);
+    }
+
+    #[test]
+    fn test_simple_filter_stats_prove_integer_predicates() {
+        macro_rules! assert_all_operators {
+            ($literal:expr, $base:expr, $below:expr, $above:expr) => {{
+                for (expr, min, max) in [
+                    (col("x").gt(lit($literal)), $above.clone(), $above.clone()),
+                    (col("x").gt_eq(lit($literal)), $base.clone(), $above.clone()),
+                    (col("x").lt(lit($literal)), $below.clone(), $below.clone()),
+                    (col("x").lt_eq(lit($literal)), $below.clone(), $base.clone()),
+                    (col("x").eq(lit($literal)), $base.clone(), $base.clone()),
+                    (
+                        col("x").not_eq(lit($literal)),
+                        $below.clone(),
+                        $below.clone(),
+                    ),
+                ] {
+                    let filter = SimpleFilterEvaluator::try_new(&expr).unwrap();
+                    assert!(simple_filter_is_true_by_values(
+                        &filter,
+                        &$base,
+                        Some(min),
+                        Some(max),
+                        Some(Value::UInt64(0)),
+                    ));
+                }
+            }};
+        }
+
+        assert_all_operators!(5_i32, Value::Int32(5), Value::Int32(-1), Value::Int32(6));
+        assert_all_operators!(5_u32, Value::UInt32(5), Value::UInt32(4), Value::UInt32(6));
+        assert_all_operators!(5_i64, Value::Int64(5), Value::Int64(-1), Value::Int64(6));
+        assert_all_operators!(
+            i64::MAX as u64 + 2,
+            Value::UInt64(i64::MAX as u64 + 2),
+            Value::UInt64(i64::MAX as u64 + 1),
+            Value::UInt64(i64::MAX as u64 + 3)
+        );
+
+        // Boundary cases must remain unproven: the min/max interval still
+        // admits a row that violates the predicate.
+        for (expr, min, max) in [
+            (col("x").lt(lit(5_i64)), 1, 5),
+            (col("x").gt(lit(5_i64)), 5, 9),
+            (col("x").lt_eq(lit(5_i64)), 1, 6),
+            (col("x").gt_eq(lit(5_i64)), 4, 9),
+            (col("x").eq(lit(5_i64)), 5, 6),
+            (col("x").not_eq(lit(5_i64)), 5, 9),
+            (col("x").not_eq(lit(5_i64)), 1, 5),
+            (col("x").not_eq(lit(5_i64)), 1, 9),
+        ] {
+            let filter = SimpleFilterEvaluator::try_new(&expr).unwrap();
+            assert!(
+                !simple_filter_is_true_by_values(
+                    &filter,
+                    &Value::Int64(5),
+                    Some(Value::Int64(min)),
+                    Some(Value::Int64(max)),
+                    Some(Value::UInt64(0)),
+                ),
+                "{expr:?} must not be proven by stats {min}..={max}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_simple_filter_stats_retain_unknown_or_unsupported_values() {
+        let filter = SimpleFilterEvaluator::try_new(&col("x").gt(lit(1_i32))).unwrap();
+        let literal = Value::Int32(1);
+        for (min, max, null_count) in [
+            (
+                Some(Value::Int32(2)),
+                Some(Value::Int32(3)),
+                Some(Value::UInt64(1)),
+            ),
+            (Some(Value::Int32(2)), Some(Value::Int32(3)), None),
+            (
+                Some(Value::Null),
+                Some(Value::Int32(3)),
+                Some(Value::UInt64(0)),
+            ),
+            (None, Some(Value::Int32(3)), Some(Value::UInt64(0))),
+            (Some(Value::Int32(2)), None, Some(Value::UInt64(0))),
+            (
+                Some(Value::Int64(2)),
+                Some(Value::Int64(3)),
+                Some(Value::UInt64(0)),
+            ),
+            (
+                Some(Value::Int32(3)),
+                Some(Value::Int32(2)),
+                Some(Value::UInt64(0)),
+            ),
+        ] {
+            assert!(!simple_filter_is_true_by_values(
+                &filter, &literal, min, max, null_count
+            ));
+        }
+
+        let float_filter = SimpleFilterEvaluator::try_new(&col("x").gt(lit(1.0_f64))).unwrap();
+        assert!(!simple_filter_is_true_by_values(
+            &float_filter,
+            &Value::Float64(1.0.into()),
+            Some(Value::Float64(2.0.into())),
+            Some(Value::Float64(3.0.into())),
+            Some(Value::UInt64(0)),
+        ));
+    }
+
+    #[test]
+    fn test_prefilter_entries_keep_only_unproven_simple_filter_indices() {
+        let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        let filters = new_simple_filter_contexts(
+            &metadata,
+            &[col("field_0").gt(lit(1_u64)), col("field_0").lt(lit(9_u64))],
+        );
+        let context = PrefilterContext {
+            pk_filter: None,
+            filters,
+            physical_filters: Vec::new(),
+            schema_version: metadata.schema_version,
+            pk_filter_expr_strs: None,
+            arrow_schema: metadata.schema.arrow_schema().clone(),
+            proven_simple_filters: vec![true, false],
+        };
+
+        let entries = all_prefilter_entries(&context);
+        assert!(matches!(
+            entries.as_slice(),
+            [PrefilterEntry {
+                kind: PrefilterEntryKind::Simple(1),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn test_identity_row_selection_preserves_input() {
+        let sparse = RowSelection::from(vec![
+            RowSelector::skip(2),
+            RowSelector::select(3),
+            RowSelector::skip(1),
+        ]);
+        assert_eq!(identity_row_selection(&Some(sparse.clone()), 6), sparse);
+
+        let empty = RowSelection::from(vec![]);
+        assert_eq!(identity_row_selection(&Some(empty.clone()), 6), empty);
+        assert_eq!(
+            identity_row_selection(&None, 6),
+            RowSelection::from(vec![RowSelector::select(6)])
+        );
     }
 
     #[test]
@@ -1602,6 +2141,7 @@ mod tests {
             false,
             &full_read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(skip_fields_plan.prefilter_builder.is_some());
         assert_eq!(
@@ -1621,6 +2161,7 @@ mod tests {
             true,
             &full_read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(postponed_time_plan.prefilter_builder.is_some());
         assert_eq!(
@@ -1638,6 +2179,7 @@ mod tests {
             true,
             &full_read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(postponed_time_only_plan.prefilter_builder.is_none());
         assert_eq!(
@@ -1667,6 +2209,7 @@ mod tests {
             false,
             &projected_read_format,
             &metric_codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(pk_prefilter_plan.prefilter_builder.is_some());
         assert!(
@@ -1691,6 +2234,7 @@ mod tests {
             true,
             &projected_read_format,
             &metric_codec,
+            &stats_metadata(&[vec![1]], None),
         );
         assert!(disabled_plan.prefilter_builder.is_none());
         assert_eq!(
@@ -1724,6 +2268,7 @@ mod tests {
             false,
             &read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
         let plan_b_a = build_reader_filter_plan(
             Some(&Predicate::new(vec![expr_b, expr_a])),
@@ -1733,6 +2278,7 @@ mod tests {
             false,
             &read_format,
             &codec,
+            &stats_metadata(&[vec![1]], None),
         );
 
         let exprs_ab = plan_ab.prefilter_builder.unwrap().pk_filter_expr_strs;

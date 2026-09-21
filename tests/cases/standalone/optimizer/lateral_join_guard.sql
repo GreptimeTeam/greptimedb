@@ -1,9 +1,7 @@
--- Document the current aliased SQL LATERAL limitation and guard the remote
--- scan boundary. DataFusion's DecorrelateLateralJoin does not currently match
--- the SubqueryAlias(Subquery) shape produced by `LATERAL (...) d`, so this query
--- is still expected to fail physical planning with an outer_ref expression. The
--- important regression assertion is that the remaining outer_ref predicate must
--- NOT be advertised as a remote TableScan.partial_filters predicate.
+-- Guard the remote scan boundary for an aliased SQL LATERAL query.
+-- DataFusion 55 decorrelates this shape into an inner join. The resulting
+-- scan-local IS NOT NULL predicates may be pushed down, but no outer_ref
+-- expression may be advertised as a remote TableScan.partial_filters predicate.
 
 CREATE TABLE lateral_fact (
     ts TIMESTAMP(3) TIME INDEX,
@@ -32,6 +30,9 @@ ADMIN FLUSH_TABLE('lateral_dim');
 
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE partitioning=Hash\(\[k@(\d+)\],\s*\d+\) partitioning=Hash([k@$1], REDACTED)
+-- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
+-- SQLNESS REPLACE (input_partitions=REDACTED)(\s+)\| $1|
 EXPLAIN SELECT f.k, d.threshold
 FROM lateral_fact f,
 LATERAL (

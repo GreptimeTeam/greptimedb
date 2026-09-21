@@ -40,6 +40,7 @@ pub type PrometheusHandlerRef = Arc<dyn PrometheusHandler + Send + Sync>;
 pub struct ParsedPromQuery {
     query: PromQuery,
     statement: QueryStatement,
+    requires_output_ordering: bool,
 }
 
 impl ParsedPromQuery {
@@ -51,7 +52,11 @@ impl ParsedPromQuery {
                     query: query.clone(),
                 }
             })?;
-        Ok(Self { query, statement })
+        Ok(Self {
+            query,
+            statement,
+            requires_output_ordering: true,
+        })
     }
 
     /// Returns the original query parameters.
@@ -62,6 +67,18 @@ impl ParsedPromQuery {
     /// Returns the parsed query statement.
     pub fn statement(&self) -> &QueryStatement {
         &self.statement
+    }
+
+    /// Returns whether the caller observes the query output in execution order.
+    /// When it does not, the executor may drop the plan's output sort.
+    pub fn requires_output_ordering(&self) -> bool {
+        self.requires_output_ordering
+    }
+
+    /// Marks the output order as irrelevant to the caller.
+    pub(crate) fn with_unordered_output(mut self) -> Self {
+        self.requires_output_ordering = false;
+        self
     }
 
     /// Returns the parsed PromQL expression.
@@ -164,6 +181,21 @@ pub trait PrometheusHandler {
         &self,
         matchers: Vec<Matcher>,
         schema: &str,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
+    /// Query metric table names that carry data matching `matchers` in the time
+    /// range. `matchers` must hold only ordinary label matchers: `__name__`
+    /// names a table and the database and field matchers name no column, so the
+    /// caller resolves all three before calling.
+    ///
+    /// Only metric engine tables are covered.
+    async fn query_metric_names_by_labels(
+        &self,
+        matchers: Vec<Matcher>,
+        schema: &str,
+        start: SystemTime,
+        end: SystemTime,
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 

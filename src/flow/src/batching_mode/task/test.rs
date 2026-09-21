@@ -13,9 +13,12 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 
-use catalog::RegisterTableRequest;
 use catalog::memory::MemoryCatalogManager;
+use catalog::{DeregisterTableRequest, RegisterTableRequest};
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_error::ext::BoxedError;
@@ -31,11 +34,13 @@ use datatypes::vectors::{
 };
 use pretty_assertions::assert_eq;
 use query::options::{
-    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY, FLOW_SCHEDULED_TIME_MILLIS,
-    QueryOptions,
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
+    FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use table::Table;
+use table::metadata::FilterPushDownType;
 use table::test_util::MemTable;
 
 use super::*;
@@ -53,6 +58,329 @@ fn incremental_batch_opts() -> Arc<BatchingModeOptions> {
         experimental_enable_incremental_read: true,
         ..Default::default()
     })
+}
+
+struct CountingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    active: std::sync::atomic::AtomicUsize,
+    max_active: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for CountingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        _guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let active = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
+        self.max_active
+            .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+        tokio::task::yield_now().await;
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        ExecuteOnceOutcome {
+            new_query: None,
+            result: Ok(None),
+        }
+    }
+}
+
+struct RetainingExecution {
+    calls: std::sync::atomic::AtomicUsize,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+    finished: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for RetainingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) != 0 {
+            return ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            };
+        }
+
+        let started = self.started.clone();
+        let release = self.release.clone();
+        let finished = self.finished.clone();
+        let child = tokio::spawn(async move {
+            started.notify_one();
+            release.notified().await;
+            drop(guard);
+            finished.notify_one();
+            ExecuteOnceOutcome {
+                new_query: None,
+                result: Ok(None),
+            }
+        });
+        match child.await {
+            Ok(outcome) => outcome,
+            Err(err) => ExecuteOnceOutcome {
+                new_query: None,
+                result: Err(Error::Unexpected {
+                    reason: format!("retaining test child failed: {err}"),
+                    location: snafu::location!(),
+                }),
+            },
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_execution_delegate_dispatch_is_serialized() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(CountingExecution {
+        calls: Default::default(),
+        active: Default::default(),
+        max_active: Default::default(),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first = task.execute_once_serialized(&query_engine, &frontend, None);
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.unwrap(), None);
+    assert_eq!(second.unwrap(), None);
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(
+        execution
+            .max_active
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the existing execution_lock must span delegate execution"
+    );
+}
+
+#[tokio::test]
+async fn test_delegate_guard_survives_caller_cancellation_until_child_finishes() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+
+    let first_task = task.clone();
+    let first_engine = query_engine.clone();
+    let first_frontend = frontend.clone();
+    let first = tokio::spawn(async move {
+        first_task
+            .execute_once_serialized(&first_engine, &first_frontend, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("delegate child did not retain the guard");
+    first.abort();
+    assert!(
+        first
+            .await
+            .expect_err("caller cancellation should abort")
+            .is_cancelled()
+    );
+
+    let second = task.execute_once_serialized(&query_engine, &frontend, None);
+    futures::pin_mut!(second);
+    assert!(
+        matches!(futures::poll!(second.as_mut()), Poll::Pending),
+        "the next round must remain pending while the retained guard is held"
+    );
+    assert_eq!(
+        execution.calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the pending waiter must not enter the collaborator"
+    );
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("delegate child did not release its guard");
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("next round should proceed after child release")
+            .unwrap(),
+        None
+    );
+    assert_eq!(execution.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn test_scheduled_context_is_retained_until_delegate_child_releases_guard() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    let execution = Arc::new(RetainingExecution {
+        calls: Default::default(),
+        started: Arc::new(tokio::sync::Notify::new()),
+        release: Arc::new(tokio::sync::Notify::new()),
+        finished: Arc::new(tokio::sync::Notify::new()),
+    });
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend, _handler) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend);
+    let scheduled = 1_700_000_000;
+
+    let task_to_run = task.clone();
+    let engine_to_run = query_engine.clone();
+    let frontend_to_run = frontend.clone();
+    let execution_call = tokio::spawn(async move {
+        task_to_run
+            .execute_once_serialized_at_scheduled_time(&engine_to_run, &frontend_to_run, scheduled)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), execution.started.notified())
+        .await
+        .expect("scheduled delegate child did not start");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored before the delegate child released the guard"
+    );
+    execution_call.abort();
+    match execution_call.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("scheduled caller cancellation should abort"),
+    }
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        Some("1700000000000"),
+        "scheduled context restored after caller cancellation but before child release"
+    );
+
+    execution.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), execution.finished.notified())
+        .await
+        .expect("scheduled delegate child did not release its guard");
+    assert_eq!(
+        task.state
+            .read()
+            .unwrap()
+            .query_ctx
+            .extension(FLOW_SCHEDULED_TIME_MILLIS),
+        None,
+        "scheduled context was not restored when child released guard"
+    );
+}
+
+struct BlockingDefaultExecutionHandler {
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    dropped: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+struct DropAck(Option<tokio::sync::oneshot::Sender<()>>);
+
+impl Drop for DropAck {
+    fn drop(&mut self) {
+        if let Some(dropped) = self.0.take() {
+            let _ = dropped.send(());
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for BlockingDefaultExecutionHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        _ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        let _ack = DropAck(self.dropped.lock().unwrap().take());
+        if let Some(entered) = self.entered.lock().unwrap().take() {
+            let _ = entered.send(());
+        }
+        std::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn test_default_execution_remains_inline_and_cancellable() {
+    let query = "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window \
+                 FROM numbers_with_ts GROUP BY time_window, number";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(query).await;
+    register_twe_sink(&query_engine, "missing_sink", 9200);
+    task.mark_all_windows_as_dirty().unwrap();
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(BlockingDefaultExecutionHandler {
+            entered: std::sync::Mutex::new(Some(entered_tx)),
+            dropped: std::sync::Mutex::new(Some(dropped_tx)),
+        });
+    let frontend = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+
+    let task_to_cancel = task.clone();
+    let engine_to_cancel = query_engine.clone();
+    let frontend_to_cancel = frontend.clone();
+    let caller = tokio::spawn(async move {
+        task_to_cancel
+            .execute_once_serialized(&engine_to_cancel, &frontend_to_cancel, None)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), entered_rx)
+        .await
+        .expect("default execution did not dispatch a frontend query")
+        .expect("default execution handler entry notification dropped");
+    caller.abort();
+    match caller.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("default caller cancellation should abort"),
+    }
+    tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+        .await
+        .expect("cancelling default execution did not drop the active frontend future")
+        .expect("default execution drop acknowledgement was not sent");
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        task.execution_lock.clone().lock_owned(),
+    )
+    .await
+    .expect("default execution must not leave an owned child holding the lock");
 }
 
 async fn new_test_task_and_plan_with_missing_sink() -> (BatchingTask, LogicalPlan) {
@@ -86,6 +414,18 @@ async fn new_test_task_engine_and_plan_with_query_and_opts(
     sink_table: &str,
     batch_opts: Arc<BatchingModeOptions>,
 ) -> TestTaskParts {
+    new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        query, sink_table, batch_opts, false,
+    )
+    .await
+}
+
+async fn new_test_task_engine_and_plan_with_query_and_opts_and_required(
+    query: &str,
+    sink_table: &str,
+    batch_opts: Arc<BatchingModeOptions>,
+    exact_sequence_range_required: bool,
+) -> TestTaskParts {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let plan = sql_to_df_plan(
@@ -98,29 +438,32 @@ async fn new_test_task_engine_and_plan_with_query_and_opts(
     .unwrap();
     let (_tx, rx) = tokio::sync::oneshot::channel();
 
-    let task = BatchingTask::try_new(TaskArgs {
-        flow_id: 1,
-        query,
-        plan: plan.clone(),
-        time_window_expr: None,
-        expire_after: None,
-        sink_table_name: [
-            "greptime".to_string(),
-            "public".to_string(),
-            sink_table.to_string(),
-        ],
-        source_table_names: vec![[
-            "greptime".to_string(),
-            "public".to_string(),
-            "numbers_with_ts".to_string(),
-        ]],
-        query_ctx: ctx,
-        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
-        shutdown_rx: rx,
-        batch_opts,
-        flow_eval_interval: None,
-        eval_schedule: None,
-    })
+    let task = BatchingTask::try_new_with_exact_sequence_range_required(
+        TaskArgs {
+            flow_id: 1,
+            query,
+            plan: plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                sink_table.to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts,
+            flow_eval_interval: None,
+            eval_schedule: None,
+        },
+        exact_sequence_range_required,
+    )
     .unwrap();
 
     TestTaskParts {
@@ -379,6 +722,62 @@ fn register_auto_created_aggregate_sink(query_engine: &QueryEngineRef, table_nam
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+async fn configure_source_capability(
+    query_engine: &QueryEngineRef,
+    engine: &str,
+    preserve_row_sequence: bool,
+) {
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let source = catalog_manager
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "numbers_with_ts",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut info = (*source.table_info()).clone();
+    info.meta.engine = engine.to_string();
+    if preserve_row_sequence {
+        info.meta
+            .options
+            .extra_options
+            .insert("preserve_row_sequence".to_string(), "true".to_string());
+    } else {
+        info.meta
+            .options
+            .extra_options
+            .remove("preserve_row_sequence");
+    }
+    let source = Arc::new(Table::new(
+        Arc::new(info),
+        FilterPushDownType::Unsupported,
+        source.data_source(),
+    ));
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .deregister_table_sync(DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+        })
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+            table_id: source.table_info().table_id(),
+            table: source,
+        })
+        .unwrap();
+}
+
 fn dirty_marker() -> DirtyTimeWindows {
     let mut dirty = DirtyTimeWindows::default();
     dirty.set_dirty();
@@ -387,50 +786,6 @@ fn dirty_marker() -> DirtyTimeWindows {
 
 fn flow_error_with_status(status_code: StatusCode) -> Error {
     Err::<(), _>(BoxedError::new(MockError::new(status_code)))
-        .context(crate::error::ExternalSnafu)
-        .unwrap_err()
-}
-
-/// Test-only error that carries a non-RequestOutdated status code but
-/// displays a stale-snapshot-fence marker string, simulating the real-world
-/// scenario where the structured status code is lost through frontend/client
-/// wrapping layers.
-#[derive(Debug)]
-struct StaleFenceTextError {
-    code: StatusCode,
-    message: String,
-}
-
-impl std::fmt::Display for StaleFenceTextError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for StaleFenceTextError {}
-
-impl common_error::ext::ErrorExt for StaleFenceTextError {
-    fn status_code(&self) -> StatusCode {
-        self.code
-    }
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
-impl common_error::ext::StackError for StaleFenceTextError {
-    fn debug_fmt(&self, _: usize, _: &mut Vec<String>) {}
-    fn next(&self) -> Option<&dyn common_error::ext::StackError> {
-        None
-    }
-}
-
-fn flow_error_with_code_and_text(code: StatusCode, text: &str) -> Error {
-    let inner = StaleFenceTextError {
-        code,
-        message: text.to_string(),
-    };
-    Err::<(), _>(BoxedError::new(inner))
         .context(crate::error::ExternalSnafu)
         .unwrap_err()
 }
@@ -545,6 +900,29 @@ fn register_scheduled_now_sink(query_engine: &QueryEngineRef, table_name: &str, 
         .downcast_ref::<MemoryCatalogManager>()
         .unwrap();
     memory_catalog.register_table_sync(request).unwrap();
+}
+
+struct ExactDeltaFailureHandler {
+    invoked: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for ExactDeltaFailureHandler
+{
+    async fn do_query(
+        &self,
+        _query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        self.invoked.store(true, Ordering::SeqCst);
+        assert_eq!(ctx.extension(FLOW_INCREMENTAL_MODE), Some("sequence_range"));
+        assert_eq!(
+            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some("{\"1\":10}")
+        );
+        Err(BoxedError::new(MockError::new(StatusCode::RequestOutdated)))
+    }
 }
 
 struct CaptureScheduledNowHandler {
@@ -1447,78 +1825,6 @@ fn test_query_failure_reason_distinguishes_fenced_repair_stale_fence() {
     );
 }
 
-/// Wrapped errors carrying stale snapshot fence marker text in their
-/// Display/Debug chain should be classified as `SnapshotFenceExpired` on
-/// fenced repair coverage, even when the structured `StatusCode::RequestOutdated`
-/// was lost through client layering. This prevents an infinite retry loop
-/// where the fenced chunk re-sends the same stale `given_seq` every tick.
-#[test]
-fn test_query_failure_reason_text_fallback_stale_snapshot_fence() {
-    let high = BTreeMap::new();
-    let fenced = QueryCoverage::FencedRepairChunk { high: high.clone() };
-
-    // STALE_SNAPSHOT_FENCE marker with a non-RequestOutdated status code
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "gRPC error: STALE_SNAPSHOT_FENCE: snapshot upper bound stale, region: 1024/0",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // REBIND_SNAPSHOT_FENCE marker
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE ... retry_hint: REBIND_SNAPSHOT_FENCE",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // snapshot upper bound stale marker (the natural-language fragment)
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "query failed: snapshot upper bound stale, consider rebinding",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-
-    // Fenced coverage with a generic wrapped error (no stale-fence marker) →
-    // still QueryFailure
-    let generic_err =
-        flow_error_with_code_and_text(StatusCode::Internal, "some transient network error");
-    assert_eq!(
-        BatchingTask::query_failure_reason(&generic_err, &fenced),
-        FlowQueryFallbackReason::QueryFailure
-    );
-
-    // Non-fenced incremental coverage with stale-fence marker text must NOT
-    // classify as SnapshotFenceExpired; it should remain IncrementalQueryFailure.
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE blob in unexpected context",
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&err, &QueryCoverage::IncrementalDelta),
-        FlowQueryFallbackReason::IncrementalQueryFailure
-    );
-
-    // Existing RequestOutdated behavior is unchanged.
-    let outdated_err = flow_error_with_status(StatusCode::RequestOutdated);
-    assert_eq!(
-        BatchingTask::query_failure_reason(&outdated_err, &fenced),
-        FlowQueryFallbackReason::SnapshotFenceExpired
-    );
-    assert_eq!(
-        BatchingTask::query_failure_reason(&outdated_err, &QueryCoverage::IncrementalDelta),
-        FlowQueryFallbackReason::StaleCursor
-    );
-}
-
 #[test]
 fn test_fenced_repair_coverage_produces_snapshot_seq_map_for_distributed_metadata_path() {
     // Covers the metadata boundary between QueryCoverage and the
@@ -1563,11 +1869,28 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
 
     {
         let mut state = task.state.write().unwrap();
+        let error = Err::<(), _>(BoxedError::new(
+            common_recordbatch::error::Error::PollStream {
+                error: datafusion::error::DataFusionError::Shared(Arc::new(
+                    datafusion::error::DataFusionError::External(Box::new(BoxedError::new(
+                        MockError::new(StatusCode::RequestOutdated),
+                    ))),
+                )),
+                location: snafu::Location::default(),
+            },
+        ))
+        .context(crate::error::ExternalSnafu)
+        .unwrap_err();
+        let reason = BatchingTask::query_failure_reason(
+            &error,
+            &QueryCoverage::FencedRepairChunk { high: high.clone() },
+        );
+        assert_eq!(reason, FlowQueryFallbackReason::SnapshotFenceExpired);
         let decision = BatchingTask::apply_query_failure_to_state(
             &mut state,
             std::time::Duration::from_millis(1),
             &QueryCoverage::FencedRepairChunk { high },
-            FlowQueryFallbackReason::SnapshotFenceExpired,
+            reason,
         );
         assert_eq!(
             decision,
@@ -1577,9 +1900,11 @@ async fn test_fenced_repair_stale_fence_next_plan_is_scoped_base_repair() {
             })
         );
         assert!(state.pending_fenced_repair().is_none());
+        assert_eq!(state.dirty_time_windows.len(), 1);
 
         // Simulate the outer execution failure restore for the in-flight chunk.
         state.restore_scoped_windows(&filter);
+        assert_eq!(state.dirty_time_windows.len(), 2);
     }
 
     let plan = task
@@ -1666,82 +1991,6 @@ fn test_fenced_repair_transient_non_stale_failure_retries_same_high() {
     );
 }
 
-/// When `query_failure_reason` classifies a wrapped error as
-/// `SnapshotFenceExpired` via the text-marker fallback (not via
-/// `StatusCode::RequestOutdated`), the state machine must still
-/// abandon the fenced repair and produce a `ScopedBaseRepair` plan
-/// next, exactly like the structured-code path.
-#[tokio::test]
-async fn test_text_fallback_stale_fence_produces_scoped_base_repair() {
-    let TestTaskParts {
-        task,
-        query_engine,
-        ..
-    } = new_time_window_test_task_with_query(
-        "SELECT number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window, number",
-    )
-    .await;
-    let high = BTreeMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]);
-    let filter = {
-        let mut state = task.state.write().unwrap();
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
-        state
-            .dirty_time_windows
-            .add_window(Timestamp::new_second(100), Some(Timestamp::new_second(105)));
-        state.start_fenced_repair(high.clone()).unwrap();
-        next_fenced_repair_filter(&mut state, 1)
-    };
-
-    // Construct a wrapped error that hits the text fallback (non-RequestOutdated
-    // status code with STALE_SNAPSHOT_FENCE marker text).
-    let err = flow_error_with_code_and_text(
-        StatusCode::Internal,
-        "STALE_SNAPSHOT_FENCE: snapshot upper bound stale, retry_hint: REBIND_SNAPSHOT_FENCE",
-    );
-    let coverage = QueryCoverage::FencedRepairChunk { high };
-    let reason = BatchingTask::query_failure_reason(&err, &coverage);
-    assert_eq!(reason, FlowQueryFallbackReason::SnapshotFenceExpired);
-
-    {
-        let mut state = task.state.write().unwrap();
-        let decision = BatchingTask::apply_query_failure_to_state(
-            &mut state,
-            std::time::Duration::from_millis(1),
-            &coverage,
-            reason,
-        );
-        assert_eq!(
-            decision,
-            Some(FlowCheckpointDecision::FallbackToFullSnapshot {
-                previous_mode: CheckpointMode::FullSnapshot,
-                reason: FlowQueryFallbackReason::SnapshotFenceExpired,
-            })
-        );
-        assert!(state.pending_fenced_repair().is_none());
-
-        // Simulate the outer execution failure restore for the in-flight chunk.
-        state.restore_scoped_windows(&filter);
-    }
-
-    let plan = task
-        .gen_query_with_time_window(
-            query_engine,
-            &aggregate_time_window_sink_schema(),
-            &[],
-            false,
-            Some(1),
-        )
-        .await
-        .unwrap()
-        .expect("text-fallback stale fence should restore dirty windows for a fresh scoped repair");
-    assert!(
-        matches!(plan.coverage, QueryCoverage::ScopedBaseRepair),
-        "next plan after text-fallback stale fence should be ScopedBaseRepair"
-    );
-}
-
 #[test]
 fn test_checkpoint_decision_labels_are_stable() {
     let advance = FlowCheckpointDecision::AdvancedIncremental {
@@ -1770,6 +2019,101 @@ fn test_checkpoint_decision_labels_are_stable() {
     assert_eq!(
         FlowQueryFallbackReason::QueryFailure.as_label(),
         "query_failure"
+    );
+}
+
+#[tokio::test]
+async fn test_exact_required_attempt_rejects_revoked_capability_without_extensions() {
+    let task = new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        "SELECT number, ts FROM numbers_with_ts",
+        "exact_required_revoked",
+        incremental_batch_opts(),
+        true,
+    )
+    .await
+    .into_task_and_plan()
+    .0;
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    let checkpoints_before = task.state.read().unwrap().checkpoints().clone();
+
+    let err = task
+        .build_flow_query_extensions(true, true)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("requires exact sequence-range"));
+    assert_eq!(
+        task.state.read().unwrap().checkpoints(),
+        &checkpoints_before
+    );
+}
+
+#[tokio::test]
+async fn test_sequence_range_producer_emits_capable_source_extensions() {
+    let parts = new_test_task_engine_and_plan_with_query_and_opts_and_required(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        incremental_batch_opts(),
+        true,
+    )
+    .await;
+    configure_source_capability(&parts.query_engine, "mito", true).await;
+    let task = parts.task;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1024_u64, 10_u64), (2048_u64, 20_u64)]));
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+
+    assert_eq!(
+        extensions,
+        vec![
+            ("flow.return_region_seq", "true".to_string()),
+            (FLOW_SINK_TABLE_ID, "1".to_string()),
+            (FLOW_INCREMENTAL_MODE, "sequence_range".to_string()),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS,
+                serde_json::json!({"1024": 10, "2048": 20}).to_string(),
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_sequence_range_producer_keeps_memtable_only_for_non_mito_source() {
+    let parts = new_test_task_engine_and_plan_with_query_and_opts(
+        "SELECT number, ts FROM numbers_with_ts",
+        "numbers_with_ts",
+        incremental_batch_opts(),
+    )
+    .await;
+    configure_source_capability(&parts.query_engine, "file", true).await;
+    let task = parts.task;
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1024_u64, 10_u64)]));
+
+    let extensions = task.build_flow_query_extensions(true, true).await.unwrap();
+
+    assert_eq!(
+        extensions,
+        vec![
+            ("flow.return_region_seq", "true".to_string()),
+            (FLOW_SINK_TABLE_ID, "1".to_string()),
+            (
+                FLOW_INCREMENTAL_MODE,
+                FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY.to_string(),
+            ),
+            (
+                FLOW_INCREMENTAL_AFTER_SEQS,
+                serde_json::json!({"1024": 10}).to_string(),
+            ),
+        ]
     );
 }
 
@@ -2053,6 +2397,62 @@ async fn test_full_snapshot_seeding_applies_expire_after_retention_filter() {
 }
 
 #[tokio::test]
+async fn test_force_full_snapshot_retains_expiration_and_reversible_dirty_capture() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    register_twe_sink(&query_engine, "missing_sink", 9201);
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after_for_retention_filter_test());
+
+    let plan = task
+        .gen_insert_plan_with_values_unlocked(&query_engine, Some(1), &BTreeMap::new(), true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(plan.coverage, QueryCoverage::UnfilteredFull));
+    assert!(
+        plan.plan
+            .to_string()
+            .contains("Filter: ts >= TimestampMillisecond(")
+    );
+    assert!(task.state.read().unwrap().dirty_time_windows.is_empty());
+
+    task.restore_dirty_windows(&plan.dirty_restore);
+    assert_eq!(task.state.read().unwrap().dirty_time_windows.len(), 1);
+
+    task.state.write().unwrap().dirty_time_windows.clean();
+    let no_dirty_plan = task
+        .gen_insert_plan_with_values_unlocked(&query_engine, Some(1), &BTreeMap::new(), true)
+        .await
+        .unwrap()
+        .expect("forced full snapshot must bypass the dirty-window notification gate");
+    assert!(matches!(
+        no_dirty_plan.coverage,
+        QueryCoverage::UnfilteredFull
+    ));
+    assert!(
+        no_dirty_plan
+            .plan
+            .to_string()
+            .contains("Filter: ts >= TimestampMillisecond(")
+    );
+}
+
+#[tokio::test]
 async fn test_incremental_plan_does_not_add_dirty_window_filter() {
     let TestTaskParts {
         task,
@@ -2128,15 +2528,115 @@ async fn test_incremental_delta_applies_expire_after_retention_filter() {
 }
 
 #[tokio::test]
-async fn test_successful_incremental_checkpoint_fallback_consumes_unscoped_dirty_signal() {
+async fn test_exact_required_executed_failure_selects_full_snapshot_repair() {
     let TestTaskParts {
-        task,
+        mut task,
         query_engine,
         ..
     } = new_time_window_test_task_with_query(
         "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
     )
     .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    register_twe_sink(&query_engine, "missing_sink", 9201);
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .exact_sequence_range_required = true;
+    {
+        let mut state = task.state.write().unwrap();
+        state.advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+        state
+            .dirty_time_windows
+            .add_window(Timestamp::new_second(0), Some(Timestamp::new_second(5)));
+    }
+    let sink_schema = aggregate_time_window_sink_schema();
+    let plan_info = task
+        .gen_insert_plan_unlocked(&query_engine, Some(1))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        plan_info.coverage,
+        QueryCoverage::IncrementalDelta
+    ));
+
+    let handler_invoked = Arc::new(AtomicBool::new(false));
+    let handler: Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError> =
+        Arc::new(ExactDeltaFailureHandler {
+            invoked: handler_invoked.clone(),
+        });
+    let frontend_client = Arc::new(FrontendClient::from_grpc_handler(
+        Arc::downgrade(&handler),
+        QueryOptions::default(),
+    ));
+    let raw = task
+        .execute_plan_unlocked(
+            &query_engine,
+            &frontend_client,
+            &plan_info.plan,
+            &plan_info.dirty_restore,
+            &plan_info.coverage,
+        )
+        .await
+        .expect("raw executor should return the dispatched execution result")
+        .expect("raw executor should dispatch the exact delta");
+    assert!(
+        raw.0.is_err(),
+        "the dispatched exact delta must fail through the injected frontend handler"
+    );
+    assert!(
+        handler_invoked.load(Ordering::SeqCst),
+        "the injected frontend handler must receive the exact delta"
+    );
+    // The raw executor is a delegate-safe primitive: it logs failures but does not change
+    // checkpoint state. Restore the consumed work, then let the default wrapper make its one
+    // failure transition and restore it again.
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+    }
+    task.restore_dirty_windows(&plan_info.dirty_restore);
+    let outcome = task
+        .execute_once_default_unlocked(&query_engine, &frontend_client, Some(1))
+        .await;
+    assert!(outcome.result.is_err());
+
+    {
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::FullSnapshot);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+        assert_eq!(state.dirty_time_windows.len(), 1);
+        assert_eq!(
+            state.dirty_time_windows.window_size(),
+            std::time::Duration::from_secs(5)
+        );
+    }
+
+    let repair = task
+        .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
+        .await
+        .unwrap()
+        .expect("failed exact delta must retry through existing base repair");
+    assert!(matches!(repair.coverage, QueryCoverage::ScopedBaseRepair));
+    assert!(repair.plan.to_string().contains("Filter:"));
+    assert!(!repair.plan.to_string().contains("Left Join"));
+}
+
+#[tokio::test]
+async fn test_exact_required_incomplete_proof_selects_base_recomputation() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS number, date_bin(INTERVAL '5 second', ts) AS time_window FROM numbers_with_ts GROUP BY time_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .exact_sequence_range_required = true;
     {
         let mut state = task.state.write().unwrap();
         state.advance_checkpoints(HashMap::from([(1_u64, 10_u64), (2_u64, 20_u64)]));
@@ -2186,13 +2686,24 @@ async fn test_successful_incremental_checkpoint_fallback_consumes_unscoped_dirty
         assert!(state.dirty_time_windows.is_empty());
     }
 
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(5), Some(Timestamp::new_second(10)));
     let followup = task
         .gen_query_with_time_window(query_engine, &sink_schema, &[], false, Some(1))
         .await
-        .unwrap();
+        .unwrap()
+        .expect("new dirty work must use base recomputation after incomplete delta proof");
+    assert!(matches!(followup.coverage, QueryCoverage::ScopedBaseRepair));
     assert!(
-        followup.is_none(),
-        "successful fallback consumes the dirty signal instead of re-running it"
+        followup.plan.to_string().contains("Filter:"),
+        "base recomputation must retain its dirty-window filter"
+    );
+    assert!(
+        !followup.plan.to_string().contains("Left Join"),
+        "base recomputation must not replay the additive incremental sink merge"
     );
 }
 
@@ -2274,6 +2785,97 @@ async fn test_executed_query_failure_restores_scoped_dirty_windows_for_flush_pat
 }
 
 #[tokio::test]
+async fn test_exact_required_unsupported_plan_keeps_exact_retry_state() {
+    let query_engine = create_test_query_engine();
+    configure_source_capability(&query_engine, "mito", true).await;
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(
+        ctx.clone(),
+        query_engine.clone(),
+        "SELECT number, ts FROM numbers_with_ts",
+        true,
+    )
+    .await
+    .unwrap();
+    let (sink_table, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            "numbers_with_ts".to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(sink_table),
+        ))),
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new_with_exact_sequence_range_required(
+        TaskArgs {
+            flow_id: 1,
+            query: "SELECT number, ts FROM numbers_with_ts",
+            plan: dml_plan.clone(),
+            time_window_expr: None,
+            expire_after: None,
+            sink_table_name: [
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ],
+            source_table_names: vec![[
+                "greptime".to_string(),
+                "public".to_string(),
+                "numbers_with_ts".to_string(),
+            ]],
+            query_ctx: ctx,
+            catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+            shutdown_rx: rx,
+            batch_opts: incremental_batch_opts(),
+            flow_eval_interval: None,
+            eval_schedule: None,
+        },
+        true,
+    )
+    .unwrap();
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+    task.state
+        .write()
+        .unwrap()
+        .dirty_time_windows
+        .add_window(Timestamp::new_second(10), Some(Timestamp::new_second(15)));
+
+    let (frontend_client, _) = FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend_client = Arc::new(frontend_client);
+    for _ in 0..2 {
+        let err = task
+            .execute_logical_plan_unlocked(
+                &query_engine,
+                &frontend_client,
+                &dml_plan,
+                &DirtyRestore::Unscoped(dirty_range(10, 15)),
+                &QueryCoverage::IncrementalDelta,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("requires exact sequence-range"));
+
+        let state = task.state.read().unwrap();
+        assert_eq!(state.checkpoint_mode(), CheckpointMode::Incremental);
+        assert_eq!(state.checkpoints(), &BTreeMap::from([(1_u64, 10_u64)]));
+        assert_eq!(state.dirty_time_windows.len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
@@ -2342,7 +2944,10 @@ async fn test_prepare_plan_for_incremental_disables_on_non_aggregate() {
         CheckpointMode::Incremental
     );
 
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     assert!(incremental_plan.is_none());
     let state = task.state.read().unwrap();
     assert!(state.is_incremental_disabled());
@@ -2419,6 +3024,7 @@ async fn test_unsafe_incremental_plan_skip_restores_dirty_without_query() {
 
     let result = task
         .execute_logical_plan_unlocked(
+            &query_engine,
             &Arc::new(frontend_client),
             &dml_plan,
             &dirty_restore,
@@ -2505,7 +3111,7 @@ async fn test_prepare_plan_for_incremental_group_by_without_merge_columns_uses_o
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
 
     let incremental_plan = task
-        .prepare_plan_for_incremental(&dml_plan)
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
         .await
         .unwrap()
         .expect("plain GROUP BY is incremental-safe without a rewrite");
@@ -2550,7 +3156,10 @@ async fn test_auto_created_sql_aggregate_sink_reaches_incremental_safe() {
         .write()
         .unwrap()
         .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
-    let incremental_plan = task.prepare_plan_for_incremental(&dml_plan).await.unwrap();
+    let incremental_plan = task
+        .prepare_plan_for_incremental(&query_engine, &dml_plan)
+        .await
+        .unwrap();
     let incremental_safe = incremental_plan.is_some();
 
     assert!(incremental_safe);

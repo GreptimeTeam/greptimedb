@@ -143,13 +143,15 @@ impl DfLogicalPlanner {
             // notice format is already set in query context, so can be ignore here
             Ok(LogicalPlan::Analyze(Analyze {
                 verbose,
+                format: ExplainFormat::Indent,
                 input: plan,
                 schema,
+                analyze_level: None,
+                analyze_categories: None,
             }))
         } else {
             let stringified_plans = vec![plan.to_stringified(PlanType::InitialLogicalPlan)];
 
-            // default to configuration value
             let options = self.session_state.config().options();
             let format = format
                 .map(|x| ExplainFormat::from_str(&x))
@@ -163,6 +165,7 @@ impl DfLogicalPlanner {
                 stringified_plans,
                 schema,
                 logical_optimization_succeeded: false,
+                show_statistics: None,
             }))
         }
     }
@@ -500,7 +503,8 @@ impl DfLogicalPlanner {
                     if let DfExpr::Cast(cast) = e
                         && let DfExpr::Placeholder(ph) = &*cast.expr
                     {
-                        placeholder_types.insert(ph.id.clone(), Some(cast.data_type.clone()));
+                        placeholder_types
+                            .insert(ph.id.clone(), Some(cast.field.data_type().clone()));
                         casted_placeholders.insert(ph.id.clone());
                     }
 
@@ -635,7 +639,7 @@ impl DfLogicalPlanner {
 ///
 /// DataFusion first resolves the leading `j.o.l` through
 /// `JsonExprPlanner::plan_compound_identifier`, which produces an untyped
-/// `json_get` with path `o.l`. Before invoking `JsonExprPlanner::plan_field_access`,
+/// `json_get` with path `$.o.l`. Before invoking `JsonExprPlanner::plan_field_access`,
 /// however, DataFusion eagerly converts every remaining access into a
 /// `GetFieldAccess`. It accepts string values but not [`SqlExpr::Identifier`]s
 /// in [`AccessExpr::Dot`] after a subscript. Without this normalization, that
@@ -648,8 +652,8 @@ impl DfLogicalPlanner {
 /// changes neither the SQL text nor the dot accesses into subscript nodes: the
 /// resulting AST is conceptually `j.o.l[1].'inner'.'l'[2]`. DataFusion converts
 /// the string-valued dot accesses into named field accesses, which
-/// `plan_field_access` safely encodes as bracket members. It can then extend the
-/// JSON path to `o.l[1]["inner"]["l"][2]`.
+/// `plan_field_access` safely encodes as dot members, quoting names when needed. It can then extend the
+/// JSON path to `$.o.l[1].inner.l[2]`.
 ///
 /// This behavior is unchanged in the latest upstream releases checked here:
 /// DataFusion 55.0.0 and sqlparser 0.62.0.

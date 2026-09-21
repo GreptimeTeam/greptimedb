@@ -25,12 +25,55 @@ use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
 use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
+use crate::row_converter::sparse::{
+    RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
+};
 use crate::row_converter::{PrimaryKeyCodec, SortField, build_primary_key_codec_with_fields};
 
 /// Encodes index values according to their data types for sorting and storage use.
 pub struct IndexValueCodec;
 
 impl IndexValueCodec {
+    /// Returns the index bytes of a value, or `None` for NULL.
+    /// Strings borrow their original UTF-8 bytes. For other non-null values, this
+    /// clears and reuses `buffer` rather than appending as [`Self::encode_nonnull_value`] does.
+    pub fn encode_value<'a>(
+        value: ValueRef<'a>,
+        field: &SortField,
+        buffer: &'a mut Vec<u8>,
+    ) -> Result<Option<&'a [u8]>> {
+        if value.is_null() {
+            return Ok(None);
+        }
+        if field.encode_data_type().is_string() {
+            return Ok(value
+                .try_into_string()
+                .context(FieldTypeMismatchSnafu)?
+                .map(str::as_bytes));
+        }
+        buffer.clear();
+        Self::encode_nonnull_value(value, field, buffer)?;
+        Ok(Some(buffer))
+    }
+
+    /// Extracts one sparse PK column in index format, without constructing a Value.
+    /// Numeric reserved fields borrow the PK; strings are unchunked into the reusable buffer.
+    /// Missing and null labels return None, whereas an empty string returns Some(&[]).
+    pub fn encode_sparse_value<'a, 'pk: 'a>(
+        pk: &mut SparsePrimaryKeyView<'pk, '_>,
+        column_id: ColumnId,
+        buffer: &'a mut Vec<u8>,
+    ) -> Result<Option<&'a [u8]>> {
+        if matches!(
+            column_id,
+            RESERVED_COLUMN_ID_TABLE_ID | RESERVED_COLUMN_ID_TSID
+        ) {
+            return pk.encoded_value(column_id);
+        }
+        pk.label(column_id, buffer)
+            .map(|value| value.map(str::as_bytes))
+    }
+
     /// Serializes a non-null `ValueRef` using the data type defined in `SortField` and writes
     /// the result into a buffer.
     ///
@@ -126,6 +169,40 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+
+    #[test]
+    fn borrowed_values_preserve_index_encoding_with_reused_buffer() {
+        let mut buffer = vec![0xff; 64];
+        for value in [
+            Value::from("中文\0abcdefgh"),
+            Value::from(""),
+            Value::Int64(-42),
+            Value::UInt64(u64::MAX),
+            Value::Boolean(true),
+            Value::Binary(vec![0, 1, 255].into()),
+            Value::Null,
+            Value::from("after-null"),
+        ] {
+            let field = SortField::new(value.data_type());
+            let mut expected = Vec::new();
+            if !value.is_null() {
+                IndexValueCodec::encode_nonnull_value(value.as_value_ref(), &field, &mut expected)
+                    .unwrap();
+            }
+            let encoded =
+                IndexValueCodec::encode_value(value.as_value_ref(), &field, &mut buffer).unwrap();
+            assert_eq!(encoded, (!value.is_null()).then_some(expected.as_slice()));
+        }
+        for (value, field) in [
+            (ValueRef::UInt64(1), ConcreteDataType::string_datatype()),
+            (ValueRef::String("x"), ConcreteDataType::uint64_datatype()),
+        ] {
+            assert!(matches!(
+                IndexValueCodec::encode_value(value, &SortField::new(field), &mut buffer),
+                Err(Error::FieldTypeMismatch { .. })
+            ));
+        }
+    }
 
     #[test]
     fn test_encode_value_basic() {

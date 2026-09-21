@@ -20,7 +20,7 @@ use datafusion::datasource::file_format::file_compression_type::FileCompressionT
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvSource, FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource, FileStream,
+    CsvSource, FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource, FileStreamBuilder,
     JsonOpener, JsonSource,
 };
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -110,13 +110,12 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     let size = store.read(origin_path).await.unwrap().len();
 
     let config = scan_config(None, origin_path, Arc::new(JsonSource::new(schema)));
-    let stream = FileStream::new(
-        &config,
-        0,
-        Arc::new(json_opener),
-        &ExecutionPlanMetricsSet::new(),
-    )
-    .unwrap();
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0)
+        .with_file_opener(Arc::new(json_opener))
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()
+        .unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_json");
 
@@ -162,7 +161,12 @@ pub async fn setup_stream_to_csv_test(
             0,
         )
         .unwrap();
-    let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0)
+        .with_file_opener(csv_opener)
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()
+        .unwrap();
 
     let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");
 

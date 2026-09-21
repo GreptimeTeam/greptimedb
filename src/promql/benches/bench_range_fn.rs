@@ -37,13 +37,18 @@ use datatypes::arrow::datatypes::{DataType, Field};
 use futures::StreamExt;
 use promql::extension_plan::RangeManipulate;
 use promql::functions::{
-    Changes, Delta, IDelta, Increase, PredictLinear, QuantileOverTime, Rate, Resets, SumOverTime,
+    AbsentOverTime, Changes, CountOverTime, Delta, DoubleExponentialSmoothing, IDelta, Increase,
+    LastOverTime, MaxOverTime, MinOverTime, PredictLinear, PresentOverTime, QuantileOverTime, Rate,
+    Resets, SumOverTime,
 };
 use promql::range_array::RangeArray;
 
+/// A `window_step` below `window_size` makes consecutive windows overlap, which is the normal
+/// PromQL range query shape.
 fn build_sliding_ranges(
     num_points: usize,
     window_size: u32,
+    window_step: usize,
     values: Vec<f64>,
     eval_offset_ms: i64,
 ) -> (RangeArray, RangeArray, Arc<TimestampMillisecondArray>) {
@@ -59,10 +64,12 @@ fn build_sliding_ranges(
         0
     };
 
-    let ranges: Vec<(u32, u32)> = (0..num_windows).map(|i| (i as u32, window_size)).collect();
+    let offsets: Vec<usize> = (0..num_windows).step_by(window_step).collect();
+    let ranges: Vec<(u32, u32)> = offsets.iter().map(|&i| (i as u32, window_size)).collect();
 
-    let eval_ts: Vec<i64> = (0..num_windows)
-        .map(|i| timestamps[i + window_size as usize - 1] + eval_offset_ms)
+    let eval_ts: Vec<i64> = offsets
+        .iter()
+        .map(|&i| timestamps[i + window_size as usize - 1] + eval_offset_ms)
         .collect();
     let eval_ts_array = Arc::new(TimestampMillisecondArray::from(eval_ts));
 
@@ -121,11 +128,12 @@ fn build_changing_values(num_points: usize) -> Vec<f64> {
 fn make_extrapolated_rate_input(
     num_points: usize,
     window_size: u32,
+    window_step: usize,
     values: Vec<f64>,
     eval_offset_ms: i64,
 ) -> Vec<ColumnarValue> {
     let (ts_range, val_range, eval_ts) =
-        build_sliding_ranges(num_points, window_size, values, eval_offset_ms);
+        build_sliding_ranges(num_points, window_size, window_step, values, eval_offset_ms);
     let range_length = window_size as i64 * 1000;
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
@@ -192,8 +200,13 @@ fn make_delta_rate_comparison_input(
 }
 
 fn make_idelta_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -205,7 +218,7 @@ fn make_edge_count_input(
     window_size: u32,
     values: Vec<f64>,
 ) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, values, 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(num_points, window_size, 1, values, 0);
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -228,9 +241,27 @@ fn make_edge_count_input_with_ranges(
     ]
 }
 
+fn make_extrema_input_with_ranges(values: Vec<f64>, ranges: Vec<(u32, u32)>) -> Vec<ColumnarValue> {
+    let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+        (0..values.len()).map(|index| index as i64 * 1_000),
+    ));
+    let values = Arc::new(Float64Array::from(values));
+    let timestamp_ranges = RangeArray::from_ranges(timestamps, ranges.clone()).unwrap();
+    let value_ranges = RangeArray::from_ranges(values, ranges).unwrap();
+    vec![
+        ColumnarValue::Array(Arc::new(timestamp_ranges.into_dict())),
+        ColumnarValue::Array(Arc::new(value_ranges.into_dict())),
+    ]
+}
+
 fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
@@ -239,13 +270,38 @@ fn make_quantile_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue
 }
 
 fn make_predict_linear_input(num_points: usize, window_size: u32) -> Vec<ColumnarValue> {
-    let (ts_range, val_range, _) =
-        build_sliding_ranges(num_points, window_size, build_default_values(num_points), 0);
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        1,
+        build_default_values(num_points),
+        0,
+    );
     vec![
         ColumnarValue::Array(Arc::new(ts_range.into_dict())),
         ColumnarValue::Array(Arc::new(val_range.into_dict())),
         // predict 60s into the future
         ColumnarValue::Scalar(ScalarValue::Int64(Some(60))),
+    ]
+}
+
+fn make_double_exponential_smoothing_input(
+    num_points: usize,
+    window_size: u32,
+    window_step: usize,
+) -> Vec<ColumnarValue> {
+    let (ts_range, val_range, _) = build_sliding_ranges(
+        num_points,
+        window_size,
+        window_step,
+        build_gauge_values(num_points),
+        0,
+    );
+    vec![
+        ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+        ColumnarValue::Array(Arc::new(val_range.into_dict())),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.5))),
+        ColumnarValue::Scalar(ScalarValue::Float64(Some(0.1))),
     ]
 }
 
@@ -338,6 +394,83 @@ fn assert_edge_count_output(
     assert_eq!(actual, expected);
 }
 
+fn bench_presence_range_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("presence_range_fn");
+    let values = build_default_values(4_096);
+    let overlapping = PreparedUdfCall::new(make_edge_count_input(4_096, 20, values.clone()));
+    let low_coverage_ranges = vec![
+        (0, 4),
+        (512, 4),
+        (1_024, 4),
+        (1_536, 4),
+        (2_048, 4),
+        (2_560, 4),
+        (3_584, 4),
+        (4_092, 4),
+    ];
+    let low_coverage = PreparedUdfCall::new(make_edge_count_input_with_ranges(
+        values,
+        low_coverage_ranges,
+    ));
+    let udfs = [
+        ("count_over_time", CountOverTime::scalar_udf()),
+        ("last_over_time", LastOverTime::scalar_udf()),
+        ("present_over_time", PresentOverTime::scalar_udf()),
+        ("absent_over_time", AbsentOverTime::scalar_udf()),
+    ];
+
+    for (name, udf) in &udfs {
+        group.bench_with_input(BenchmarkId::new(*name, "N4096_overlap_w20"), &(), |b, _| {
+            b.iter(|| invoke_prepared(udf, &overlapping))
+        });
+        group.bench_with_input(BenchmarkId::new(*name, "N4096_windows8_w4"), &(), |b, _| {
+            b.iter(|| invoke_prepared(udf, &low_coverage))
+        });
+    }
+
+    group.finish();
+}
+
+fn extrema_oracle(
+    values: &[f64],
+    ranges: &[(u32, u32)],
+    is_better: impl Fn(f64, f64) -> bool,
+) -> Vec<Option<f64>> {
+    ranges
+        .iter()
+        .map(|(offset, length)| {
+            let window = &values[*offset as usize..(*offset + *length) as usize];
+            let mut extrema = *window.first()?;
+            for value in &window[1..] {
+                if is_better(*value, extrema) || extrema.is_nan() {
+                    extrema = *value;
+                }
+            }
+            Some(extrema)
+        })
+        .collect()
+}
+
+fn assert_extrema_output(
+    udf: &datafusion::logical_expr::ScalarUDF,
+    prepared: &PreparedUdfCall,
+    expected: &[Option<f64>],
+) {
+    let output = invoke_prepared_output(udf, prepared);
+    let ColumnarValue::Array(output) = output else {
+        panic!("extrema range UDF must return an array");
+    };
+    let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+    assert_eq!(output.len(), expected.len());
+    for (actual, expected) in output.iter().zip(expected) {
+        match (actual, expected) {
+            (Some(actual), Some(expected)) => assert_eq!(actual.to_bits(), expected.to_bits()),
+            (None, None) => {}
+            (actual, expected) => panic!("expected {expected:?}, got {actual:?}"),
+        }
+    }
+}
+
 fn bench_range_functions(c: &mut Criterion) {
     let mut group = c.benchmark_group("range_fn");
 
@@ -355,6 +488,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_monotonic_counter_values(n),
             500,
         ));
@@ -370,6 +504,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_resetting_counter_values(n),
             500,
         ));
@@ -386,6 +521,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_monotonic_counter_values(n),
             500,
         ));
@@ -401,6 +537,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_resetting_counter_values(n),
             500,
         ));
@@ -417,6 +554,7 @@ fn bench_range_functions(c: &mut Criterion) {
         let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
             n,
             w,
+            1,
             build_gauge_values(n),
             500,
         ));
@@ -468,6 +606,26 @@ fn bench_range_functions(c: &mut Criterion) {
             BenchmarkId::new("predict_linear", format!("n{n}_w{w}")),
             &(n, w),
             |b, _| b.iter(|| invoke_prepared(&predict_udf, &prepared)),
+        );
+    }
+
+    // --- double_exponential_smoothing ---
+    let smoothing_udf = DoubleExponentialSmoothing::scalar_udf();
+    for (window_size, window_step, case) in [
+        (4, 1, "N4096_w4_overlap"),
+        (20, 1, "N4096_w20_overlap"),
+        (240, 1, "N4096_w240_overlap"),
+        (240, 240, "N4096_w240_nonoverlap"),
+    ] {
+        let prepared = PreparedUdfCall::new(make_double_exponential_smoothing_input(
+            4_096,
+            window_size,
+            window_step,
+        ));
+        group.bench_with_input(
+            BenchmarkId::new("double_exponential_smoothing", case),
+            &(),
+            |b, _| b.iter(|| invoke_prepared(&smoothing_udf, &prepared)),
         );
     }
 
@@ -547,6 +705,156 @@ fn bench_delta_rate_comparison(c: &mut Criterion) {
             &(),
             |b, _| b.iter(|| invoke_prepared(&cumulative_udf, &cumulative)),
         );
+    }
+
+    group.finish();
+}
+
+/// Counter-reset correction is reduced per window, so its cost follows how much the windows
+/// overlap and how many resets each one covers. `range_fn` fixes the query step at one sample
+/// and `delta_rate_comparison` at four and twenty, so sweep both dimensions here.
+fn bench_rate_window_steps(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rate_window_steps");
+    let rate_udf = Rate::scalar_udf();
+    let num_points = 20_280;
+    let window_size = 120u32;
+
+    // No resets, one reset per 24 window widths, and roughly three resets per window.
+    for reset_period in [0usize, 2_880, 37] {
+        let values: Vec<f64> = match reset_period {
+            0 => (0..num_points).map(|i| i as f64).collect(),
+            period => (0..num_points).map(|i| (i % period) as f64).collect(),
+        };
+        for window_step in [1usize, 10, 120] {
+            let prepared = PreparedUdfCall::new(make_extrapolated_rate_input(
+                num_points,
+                window_size,
+                window_step,
+                values.clone(),
+                500,
+            ));
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "rate_counter",
+                    format!("reset{reset_period}_step{window_step}"),
+                ),
+                &(),
+                |b, _| b.iter(|| invoke_prepared(&rate_udf, &prepared)),
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_extrema_functions(c: &mut Criterion) {
+    let mut group = c.benchmark_group("extrema_fn");
+    let num_points = 4_096;
+    let values = build_gauge_values(num_points);
+    let min_udf = MinOverTime::scalar_udf();
+    let max_udf = MaxOverTime::scalar_udf();
+    // Cases meant to reuse candidates use 40-sample windows: the UDF rescans batches
+    // whose windows average fewer than 32 samples.
+    let mut backwards_ranges = (0..=num_points - 40)
+        .step_by(5)
+        .map(|offset| (offset as u32, 40))
+        .collect::<Vec<_>>();
+    backwards_ranges.extend((0..=512).step_by(5).map(|offset| (offset as u32, 40)));
+
+    // The last two controls use explicit ranges instead of a regular window/step sweep.
+    let cases = vec![
+        (
+            "w4_step1",
+            (0..=num_points - 4)
+                .map(|offset| (offset as u32, 4))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w40_step1",
+            (0..=num_points - 40)
+                .map(|offset| (offset as u32, 40))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w40_step5",
+            (0..=num_points - 40)
+                .step_by(5)
+                .map(|offset| (offset as u32, 40))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w240_step1",
+            (0..=num_points - 240)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        // A quarter of the window is the widest step that still reuses candidates.
+        (
+            "w240_step60",
+            (0..=num_points - 240)
+                .step_by(60)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        (
+            "w240_step240",
+            (0..=num_points - 240)
+                .step_by(240)
+                .map(|offset| (offset as u32, 240))
+                .collect::<Vec<_>>(),
+        ),
+        // A query ending one window past the last sample closes on an empty window.
+        (
+            "w240_step240_trailing_empty",
+            (0..=num_points - 240)
+                .step_by(240)
+                .map(|offset| (offset as u32, 240))
+                .chain([(0, 0)])
+                .collect::<Vec<_>>(),
+        ),
+        ("backwards_reset_rebuild_w40_step5", backwards_ranges),
+        (
+            "low_coverage_full_backing_w4",
+            vec![
+                (0, 4),
+                (512, 4),
+                (1_024, 4),
+                (1_536, 4),
+                (2_048, 4),
+                (2_560, 4),
+                (3_584, 4),
+                (4_092, 4),
+            ],
+        ),
+    ];
+    let functions = [
+        ("min_over_time", &min_udf, true),
+        ("max_over_time", &max_udf, false),
+    ];
+
+    for (case_name, ranges) in cases {
+        let prepared = PreparedUdfCall::new(make_extrema_input_with_ranges(
+            values.clone(),
+            ranges.clone(),
+        ));
+        for (function_name, udf, is_min) in functions {
+            let expected = extrema_oracle(&values, &ranges, |value, extrema| {
+                if is_min {
+                    value < extrema
+                } else {
+                    value > extrema
+                }
+            });
+            assert_extrema_output(udf, &prepared, &expected);
+            group.bench_with_input(
+                BenchmarkId::new(
+                    format!("{function_name}_{case_name}"),
+                    format!("N{num_points}"),
+                ),
+                &(),
+                |b, _| b.iter(|| invoke_prepared(udf, &prepared)),
+            );
+        }
     }
 
     group.finish();
@@ -840,6 +1148,7 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
             0,
             (evaluations as i64 - 1) * RANGE_MANIPULATE_CADENCE_MS,
             RANGE_MANIPULATE_CADENCE_MS,
+            0,
             window_points as i64 * RANGE_MANIPULATE_CADENCE_MS,
             "timestamp".to_string(),
             field_columns,
@@ -880,7 +1189,10 @@ fn bench_range_manipulate_wall_time(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_range_functions,
+    bench_presence_range_functions,
     bench_delta_rate_comparison,
+    bench_rate_window_steps,
     bench_edge_count_functions,
+    bench_extrema_functions,
     bench_range_manipulate_wall_time
 );

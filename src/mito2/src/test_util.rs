@@ -682,6 +682,7 @@ impl TestEnv {
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
+                &data_home,
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
@@ -693,6 +694,7 @@ impl TestEnv {
             .await
             .unwrap(),
             LogStoreImpl::Kafka(log_store) => WorkerGroup::start(
+                &data_home,
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
@@ -1351,6 +1353,7 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows,
                 hint: None,
                 partition_expr_version: None,

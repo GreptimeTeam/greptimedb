@@ -30,6 +30,7 @@
 //! Implementations of `rate`, `increase` and `delta` functions in PromQL.
 
 use std::fmt::Display;
+use std::ops::Range;
 use std::sync::Arc;
 
 use datafusion::arrow::array::{Float64Array, Float64Builder, TimestampMillisecondArray};
@@ -180,99 +181,120 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("validated by extract_range_dict")
             .values();
-        let all_values = value_dict
+        let value_array = value_dict
             .values()
             .as_any()
             .downcast_ref::<Float64Array>()
-            .expect("validated by extract_range_dict")
-            .values();
+            .expect("validated by extract_range_dict");
+        // A NULL field value means the series has no sample at that timestamp, so the padding
+        // under a null slot must not be read. Skip the per-window null scan when the whole
+        // backing array is null-free, which is the common case.
+        let has_nulls = value_array.null_count() > 0;
+        let all_values = value_array.values();
         let eval_ts = eval_ts_array.values();
 
         let mut result_builder = Float64Builder::with_capacity(num_windows);
         let range_length = self.range_length;
         let range_length_secs = range_length as f64 / 1000.0;
 
-        let mut counter_correction = 0.0;
-        let mut prev_offset = usize::MAX;
-        let mut prev_length = 0usize;
+        // Range windows normally overlap heavily, so scanning every one for resets costs far
+        // more than a single pass over the values. Index the reset positions once that is the
+        // cheaper side, and stop counting as soon as the requested pairs pass that budget,
+        // which heavy overlap does within the first few windows. A short lookback with a long
+        // step is the shape that never reaches it, and there the per-window scans do win.
+        let mut reset_index = if IS_COUNTER && !has_nulls {
+            let budget = all_values.len().saturating_sub(1);
+            let mut scanned_pairs = 0usize;
+            keys.iter()
+                .any(|&key| {
+                    scanned_pairs =
+                        scanned_pairs.saturating_add(unpack(key).1.saturating_sub(1) as usize);
+                    scanned_pairs > budget
+                })
+                .then(|| CounterResetIndex::new(all_values))
+        } else {
+            None
+        };
 
         for index in 0..num_windows {
             let (raw_offset, raw_length) = unpack(keys[index]);
             let offset = raw_offset as usize;
             let length = raw_length as usize;
 
-            if length < 2 {
+            let end = offset + length;
+            let (first_index, last_index, sample_count) = if has_nulls {
+                match valid_window_bounds(value_array, offset, length) {
+                    Some(bounds) => bounds,
+                    None => {
+                        result_builder.append_null();
+                        continue;
+                    }
+                }
+            } else {
+                (offset, end.saturating_sub(1), length)
+            };
+
+            if sample_count < 2 {
                 result_builder.append_null();
-                prev_offset = usize::MAX;
                 continue;
             }
 
-            let end = offset + length;
-            let first_value = all_values[offset];
-            let last_value = all_values[end - 1];
+            let first_value = all_values[first_index];
+            let last_value = all_values[last_index];
 
-            let result_value = if IS_COUNTER {
-                // Adjacent normalized windows usually slide forward by one sample. Reuse the
-                // previous window's accumulated reset correction and adjust only the dropped and
-                // newly added edges, falling back to a full scan when the layout changes.
-                if prev_offset != usize::MAX && offset == prev_offset + 1 && length == prev_length {
-                    if all_values[prev_offset + 1] < all_values[prev_offset] {
-                        counter_correction -= all_values[prev_offset];
-                    }
-                    if all_values[end - 1] < all_values[end - 2] {
-                        counter_correction += all_values[end - 2];
-                    }
+            let mut result_value = last_value - first_value;
+            if IS_COUNTER {
+                result_value = if has_nulls {
+                    add_counter_resets_between_samples(
+                        result_value,
+                        value_array,
+                        first_index,
+                        last_index,
+                    )
                 } else {
-                    counter_correction = 0.0;
-                    for pair in all_values[offset..end].windows(2) {
-                        if pair[1] < pair[0] {
-                            counter_correction += pair[0];
-                        }
+                    match &mut reset_index {
+                        Some(reset_index) => reset_index.add_resets(result_value, offset, end),
+                        None => add_counter_resets(result_value, &all_values[offset..end]),
                     }
-                }
-                last_value - first_value + counter_correction
-            } else {
-                last_value - first_value
-            };
+                };
+            }
 
-            prev_offset = offset;
-            prev_length = length;
-
-            let first_ts = all_timestamps[offset];
-            let last_ts = all_timestamps[end - 1];
+            let first_ts = all_timestamps[first_index];
+            let last_ts = all_timestamps[last_index];
             let range_end = eval_ts[index];
             let range_start = range_end - range_length;
             let sampled_interval_ms = (last_ts - first_ts) as f64;
-            let average_interval_ms = sampled_interval_ms / (length - 1) as f64;
+            let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
             let mut duration_to_start_ms = (first_ts - range_start) as f64;
-            let duration_to_end_ms = (range_end - last_ts) as f64;
+            let mut duration_to_end_ms = (range_end - last_ts) as f64;
+            let extrapolation_threshold = average_interval_ms * 1.1;
 
-            // Counters cannot be negative, so Prometheus allows the extrapolation window to snap
-            // back to the inferred zero point instead of extending into negative values.
+            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
+            // close enough, otherwise only half an average sampling interval, which is the guess
+            // for where the series actually starts or ends.
+            if duration_to_start_ms >= extrapolation_threshold {
+                duration_to_start_ms = average_interval_ms / 2.0;
+            }
+            // Counters cannot be negative, so the extrapolation can snap back to the inferred
+            // zero point instead of extending into negative values. Prometheus applies this
+            // after the threshold clamp, so it can only shorten the leading extrapolation.
             if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
                 let duration_to_zero = sampled_interval_ms * (first_value / result_value);
                 if duration_to_zero < duration_to_start_ms {
                     duration_to_start_ms = duration_to_zero;
                 }
             }
-
-            let extrapolation_threshold = average_interval_ms * 1.1;
-            let mut extrapolated_interval_ms = sampled_interval_ms;
-
-            // Mirror Prometheus extrapolation: extend to the real range boundary when a sample is
-            // close enough, otherwise add half an average sampling interval on that side.
-            if duration_to_start_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_start_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
-            }
-            if duration_to_end_ms < extrapolation_threshold {
-                extrapolated_interval_ms += duration_to_end_ms;
-            } else {
-                extrapolated_interval_ms += average_interval_ms / 2.0;
+            if duration_to_end_ms >= extrapolation_threshold {
+                duration_to_end_ms = average_interval_ms / 2.0;
             }
 
-            let mut factor = extrapolated_interval_ms / sampled_interval_ms;
+            // Samples sharing one timestamp leave nothing to extrapolate over.
+            let mut factor = if sampled_interval_ms == 0.0 {
+                1.0
+            } else {
+                (sampled_interval_ms + duration_to_start_ms + duration_to_end_ms)
+                    / sampled_interval_ms
+            };
 
             if IS_RATE {
                 factor /= range_length_secs;
@@ -284,6 +306,151 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let result = ColumnarValue::Array(Arc::new(result_builder.finish()));
         Ok(result)
     }
+}
+
+/// Adds the value preceding every counter reset in `values` to `result`, in sample order.
+///
+/// Prometheus accumulates the resets into the running result rather than summing them on
+/// their own, and the two are not interchangeable in f64: a reset large enough to swallow a
+/// later one in an isolated sum still leaves it visible once the first difference is folded
+/// in first.
+fn add_counter_resets(result: f64, values: &[f64]) -> f64 {
+    values
+        .windows(2)
+        .filter(|pair| pair[1] < pair[0])
+        .fold(result, |result, pair| result + pair[0])
+}
+
+/// Positions of the counter resets in a value array, so that a window can accumulate the
+/// resets it contains instead of scanning all of its samples.
+struct CounterResetIndex<'a> {
+    values: &'a [f64],
+    /// Ascending indices `i` where `values[i] < values[i - 1]`.
+    positions: Vec<usize>,
+    /// Slice of `positions` covered by the last window.
+    active: Range<usize>,
+    /// That window, so the next one can tell whether it advanced.
+    previous: Range<usize>,
+    /// `positions[active.start]`: the reset a later `start` would drop. `usize::MAX` when the
+    /// active slice reaches the end of `positions`.
+    drops_at: usize,
+    /// `positions[active.end]`: the reset a later `end` would gain, saturated the same way.
+    gains_at: usize,
+}
+
+impl<'a> CounterResetIndex<'a> {
+    fn new(values: &'a [f64]) -> Self {
+        let positions: Vec<usize> = (1..values.len())
+            .filter(|&i| values[i] < values[i - 1])
+            .collect();
+        let first = positions.first().copied().unwrap_or(usize::MAX);
+        Self {
+            values,
+            positions,
+            active: 0..0,
+            previous: 0..0,
+            drops_at: first,
+            gains_at: first,
+        }
+    }
+
+    /// Same additions [`add_counter_resets`] performs over `values[start..end]`, in the same
+    /// order, reached through the index instead of by scanning the window.
+    #[inline]
+    fn add_resets(&mut self, result: f64, start: usize, end: usize) -> f64 {
+        // The active slice only stays put if the window advanced without reaching either of
+        // the resets that bound it.
+        if start < self.previous.start
+            || end < self.previous.end
+            || start >= self.drops_at
+            || end > self.gains_at
+        {
+            self.locate(start, end);
+        }
+        self.previous = start..end;
+
+        if self.active.start == self.active.end {
+            // A counter that has not reset inside this window, which is the normal case, would
+            // otherwise pay a range bounds check and an empty iterator for nothing.
+            return result;
+        }
+
+        let values = self.values;
+        self.positions[self.active.start..self.active.end]
+            .iter()
+            .fold(result, |result, &i| result + values[i - 1])
+    }
+
+    fn locate(&mut self, start: usize, end: usize) {
+        // Walk the bounds forward from the previous window and only search when they move
+        // back. On a series that resets often the searches cost more than the additions they
+        // locate, because they run deep and a window holds a handful of resets.
+        let (left, right) = if start < self.previous.start || end < self.previous.end {
+            (
+                self.positions.partition_point(|&i| i <= start),
+                self.positions.partition_point(|&i| i < end),
+            )
+        } else {
+            let mut left = self.active.start;
+            while left < self.positions.len() && self.positions[left] <= start {
+                left += 1;
+            }
+            let mut right = self.active.end.max(left);
+            while right < self.positions.len() && self.positions[right] < end {
+                right += 1;
+            }
+            (left, right)
+        };
+        self.active = left..right;
+        self.drops_at = self.positions.get(left).copied().unwrap_or(usize::MAX);
+        self.gains_at = self.positions.get(right).copied().unwrap_or(usize::MAX);
+    }
+}
+
+/// Same additions [`add_counter_resets`] performs, over the samples in `[first, last]` instead
+/// of over every slot.
+fn add_counter_resets_between_samples(
+    result: f64,
+    values: &Float64Array,
+    first: usize,
+    last: usize,
+) -> f64 {
+    let raw_values = values.values();
+    let mut result = result;
+    let mut previous = raw_values[first];
+    for index in first + 1..=last {
+        if values.is_null(index) {
+            continue;
+        }
+        let current = raw_values[index];
+        if current < previous {
+            result += previous;
+        }
+        previous = current;
+    }
+    result
+}
+
+/// Locates the samples inside `[offset, offset + length)`, returning the first and last
+/// non-null index together with the number of non-null slots. Returns `None` when the
+/// window holds no sample.
+fn valid_window_bounds(
+    values: &Float64Array,
+    offset: usize,
+    length: usize,
+) -> Option<(usize, usize, usize)> {
+    let mut first = None;
+    let mut last = 0;
+    let mut count = 0;
+    for index in offset..offset + length {
+        if values.is_null(index) {
+            continue;
+        }
+        first.get_or_insert(index);
+        last = index;
+        count += 1;
+    }
+    first.map(|first| (first, last, count))
 }
 
 fn extract_eval_timestamps(
@@ -358,9 +525,11 @@ impl Display for ExtrapolatedRate<true, false> {
 mod test {
 
     use datafusion::arrow::array::ArrayRef;
+    use datafusion::arrow::buffer::NullBuffer;
     use datafusion_common::ScalarValue;
 
     use super::*;
+    use crate::functions::test_util::TinyPrng;
 
     /// Range length is fixed to 5
     fn extrapolated_rate_runner<const IS_COUNTER: bool, const IS_RATE: bool>(
@@ -407,6 +576,366 @@ mod test {
             ColumnarValue::Array(Arc::new(value_range.into_dict())),
             ColumnarValue::Array(eval_ts),
         )
+    }
+
+    /// Evaluates `ranges` as one batch and asserts every window is bit-identical to evaluating
+    /// that window on its own, which always takes the direct per-window reduction.
+    fn assert_counter_windows_match_single(values: &[f64], ranges: &[(u32, u32)]) {
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..values.len()).map(|i| i as i64 * 30_000 + (i % 5) as i64 * 1_000),
+        ));
+        let values = Arc::new(Float64Array::from(values.to_vec()));
+        let evaluate = |ranges: &[(u32, u32)]| {
+            let eval_ts = Arc::new(TimestampMillisecondArray::from_iter_values(
+                ranges.iter().map(|&(offset, length)| {
+                    timestamps.value((offset + length.saturating_sub(1)) as usize) + 5_000
+                }),
+            ));
+            let input = [
+                ColumnarValue::Array(Arc::new(
+                    RangeArray::from_ranges(timestamps.clone(), ranges.iter().copied())
+                        .unwrap()
+                        .into_dict(),
+                )),
+                ColumnarValue::Array(Arc::new(
+                    RangeArray::from_ranges(values.clone(), ranges.iter().copied())
+                        .unwrap()
+                        .into_dict(),
+                )),
+                ColumnarValue::Array(eval_ts),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(3_600_000))),
+            ];
+            extract_array(&Rate::new(3_600_000).calc(&input).unwrap())
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .iter()
+                .collect::<Vec<_>>()
+        };
+
+        for (range, batched) in ranges.iter().zip(evaluate(ranges)) {
+            let single = evaluate(std::slice::from_ref(range))[0];
+            match (batched, single) {
+                (None, None) => {}
+                (Some(batched), Some(single)) => assert!(
+                    batched.to_bits() == single.to_bits() || (batched.is_nan() && single.is_nan()),
+                    "range {range:?}: batched {batched} != single {single}"
+                ),
+                _ => panic!("range {range:?}: batched {batched:?} != single {single:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn counter_resets_accumulate_into_the_running_result() {
+        // Summed on their own, 1e16 and 1.0 round to 1e16, which then cancels against the
+        // first sample and reports no increase at all. Folding each reset into `last - first`
+        // as Prometheus does keeps the 1.0. Both paths detect the same two resets.
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
+            [1, 2, 3, 4].into_iter().map(Some),
+        ));
+        let values_array = Arc::new(Float64Array::from_iter([1e16, 1.0, 0.0, 1.0]));
+        let ranges = [(0, 4)];
+        let ts_range = RangeArray::from_ranges(ts_array, ranges).unwrap();
+        let value_range = RangeArray::from_ranges(values_array, ranges).unwrap();
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter([Some(4)])) as _;
+
+        extrapolated_rate_runner::<true, false>(
+            ts_range,
+            value_range,
+            timestamps,
+            vec![1.1666666666666667],
+        );
+    }
+
+    #[test]
+    fn counter_correction_survives_huge_and_infinite_resets() {
+        // Both series reset twice inside the first window and once inside the second, but the
+        // first reset is large enough to swallow the second one when they are summed together.
+        for values in [
+            vec![1e16, 1.0, 0.0, 1.0, 2.0],
+            vec![f64::INFINITY, 1.0, 0.0, 1.0, 2.0],
+        ] {
+            assert_counter_windows_match_single(&values, &[(0, 4), (1, 4)]);
+        }
+    }
+
+    #[test]
+    fn counter_correction_matches_single_window_on_irregular_layouts() {
+        let mut values: Vec<f64> = (0..512).map(|i| (i % 37) as f64 * 0.25).collect();
+        values[20] = f64::NAN;
+        values[70] = f64::INFINITY;
+        values[140] = f64::NEG_INFINITY;
+        values[220] = 1e300;
+        values[221] = 1e-200;
+
+        // A stride of one walks both bounds across the reset positions, which sit every 37
+        // samples: `start` reaches one when that reset has to leave the window, `end` when the
+        // next one has to stay out of it, both while the cached bounds are live.
+        let mut ranges: Vec<(u32, u32)> = (0..390).map(|i| (i, 120)).collect();
+        // Empty, too-short, backward and disjoint windows all break a forward-only slide.
+        ranges.extend([(400, 0), (400, 1), (2, 20), (450, 30), (0, 120)]);
+        ranges.extend((0..390).rev().step_by(10).map(|i| (i, 120)));
+
+        assert_counter_windows_match_single(&values, &ranges);
+    }
+
+    /// Builds a value array whose null slots keep a distinguishable raw payload, so a
+    /// function that reads the padding instead of the samples produces a different result.
+    fn values_with_nulls(values: Vec<Option<f64>>, padding: f64) -> Arc<Float64Array> {
+        let raw = values
+            .iter()
+            .map(|value| value.unwrap_or(padding))
+            .collect::<Vec<_>>();
+        Arc::new(Float64Array::new(
+            raw.into(),
+            Some(NullBuffer::from_iter(
+                values.iter().map(|value| value.is_some()),
+            )),
+        ))
+    }
+
+    fn nullable_rate_runner<const IS_COUNTER: bool, const IS_RATE: bool>(
+        timestamps: Vec<i64>,
+        values: Arc<Float64Array>,
+        ranges: Vec<(u32, u32)>,
+        eval_timestamps: Vec<i64>,
+        range_length: i64,
+    ) -> Vec<Option<f64>> {
+        let ts_array = Arc::new(TimestampMillisecondArray::from_iter_values(timestamps));
+        let ts_range = RangeArray::from_ranges(ts_array, ranges.clone()).unwrap();
+        let value_range = RangeArray::from_ranges(values, ranges).unwrap();
+        let input = vec![
+            ColumnarValue::Array(Arc::new(ts_range.into_dict())),
+            ColumnarValue::Array(Arc::new(value_range.into_dict())),
+            ColumnarValue::Array(Arc::new(TimestampMillisecondArray::from_iter_values(
+                eval_timestamps,
+            ))),
+            ColumnarValue::Array(Arc::new(Int64Array::from(vec![range_length]))),
+        ];
+        let output = extract_array(
+            &ExtrapolatedRate::<IS_COUNTER, IS_RATE>::new(range_length)
+                .calc(&input)
+                .unwrap(),
+        )
+        .unwrap();
+        let output = output.as_any().downcast_ref::<Float64Array>().unwrap();
+        output.iter().collect()
+    }
+
+    #[test]
+    fn rate_uses_samples_not_null_padding() {
+        // Samples are 1.0@0 and 4.0@3000; the padding under the null slots would add two more.
+        let output = nullable_rate_runner::<true, true>(
+            vec![0, 1000, 2000, 3000],
+            values_with_nulls(vec![Some(1.0), None, None, Some(4.0)], 99.0),
+            vec![(0, 4)],
+            vec![3000],
+            4000,
+        );
+
+        assert_eq!(output, vec![Some(1.0)]);
+    }
+
+    #[test]
+    fn rate_returns_null_for_windows_without_enough_samples() {
+        let output = nullable_rate_runner::<true, true>(
+            vec![0, 1000, 2000],
+            values_with_nulls(vec![None, Some(2.0), None], 7.0),
+            vec![(0, 3), (0, 2), (2, 1)],
+            vec![2000, 2000, 2000],
+            4000,
+        );
+
+        assert_eq!(output, vec![None, None, None]);
+    }
+
+    #[test]
+    fn increase_corrects_counter_reset_between_samples() {
+        // The sample sequence is 5.0 -> 3.0, one reset. Reading the padding would see
+        // 5.0 -> 100.0 -> 3.0 and charge the correction against the wrong value.
+        let output = nullable_rate_runner::<true, false>(
+            vec![0, 1000, 2000],
+            values_with_nulls(vec![Some(5.0), None, Some(3.0)], 100.0),
+            vec![(0, 3)],
+            vec![2000],
+            2000,
+        );
+
+        assert_eq!(output, vec![Some(3.0)]);
+    }
+
+    #[test]
+    fn delta_extrapolates_from_sample_timestamps() {
+        // The window spans (-1000, 3000] but its samples only cover 1000..2000, so the
+        // extrapolation adds half an average interval on the leading side.
+        let output = nullable_rate_runner::<false, false>(
+            vec![0, 1000, 2000, 3000],
+            values_with_nulls(vec![None, Some(2.0), Some(5.0), None], 42.0),
+            vec![(0, 4)],
+            vec![3000],
+            4000,
+        );
+
+        assert_eq!(output, vec![Some(7.5)]);
+    }
+
+    /// Line-by-line port of Prometheus `extrapolatedRate` (promql/functions.go), float path
+    /// without start timestamps. Kept as a second implementation so that the order of the
+    /// threshold clamp and the counter zero-snap stays pinned to the upstream one.
+    fn prometheus_extrapolated_rate(
+        timestamps: &[i64],
+        values: &[f64],
+        eval_ts: i64,
+        range_ms: i64,
+        is_counter: bool,
+        is_rate: bool,
+    ) -> Option<f64> {
+        if values.len() < 2 {
+            return None;
+        }
+        let num_samples_minus_one = values.len() - 1;
+        let first_t = timestamps[0];
+        let last_t = timestamps[num_samples_minus_one];
+        let mut result = values[num_samples_minus_one] - values[0];
+        if is_counter {
+            for index in 1..values.len() {
+                if values[index] < values[index - 1] {
+                    result += values[index - 1];
+                }
+            }
+        }
+
+        let range_start = eval_ts - range_ms;
+        let mut duration_to_start = (first_t - range_start) as f64 / 1000.0;
+        let mut duration_to_end = (eval_ts - last_t) as f64 / 1000.0;
+        let sampled_interval = (last_t - first_t) as f64 / 1000.0;
+        let average_duration_between_samples = sampled_interval / num_samples_minus_one as f64;
+        let extrapolation_threshold = average_duration_between_samples * 1.1;
+
+        if duration_to_start >= extrapolation_threshold {
+            duration_to_start = average_duration_between_samples / 2.0;
+        }
+        if is_counter {
+            let mut duration_to_zero = duration_to_start;
+            if result > 0.0 && values[0] >= 0.0 {
+                duration_to_zero = sampled_interval * (values[0] / result);
+            }
+            if duration_to_zero < duration_to_start {
+                duration_to_start = duration_to_zero;
+            }
+        }
+        if duration_to_end >= extrapolation_threshold {
+            duration_to_end = average_duration_between_samples / 2.0;
+        }
+
+        let mut factor = 1.0;
+        if sampled_interval != 0.0 {
+            factor = (sampled_interval + duration_to_start + duration_to_end) / sampled_interval;
+        }
+        if is_rate {
+            factor /= range_ms as f64 / 1000.0;
+        }
+        Some(result * factor)
+    }
+
+    fn assert_matches_prometheus<const IS_COUNTER: bool, const IS_RATE: bool>(
+        timestamps: &[i64],
+        values: &[f64],
+        ranges: &[(u32, u32)],
+        eval_timestamps: &[i64],
+        range_ms: i64,
+    ) {
+        let actual = nullable_rate_runner::<IS_COUNTER, IS_RATE>(
+            timestamps.to_vec(),
+            Arc::new(Float64Array::from(values.to_vec())),
+            ranges.to_vec(),
+            eval_timestamps.to_vec(),
+            range_ms,
+        );
+
+        for (index, ((offset, length), eval_ts)) in ranges.iter().zip(eval_timestamps).enumerate() {
+            let window = *offset as usize..(*offset + *length) as usize;
+            let expected = prometheus_extrapolated_rate(
+                &timestamps[window.clone()],
+                &values[window],
+                *eval_ts,
+                range_ms,
+                IS_COUNTER,
+                IS_RATE,
+            );
+            match (actual[index], expected) {
+                (None, None) => {}
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() <= expected.abs() * 1e-9,
+                    "window {index} {:?}: got {actual}, Prometheus gives {expected}",
+                    ranges[index]
+                ),
+                (actual, expected) => {
+                    panic!("window {index}: got {actual:?}, Prometheus gives {expected:?}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn extrapolation_matches_prometheus_on_seeded_windows() {
+        let mut prng = TinyPrng(0x51ed_270b_8f26_1a37);
+        // Uneven spacing so the average interval, and with it the extrapolation threshold,
+        // differs from window to window.
+        let timestamps = (0..48)
+            .scan(0i64, |clock, _| {
+                *clock += 1_000 + prng.next_index(4) as i64 * 500;
+                Some(*clock)
+            })
+            .collect::<Vec<_>>();
+        // A counter that resets a few times, so the zero-snap branch is reached with both
+        // small and large leading values.
+        let values = (0..48)
+            .scan(0.0f64, |counter, _| {
+                *counter = match prng.next_index(8) {
+                    0 => 0.0,
+                    1 => *counter / 2.0,
+                    _ => *counter + prng.next_index(50) as f64,
+                };
+                Some(*counter)
+            })
+            .collect::<Vec<_>>();
+
+        let mut ranges = Vec::new();
+        let mut eval_timestamps = Vec::new();
+        for _ in 0..32 {
+            let length = 2 + prng.next_index(10) as u32;
+            let offset = prng.next_index(48 - length as usize) as u32;
+            ranges.push((offset, length));
+            // Land the range boundary at varying distances from the samples, so the clamp
+            // fires on neither, one, or both sides.
+            let last = timestamps[(offset + length - 1) as usize];
+            eval_timestamps.push(last + prng.next_index(5) as i64 * 500);
+        }
+
+        assert_matches_prometheus::<true, true>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
+        assert_matches_prometheus::<true, false>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
+        assert_matches_prometheus::<false, false>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            20_000,
+        );
     }
 
     #[test]
@@ -486,7 +1015,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![2.0, 5.0, 0.0, 2.5, 0.0, 0.0],
+            vec![1.5, 5.0, 0.0, 2.5, 0.0, 0.0],
         );
     }
 
@@ -517,8 +1046,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            // `2.0` is because that `duration_to_zero` less than `extrapolation_threshold`
-            vec![2.0, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
+            vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
     }
 
@@ -591,7 +1119,7 @@ mod test {
             // that two `2.0` is because `duration_to_start` are shrunk to
             // `duration_to_zero`, and causes `duration_to_zero` less than
             // `extrapolation_threshold`.
-            vec![2.0, 1.5, 1.5, 1.5, 2.0, 1.5, 1.5, 1.5],
+            vec![1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5, 1.5],
         );
     }
 
@@ -611,7 +1139,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![4.0, 3.5, 3.5, 4.0],
+            vec![3.5, 3.5, 3.5, 3.5],
         );
     }
 
@@ -786,7 +1314,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![400.0, 300.0, 300.0, 300.0, 400.0, 300.0, 300.0, 300.0],
+            vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
         );
     }
 
@@ -817,7 +1345,7 @@ mod test {
             ts_range,
             value_range,
             timestamps,
-            vec![400.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
+            vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
         );
     }
 

@@ -11,20 +11,26 @@ Affected Rows: 3
 -- Test LIMIT 0 returns empty result
 SELECT * FROM test_data LIMIT 0;
 
-++
-++
++---+----+
+| i | ts |
++---+----+
++---+----+
 
 -- Test LIMIT 0 with aggregation
 SELECT SUM(i) FROM test_data LIMIT 0;
 
-++
-++
++------------------+
+| sum(test_data.i) |
++------------------+
++------------------+
 
 -- Test LIMIT 0 with WHERE clause
 SELECT * FROM test_data WHERE i > 0 LIMIT 0;
 
-++
-++
++---+----+
+| i | ts |
++---+----+
++---+----+
 
 -- Clean up
 DROP TABLE test_data;

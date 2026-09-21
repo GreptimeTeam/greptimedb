@@ -147,7 +147,8 @@ impl SeriesScan {
         };
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows());
+            .with_total_rows(input.total_rows())
+            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
         if let Some(counters) = input.query_stat_counters.clone() {
             properties.set_query_stat_counters(counters);
         }
@@ -585,6 +586,25 @@ impl RegionScanner for SeriesScan {
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
+    }
+
+    fn reset_state(&mut self) {
+        self.stream_ctx.input.predicate.clear_dyn_filters();
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = match self.mode {
+            SeriesScanMode::Legacy => Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers)),
+            SeriesScanMode::TwoPhase => Arc::new(Pruner::new_with_options(
+                self.stream_ctx.clone(),
+                num_workers,
+                PrunerOptions {
+                    retain_builders: true,
+                    enable_predicate_prefilter: false,
+                },
+            )),
+        };
+        self.legacy_receivers.lock().unwrap().clear();
+        self.candidate_receivers.lock().unwrap().clear();
+        self.metrics_list = Arc::new(PartitionMetricsList::default());
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {
@@ -1214,6 +1234,39 @@ mod tests {
     use datatypes::arrow::record_batch::RecordBatch;
 
     use super::*;
+    use crate::read::flat_projection::FlatProjectionMapper;
+    use crate::read::scan_region::PredicateGroup;
+    use crate::test_util::scheduler_util::SchedulerEnv;
+    use crate::test_util::sst_util::sst_region_metadata_with_encoding;
+
+    #[tokio::test]
+    async fn two_phase_eligibility_allows_exact_sequence_range() {
+        let env = SchedulerEnv::new().await;
+        let metadata = Arc::new(sst_region_metadata_with_encoding(
+            store_api::codec::PrimaryKeyEncoding::Sparse,
+        ));
+        let predicate = PredicateGroup::default();
+
+        let eligible = ScanInput::builder(
+            env.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
+        )
+        .with_predicate(predicate.clone())
+        .build();
+        assert!(SeriesScan::supports_two_phase(&eligible));
+
+        let exact_sequence = ScanInput::builder(
+            env.access_layer.clone(),
+            FlatProjectionMapper::new(&metadata, [0]).unwrap(),
+        )
+        .with_predicate(predicate)
+        .with_sequence_range(Some(store_api::storage::SequenceRange::GtLtEq {
+            min: 1,
+            max: 2,
+        }))
+        .build();
+        assert!(SeriesScan::supports_two_phase(&exact_sequence));
+    }
 
     #[test]
     fn candidate_distributor_stops_after_all_receivers_close() {

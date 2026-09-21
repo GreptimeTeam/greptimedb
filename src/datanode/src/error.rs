@@ -299,6 +299,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid object store WAL config, {} = {:?}: {}", field, value, reason))]
+    InvalidObjectStoreWalConfig {
+        field: &'static str,
+        value: String,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL is not supported yet"))]
+    ObjectStoreWalNotSupported {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,
@@ -471,6 +486,7 @@ impl ErrorExt for Error {
             | GcConfigMismatch { .. }
             | ParseAddr { .. }
             | TomlFormat { .. }
+            | InvalidObjectStoreWalConfig { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 
             PayloadNotExist { .. }
@@ -495,7 +511,9 @@ impl ErrorExt for Error {
 
             OpenLogStore { source, .. } => source.status_code(),
             MetaClientInit { source, .. } => source.status_code(),
-            UnsupportedOutput { .. } | NotYetImplemented { .. } => StatusCode::Unsupported,
+            UnsupportedOutput { .. }
+            | NotYetImplemented { .. }
+            | ObjectStoreWalNotSupported { .. } => StatusCode::Unsupported,
             HandleRegionRequest { source, .. }
             | GetRegionMetadata { source, .. }
             | HandleBatchOpenRequest { source, .. }

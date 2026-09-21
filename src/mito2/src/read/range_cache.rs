@@ -736,26 +736,33 @@ struct CacheBatchBuffer {
     buffered_rows: usize,
     buffered_size: usize,
     sender: Option<mpsc::UnboundedSender<CacheConcatCommand>>,
+    /// Handle of the background concat task. Cleared once the task owns a finish
+    /// command, so only unfinished scans cancel it.
+    concat_task: Option<common_runtime::JoinHandle<()>>,
 }
 
 impl CacheBatchBuffer {
     fn new(cache_strategy: &CacheStrategy) -> Self {
-        let sender = cache_strategy.range_result_memory_limiter().map(|limiter| {
-            let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
-            let (tx, rx) = mpsc::unbounded_channel();
-            common_runtime::spawn_query(run_cache_concat_task(
-                rx,
-                limiter.clone(),
-                skip_threshold_bytes,
-            ));
-            tx
-        });
+        let (sender, concat_task) = cache_strategy
+            .range_result_memory_limiter()
+            .map(|limiter| {
+                let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
+                let (tx, rx) = mpsc::unbounded_channel();
+                let task = common_runtime::spawn_query(run_cache_concat_task(
+                    rx,
+                    limiter.clone(),
+                    skip_threshold_bytes,
+                ));
+                (tx, task)
+            })
+            .unzip();
 
         Self {
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_size: 0,
             sender,
+            concat_task,
         }
     }
 
@@ -814,9 +821,22 @@ impl CacheBatchBuffer {
                 part_metrics,
                 result_tx,
             })
-            .is_err()
+            .is_ok()
         {
-            self.sender = None;
+            // The task now owns the finish command, so it may keep populating the
+            // cache after the scan stream is dropped.
+            self.concat_task = None;
+        }
+    }
+}
+
+impl Drop for CacheBatchBuffer {
+    fn drop(&mut self) {
+        // Still holding the handle means no finish command was sent: the scan was
+        // cancelled or failed and the queued batches can never reach the cache.
+        // Aborting releases them even while the task waits for a memory permit.
+        if let Some(task) = &self.concat_task {
+            task.abort();
         }
     }
 }
@@ -1441,7 +1461,27 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_and_clears_time_filters() {
+    fn selector_after_merge_changes_fingerprint() {
+        let ordinary = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+            true,
+            0,
+        );
+        let after_merge = test_scan_fingerprint(
+            vec!["k0 = 'foo'".to_string()],
+            vec![],
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+            true,
+            0,
+        );
+
+        assert_ne!(ordinary, after_merge);
+    }
+
+    #[test]
+    fn true_selector_after_merge_is_preserved_by_fingerprint_transforms() {
         let normalized =
             test_scan_fingerprint(vec!["k0 = 'foo'".to_string()], vec![], None, true, 0);
 
@@ -1450,18 +1490,32 @@ mod tests {
         let fingerprint = test_scan_fingerprint(
             vec!["k0 = 'foo'".to_string()],
             vec!["ts >= 1000".to_string()],
-            Some(TimeSeriesRowSelector::LastRow),
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
             true,
             7,
         );
 
         let reset = fingerprint.without_time_filters();
+        let candidate = fingerprint.for_candidate_series();
+        let series_data = fingerprint.for_series_data(SeriesRange::new(0, 1).unwrap());
 
         assert_eq!(reset.read_columns(), fingerprint.read_columns());
         assert_eq!(reset.read_column_types(), fingerprint.read_column_types());
         assert_eq!(reset.filters(), fingerprint.filters());
         assert!(reset.time_filters().is_empty());
         assert_eq!(reset.series_row_selector, fingerprint.series_row_selector);
+        assert_eq!(
+            fingerprint.series_row_selector,
+            Some(TimeSeriesRowSelector::LastRow { after_merge: true })
+        );
+        assert_eq!(
+            candidate.series_row_selector,
+            fingerprint.series_row_selector
+        );
+        assert_eq!(
+            series_data.series_row_selector,
+            fingerprint.series_row_selector
+        );
         assert_eq!(reset.append_mode, fingerprint.append_mode);
         assert_eq!(reset.filter_deleted, fingerprint.filter_deleted);
         assert_eq!(reset.merge_mode, fingerprint.merge_mode);
@@ -1534,6 +1588,43 @@ mod tests {
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].num_rows(), 2);
         assert_eq!(replayed[1].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_cache_buffer_releases_batches_while_waiting_for_memory() {
+        let strategy = test_cache_strategy();
+        let limiter = strategy.range_result_memory_limiter().unwrap();
+        // Take every permit so the concat task blocks before it can compact.
+        let _permit = limiter
+            .acquire(limiter.available_permits() * limiter.permit_bytes())
+            .await
+            .unwrap();
+        let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
+        let weak = Arc::downgrade(batch.column(0));
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(batch.clone()).unwrap();
+        buffer.push(batch).unwrap();
+        // Both batches were handed to the task instead of staying in the buffer.
+        assert!(buffer.buffered_batches.is_empty());
+
+        // Cancel only once the task is parked on the permit, otherwise the abort
+        // could land on a task that was never polled.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while limiter.waited_acquires() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("concat task must wait for a memory permit");
+        drop(buffer);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled cache work must release input without waiting for a permit");
     }
 
     #[tokio::test]

@@ -57,6 +57,7 @@ pub(super) async fn run_prepare_remote(args: PrepareRemoteArgs) -> Result<()> {
         args.base_http_port,
         &args.fixture_generator,
         &remote,
+        &remote.base_setup_sql,
         &client,
     )
     .await?;
@@ -65,6 +66,7 @@ pub(super) async fn run_prepare_remote(args: PrepareRemoteArgs) -> Result<()> {
         args.candidate_http_port,
         &args.fixture_generator,
         &remote,
+        &remote.candidate_setup_sql,
         &client,
     )
     .await?;
@@ -88,6 +90,7 @@ async fn prepare_remote_target(
     port: u16,
     generator: &Path,
     remote: &RemoteWrite,
+    setup_sql: &[String],
     client: &Client,
 ) -> Result<Value> {
     let create_database = http_post_sql(
@@ -107,6 +110,7 @@ async fn prepare_remote_target(
         )
         .into());
     }
+    let setup = run_setup_sql(client, port, &remote.database, name, setup_sql).await?;
     let (remote_write, flushes) = ingest_remote_write(generator, port, remote, client).await?;
     let expected_rows = remote
         .series_count
@@ -124,11 +128,34 @@ async fn prepare_remote_target(
     Ok(json!({
         "name": name,
         "create_database": create_database,
+        "setup_sql": setup,
         "remote_write": remote_write,
         "flushes": flushes,
         "visibility": visibility,
         "status": "ok",
     }))
+}
+
+async fn run_setup_sql(
+    client: &Client,
+    port: u16,
+    database: &str,
+    target: &str,
+    setup_sql: &[String],
+) -> Result<Vec<Value>> {
+    let mut results = Vec::with_capacity(setup_sql.len());
+    for (index, statement) in setup_sql.iter().enumerate() {
+        let result = http_post_sql(client, port, statement, database).await;
+        if !result["ok"].as_bool().unwrap_or(false) {
+            return Err(format!(
+                "setup SQL statement {} failed for {target}: {result}",
+                index + 1
+            )
+            .into());
+        }
+        results.push(result);
+    }
+    Ok(results)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -434,8 +461,109 @@ fn json_number(value: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
     use super::*;
     use crate::query_regression_runner::model::{PromStore, RemoteValue};
+
+    async fn read_http_request(stream: &mut TcpStream) -> Vec<u8> {
+        let mut request = Vec::new();
+        let mut chunk = [0; 1024];
+        loop {
+            let read = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(
+                read, 0,
+                "HTTP client closed request before sending its body"
+            );
+            request.extend_from_slice(&chunk[..read]);
+            let Some(header_end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+            else {
+                continue;
+            };
+            let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+            let content_length = headers
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .or_else(|| {
+                    headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("Content-Length: "))
+                })
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            if request.len() >= header_end + 4 + content_length {
+                return request;
+            }
+        }
+    }
+
+    async fn spawn_sql_server(
+        responses: Vec<String>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await;
+                requests.push(String::from_utf8(request).unwrap());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (port, server)
+    }
+
+    #[tokio::test]
+    async fn setup_sql_runs_in_order_with_configured_database() {
+        let (port, server) = spawn_sql_server(vec!["{\"code\":0}".to_string(); 2]).await;
+        let client = Client::new();
+        let setup = vec![
+            "CREATE TABLE physical (ts TIMESTAMP TIME INDEX) ENGINE=metric".to_string(),
+            "ALTER TABLE physical SET 'compaction.twcs.trigger_file_num'='100'".to_string(),
+        ];
+
+        let results = run_setup_sql(&client, port, "perf", "candidate", &setup)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].contains("db=perf"));
+        assert!(requests[0].contains("sql=CREATE"));
+        assert!(requests[1].contains("db=perf"));
+        assert!(requests[1].contains("sql=ALTER"));
+    }
+
+    #[tokio::test]
+    async fn setup_sql_stops_at_the_failing_statement() {
+        let (port, server) =
+            spawn_sql_server(vec!["{\"code\":0}".to_string(), "{\"code\":1}".to_string()]).await;
+        let client = Client::new();
+        let setup = vec![
+            "CREATE TABLE physical (ts TIMESTAMP TIME INDEX) ENGINE=metric".to_string(),
+            "invalid SQL".to_string(),
+            "ALTER TABLE physical SET 'compaction.twcs.trigger_file_num'='100'".to_string(),
+        ];
+
+        let error = run_setup_sql(&client, port, "perf", "base", &setup)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("statement 2 failed for base"));
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[1].contains("sql=invalid+SQL"));
+    }
 
     #[test]
     fn schedules_remote_sample_chunks_and_flushes() {
@@ -452,6 +580,8 @@ mod tests {
             sample_chunk_size: Some(2),
             flush_every_sample_chunks: 2,
             visibility_timeout_seconds: 30,
+            base_setup_sql: Vec::new(),
+            candidate_setup_sql: Vec::new(),
             prom_store: PromStore {
                 pending_rows_flush_interval: "1s".to_string(),
                 max_batch_rows: 1,

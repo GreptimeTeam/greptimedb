@@ -38,7 +38,7 @@ use common_telemetry::{debug, error, tracing, warn};
 use common_time::timezone::parse_timezone;
 use futures_util::StreamExt;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
-use session::hints::{READ_PREFERENCE_HINT, is_reserved_extension_key};
+use session::hints::{INSERT_SKIP_WAL_HINT, READ_PREFERENCE_HINT, is_reserved_extension_key};
 use snafu::{OptionExt, ResultExt};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -202,7 +202,7 @@ pub fn get_request_type(request: &GreptimeRequest) -> &'static str {
 pub(crate) fn create_query_context(
     channel: Channel,
     header: Option<&RequestHeader>,
-    mut extensions: Vec<(String, String)>,
+    extensions: Vec<(String, String)>,
     snapshot_seqs: HashMap<u64, u64>,
 ) -> Result<QueryContextRef> {
     let (catalog, schema) = header
@@ -240,29 +240,36 @@ pub(crate) fn create_query_context(
         .channel(channel)
         .snapshot_seqs(Arc::new(RwLock::new(snapshot_seqs)));
 
-    if let Some(x) = extensions
-        .iter()
-        .position(|(k, _)| k == READ_PREFERENCE_HINT)
-    {
-        let (k, v) = extensions.swap_remove(x);
-        let Ok(read_preference) = ReadPreference::from_str(&v) else {
-            return UnknownHintSnafu {
-                hint: format!("{k}={v}"),
-            }
-            .fail();
-        };
-        ctx_builder = ctx_builder.read_preference(read_preference);
-    }
-
     for (key, value) in extensions {
-        if is_reserved_extension_key(&key) {
-            debug!(
-                key = key.as_str(),
-                "Ignoring reserved external query context extension key"
-            );
-            continue;
+        match key.as_str() {
+            READ_PREFERENCE_HINT => {
+                let Ok(read_preference) = ReadPreference::from_str(&value) else {
+                    return UnknownHintSnafu {
+                        hint: format!("{key}={value}"),
+                    }
+                    .fail();
+                };
+                ctx_builder = ctx_builder.read_preference(read_preference);
+            }
+            INSERT_SKIP_WAL_HINT => {
+                let skip_wal = value.parse::<bool>().map_err(|_| {
+                    UnknownHintSnafu {
+                        hint: format!("{key}={value}"),
+                    }
+                    .build()
+                })?;
+                ctx_builder = ctx_builder.skip_wal(skip_wal);
+            }
+            _ if is_reserved_extension_key(&key) => {
+                debug!(
+                    key = key.as_str(),
+                    "Ignoring reserved external query context extension key"
+                );
+            }
+            _ => {
+                ctx_builder = ctx_builder.set_extension(key, value);
+            }
         }
-        ctx_builder = ctx_builder.set_extension(key, value);
     }
     Ok(ctx_builder.build().into())
 }
@@ -321,6 +328,81 @@ mod tests {
 
     use super::*;
     use crate::error::{ExecuteGrpcRequestSnafu, InvalidParameterSnafu};
+
+    #[test]
+    fn test_create_query_context_typed_skip_wal() {
+        let ctx = create_query_context(Channel::Grpc, None, vec![], HashMap::new()).unwrap();
+        assert!(!ctx.skip_wal());
+        let legacy = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![("skip_wal".to_string(), "true".to_string())],
+            HashMap::new(),
+        )
+        .unwrap();
+        assert!(!legacy.skip_wal());
+        assert_eq!(legacy.extension("skip_wal"), Some("true"));
+        for (value, expected) in [("true", true), ("false", false)] {
+            let ctx = create_query_context(
+                Channel::Grpc,
+                None,
+                vec![(INSERT_SKIP_WAL_HINT.to_string(), value.to_string())],
+                HashMap::new(),
+            )
+            .unwrap();
+            assert_eq!(ctx.skip_wal(), expected);
+            assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+        }
+        for value in ["", "TRUE", "1", "invalid"] {
+            assert!(
+                create_query_context(
+                    Channel::Grpc,
+                    None,
+                    vec![(INSERT_SKIP_WAL_HINT.to_string(), value.to_string())],
+                    HashMap::new()
+                )
+                .is_err()
+            );
+        }
+        let ctx = create_query_context(
+            Channel::Grpc,
+            None,
+            vec![
+                (INSERT_SKIP_WAL_HINT.to_string(), "true".to_string()),
+                (INSERT_SKIP_WAL_HINT.to_string(), "false".to_string()),
+            ],
+            HashMap::new(),
+        )
+        .unwrap();
+        assert!(!ctx.skip_wal());
+        assert_eq!(ctx.extension(INSERT_SKIP_WAL_HINT), None);
+    }
+
+    #[test]
+    fn test_create_query_context_read_preference_duplicates() {
+        for (values, valid) in [
+            (["leader", "LEADER"], true),
+            (["invalid", "leader"], false),
+            (["leader", "invalid"], false),
+        ] {
+            let result = create_query_context(
+                Channel::Grpc,
+                None,
+                values
+                    .into_iter()
+                    .map(|value| (READ_PREFERENCE_HINT.to_string(), value.to_string()))
+                    .collect(),
+                HashMap::new(),
+            );
+            if valid {
+                let ctx = result.unwrap();
+                assert!(matches!(ctx.read_preference(), ReadPreference::Leader));
+                assert_eq!(ctx.extension(READ_PREFERENCE_HINT), None);
+            } else {
+                assert!(result.is_err());
+            }
+        }
+    }
 
     #[test]
     fn test_create_query_context() {

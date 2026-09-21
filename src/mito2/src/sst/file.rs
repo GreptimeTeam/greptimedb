@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use base64::prelude::{BASE64_STANDARD, Engine};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
-use common_telemetry::{debug, error};
+use common_telemetry::{debug, error, warn};
 use common_time::Timestamp;
 use partition::expr::PartitionExpr;
 use serde::{Deserialize, Serialize};
@@ -39,6 +39,7 @@ use crate::cache::file_cache::{FileType, IndexKey};
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location;
 use crate::sst::parquet::SstInfo;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Custom serde functions for Bytes fields serialized as base64 strings.
 fn serialize_bytes_option<S>(bytes: &Option<Bytes>, serializer: S) -> Result<S::Ok, S::Error>
@@ -243,10 +244,13 @@ pub struct FileMeta {
     /// the default value `0` doesn't means the file doesn't contains any rows,
     /// but instead means the number of rows is unknown.
     pub num_row_groups: u64,
-    /// Sequence in this file.
+    /// File-level sequence bound or admission marker in the target region.
     ///
-    /// This sequence is the only sequence in this file. And it's retrieved from the max
-    /// sequence of the rows on generating this file.
+    /// Flush records the maximum input row sequence. Compaction outputs inherit
+    /// the maximum input bound, or remain unknown if any input bound is unknown,
+    /// independently of per-row sequence trust. This does not imply that every
+    /// physical row has this sequence.
+    /// Readers also use it to normalize foreign and legacy all-zero files.
     pub sequence: Option<NonZeroU64>,
     /// Partition expression from the region metadata when the file is created.
     ///
@@ -284,6 +288,8 @@ pub struct FileMeta {
     pub primary_key_max: Option<Bytes>,
     /// Whether the file preserves per-row sequence numbers usable for exact
     /// row-level sequence filtering.
+    /// Merely retaining physical input sequences during compaction does not
+    /// restore this capability for untrusted inputs.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
 }
@@ -492,6 +498,7 @@ impl fmt::Debug for FileHandle {
 }
 
 impl FileHandle {
+    /// Creates a handle sharing the file's physical state and original statistics.
     pub fn new(meta: FileMeta, file_purger: FilePurgerRef) -> FileHandle {
         let pk_range = meta.primary_key_range();
         FileHandle {
@@ -607,12 +614,100 @@ impl FileHandle {
         self.inner.deleted.load(Ordering::Relaxed)
     }
 
-    pub fn primary_key_range(&self) -> Option<(Bytes, Bytes)> {
-        self.inner.primary_key_range.read().unwrap().clone()
+    /// Returns bounds aligned to the caller's pinned schema, before any comparison
+    /// or aggregation. Unknown and invalid statistics cannot exclude possible data.
+    pub(crate) fn primary_key_range(
+        &self,
+        mapper: &PrimaryKeyRangeMapper,
+    ) -> Option<(Bytes, Bytes)> {
+        debug_assert_eq!(self.region_id().table_id(), mapper.region_id().table_id());
+        if let Some(range) = self
+            .inner
+            .primary_key_range
+            .read()
+            .unwrap()
+            .aligned(mapper.schema_version())
+        {
+            return range.clone();
+        }
+        // Recheck under the write lock: another snapshot may have replaced the cached schema.
+        let aligned = self.inner.primary_key_range.write().unwrap().align(mapper);
+        match aligned {
+            Ok(range) => range,
+            Err(err) => {
+                warn!(err; "Invalid SST primary key range; using unknown bounds, region: {}, file: {}, schema version: {}",
+                    self.region_id(), self.file_id(), mapper.schema_version());
+                None
+            }
+        }
+    }
+
+    /// Returns original statistics for metadata hydration, never schema-aligned bounds.
+    pub fn raw_primary_key_range(&self) -> Option<(Bytes, Bytes)> {
+        self.inner.primary_key_range.read().unwrap().raw().cloned()
     }
 
     pub(crate) fn set_primary_key_range(&self, primary_key_range: (Bytes, Bytes)) {
-        *self.inner.primary_key_range.write().unwrap() = Some(primary_key_range);
+        // SST contents are immutable. Hydrate missing raw statistics without
+        // replacing the source of already cached schema views.
+        let mut range = self.inner.primary_key_range.write().unwrap();
+        if matches!(*range, PrimaryKeyRange::Missing) {
+            *range = PrimaryKeyRange::Raw(primary_key_range);
+        }
+    }
+}
+
+type PrimaryKeyBounds = (Bytes, Bytes);
+
+/// A single-slot cache shared by file handles. Always retain the source bounds so
+/// older snapshots and changed defaults can realign without interpreting padded values as stored.
+enum PrimaryKeyRange {
+    Missing,
+    Raw(PrimaryKeyBounds),
+    Aligned {
+        raw: PrimaryKeyBounds,
+        schema_version: u64,
+        bounds: Option<PrimaryKeyBounds>,
+    },
+}
+
+impl PrimaryKeyRange {
+    fn raw(&self) -> Option<&PrimaryKeyBounds> {
+        match self {
+            Self::Missing => None,
+            Self::Raw(raw) | Self::Aligned { raw, .. } => Some(raw),
+        }
+    }
+
+    fn aligned(&self, target_version: u64) -> Option<&Option<PrimaryKeyBounds>> {
+        match self {
+            Self::Aligned {
+                schema_version,
+                bounds,
+                ..
+            } if *schema_version == target_version => Some(bounds),
+            _ => None,
+        }
+    }
+
+    fn align(
+        &mut self,
+        mapper: &PrimaryKeyRangeMapper,
+    ) -> crate::error::Result<Option<PrimaryKeyBounds>> {
+        if let Some(bounds) = self.aligned(mapper.schema_version()) {
+            return Ok(bounds.clone());
+        }
+        let Some(raw) = self.raw().cloned() else {
+            return Ok(None);
+        };
+        let aligned = mapper.map(raw.clone());
+        // Failed mappings also occupy the cache, so repeated hits don't repeat the warning.
+        *self = Self::Aligned {
+            raw,
+            schema_version: mapper.schema_version(),
+            bounds: aligned.as_ref().ok().cloned().flatten(),
+        };
+        aligned
     }
 }
 
@@ -624,7 +719,7 @@ struct FileHandleInner {
     compacting: AtomicBool,
     deleted: AtomicBool,
     index_outdated: AtomicBool,
-    primary_key_range: RwLock<Option<(Bytes, Bytes)>>,
+    primary_key_range: RwLock<PrimaryKeyRange>,
     file_purger: FilePurgerRef,
 }
 
@@ -651,7 +746,9 @@ impl FileHandleInner {
             compacting: AtomicBool::new(false),
             deleted: AtomicBool::new(false),
             index_outdated: AtomicBool::new(false),
-            primary_key_range: RwLock::new(primary_key_range),
+            primary_key_range: RwLock::new(
+                primary_key_range.map_or(PrimaryKeyRange::Missing, PrimaryKeyRange::Raw),
+            ),
             file_purger,
         }
     }

@@ -25,6 +25,7 @@ common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
 common-wal.workspace = true
+crc32fast.workspace = true
 dashmap.workspace = true
 delta-encoding = "0.4"
 derive_builder.workspace = true
@@ -49,6 +50,7 @@ common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-wal = { workspace = true, features = ["testing"] }
 itertools.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 rand.workspace = true
 rskafka = { workspace = true, features = ["unstable-fuzzing"] }
 uuid.workspace = true

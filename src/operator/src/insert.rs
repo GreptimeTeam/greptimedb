@@ -24,7 +24,7 @@ use api::v1::region::{
 };
 use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
-    RowInsertRequest, RowInsertRequests, SemanticType,
+    RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
@@ -45,7 +45,7 @@ use common_query::Output;
 use common_query::native_histogram::{is_native_histogram_value_type, native_histogram_value_type};
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_telemetry::tracing_context::TracingContext;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{debug, error, warn};
 use datatypes::schema::SkippingIndexOptions;
 use futures_util::future;
 use meter_macros::write_meter;
@@ -65,14 +65,16 @@ use store_api::mito_engine_options::{
 };
 use store_api::storage::{RegionId, TableId};
 use table::TableRef;
-use table::metadata::TableInfo;
+use table::metadata::{TableInfo, TableInfoRef};
 use table::requests::{
     AUTO_CREATE_TABLE_KEY, InsertRequest as TableInsertRequest, SEMANTIC_PER_TABLE_INDEX_KEY,
-    TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TRACE_TABLE_PARTITIONS_HINT_KEY,
-    VALID_TABLE_OPTION_KEYS, is_semantic_option_key, validate_semantic_option,
+    SEMANTIC_PIPELINE, TABLE_DATA_MODEL, TABLE_DATA_MODEL_TRACE_V1, TABLE_DATA_MODEL_TRACE_V2,
+    TRACE_TABLE_PARTITIONS_HINT_KEY, VALID_TABLE_OPTION_KEYS, is_semantic_option_key,
+    validate_semantic_option,
 };
 use table::table_reference::TableReference;
 
+use crate::batcher::PendingRowsBatcher;
 use crate::error::{
     CatalogSnafu, ColumnOptionsSnafu, CreatePartitionRulesSnafu, FindRegionLeaderSnafu,
     InvalidInsertRequestSnafu, JoinTaskSnafu, RequestInsertsSnafu, Result, TableNotFoundSnafu,
@@ -81,7 +83,8 @@ use crate::expr_helper;
 use crate::region_req_factory::RegionRequestFactory;
 use crate::req_convert::common::preprocess_row_insert_requests;
 use crate::req_convert::insert::{
-    ColumnToRow, RowToRegion, StatementToRegion, TableToRegion, fill_reqs_with_impure_default,
+    ColumnToRow, ImpureDefaultFiller, RowToRegion, StatementToRegion, TableToRegion,
+    fill_reqs_with_impure_default, rows_to_record_batch,
 };
 use crate::statement::StatementExecutor;
 
@@ -94,6 +97,7 @@ pub struct Inserter {
     /// When `false`, missing tables are never auto-created regardless of the
     /// per-request `auto_create_table` hint. When `true`, the hint still applies.
     auto_create_table: bool,
+    pending_rows_batcher: Option<Arc<dyn PendingRowsBatcher>>,
 }
 
 pub type InserterRef = Arc<Inserter>;
@@ -163,7 +167,17 @@ impl Inserter {
             node_manager,
             table_flownode_set_cache,
             auto_create_table,
+            pending_rows_batcher: None,
         }
+    }
+
+    /// Installs the shared batcher; callers explicitly select its ingestion entry point.
+    pub fn with_pending_rows_batcher(
+        mut self,
+        batcher: Option<Arc<dyn PendingRowsBatcher>>,
+    ) -> Self {
+        self.pending_rows_batcher = batcher;
+        self
     }
 
     pub async fn handle_column_inserts(
@@ -265,6 +279,13 @@ impl Inserter {
         accommodate_existing_schema: bool,
         is_single_value: bool,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
+        let batcher = self
+            .pending_rows_batcher
+            .as_ref()
+            .filter(|_| ctx.batching_enabled());
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -288,6 +309,19 @@ impl Inserter {
             )
             .await?;
 
+        // Instant tables have no persisted data for dirty-window Flow to read.
+        // Metric tables keep their existing dedicated ingestion path.
+        if let Some(batcher) = batcher
+            && instant_table_ids.is_empty()
+            && table_infos
+                .values()
+                .all(|info| info.meta.engine == default_engine())
+        {
+            return self
+                .submit_pending_rows(requests, table_infos, ctx, batcher)
+                .await;
+        }
+
         let name_to_info = table_infos
             .values()
             .map(|info| (info.name.clone(), info.clone()))
@@ -297,10 +331,89 @@ impl Inserter {
             instant_table_ids,
             self.partition_manager.as_ref(),
         )
-        .convert(requests)
+        .convert(requests, skip_wal)
         .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
+    }
+
+    async fn submit_pending_rows(
+        &self,
+        mut requests: RowInsertRequests,
+        table_infos: HashMap<TableId, Arc<TableInfo>>,
+        ctx: QueryContextRef,
+        batcher: &Arc<dyn PendingRowsBatcher>,
+    ) -> Result<Output> {
+        // All entry points, including single-table and SQL writes, skip empty input
+        // before evaluating defaults or converting prepared rows.
+        requests.inserts.retain(|request| {
+            request
+                .rows
+                .as_ref()
+                .is_some_and(|rows| !rows.rows.is_empty())
+        });
+        let by_name = table_infos
+            .values()
+            .map(|info| (info.name.as_str(), info))
+            .collect::<HashMap<_, _>>();
+        let mut prepared = Vec::with_capacity(requests.inserts.len());
+        for request in &mut requests.inserts {
+            let table_info =
+                by_name
+                    .get(request.table_name.as_str())
+                    .context(TableNotFoundSnafu {
+                        table_name: &request.table_name,
+                    })?;
+            let Some(rows) = &mut request.rows else {
+                continue;
+            };
+            ImpureDefaultFiller::new((*table_info).clone())?.fill_rows(rows);
+            let batch = rows_to_record_batch(rows, table_info)?;
+            prepared.push(((*table_info).clone(), batch));
+        }
+        // Preserve the existing meter input and original request boundary. These
+        // envelopes are only for accounting; routing happens after batching.
+        let metered = InstantAndNormalInsertRequests {
+            normal_requests: RegionInsertRequests {
+                requests: requests
+                    .inserts
+                    .into_iter()
+                    .map(|request| RegionInsertRequest {
+                        rows: request.rows,
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+            instant_requests: RegionInsertRequests::default(),
+        };
+        let write_cost = write_meter!(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            metered,
+            ctx.channel() as u8
+        );
+        prepared.retain(|(_, batch)| batch.num_rows() != 0);
+        let results = if prepared.is_empty() {
+            Vec::new()
+        } else {
+            // One original request shares admission across all table submissions.
+            let permit = batcher.acquire().await?;
+            let submissions = prepared.into_iter().map(|(info, batch)| {
+                // Routing uses the target database; metering above retains the
+                // original request context, including fully qualified SQL writes.
+                let mut target_ctx = ctx.fork();
+                target_ctx.set_current_catalog(&info.catalog_name);
+                target_ctx.set_current_schema(&info.schema_name);
+                batcher.submit(info, batch, Arc::new(target_ctx), permit.clone())
+            });
+            // Observe every table completion even when another table fails.
+            future::join_all(submissions).await
+        };
+        let affected_rows = results.into_iter().sum::<Result<usize>>()?;
+        Ok(Output::new(
+            OutputData::AffectedRows(affected_rows),
+            OutputMeta::new_with_cost(write_cost as _),
+        ))
     }
 
     /// Handles row inserts request with metric engine.
@@ -311,6 +424,8 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         physical_table: String,
     ) -> Result<Output> {
+        let skip_wal = ctx.skip_wal();
+
         // remove empty requests
         requests.inserts.retain(|req| {
             req.rows
@@ -343,10 +458,40 @@ impl Inserter {
             .map(|info| (info.name.clone(), info.clone()))
             .collect::<HashMap<_, _>>();
         let inserts = RowToRegion::new(name_to_info, instant_table_ids, &self.partition_manager)
-            .convert(requests)
+            .convert(requests, skip_wal)
             .await?;
 
         self.do_request(inserts, &table_infos, &ctx).await
+    }
+
+    fn table_batcher(
+        &self,
+        table_info: &TableInfoRef,
+        ctx: &QueryContextRef,
+    ) -> Option<&Arc<dyn PendingRowsBatcher>> {
+        self.pending_rows_batcher.as_ref().filter(|_| {
+            ctx.batching_enabled()
+                && !table_info.is_ttl_instant_table()
+                && table_info.meta.engine == default_engine()
+        })
+    }
+
+    async fn submit_table_rows(
+        &self,
+        rows: Rows,
+        table_info: TableInfoRef,
+        ctx: QueryContextRef,
+        batcher: &Arc<dyn PendingRowsBatcher>,
+    ) -> Result<Output> {
+        let requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: table_info.name.clone(),
+                rows: Some(rows),
+            }],
+        };
+        let table_infos = HashMap::from_iter([(table_info.table_id(), table_info)]);
+        self.submit_pending_rows(requests, table_infos, ctx, batcher)
+            .await
     }
 
     pub async fn handle_table_insert(
@@ -363,9 +508,13 @@ impl Inserter {
         })?;
         let table_info = table.table_info();
 
-        let inserts = TableToRegion::new(&table_info, &self.partition_manager)
-            .convert(request)
-            .await?;
+        let converter = TableToRegion::new(&table_info, &self.partition_manager);
+        let skip_wal = request.skip_wal;
+        let rows = converter.prepare(request)?;
+        if let Some(batcher) = self.table_batcher(&table_info, &ctx) {
+            return self.submit_table_rows(rows, table_info, ctx, batcher).await;
+        }
+        let inserts = converter.partition(rows, skip_wal).await?;
 
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
@@ -377,10 +526,15 @@ impl Inserter {
         insert: &Insert,
         ctx: &QueryContextRef,
     ) -> Result<Output> {
-        let (inserts, table_info) =
-            StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx)
-                .convert(insert, ctx)
-                .await?;
+        let converter =
+            StatementToRegion::new(self.catalog_manager.as_ref(), &self.partition_manager, ctx);
+        let (rows, table_info) = converter.prepare(insert, ctx).await?;
+        if let Some(batcher) = self.table_batcher(&table_info, ctx) {
+            return self
+                .submit_table_rows(rows, table_info, ctx.clone(), batcher)
+                .await;
+        }
+        let inserts = converter.partition(rows, table_info.clone(), ctx).await?;
 
         let table_infos = HashMap::from_iter([(table_info.table_id(), table_info.clone())]);
 
@@ -621,6 +775,9 @@ impl Inserter {
                     }
                 };
                 let table_info = table.table_info();
+                if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
+                    validate_trace_table_model(&table_info, ctx)?;
+                }
                 if table_info.is_ttl_instant_table() {
                     instant_table_ids.insert(table_info.table_id());
                 }
@@ -646,6 +803,9 @@ impl Inserter {
             match self.get_table(catalog, &schema, &req.table_name).await? {
                 Some(table) => {
                     let table_info = table.table_info();
+                    if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
+                        validate_trace_table_model(&table_info, ctx)?;
+                    }
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
                     }
@@ -837,7 +997,9 @@ impl Inserter {
                         // use table_options to mark table model version
                         create_table.table_options.insert(
                             TABLE_DATA_MODEL.to_string(),
-                            TABLE_DATA_MODEL_TRACE_V1.to_string(),
+                            ctx.extension(SEMANTIC_PIPELINE)
+                                .unwrap_or(TABLE_DATA_MODEL_TRACE_V1)
+                                .to_string(),
                         );
 
                         let table = self
@@ -914,7 +1076,7 @@ impl Inserter {
         }
 
         let table_reference = TableReference::full(catalog_name, &schema_name, &physical_table);
-        info!("Physical metric table `{table_reference}` does not exist, try creating table");
+        debug!("Ensuring physical metric table `{table_reference}` exists for insert");
 
         // schema with timestamp and field column
         let default_schema = vec![
@@ -952,10 +1114,7 @@ impl Inserter {
             .await;
 
         match res {
-            Ok(_) => {
-                info!("Successfully created table {table_reference}",);
-                Ok(())
-            }
+            Ok(_) => Ok(()),
             Err(err) => {
                 error!(err; "Failed to create table {table_reference}");
                 Err(err)
@@ -1010,7 +1169,7 @@ impl Inserter {
             reorder_splunk_primary_keys(&mut create_table_expr.primary_keys);
         }
 
-        info!("Table `{table_ref}` does not exist, try creating table");
+        debug!("Ensuring table `{table_ref}` exists for insert");
         create_table_expr.table_options.extend(table_options);
         Ok(create_table_expr)
     }
@@ -1141,15 +1300,6 @@ impl Inserter {
         ctx: &QueryContextRef,
         statement_executor: &StatementExecutor,
     ) -> Result<TableRef> {
-        {
-            let table_ref = TableReference::full(
-                &create_table_expr.catalog_name,
-                &create_table_expr.schema_name,
-                &create_table_expr.table_name,
-            );
-
-            info!("Table `{table_ref}` does not exist, try creating table");
-        }
         let res = statement_executor
             .create_table_inner(
                 &mut create_table_expr,
@@ -1167,10 +1317,7 @@ impl Inserter {
 
         match res {
             Ok(table) => {
-                info!(
-                    "Successfully created table {} with options: {:?}",
-                    table_ref, create_table_expr.table_options,
-                );
+                validate_trace_table_model(&table.table_info(), ctx)?;
                 Ok(table)
             }
             Err(err) => {
@@ -1191,10 +1338,7 @@ impl Inserter {
             .await;
 
         match res {
-            Ok(res) => {
-                info!("Successfully created logical tables");
-                Ok(res)
-            }
+            Ok(res) => Ok(res),
             Err(err) => {
                 let failed_tables = create_table_exprs
                     .into_iter()
@@ -1270,6 +1414,28 @@ fn validate_column_count_match(requests: &RowInsertRequests) -> Result<()> {
             );
             Ok(())
         })?;
+    }
+    Ok(())
+}
+
+/// Rejects writes from a different built-in trace model before schema mutation.
+/// Unstamped, explicitly created tables remain subject to normal schema validation.
+pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef) -> Result<()> {
+    let Some(expected @ (TABLE_DATA_MODEL_TRACE_V1 | TABLE_DATA_MODEL_TRACE_V2)) =
+        ctx.extension(SEMANTIC_PIPELINE)
+    else {
+        return Ok(());
+    };
+    if let Some(actual) = table_info.meta.options.extra_options.get(TABLE_DATA_MODEL) {
+        ensure!(
+            actual == expected,
+            InvalidInsertRequestSnafu {
+                reason: format!(
+                    "Trace table `{}` uses {actual}, but the request uses {expected}",
+                    table_info.name,
+                ),
+            }
+        );
     }
     Ok(())
 }
@@ -1554,8 +1720,8 @@ mod tests {
     use table::dist_table::DummyDataSource;
     use table::metadata::{TableInfoBuilder, TableMetaBuilder, TableType};
 
-    use super::*;
-    use crate::tests::{create_partition_rule_manager, prepare_mocked_backend};
+    use crate::insert::*;
+    use crate::test_util::{create_partition_rule_manager, prepare_mocked_backend};
 
     fn make_table_ref_with_schema(
         ts_name: &str,
@@ -1741,6 +1907,24 @@ mod tests {
 
         assert!(request_is_native_histogram(&request_schema));
         assert!(table_is_native_histogram(&table));
+    }
+
+    #[test]
+    fn test_skip_wal_does_not_change_table_options() {
+        check_skip_wal_does_not_change_table_options(false);
+        check_skip_wal_does_not_change_table_options(true);
+    }
+
+    fn check_skip_wal_does_not_change_table_options(skip_wal: bool) {
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        ctx.set_skip_wal(skip_wal);
+        let mut options = Default::default();
+        fill_table_options_for_create(&mut options, &AutoCreateTableType::Physical, &ctx);
+        assert!(!options.contains_key(session::hints::INSERT_SKIP_WAL_HINT));
+        assert!(!options.contains_key("skip_wal"));
     }
 
     #[test]
@@ -1931,5 +2115,93 @@ mod tests {
             Some("last_row"),
             table_options.get(MERGE_MODE_KEY).map(String::as_str)
         );
+    }
+
+    struct UnexpectedBatcher;
+
+    #[async_trait::async_trait]
+    impl PendingRowsBatcher for UnexpectedBatcher {
+        async fn acquire(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>> {
+            panic!("empty writes must not acquire batch admission")
+        }
+
+        async fn submit(
+            &self,
+            _table_info: TableInfoRef,
+            _batch: arrow::record_batch::RecordBatch,
+            _ctx: QueryContextRef,
+            _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+        ) -> Result<usize> {
+            panic!("empty writes must not submit a batch")
+        }
+    }
+
+    async fn batcher_test_inserter() -> Inserter {
+        let kv_backend = prepare_mocked_backend().await;
+        Inserter::new(
+            catalog::memory::MemoryCatalogManager::new(),
+            create_partition_rule_manager(kv_backend.clone()).await,
+            Arc::new(MockDatanodeManager::new(NaiveDatanodeHandler)),
+            Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(100),
+                kv_backend,
+            )),
+            true,
+        )
+    }
+
+    #[tokio::test]
+    async fn test_instant_table_bypasses_batcher() {
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let inserter = batcher_test_inserter()
+            .await
+            .with_pending_rows_batcher(Some(batcher));
+        let mut ctx = session::context::QueryContextBuilder::default().build();
+        ctx.set_batching_enabled(true);
+        let ctx = Arc::new(ctx);
+        let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
+            .table_info();
+        assert!(inserter.table_batcher(&table, &ctx).is_some());
+        let mut instant = (*table).clone();
+        instant.meta.options.ttl = Some(common_time::ttl::TimeToLive::Instant);
+        assert!(inserter.table_batcher(&Arc::new(instant), &ctx).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_empty_prepared_rows_skip_batcher() {
+        let inserter = batcher_test_inserter().await;
+        let table = make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
+            .table_info();
+        let batcher: Arc<dyn PendingRowsBatcher> = Arc::new(UnexpectedBatcher);
+        let ctx = QueryContext::arc();
+        let output = inserter
+            .submit_table_rows(
+                Rows {
+                    schema: vec![],
+                    rows: vec![],
+                },
+                table.clone(),
+                ctx.clone(),
+                &batcher,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
+        let output = inserter
+            .submit_pending_rows(
+                RowInsertRequests {
+                    inserts: vec![RowInsertRequest {
+                        table_name: table.name.clone(),
+                        rows: None,
+                    }],
+                },
+                HashMap::from_iter([(table.table_id(), table)]),
+                ctx,
+                &batcher,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(output.data, OutputData::AffectedRows(0)));
     }
 }

@@ -32,7 +32,9 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metric_engine_consts::{
     MEMTABLE_PARTITION_TREE_PRIMARY_KEY_ENCODING, PRIMARY_KEY_ENCODING,
 };
-use store_api::mito_engine_options::{COMPACTION_OVERRIDE, MAX_ROW_GROUP_ROW_COUNT_LIMIT};
+use store_api::mito_engine_options::{
+    COMPACTION_OVERRIDE, FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+};
 use store_api::storage::{ColumnId, RegionId};
 use strum::EnumString;
 
@@ -119,7 +121,8 @@ pub struct RegionOptions {
     /// the configured size; zero disables both limits.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_buffer_size: Option<ReadableSize>,
-    /// Whether to preserve per-row sequence numbers through flush and compaction.
+    /// Whether to preserve original per-row sequence numbers when flushing.
+    /// Compaction always retains effective input sequences, regardless of this option.
     ///
     /// Only meaningful for append-only tables (`append_mode = true`): when enabled,
     /// every row keeps its exact sequence number in memtables, flushed SSTs and
@@ -128,6 +131,9 @@ pub struct RegionOptions {
     /// sequence metadata.
     #[serde(default, skip_serializing_if = "is_false")]
     pub preserve_row_sequence: bool,
+    /// Encoding for direct floating-point field columns in Parquet SSTs.
+    #[serde(default)]
+    pub float_field_encoding: FloatFieldEncoding,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -172,6 +178,19 @@ impl RegionOptions {
                 }
             );
         }
+        let CompactionOptions::Twcs(options) = &self.compaction;
+        ensure!(
+            options.active_window_l1_merge_trigger >= 2,
+            InvalidRegionOptionsSnafu {
+                reason: "active_window.l1_merge_trigger must be at least 2",
+            }
+        );
+        ensure!(
+            options.inactive_window_l1_merge_trigger >= 2,
+            InvalidRegionOptionsSnafu {
+                reason: "inactive_window.l1_merge_trigger must be at least 2",
+            }
+        );
         Ok(())
     }
 
@@ -274,6 +293,8 @@ impl RegionOptions {
             sst_format = Some(FormatType::Flat);
         }
 
+        let float_field_encoding = options.float_field_encoding.unwrap_or_default();
+
         let compaction_override_flag = options_map
             .get(COMPACTION_OVERRIDE)
             .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1"))
@@ -309,6 +330,7 @@ impl RegionOptions {
             primary_key_encoding,
             write_buffer_size: options.write_buffer_size,
             preserve_row_sequence: options.preserve_row_sequence,
+            float_field_encoding,
         };
         opts.validate()?;
 
@@ -372,13 +394,28 @@ impl Default for CompactionOptions {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TwcsOptions {
-    /// Minimum file num in every time window to trigger a compaction.
+    /// Minimum file num in the active time window to trigger a compaction.
     #[serde_as(as = "DisplayFromStr")]
-    pub trigger_file_num: usize,
+    #[serde(rename = "active_window.trigger_file_num", alias = "trigger_file_num")]
+    pub active_window_trigger_file_num: usize,
+    /// Minimum L1 file num in the active window to allow a safety compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "active_window.l1_merge_trigger")]
+    pub active_window_l1_merge_trigger: usize,
+    /// Minimum file num in an inactive time window to trigger a compaction.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "inactive_window.trigger_file_num")]
+    pub inactive_window_trigger_file_num: usize,
+    /// Minimum L1 file num to trigger a compaction in an inactive window.
+    #[serde_as(as = "DisplayFromStr")]
+    #[serde(rename = "inactive_window.l1_merge_trigger")]
+    pub inactive_window_l1_merge_trigger: usize,
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
-    /// Compaction time window defined when creating tables.
+    /// Soft output SST size threshold for TWCS and strict-window compaction.
+    /// `None` or zero disables size-based splitting. With a primary key, files
+    /// split at series boundaries, so a single series may exceed the threshold.
     pub max_output_file_size: Option<ReadableSize>,
     /// Whether to use remote compaction.
     #[serde_as(as = "DisplayFromStr")]
@@ -407,7 +444,10 @@ impl TwcsOptions {
 impl Default for TwcsOptions {
     fn default() -> Self {
         Self {
-            trigger_file_num: 4,
+            active_window_trigger_file_num: 4,
+            active_window_l1_merge_trigger: 16,
+            inactive_window_trigger_file_num: 2,
+            inactive_window_l1_merge_trigger: 8,
             time_window: None,
             max_output_file_size: Some(ReadableSize::mb(512)),
             remote_compaction: false,
@@ -440,6 +480,9 @@ struct RegionOptionsWithoutEnum {
     max_row_group_row_count: Option<usize>,
     #[serde_as(as = "DisplayFromStr")]
     preserve_row_sequence: bool,
+    #[serde(rename = "experimental_sst_float_field_encoding")]
+    #[serde_as(as = "NoneAsEmptyString")]
+    float_field_encoding: Option<FloatFieldEncoding>,
 }
 
 impl Default for RegionOptionsWithoutEnum {
@@ -456,6 +499,7 @@ impl Default for RegionOptionsWithoutEnum {
             sst_format: options.sst_format,
             max_row_group_row_count: options.max_row_group_row_count,
             preserve_row_sequence: options.preserve_row_sequence,
+            float_field_encoding: Some(options.float_field_encoding),
         }
     }
 }
@@ -599,7 +643,9 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_wal::options::KafkaWalOptions;
-    use store_api::mito_engine_options::{SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY};
+    use store_api::mito_engine_options::{
+        EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, SKIP_WAL_KEY, WRITE_BUFFER_SIZE_KEY,
+    };
 
     use super::*;
 
@@ -615,6 +661,26 @@ mod tests {
         let map = make_map(&[]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         assert_eq!(RegionOptions::default(), options);
+    }
+
+    #[test]
+    fn test_float_field_encoding_defaults_and_parses() {
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &make_map(&[])).unwrap();
+        assert_eq!(FloatFieldEncoding::Default, options.float_field_encoding);
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "default")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(FloatFieldEncoding::Default, options.float_field_encoding);
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "byte_stream_split")]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        assert_eq!(
+            FloatFieldEncoding::ByteStreamSplit,
+            options.float_field_encoding
+        );
+
+        let map = make_map(&[(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING, "invalid")]);
+        assert!(RegionOptions::try_from_options(RegionId::new(0, 0), &map).is_err());
     }
 
     #[test]
@@ -702,14 +768,20 @@ mod tests {
     #[test]
     fn test_with_compaction_type() {
         let map = make_map(&[
-            ("compaction.twcs.trigger_file_num", "8"),
+            ("compaction.twcs.active_window.trigger_file_num", "8"),
+            ("compaction.twcs.active_window.l1_merge_trigger", "16"),
+            ("compaction.twcs.inactive_window.trigger_file_num", "2"),
+            ("compaction.twcs.inactive_window.l1_merge_trigger", "12"),
             ("compaction.twcs.time_window", "2h"),
             ("compaction.type", "twcs"),
         ]);
         let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
         let expect = RegionOptions {
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
+                active_window_l1_merge_trigger: 16,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 12,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 ..Default::default()
             }),
@@ -717,6 +789,60 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(expect, options);
+    }
+
+    #[test]
+    fn test_twcs_window_trigger_below_two_is_accepted_for_compatibility() {
+        // Tables created before the >= 2 ALTER-time check may have persisted
+        // trigger values of 1; region open must still accept them.
+        let map = make_map(&[
+            ("compaction.twcs.active_window.trigger_file_num", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let CompactionOptions::Twcs(twcs) = &options.compaction;
+        assert_eq!(1, twcs.active_window_trigger_file_num);
+
+        let map = make_map(&[
+            ("compaction.twcs.inactive_window.trigger_file_num", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+        let options = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap();
+        let CompactionOptions::Twcs(twcs) = &options.compaction;
+        assert_eq!(1, twcs.inactive_window_trigger_file_num);
+    }
+
+    #[test]
+    fn test_active_window_l1_merge_trigger_below_two_is_rejected() {
+        let map = make_map(&[
+            ("compaction.twcs.active_window.l1_merge_trigger", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+    }
+
+    #[test]
+    fn test_inactive_window_l1_merge_trigger_defaults_to_eight() {
+        let value = serde_json::to_value(TwcsOptions::default()).unwrap();
+        assert_eq!(
+            Some("8"),
+            value
+                .get("inactive_window.l1_merge_trigger")
+                .and_then(|value| value.as_str())
+        );
+    }
+
+    #[test]
+    fn test_inactive_window_l1_merge_trigger_below_two_is_rejected() {
+        let map = make_map(&[
+            ("compaction.twcs.inactive_window.l1_merge_trigger", "1"),
+            ("compaction.type", "twcs"),
+        ]);
+
+        let err = RegionOptions::try_from_options(RegionId::new(0, 0), &map).unwrap_err();
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
     }
 
     #[test]
@@ -982,7 +1108,10 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
+                active_window_l1_merge_trigger: 16,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::gb(1)),
                 remote_compaction: false,
@@ -1011,6 +1140,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: None,
             preserve_row_sequence: false,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         assert_eq!(expect, options);
     }
@@ -1042,7 +1172,10 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
+                active_window_l1_merge_trigger: 8,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: None,
                 remote_compaction: false,
@@ -1066,6 +1199,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: Some(ReadableSize::mb(128)),
             preserve_row_sequence: true,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         let region_options_json_str = serde_json::to_string(&options).unwrap();
         assert!(region_options_json_str.contains("preserve_row_sequence"));
@@ -1077,6 +1211,10 @@ mod tests {
         let got: RegionOptions = serde_json::from_str(old_region_options_json_str).unwrap();
         assert_eq!(None, got.write_buffer_size);
         assert!(!got.preserve_row_sequence);
+        assert_eq!(FloatFieldEncoding::Default, got.float_field_encoding);
+        let CompactionOptions::Twcs(twcs) = got.compaction;
+        assert_eq!(16, twcs.active_window_l1_merge_trigger);
+        assert_eq!(8, twcs.inactive_window_l1_merge_trigger);
 
         let default_json = serde_json::to_value(RegionOptions::default()).unwrap();
         assert!(default_json.get(WRITE_BUFFER_SIZE_KEY).is_none());
@@ -1113,7 +1251,10 @@ mod tests {
             ttl: Some(Duration::from_secs(3600 * 24 * 7).into()),
             auto_flush_interval: None,
             compaction: CompactionOptions::Twcs(TwcsOptions {
-                trigger_file_num: 8,
+                active_window_trigger_file_num: 8,
+                active_window_l1_merge_trigger: 16,
+                inactive_window_trigger_file_num: 2,
+                inactive_window_l1_merge_trigger: 8,
                 time_window: Some(Duration::from_secs(3600 * 2)),
                 max_output_file_size: Some(ReadableSize::mb(7)),
                 remote_compaction: false,
@@ -1137,6 +1278,7 @@ mod tests {
             primary_key_encoding: None,
             write_buffer_size: None,
             preserve_row_sequence: false,
+            float_field_encoding: FloatFieldEncoding::default(),
         };
         assert_eq!(options, got);
     }

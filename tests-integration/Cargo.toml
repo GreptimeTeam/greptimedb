@@ -110,7 +110,7 @@ http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
 meta-srv = { workspace = true, features = ["mock"] }
-mito2 = { workspace = true, features = ["test-shared-fs-region-migration"] }
+mito2 = { workspace = true, features = ["test", "test-shared-fs-region-migration"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",
     "default-rustls-ring",
@@ -132,6 +132,7 @@ session = { workspace = true, features = ["testing"] }
 similar-asserts.workspace = true
 store-api.workspace = true
 tokio-postgres = { workspace = true }
+tokio-util.workspace = true
 url = "2.3"
 urlencoding = "2.1"
 yaml-rust = "0.4"

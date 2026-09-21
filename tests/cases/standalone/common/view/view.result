@@ -58,8 +58,10 @@ Error: 4001(TableNotFound), Failed to plan SQL: Table not found: greptime.public
 
 SHOW VIEWS;
 
-++
-++
++-------+
+| Views |
++-------+
++-------+
 
 DROP VIEW v1;
 
@@ -92,6 +94,8 @@ SHOW TABLES;
 
 SHOW VIEWS;
 
-++
-++
++-------+
+| Views |
++-------+
++-------+
 

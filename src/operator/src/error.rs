@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_datasource::file_format::Format;
 use common_error::define_into_tonic_status;
@@ -85,9 +86,31 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid database export: {reason}"))]
+    InvalidDatabaseExport { reason: String },
+
+    #[snafu(display("Database export cancelled"))]
+    DatabaseExportCancelled {},
+
+    #[snafu(display("Invalid logical table export: {reason}"))]
+    InvalidLogicalTableExport { reason: String },
+
+    #[snafu(display("Logical table export resource limit exceeded: {reason}"))]
+    LogicalTableExportResource { reason: String },
+
+    #[snafu(display("Logical table export cancelled"))]
+    LogicalTableExportCancelled {},
+
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to flush pending batch: {source}"))]
+    BatchFlush {
+        source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1014,8 +1037,10 @@ impl ErrorExt for Error {
             Error::BuildDfLogicalPlan { .. }
             | Error::BuildTableMeta { .. }
             | Error::MissingInsertBody { .. } => StatusCode::Internal,
-            Error::ExecuteAdminFunction { .. }
-            | Error::EncodeJson { .. }
+            Error::ExecuteAdminFunction { error, .. } => admin_external_error(error)
+                .map(ErrorExt::status_code)
+                .unwrap_or(StatusCode::Unexpected),
+            Error::EncodeJson { .. }
             | Error::DeserializePartitionExpr { .. }
             | Error::SerializePartitionExpr { .. } => StatusCode::Unexpected,
             Error::AdminFunctionCancelled => StatusCode::Cancelled,
@@ -1040,6 +1065,7 @@ impl ErrorExt for Error {
             | Error::DescribeStatement { source, .. } => source.status_code(),
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
+            Error::BatchFlush { source, .. } => source.status_code(),
             Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
@@ -1069,6 +1095,11 @@ impl ErrorExt for Error {
             Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::InvalidDatabaseExport { .. } => StatusCode::InvalidArguments,
+            Error::DatabaseExportCancelled { .. } => StatusCode::Cancelled,
+            Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
+            Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
+            Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,
             Error::InvalidProcessId { .. } => StatusCode::InvalidArguments,
             Error::ProcessManagerMissing { .. } => StatusCode::Unexpected,
             Error::TimestampFormatNotSupported { .. } => StatusCode::InvalidArguments,
@@ -1135,10 +1166,14 @@ impl ErrorExt for Error {
             | Error::MissingTimeIndexColumn { source, .. } => source.retry_hint(),
 
             Error::Cast { source, .. } => source.retry_hint(),
+            Error::ExecuteAdminFunction { error, .. } => admin_external_error(error)
+                .map(ErrorExt::retry_hint)
+                .unwrap_or(RetryHint::NonRetryable),
             Error::ParseSql { source, .. } => source.retry_hint(),
             Error::Catalog { source, .. } => source.retry_hint(),
             Error::SubstraitCodec { source, .. } => source.retry_hint(),
             Error::External { source, .. } => source.retry_hint(),
+            Error::BatchFlush { source, .. } => source.retry_hint(),
             Error::BuildRecordBatch { source, .. } => source.retry_hint(),
             Error::DecodeFlightData { source, .. } => source.retry_hint(),
             Error::SqlCommon { source, .. } => source.retry_hint(),
@@ -1154,4 +1189,36 @@ impl ErrorExt for Error {
     }
 }
 
+fn admin_external_error(error: &DataFusionError) -> Option<&BoxedError> {
+    match error {
+        DataFusionError::External(error) => error.downcast_ref::<BoxedError>(),
+        DataFusionError::Diagnostic(_, error) => admin_external_error(error),
+        _ => None,
+    }
+}
+
 define_into_tonic_status!(Error);
+
+#[cfg(test)]
+mod tests {
+    use crate::error::*;
+
+    #[test]
+    fn admin_function_preserves_external_error_metadata() {
+        let external = BoxedError::new(meta_client::error::Error::MetaServer {
+            code: StatusCode::TableUnavailable,
+            msg: "leader changed".to_string(),
+            tonic_code: tonic::Code::Unavailable,
+            retry_hint: RetryHint::Retryable,
+            location: snafu::location!(),
+        });
+        let error = Error::ExecuteAdminFunction {
+            msg: "test_admin".to_string(),
+            error: DataFusionError::External(Box::new(external)),
+            location: snafu::location!(),
+        };
+
+        assert_eq!(StatusCode::TableUnavailable, error.status_code());
+        assert_eq!(RetryHint::Retryable, error.retry_hint());
+    }
+}

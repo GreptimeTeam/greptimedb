@@ -239,10 +239,6 @@ fn build_struct(
 
         // Implement DataFusion's ScalarUDFImpl trait
         impl datafusion::logical_expr::ScalarUDFImpl for #name {
-            fn as_any(&self) -> &dyn std::any::Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 #display_name
             }
@@ -304,7 +300,7 @@ fn build_struct(
                             .and_then(|cv| match cv {
                                 common_query::prelude::ColumnarValue::Vector(v) => Ok(v),
                                 common_query::prelude::ColumnarValue::Scalar(s) => {
-                                    datatypes::vectors::Helper::try_from_scalar_value(s, args.number_rows)
+                                    datatypes::vectors::Helper::try_from_scalar_value(s, args.number_rows, None)
                                         .context(common_query::error::FromScalarValueSnafu)
                                 }
                             })

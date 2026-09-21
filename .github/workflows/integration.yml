@@ -14,6 +14,18 @@ on:
       - 'grafana/**'
       - 'Makefile'
   workflow_dispatch:
+    inputs:
+      ci_command:
+        description: Internal comment-command marker
+        required: false
+        default: false
+        type: boolean
+      fuzz_profile:
+        description: Fuzz profile selected by /ci fuzz
+        required: false
+        default: none
+        type: choice
+        options: [none, standalone, distributed, chaos, all]
 
 name: Integration CI
 
@@ -26,7 +38,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
     strategy:
@@ -87,7 +99,7 @@ jobs:
           version: current
 
   sqlness:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: Sqlness Test (${{ matrix.mode.name }})
     needs: build
     runs-on: ${{ matrix.os }}
@@ -167,7 +179,7 @@ jobs:
           retention-days: 3
 
   export-import-v2-e2e:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: Export/Import V2 E2E Test
     needs: build
     runs-on: ubuntu-latest
@@ -237,7 +249,7 @@ jobs:
           retention-days: 3
 
   run-multi-lang-tests:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: Run Multi-language SDK Tests
     needs: build
     uses: ./.github/workflows/run-multi-lang-tests.yml
@@ -245,7 +257,7 @@ jobs:
       artifact-name: bins
 
   compat-updater-check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
     name: Check compat version updater
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -302,7 +314,7 @@ jobs:
           retention-days: 3
 
   prepare-fuzz-targets:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
     name: Prepare Fuzz Targets
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -414,7 +426,7 @@ jobs:
           if-no-files-found: error
 
   fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
     name: Fuzz Test (Standalone, ${{ matrix.group.name }})
     needs: [build, prepare-fuzz-targets]
     runs-on: ubuntu-latest
@@ -494,7 +506,7 @@ jobs:
           artifact-name: fuzz-standalone-${{ matrix.group.id }}
 
   unstable-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'standalone' || inputs.fuzz_profile == 'all') }}
     name: Unstable Fuzz Test
     needs: [build-greptime-ci, prepare-fuzz-targets]
     runs-on: ubuntu-latest
@@ -553,7 +565,7 @@ jobs:
           artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
     name: Build GreptimeDB binary (profile-CI)
     runs-on: ${{ matrix.os }}
     strategy:
@@ -613,7 +625,7 @@ jobs:
           version: current
 
   distributed-fuzztest:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'distributed' || inputs.fuzz_profile == 'all') }}
     name: Fuzz Test (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs: [build-greptime-ci, prepare-fuzz-targets]
@@ -781,10 +793,9 @@ jobs:
           kubectl -n kafka-cluster apply \
             -f .github/actions/setup-greptimedb-cluster/kafka-wal-helper.yaml
 
-          kubectl -n kafka-cluster wait \
-            --for=condition=Ready \
-            pod -l app=kafka-wal-helper \
-            --timeout=120s
+          kubectl rollout status deployment/kafka-wal-helper \
+            --timeout=120s \
+            -n kafka-cluster
       - name: Print etcd info
         shell: bash
         run: kubectl get all --show-labels -n etcd-cluster
@@ -852,7 +863,7 @@ jobs:
           docker system prune -f
 
   distributed-fuzztest-with-chaos:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'pull_request' }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile == 'chaos' || inputs.fuzz_profile == 'all') }}
     name: Fuzz Test with Chaos (Distributed, ${{ matrix.mode.name }}, ${{ matrix.group.name }})
     runs-on: ubuntu-latest
     needs: [build-greptime-ci, prepare-fuzz-targets]

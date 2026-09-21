@@ -144,7 +144,7 @@ impl FlatRowGroupLastRowCachedReader {
         let key = SelectorResultKey {
             file_id,
             row_group_idx,
-            selector: TimeSeriesRowSelector::LastRow,
+            selector: TimeSeriesRowSelector::LastRow { after_merge: false },
         };
 
         if let Some(value) = cache_strategy.get_selector_result(&key) {

@@ -14,18 +14,21 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use clap::Args as ClapArgs;
 use datafusion_object_store::path::Path as StorePath;
-use datafusion_object_store::{ObjectMeta, ObjectStore};
-use futures::{StreamExt, TryStreamExt};
+use datafusion_object_store::{ObjectMeta, ObjectStore, ObjectStoreExt};
+use futures::future::BoxFuture;
+use futures::{FutureExt, StreamExt, TryFutureExt, TryStreamExt};
 use object_store::config::ObjectStoreConfig;
 use object_store::factory::new_raw_object_store;
 use object_store::services::Fs;
-use parquet::arrow::async_reader::ParquetObjectReader;
-use parquet::file::metadata::ParquetMetaDataReader;
+use parquet::arrow::async_reader::AsyncFileReader;
+use parquet::errors::{ParquetError, Result as ParquetResult};
+use parquet::file::metadata::{ParquetMetaData, ParquetMetaDataReader};
 use serde::{Deserialize, Serialize};
 
 /// Same shape as `query_regression_runner::model::DestinationConfig`. The two
@@ -98,6 +101,70 @@ struct ListedFile {
     size: u64,
     path: String,
     relative_path: String,
+}
+
+/// An asynchronous Parquet reader backed directly by an object store.
+///
+/// The file size is retained from the listing so footer reads use bounded
+/// ranges without an additional stat/head request.
+#[derive(Clone, Debug)]
+struct ObjectStoreReader {
+    store: Arc<dyn ObjectStore>,
+    path: StorePath,
+    file_size: u64,
+}
+
+impl ObjectStoreReader {
+    fn new(store: Arc<dyn ObjectStore>, path: StorePath, file_size: u64) -> Self {
+        Self {
+            store,
+            path,
+            file_size,
+        }
+    }
+}
+
+fn to_parquet_error(error: datafusion_object_store::Error) -> ParquetError {
+    ParquetError::External(Box::new(error))
+}
+
+impl AsyncFileReader for ObjectStoreReader {
+    fn get_bytes(
+        &mut self,
+        range: Range<u64>,
+    ) -> BoxFuture<'_, ParquetResult<prost::bytes::Bytes>> {
+        self.store
+            .get_range(&self.path, range)
+            .map_err(to_parquet_error)
+            .boxed()
+    }
+
+    fn get_byte_ranges(
+        &mut self,
+        ranges: Vec<Range<u64>>,
+    ) -> BoxFuture<'_, ParquetResult<Vec<prost::bytes::Bytes>>> {
+        async move {
+            self.store
+                .get_ranges(&self.path, &ranges)
+                .await
+                .map_err(to_parquet_error)
+        }
+        .boxed()
+    }
+
+    fn get_metadata<'a>(
+        &'a mut self,
+        _options: Option<&'a parquet::arrow::arrow_reader::ArrowReaderOptions>,
+    ) -> BoxFuture<'a, ParquetResult<Arc<ParquetMetaData>>> {
+        let file_size = self.file_size;
+        async move {
+            let metadata = ParquetMetaDataReader::new()
+                .load_and_finish(self, file_size)
+                .await?;
+            Ok(Arc::new(metadata))
+        }
+        .boxed()
+    }
 }
 
 pub(super) async fn run_inspect_footer(
@@ -217,11 +284,8 @@ async fn inspect_file(
     file: &ListedFile,
     column: &str,
 ) -> Result<FooterFileReport, Box<dyn std::error::Error + Send + Sync>> {
-    let mut reader =
-        ParquetObjectReader::new(store, file.location.clone()).with_file_size(file.size);
-    let metadata = ParquetMetaDataReader::new()
-        .load_and_finish(&mut reader, file.size)
-        .await?;
+    let mut reader = ObjectStoreReader::new(store, file.location.clone(), file.size);
+    let metadata = reader.get_metadata(None).await?;
     let file_metadata = metadata.file_metadata();
     let row_groups = metadata.row_groups();
     let mut columns = Vec::new();
