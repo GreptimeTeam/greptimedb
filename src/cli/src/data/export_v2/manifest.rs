@@ -279,7 +279,7 @@ impl Manifest {
                 }
             }
         }
-        serde_json::from_value(value)
+        serde_json::from_slice(data)
     }
 
     /// Validates the encoding contract before any snapshot operation.
@@ -525,6 +525,22 @@ mod tests {
             if version == 2 {
                 value["data_layout"] = "metric-parquet-packs".into();
                 value["schema_only"] = false.into();
+            }
+            let raw = serde_json::to_string(&value).unwrap();
+            for duplicate in [
+                format!(
+                    "{{\"checksum\":\"unsupported\",\"checksum\":null,{}",
+                    &raw[1..]
+                ),
+                format!("{{\"chunks\":[],{}", &raw[1..]),
+                raw.replacen("\"files\":[]", "\"files\":[],\"files\":[]", 1),
+                raw.replacen(
+                    "\"files\":[]",
+                    "\"checksum\":\"unsupported\",\"checksum\":null,\"files\":[]",
+                    1,
+                ),
+            ] {
+                assert!(super::Manifest::from_json(duplicate.as_bytes()).is_err());
             }
             for field in ["chunks", "files"] {
                 let mut missing = value.clone();

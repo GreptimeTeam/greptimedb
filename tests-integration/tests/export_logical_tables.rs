@@ -1051,6 +1051,14 @@ async fn packed_copy_standalone_heterogeneous_streams() {
         "never",
     ]);
     let importer = command.build().await.unwrap();
+    std::fs::write(
+        root.join("schema/schemas.json"),
+        serde_json::to_vec(
+            &serde_json::json!([{"catalog":"greptime","name":"public","options":{}}]),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     #[derive(clap::Parser)]
     struct VerifyArgs {
         #[command(subcommand)]
