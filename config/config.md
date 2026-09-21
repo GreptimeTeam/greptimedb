@@ -170,7 +170,7 @@
 | `storage.http_client.timeout` | String | `30s` | The total request timeout, applied from when the request starts connecting until the response body has finished.<br/>Also considered a total deadline. |
 | `storage.http_client.pool_idle_timeout` | String | `90s` | The timeout for idle sockets being kept-alive. |
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
-| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines. |
+| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
@@ -631,7 +631,7 @@
 | `storage.http_client.timeout` | String | `30s` | The total request timeout, applied from when the request starts connecting until the response body has finished.<br/>Also considered a total deadline. |
 | `storage.http_client.pool_idle_timeout` | String | `90s` | The timeout for idle sockets being kept-alive. |
 | `storage.http_client.skip_ssl_validation` | Bool | `false` | To skip the ssl verification<br/>**Security Notice**: Setting `skip_ssl_validation = true` disables certificate verification, making connections vulnerable to man-in-the-middle attacks. Only use this in development or trusted private networks. |
-| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines. |
+| `[[region_engine]]` | -- | -- | The region engine options. You can configure multiple region engines.<br/>Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail. |
 | `region_engine.mito` | -- | -- | The Mito engine options. |
 | `region_engine.mito.num_workers` | Integer | `8` | Number of region workers. |
 | `region_engine.mito.worker_channel_size` | Integer | `128` | Request channel size of each worker. |
