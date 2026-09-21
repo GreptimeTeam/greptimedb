@@ -7,7 +7,7 @@ It is an asynchronous SQL scalar function usable in `WHERE` and `SELECT`.
 ## Start GreptimeDB
 
 Jev is compiled and registered by the **default-enabled Cargo feature
-`ai-functions`**. Enable API evaluation separately in the server process:
+`ai_functions`**. Enable API evaluation separately in the server process:
 
 ```sh
 export GREPTIMEDB_EXPERIMENTAL_JEV=true
@@ -22,7 +22,7 @@ The MVP uses environment variables rather than TOML configuration.
 The Cargo feature includes the SQL function in the build; the runtime environment
 variables enable and configure its API calls. Default compilation does not turn
 on external API calls. To enable the feature explicitly, use
-`--features ai-functions`.
+`--features ai_functions`.
 
 ## Query
 
@@ -97,16 +97,16 @@ HTTP server and need no API key:
 ```sh
 cargo nextest run -p common-function
 cargo nextest run -p common-function --no-default-features
-cargo nextest run -p common-function --no-default-features --features ai-functions
+cargo nextest run -p common-function --no-default-features --features ai_functions
 ```
 
-The sqlness runner explicitly includes `ai-functions` when building its test binary:
+The sqlness runner explicitly includes `ai_functions` when building its test binary:
 
 ```sh
 cargo sqlness bare -t jev
 ```
 
-If using `--bins-dir`, provide a binary built with `ai-functions` (included by
+If using `--bins-dir`, provide a binary built with `ai_functions` (included by
 default). CI covers the AI-enabled path through the regular unit tests and
 sqlness tests; the feature-off checks above can be run locally when needed.
 
