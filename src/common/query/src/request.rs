@@ -622,22 +622,27 @@ mod tests {
 
     #[test]
     fn bounded_encoding_stops_before_later_children() {
-        let expr = Arc::new(BinaryExpr::new(
-            lit("x".repeat(1024)),
-            Operator::Eq,
-            lit("y".repeat(4096)),
-        )) as Arc<dyn PhysicalExpr>;
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
+        let expr = Arc::new(
+            InListExpr::try_new(
+                Arc::new(Column::new("host", 0)),
+                (0..8).map(|i| lit(i.to_string().repeat(1024))).collect(),
+                false,
+                &schema,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
         let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
-        assert!(full_size > 4096);
+        assert!(full_size > 8192);
 
-        let error = encode_bounded_physical_expr_to_bytes(&expr, 128).unwrap_err();
+        let error = encode_bounded_physical_expr_to_bytes(&expr, 2048).unwrap_err();
         let CommonQueryError::DynFilterPayloadTooLarge {
             payload_size_bytes, ..
         } = error
         else {
             panic!("expected payload size error, got {error:?}");
         };
-        assert!(payload_size_bytes < 4096);
+        assert!((2048..4096).contains(&payload_size_bytes));
     }
 
     #[test]
