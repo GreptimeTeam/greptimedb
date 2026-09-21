@@ -274,7 +274,7 @@ impl LogStore for ObjectStoreLogStore {
                             provider: provider.clone(),
                             region_id,
                             entry_id: record.entry_id,
-                            data: record.payload.to_vec(),
+                            data: record.payload.into(),
                         })
                     })
                     .collect::<Vec<_>>();
