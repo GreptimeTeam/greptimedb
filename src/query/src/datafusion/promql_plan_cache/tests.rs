@@ -19,6 +19,7 @@ use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
 use catalog::table_source::DfTableSourceProvider;
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_query::promql_annotations::PromqlAnnotationCollector;
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use common_time::Timezone;
@@ -29,9 +30,13 @@ use datafusion::prelude::{col, lit};
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::expr_fn::SimpleScalarUDF;
-use datafusion_expr::{ColumnarValue, LogicalPlanBuilder};
+use datafusion_expr::{ColumnarValue, LogicalPlanBuilder, WindowFrame};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use promql::functions::{
+    NativeHistogramAvgOverTime, NativeHistogramDelta, NativeHistogramIDelta, NativeHistogramIRate,
+    NativeHistogramIncrease, NativeHistogramRate, NativeHistogramSumOverTime,
+};
 use promql_parser::parser;
 use promql_parser::parser::EvalStmt;
 use session::context::{QueryContext, QueryContextBuilder};
@@ -146,14 +151,22 @@ const EVAL_START_MS: i64 = 1_743_076_800_000;
 
 /// Queries covering the supported shapes: range selector, range selector with
 /// an offset (which adds a normalizer), bare instant selector, instant selector
-/// with an offset, and the admitted aggregations over both.
-const QUERIES: [&str; 6] = [
+/// with an offset, the admitted aggregations over both, the instant range
+/// functions, and the `topk`/`bottomk` rewrite that expands into a window.
+const QUERIES: [&str; 13] = [
     "rate(metric[1h])",
     "sum(rate(metric[1h] offset 5m))",
     "avg by (tag_0) (rate(metric[1h]))",
     "metric",
     "metric offset 5m",
     "sum by (tag_0) (metric)",
+    "max by (tag_0) (metric)",
+    "min by (tag_0) (metric)",
+    "count by (tag_0) (metric)",
+    "irate(metric[1h])",
+    "sum by (tag_0) (avg_over_time(metric[1h]))",
+    "topk(1, sum by (tag_0) (rate(metric[1h])))",
+    "bottomk(2, max by (tag_0) (metric))",
 ];
 
 fn eval_stmt(query: &str, shift_ms: i64) -> EvalStmt {
@@ -311,6 +324,11 @@ async fn a_hit_reads_current_data_not_the_data_the_template_was_built_from() {
     let state = engine_state(false);
     let session = state.session_state();
     for query in QUERIES {
+        // This test scales every sample to tell the two sources apart, so it
+        // needs a shape whose result depends on the values. `count` does not.
+        if query.starts_with("count") {
+            continue;
+        }
         let cache = PromqlPlanCache::new(8);
         warm(&cache, &state, query).await.unwrap();
 
@@ -498,9 +516,11 @@ async fn unsupported_shapes_keep_the_uncached_path() {
     for query in [
         // Two data sources.
         "metric / other_metric",
-        // Neither `topk` nor `count` is an admitted aggregation.
-        "topk(1, sum by (tag_0) (rate(metric[1h])))",
-        "count by (tag_0) (metric)",
+        // `quantile` is not an admitted aggregation: it is GreptimeDB's own
+        // UDAF, not one of DataFusion's process-wide instances.
+        "quantile(0.9, metric)",
+        // `stddev` likewise.
+        "stddev by (tag_0) (metric)",
         // No range or instant evaluation node at all.
         "1 + 1",
     ] {
@@ -517,12 +537,103 @@ async fn unsupported_shapes_keep_the_uncached_path() {
     }
 }
 
+/// The native-histogram range functions carry a per-request annotation
+/// collector, so a template must never keep one. They are kept apart by name,
+/// which is what this pins down: adding a float function to `RANGE_FUNCTIONS`
+/// must not drag its histogram counterpart in with it.
+#[test]
+fn native_histogram_range_functions_are_never_admitted() {
+    let collector = Some(PromqlAnnotationCollector::default());
+    for histogram in [
+        NativeHistogramRate::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramIncrease::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramDelta::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramIRate::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramIDelta::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramAvgOverTime::scalar_udf_with_collector(collector.clone()),
+        NativeHistogramSumOverTime::scalar_udf_with_collector(collector),
+    ] {
+        assert!(
+            canonical_range_function(&histogram).is_none(),
+            "{} must not resolve to a float implementation",
+            histogram.name()
+        );
+        let expr = Expr::ScalarFunction(ScalarFunction {
+            func: Arc::new(histogram),
+            args: vec![col("time_range"), col("value"), col("time")],
+        });
+        assert!(Shape::default().expression(&expr, false, false).is_none());
+    }
+}
+
+/// `row_number` is the only window function the PromQL planner emits, and
+/// `apply_children` never descends into the frame, so the frame bounds have to
+/// be checked here or a bound that moves with the request would key a new
+/// entry on every query.
+#[test]
+fn window_admission_requires_row_number_and_a_request_independent_frame() {
+    let row_number = |frame: WindowFrame| {
+        Expr::WindowFunction(Box::new(datafusion_expr::expr::WindowFunction {
+            fun: WindowFunctionDefinition::WindowUDF(Arc::new(RowNumber::new().into())),
+            params: datafusion_expr::expr::WindowFunctionParams {
+                args: vec![],
+                partition_by: vec![col("time")],
+                order_by: vec![col("value").sort(false, true)],
+                window_frame: frame,
+                null_treatment: None,
+                distinct: false,
+                filter: None,
+            },
+        }))
+    };
+
+    assert!(
+        Shape::default()
+            .expression(&row_number(WindowFrame::new(Some(true))), false, false)
+            .is_some()
+    );
+
+    // A frame anchored to a timestamp would neither be shifted by `rebind` nor
+    // compared away by the key.
+    let moving = WindowFrame::new_bounds(
+        datafusion_expr::WindowFrameUnits::Range,
+        WindowFrameBound::Preceding(ScalarValue::TimestampMillisecond(Some(300_000), None)),
+        WindowFrameBound::CurrentRow,
+    );
+    assert!(
+        Shape::default()
+            .expression(&row_number(moving), false, false)
+            .is_none()
+    );
+
+    // Same shape, a different window function.
+    let imposter = Expr::WindowFunction(Box::new(datafusion_expr::expr::WindowFunction {
+        fun: WindowFunctionDefinition::AggregateUDF(sum_udaf()),
+        params: datafusion_expr::expr::WindowFunctionParams {
+            args: vec![col("value")],
+            partition_by: vec![col("time")],
+            order_by: vec![],
+            window_frame: WindowFrame::new(Some(true)),
+            null_treatment: None,
+            distinct: false,
+            filter: None,
+        },
+    }));
+    assert!(
+        Shape::default()
+            .expression(&imposter, false, false)
+            .is_none()
+    );
+}
+
 #[test]
 fn range_function_admission_requires_the_shared_implementation() {
     for real in [
         Rate::scalar_udf(),
         Increase::scalar_udf(),
         Delta::scalar_udf(),
+        IDelta::<true>::scalar_udf(),
+        AvgOverTime::scalar_udf(),
     ] {
         let args = vec![
             col("time_range"),
@@ -651,12 +762,13 @@ async fn plan_equality_ignores_the_table_source() {
     assert_eq!(scan(older.clone()), scan(newer.clone()));
     assert!(Dependency::from_source(&older).unwrap() != Dependency::from_source(&newer).unwrap());
     let table_info = |source: &Arc<dyn TableSource>| {
-        source
-            .as_any()
+        let source: &dyn std::any::Any = source.as_ref();
+        let provider: &dyn std::any::Any = source
             .downcast_ref::<DefaultTableSource>()
             .unwrap()
             .table_provider
-            .as_any()
+            .as_ref();
+        provider
             .downcast_ref::<DfTableProviderAdapter>()
             .unwrap()
             .table()
@@ -875,6 +987,7 @@ fn region_instant_plan(provider: Arc<DummyTableProvider>, start: i64, end: i64) 
             end,
             300_000,
             300_000,
+            0,
             "ts".to_string(),
             vec!["k0".to_string()],
             Some("v0".to_string()),
@@ -887,10 +1000,9 @@ fn scan_requests(plan: &LogicalPlan) -> Vec<store_api::storage::ScanRequest> {
     let mut requests = Vec::new();
     plan.apply(|node| {
         if let LogicalPlan::TableScan(scan) = node
-            && let Some(source) = scan.source.as_any().downcast_ref::<DefaultTableSource>()
-            && let Some(provider) = source
-                .table_provider
-                .as_any()
+            && let Some(source) =
+                (scan.source.as_ref() as &dyn std::any::Any).downcast_ref::<DefaultTableSource>()
+            && let Some(provider) = (source.table_provider.as_ref() as &dyn std::any::Any)
                 .downcast_ref::<DummyTableProvider>()
         {
             requests.push(provider.scan_request());
