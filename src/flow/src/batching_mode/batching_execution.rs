@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use datafusion_expr::LogicalPlan;
 use query::QueryEngineRef;
 use table::TableRef;
 
@@ -36,6 +37,11 @@ pub trait BatchingExecution: Send + Sync + 'static {
         frontend: &Arc<FrontendClient>,
         max_window_cnt: Option<usize>,
     ) -> ExecuteOnceOutcome;
+
+    /// Rewrite the completed query plan after incremental merging and before execution.
+    fn rewrite_plan(&self, _task: &BatchingTask, plan: LogicalPlan) -> Result<LogicalPlan> {
+        Ok(plan)
+    }
 
     /// Retire this execution instance, rejecting new work and requesting that any
     /// retained local work stop. This is not an acknowledgement of remote quiescence.
