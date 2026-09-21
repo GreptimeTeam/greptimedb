@@ -90,9 +90,7 @@ impl SerializerRegistry for DefaultSerializer {
         bytes: &[u8],
     ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
         if name == MergeScanLogicalPlan::name() {
-            // TODO(dennis): missing `session_state` to decode the logical plan in `MergeScanLogicalPlan`,
-            // so we only save the unoptimized logical plan for view currently.
-            // Plan decoding paths that need to decode a `MergeScan` use [`MergeScanAwareSerializer`].
+            // `DefaultSerializer` has no session state; use `MergeScanAwareSerializer` to decode.
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
@@ -102,25 +100,11 @@ impl SerializerRegistry for DefaultSerializer {
     }
 }
 
-/// Extended [`substrait::extension_serializer::ExtensionSerializer`] that supports both
-/// serialization and deserialization of [`MergeScanLogicalPlan`].
-///
-/// [`DefaultSerializer`] is a unit struct that is shared by every encoding path, hence it cannot
-/// decode a `MergeScan` node: the plan embedded in the `MergeScan` payload is decoded with a
-/// [`SessionState`] which is only known at the decoding site. This registry keeps such a session
-/// state and is installed (instead of `DefaultSerializer`) into the session state built by
-/// [`DefaultPlanDecoder::decode`], so that plans containing a `MergeScan` can be decoded.
+/// [`ExtensionSerializer`] with the session state required to decode [`MergeScanLogicalPlan`].
 struct MergeScanAwareSerializer {
-    /// The session state used to decode the plans embedded in `MergeScan` payloads: the state of
-    /// the request being decoded, with the functions and the catalog list given to
-    /// [`DefaultPlanDecoder::decode`].
+    /// Request state used to decode nested `MergeScan` payloads.
     session_state: SessionState,
-    /// The catalog of the query engine, which knows every table of the cluster. It resolves the
-    /// tables of a `MergeScan` payload, see [`Self::decode_payload`].
-    ///
-    /// It is `None` when the session state doesn't carry the engine state (a session state built
-    /// by hand, e.g. in a unit test): the payload is then decoded with the catalog list of the
-    /// request, which is the behavior of every payload before this field existed.
+    /// Engine catalog for payload tables; absent for manually built session states.
     catalog_manager: Option<CatalogManagerRef>,
 }
 
@@ -135,7 +119,6 @@ impl fmt::Debug for MergeScanAwareSerializer {
 }
 
 impl MergeScanAwareSerializer {
-    /// Returns the query context of the session state, or an empty one if it doesn't carry any.
     fn query_ctx(&self) -> QueryContextRef {
         self.session_state
             .config()
@@ -143,23 +126,9 @@ impl MergeScanAwareSerializer {
             .unwrap_or_else(QueryContext::arc)
     }
 
-    /// Returns the session state used to decode a `MergeScan` payload whose tables are resolved
-    /// with `catalog_list`.
+    /// Rebuilds state for recursive payload decoding with request catalog/schema defaults.
     ///
-    /// The state is rebuilt with this registry, so that a `MergeScan` nested in the payload (e.g.
-    /// the plan sent to a datanode that has to query another datanode) is decoded recursively.
-    ///
-    /// The default catalog and schema of the state are the ones of the request, because the table
-    /// references of a payload may be bare (a table name as it was written in the query): they are
-    /// resolved against that pair, which is how they refer to a `(catalog, schema, table)` of the
-    /// catalog. Decoding the payload with the catalog list of a region aware request used to make
-    /// that pair irrelevant (that list resolves every catalog and schema to the region); a catalog
-    /// that resolves the tables of the cluster needs it.
-    ///
-    /// The functions of the state are registered once more after it is built, see
-    /// [`register_greptime_functions`]: building a state may bind a function back to a built-in
-    /// DataFusion function of the same name or alias, so the payload has to be decoded with a state
-    /// that holds the GreptimeDB functions, like the state that decodes the enclosing plan.
+    /// Re-register Greptime functions after each build to preserve bindings over DataFusion aliases.
     fn payload_state(&self, catalog_list: Arc<dyn CatalogProviderList>) -> Result<SessionState> {
         let query_ctx = self.query_ctx();
         let mut config = self.session_state.config().clone();
@@ -182,28 +151,10 @@ impl MergeScanAwareSerializer {
         Ok(state)
     }
 
-    /// Decodes `payload`, the plan embedded in a `MergeScan`.
+    /// Decodes payload tables through the engine catalog, not the region-bound request catalog.
     ///
-    /// The tables of the payload are the tables that the merge scan reads, i.e. the tables of that
-    /// merge scan and not the region that the enclosing plan is decoded for: they are resolved by
-    /// `(catalog, schema, table)` name through the catalog of the query engine, which knows every
-    /// table of the cluster.
-    ///
-    /// The catalog list of the request is deliberately not used for the payload: on a datanode that
-    /// list is the region aware one (`NameAwareCatalogList`), which resolves *every* table name to
-    /// the region of the request. A nested `MergeScan` reads another table than the enclosing plan
-    /// (the build side of a nested join, e.g.), and binding it to the region of the request decodes
-    /// it with the schema of the table of that region (the columns don't even match when the two
-    /// tables don't share their column names). The tables of a payload are read by the datanodes
-    /// that own their regions: `MergeScanExec` sends the plan of the payload to them as is, and
-    /// they decode it against their own regions.
-    ///
-    /// When the session state carries a catalog manager (the query engine does), the payload is
-    /// decoded with it and a failure is returned as is: falling back to the catalog list of the
-    /// request would decode the payload with a *different* table binding semantics (on a datanode
-    /// it binds every table to the region of the request), masking a real catalog, metadata or
-    /// decoding error behind a wrong schema. The catalog list of the request is only used when no
-    /// catalog manager is available (e.g. a hand-built session state of a unit test).
+    /// Do not fall back after an engine-catalog failure: it can bind payload tables to the request
+    /// region with the wrong schema. Manually built states lack that catalog and use the request list.
     fn decode_payload(&self, payload: Vec<u8>) -> Result<LogicalPlan> {
         if let Some(catalog_manager) = &self.catalog_manager {
             let engine_catalog = Arc::new(
@@ -224,7 +175,6 @@ impl MergeScanAwareSerializer {
 
 impl SerializerRegistry for MergeScanAwareSerializer {
     fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
-        // Encoding doesn't need any session state, delegate to the default serializer.
         DefaultSerializer.serialize_logical_plan(node)
     }
 
@@ -243,13 +193,7 @@ impl SerializerRegistry for MergeScanAwareSerializer {
 
         let input = self.decode_payload(merge_scan.input)?;
 
-        // `PbMergeScan` doesn't carry `partition_cols`, so the decoded node maps no partition
-        // column to its aliases (an empty `AliasMapping`). `MergeScanExec` uses it to declare the
-        // hash partitioning of its output and to keep a hash partitioned input of an upstream
-        // operator (see `MergeScanExec::try_with_new_distribution`), so an empty mapping only
-        // loses that optimization (an extra repartition may be inserted by the planner), it
-        // doesn't change the results. Carrying `partition_cols` in the payload requires a proto
-        // change and is left to a follow-up.
+        // `PbMergeScan` lacks `partition_cols`; decoded plans lose this optimization and may repartition.
         Ok(Arc::new(MergeScanLogicalPlan::new(
             input,
             merge_scan.is_placeholder,
@@ -258,42 +202,11 @@ impl SerializerRegistry for MergeScanAwareSerializer {
     }
 }
 
-/// Decodes `sub_plan`, the plan embedded in a `MergeScan` payload.
+/// Bridges synchronous serializer callbacks to asynchronous payload decoding.
 ///
-/// This sync/async bridge exists because the two sides of it have incompatible shapes (a PoC
-/// simplification):
-///
-/// * `SerializerRegistry::deserialize_logical_plan` is synchronous — it is called from the
-///   synchronous `consume_extension_leaf` of the datafusion fork — while decoding a substrait plan
-///   is asynchronous.
-/// * `consume_extension_leaf` does not treat the input of a `MergeScan` as a subtree it recurses
-///   into, so a nested `MergeScan` is only decoded by recursing from here, in our own registry.
-///   Each recursion level therefore re-enters this synchronous bridge *from inside the future it
-///   is currently driving*, which a plain `block_on` cannot do: the nested executor aborts with
-///   `cannot execute LocalPool executor from within another executor: EnterError`.
-///
-/// The future must thus be driven on a runtime other than the one the caller is already running
-/// in. Driving it at all needs a runtime — not a bare polling loop — because resolving the tables
-/// of the payload may read the metadata through the catalog (a remote read on a datanode), which
-/// needs a reactor.
-///
-/// * On a multi-threaded runtime (the datanode production path) `block_in_place` hands the other
-///   tasks of the current worker thread over to another worker, then drives the future on the
-///   current runtime; the remaining workers keep serving the I/O the future awaits.
-/// * Otherwise (a current-thread runtime, e.g. the default of `#[tokio::test]`, or no runtime at
-///   all) there is no other worker to hand the tasks over to, so driving the future here would
-///   both starve the runtime and panic as soon as this function is re-entered recursively. The
-///   future is moved to a fresh thread that builds its own current-thread runtime instead. That
-///   thread is unrelated to whatever the caller runs in, so a recursive call simply spawns another
-///   fresh thread; the caller thread only joins and never re-enters its own executor.
-///
-/// Scope of that current-thread branch (best effort, not a general guarantee): the production
-/// datanode runs on a multi-threaded runtime and uses the `block_in_place` branch above. The
-/// current-thread branch exists for environments such as `#[tokio::test]`. It assumes the
-/// catalog resolution the future awaits does *not* depend on tasks running on the caller's
-/// runtime (the PoC uses in-memory / KV catalogs, for which that holds). `Send`-ness of the
-/// future alone does not establish that independence, so this branch makes no safety claim for
-/// arbitrary runtime setups; it also offers no cancellation of the synchronous `join`.
+/// Nested `MergeScan` payloads recurse through this bridge, so plain nested `block_on` is invalid.
+/// Multi-thread runtimes use `block_in_place`; current-thread or absent runtimes use a fresh thread.
+/// The latter assumes catalog resolution does not require the caller runtime and has no cancellation.
 fn decode_sub_plan(sub_plan: Vec<u8>, session_state: SessionState) -> Result<LogicalPlan> {
     let decode = async move {
         DFLogicalSubstraitConvertor
@@ -336,25 +249,10 @@ impl DefaultPlanDecoder {
     }
 }
 
-/// Registers every function of GreptimeDB into `session_state`, overwriting any built-in
-/// function of the same name or alias.
+/// Re-registers Greptime functions after every state build.
 ///
-/// The sub strait decoder looks the functions of a plan up in the session state, and some of the
-/// GreptimeDB functions collide with a built-in DataFusion function or one of its aliases: the
-/// built-in `to_char` declares `date_format` as an alias, while GreptimeDB has a `date_format`
-/// function of its own.
-///
-/// That is why the functions have to be registered *after* the session state is built. Building a
-/// state re-registers the functions of the state it was given — `SessionStateBuilder::build`
-/// takes them from `new_from_existing`, which turns the function maps into vectors — in the
-/// unspecified order in which a hash map yields them, and registering a function inserts its
-/// aliases *before* its own name. A state that holds both the built-in `to_char` and the GreptimeDB
-/// `date_format` therefore binds `date_format` back to the built-in `to_char` whenever it
-/// re-registers `to_char` last.
-///
-/// The query context must be passed to the functions to set the timezone. This function is
-/// idempotent, and it must be applied to the state that actually decodes a plan, i.e. after *every*
-/// `SessionStateBuilder::build`.
+/// DataFusion aliases can rebind Greptime `date_format` to built-in `to_char`; registration must
+/// happen after `SessionStateBuilder::build` on the state that decodes the plan.
 fn register_greptime_functions(
     session_state: &mut SessionState,
     query_ctx: &QueryContextRef,
@@ -461,21 +359,12 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         catalog_list: Arc<dyn CatalogProviderList>,
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
-        // The session_state already has the `DefaultSerialzier` as `SerializerRegistry`. It is
-        // replaced by `MergeScanAwareSerializer` below, once this state is fully built.
         let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_catalog_list(catalog_list)
             .build();
         register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
-        // Install a registry that is also able to decode `MergeScan` nodes (the plans sent to a
-        // datanode may contain one), so that the sub-plans of a `MergeScan` see the same functions.
-        //
-        // The registry resolves the tables of a `MergeScan` payload with the catalog of the query
-        // engine, which it retrieves from the engine state the query engine leaves in the session
-        // config (`QueryEngine::engine_context`). A session state that carries no engine state has
-        // no catalog manager either, in which case the payloads are decoded with the catalog list
-        // of the request, see `MergeScanAwareSerializer::decode_payload`.
+        // Payloads need the engine catalog rather than the request's region-bound catalog.
         let catalog_manager = session_state
             .config()
             .get_extension::<QueryEngineState>()
@@ -486,10 +375,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
                 catalog_manager,
             }))
             .build();
-        // Building the state above re-registered the functions of the previous state in hash order,
-        // which can bind a function back to a built-in DataFusion function of the same name or
-        // alias: register the GreptimeDB functions once more, so that the state that decodes the
-        // plan below holds the GreptimeDB bindings.
+        // Re-register after the build to avoid Greptime UDF alias collisions.
         register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
         let logical_plan = DFLogicalSubstraitConvertor
@@ -765,9 +651,7 @@ mod tests {
     #[tokio::test]
     async fn test_serializer_decode_merge_scan() {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
-        // The payload scans `numbers`: it has to be resolvable through the catalog of the query
-        // engine, which is what a datanode uses to decode the payload of a `MergeScan` (the
-        // catalog list of the request is not a fallback for the engine catalog).
+        // Payload tables must be registered in the engine catalog.
         catalog_manager
             .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -788,8 +672,6 @@ mod tests {
         );
         let engine = factory.query_engine();
 
-        // A `MergeScan` embeds its input plan into its payload, so decoding a `MergeScan` has to
-        // decode that plan recursively.
         let input = LogicalPlanBuilder::scan(
             NUMBERS_TABLE_NAME,
             Arc::new(LogicalTableSource::new(
@@ -810,8 +692,7 @@ mod tests {
             .engine_context(QueryContext::arc())
             .new_plan_decoder()
             .unwrap();
-        // The catalog list of the request is deliberately unrelated to the payload: the payload
-        // is resolved through the catalog of the query engine, not through this list.
+        // Must not bind payload tables through the request catalog.
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
             mock_table_provider(1.into()),
         )));
@@ -835,19 +716,10 @@ mod tests {
         assert!(merge_scan.partition_cols().is_empty());
     }
 
-    /// The plan embedded in a `MergeScan` is decoded with the catalog of the query engine, which
-    /// resolves its tables by `(catalog, schema, table)` name, and not with the catalog list of the
-    /// request.
-    ///
-    /// On a datanode the catalog list of the request is the region aware one
-    /// (`NameAwareCatalogList`), which resolves *every* table name to the region of the request: a
-    /// payload reading another table is then decoded with the schema of the table of that region,
-    /// which breaks the plan as soon as the two tables don't share their columns. This test covers
-    /// that binding with a `numbers` table whose column names differ from the request region's.
+    /// Payload table binding uses the engine catalog, not the request catalog.
     #[tokio::test]
     async fn test_serializer_decode_merge_scan_with_engine_catalog() {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
-        // The table of the payload: `numbers`, with a single `number` column.
         catalog_manager
             .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -868,8 +740,6 @@ mod tests {
         );
         let engine = factory.query_engine();
 
-        // The payload scans `numbers` by name, so the catalog that decodes it has to resolve a
-        // bare table name too.
         let input = LogicalPlanBuilder::scan(
             NUMBERS_TABLE_NAME,
             Arc::new(LogicalTableSource::new(
@@ -885,8 +755,7 @@ mod tests {
             .encode(&plan, DefaultSerializer)
             .unwrap();
 
-        // The catalog list of the request resolves every table name to a provider whose schema is
-        // not the one of `numbers` (the region aware list of a datanode does the same).
+        // This request catalog deliberately has a different schema.
         let table_provider = Arc::new(mock_table_provider(1.into()));
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(table_provider));
 
@@ -910,20 +779,15 @@ mod tests {
         let LogicalPlan::TableScan(scan) = merge_scan.input() else {
             panic!("Expect a table scan, got: {}", merge_scan.input());
         };
-        // The scan is the `numbers` table of the catalog of the query engine, not the table of the
-        // request catalog list.
         assert_eq!(scan.table_name.table(), NUMBERS_TABLE_NAME);
         assert_eq!(scan.source.schema().fields().len(), 1);
         assert_eq!(scan.source.schema().field(0).name(), "number");
     }
 
-    /// A `MergeScan` nested in the payload of another `MergeScan` is decoded recursively: this is
-    /// the shape of a datanode querying another datanode.
+    /// Nested `MergeScan` payloads decode recursively.
     #[tokio::test]
     async fn test_serializer_decode_nested_merge_scan() {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
-        // The payload of both `MergeScan` levels scans `numbers`, which has to be resolvable
-        // through the catalog of the query engine (the request catalog list is not a fallback).
         catalog_manager
             .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -973,7 +837,6 @@ mod tests {
             .engine_context(QueryContext::arc())
             .new_plan_decoder()
             .unwrap();
-        // The catalog list of the request is deliberately unrelated to the payload.
         let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
             mock_table_provider(1.into()),
         )));
@@ -984,12 +847,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(decoded.to_string(), plan.to_string());
-        // Both levels are `MergeScan` nodes.
         assert_eq!(decoded.to_string().matches("MergeScan [").count(), 2);
     }
 
-    /// Returns the `date_format` implementation of GreptimeDB: the implementation a decoded plan
-    /// has to use.
     fn greptime_date_format_udf(query_ctx: &QueryContextRef) -> Arc<ScalarUDF> {
         FUNCTION_REGISTRY
             .get_function("date_format")
@@ -1001,16 +861,13 @@ mod tests {
             .into()
     }
 
-    /// The query context of the tests below: the timezone is not the default one, so that the
-    /// implementation bound to `date_format` is observable (only the GreptimeDB implementation
-    /// formats in the timezone of the query context).
+    /// Uses a non-default timezone to distinguish the Greptime implementation.
     fn date_format_query_ctx() -> QueryContextRef {
         let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         query_ctx.set_timezone(Timezone::from_tz_string("Asia/Shanghai").unwrap());
         Arc::new(query_ctx)
     }
 
-    /// A `date_format(timestamp, format)` expression that uses the GreptimeDB implementation.
     fn greptime_date_format_expr(query_ctx: &QueryContextRef, timestamp: Expr) -> Expr {
         Expr::ScalarFunction(ScalarFunction {
             func: greptime_date_format_udf(query_ctx),
@@ -1018,9 +875,7 @@ mod tests {
         })
     }
 
-    /// Returns the scalar functions of every expression of `plan`, including the expressions of its
-    /// inputs and the ones of the plan embedded in a `MergeScan` (the payload of a `MergeScan` is
-    /// not an input of the node, see `MergeScanLogicalPlan::inputs`).
+    /// Includes `MergeScan` payload expressions, which are not node inputs.
     fn scalar_functions_of(plan: &LogicalPlan) -> Vec<Arc<ScalarUDF>> {
         use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 
@@ -1051,12 +906,7 @@ mod tests {
         udfs
     }
 
-    /// Asserts that the only function of `plan` is the `date_format` of GreptimeDB.
-    ///
-    /// The built-in `to_char` of DataFusion declares `date_format` as an alias, so a plan where
-    /// `date_format` was bound to it holds a `to_char` function, which the substrait encoder
-    /// renders as `to_char(...) AS date_format(...)`: the binding itself is asserted here, and not
-    /// the way the expression is printed.
+    /// Asserts the Greptime `date_format` binding rather than DataFusion's `to_char` alias.
     fn assert_only_function_is_greptime_date_format(
         plan: &LogicalPlan,
         query_ctx: &QueryContextRef,
@@ -1066,10 +916,6 @@ mod tests {
 
         let udf = &udfs[0];
         assert_eq!(udf.name(), "date_format", "got: {plan}");
-        // The built-in `to_char` of DataFusion declares `date_format` as an alias, so a plan
-        // where `date_format` was bound to it holds a `to_char` function (rendered
-        // `to_char(...) AS date_format(...)` by the substrait encoder). Its instance can never
-        // equal the implementation of GreptimeDB, which the assertion below checks.
         assert_eq!(
             udf.as_ref(),
             greptime_date_format_udf(query_ctx).as_ref(),
@@ -1077,17 +923,10 @@ mod tests {
         );
     }
 
-    /// The built-in `to_char` of DataFusion declares `date_format` as an alias, and
-    /// [`SessionStateBuilder`] re-registers the functions of a state in the (unspecified) order in
-    /// which a hash map yields them, so building the session state can bind `date_format` back to
-    /// the built-in `to_char` instead of the GreptimeDB implementation. Decoding a plan has to keep
-    /// the GreptimeDB binding, on the plain path (no `MergeScan` to decode) as well.
+    /// Rebuilding state must retain the Greptime `date_format` binding.
     #[tokio::test]
     async fn test_serializer_decode_keeps_greptime_date_format() {
-        // The functions of a session state are collected from a hash map, and the map order differs
-        // between the states (and between the decodings, which rebuild the state): decode the same
-        // plan several times, with a fresh engine each time, so that an order dependent binding is
-        // caught whatever the order of a single state is.
+        // Repeat to expose nondeterministic function-registration order.
         for _ in 0..8 {
             let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
             let factory = QueryEngineFactory::new(
@@ -1134,14 +973,10 @@ mod tests {
         }
     }
 
-    /// Same as [`test_serializer_decode_keeps_greptime_date_format`], for a `date_format` inside the
-    /// payload of a `MergeScan`: the payload is decoded with the session state built by
-    /// [`MergeScanAwareSerializer::payload_state`], which is rebuilt as well and thus has to keep
-    /// the GreptimeDB functions too.
+    /// Payload-state rebuilding must retain the Greptime `date_format` binding.
     #[tokio::test]
     async fn test_serializer_decode_merge_scan_payload_keeps_greptime_date_format() {
         let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
-        // The payload scans `numbers`, which is resolved through the catalog of the query engine.
         catalog_manager
             .register_table_sync(RegisterTableRequest {
                 catalog: DEFAULT_CATALOG_NAME.to_string(),
@@ -1165,8 +1000,6 @@ mod tests {
             let engine = factory.query_engine();
             let query_ctx = date_format_query_ctx();
 
-            // `numbers` has a single `number` column of type `u32`: cast it to a timestamp, which
-            // is what `date_format` formats.
             let input = LogicalPlanBuilder::scan(
                 NUMBERS_TABLE_NAME,
                 Arc::new(LogicalTableSource::new(
@@ -1195,7 +1028,6 @@ mod tests {
                 .engine_context(query_ctx.clone())
                 .new_plan_decoder()
                 .unwrap();
-            // The catalog list of the request is deliberately unrelated to the payload.
             let catalog_list = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
                 mock_table_provider(1.into()),
             )));
