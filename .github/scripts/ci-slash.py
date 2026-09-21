@@ -55,12 +55,14 @@ def main():
     pr=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/pulls/'+number)
     if pr.get('state')!='open' or not pr.get('draft'): return reject(number,'PR must be open and draft.')
     if pr.get('head',{}).get('repo',{}).get('full_name') != os.environ['GITHUB_REPOSITORY']: return reject(number,'fork PRs are not admitted.')
-    head=pr.get('head',{}).get('sha','')
-    if head != os.environ.get('DISPATCH_HEAD_SHA') or not re.fullmatch('[0-9a-f]{40}',head): return reject(number,'PR head changed; comment again.')
+    head=pr.get('head',{})
+    head_sha=head.get('sha','')
+    head_ref=head.get('ref','')
+    if head_sha != os.environ.get('DISPATCH_HEAD_SHA') or not re.fullmatch('[0-9a-f]{40}',head_sha) or not head_ref: return reject(number,'PR head changed; comment again.')
     actor=comment.get('user',{}).get('login','')
     permission=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/collaborators/'+actor+'/permission').get('permission')
     if permission!='admin': return reject(number,'repository admin permission is required.')
     workflow, profile, label=OPTIONS[arg]
-    out(skip='false',pr_number=number,head_sha=head,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for `{head}`.')
+    out(skip='false',pr_number=number,head_sha=head_sha,head_ref=head_ref,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for `{head_sha}`.')
     return 0
 if __name__ == '__main__': sys.exit(main())

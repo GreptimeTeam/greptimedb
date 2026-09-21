@@ -30,6 +30,10 @@ on:
         required: false
         default: false
         type: boolean
+      expected_head_sha:
+        description: Head SHA verified by the CI command admission workflow
+        required: false
+        type: string
 
 name: Docs CI
 
@@ -37,8 +41,21 @@ name: Docs CI
 # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/defining-the-mergeability-of-pull-requests/troubleshooting-required-status-checks#handling-skipped-but-required-checks
 
 jobs:
+  verify_dispatch_head:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
+    name: Verify dispatched head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the admitted head
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          test -n "${EXPECTED_HEAD_SHA}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+
   typos:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Spell Check with Typos
     runs-on: ubuntu-latest
     steps:
@@ -48,7 +65,8 @@ jobs:
       - uses: crate-ci/typos@v1.50.2
 
   license-header-check:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -58,7 +76,8 @@ jobs:
       - uses: korandoru/hawkeye@v5
 
   required-checks:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: ${{ matrix.check }}
     runs-on: ubuntu-slim
     strategy:

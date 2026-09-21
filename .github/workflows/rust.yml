@@ -20,6 +20,10 @@ on:
         required: false
         default: false
         type: boolean
+      expected_head_sha:
+        description: Head SHA verified by the CI command admission workflow
+        required: false
+        type: string
 
 name: Rust CI
 
@@ -31,8 +35,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify_dispatch_head:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
+    name: Verify dispatched head
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify the admitted head
+        env:
+          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
+        run: |
+          test -n "${EXPECTED_HEAD_SHA}"
+          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
+
   fmt:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Rustfmt
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -50,7 +67,8 @@ jobs:
         run: make fmt-check
 
   clippy:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -76,7 +94,8 @@ jobs:
         run: make clippy
 
   check-udeps:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -103,7 +122,8 @@ jobs:
         run: make check-udeps
 
   check-riscv64:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Check riscv64 build
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -129,7 +149,8 @@ jobs:
         run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
   check-windows:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Check Windows build
     runs-on: windows-2022
     timeout-minutes: 60
@@ -158,7 +179,8 @@ jobs:
           RUSTFLAGS: "-D warnings"
 
   conflict-check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    needs: verify_dispatch_head
     name: Check for conflict
     runs-on: ubuntu-latest
     steps:
@@ -169,10 +191,10 @@ jobs:
         uses: olivernybroe/action-conflict-finder@v4.0
 
   test:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
-    needs: [conflict-check, clippy, fmt, check-udeps]
+    needs: [verify_dispatch_head, conflict-check, clippy, fmt, check-udeps]
     steps:
       - uses: actions/checkout@v4
         with:

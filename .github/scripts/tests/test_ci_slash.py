@@ -57,19 +57,28 @@ class CiSlashTest(unittest.TestCase):
     def test_dispatches_full_suite_with_top_level_admin_permission(self):
         output = self.run_main([
             {"body": "/ci", "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "admin"}},
-            {"state": "open", "draft": True, "head": {"sha": "a" * 40, "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
+            {"state": "open", "draft": True, "head": {"sha": "a" * 40, "ref": "fix/draft-ci", "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
             {"permission": "admin", "user": {"login": "admin"}},
         ])
         self.assertIn("skip=false", output)
+        self.assertIn("head_ref=fix/draft-ci", output)
         self.assertIn("workflow=rust.yml,integration.yml,checks.yml,docs.yml", output)
 
     def test_rejects_non_draft_before_permission_lookup(self):
         output = self.run_main([
             {"body": "/ci fuzz chaos", "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "admin"}},
-            {"state": "open", "draft": False, "head": {"sha": "a" * 40, "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
+            {"state": "open", "draft": False, "head": {"sha": "a" * 40, "ref": "fix/draft-ci", "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
         ])
         self.assertIn("skip=true", output)
         self.assertIn("PR must be open and draft", output)
+
+    def test_rejects_missing_head_ref_before_permission_lookup(self):
+        output = self.run_main([
+            {"body": "/ci", "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "admin"}},
+            {"state": "open", "draft": True, "head": {"sha": "a" * 40, "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
+        ])
+        self.assertIn("skip=true", output)
+        self.assertIn("PR head changed; comment again.", output)
 
 
 if __name__ == "__main__":
