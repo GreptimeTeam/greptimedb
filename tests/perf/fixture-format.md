@@ -58,6 +58,34 @@ warmup = 0
 iterations = 1
 ```
 
+### Value distributions
+
+Tag columns use `cardinality` and produce one label per series. Double field
+columns accept either a NULL-free wave:
+
+```toml
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+```
+
+or a wave with periodic NULLs:
+
+```toml
+distribution = { kind = "nullable_wave", min = 0.0, max = 100.0, null_every = 4 }
+```
+
+`nullable_wave` also accepts `null_every = 0` to disable NULLs. It writes NULL on
+every `null_every`-th sample of each series and wave values everywhere else, so a
+NULL is one missing sample of one series rather than a missing row. The cadence
+is counted in samples of the series, not in generated rows, so every series
+carries the same null ratio under any `series_layout`; when one SST holds a
+multiple of `null_every` samples per series (`rows_per_sst / series_count`), the
+pattern also repeats with the same period in every SST. Counting the cadence in
+generated rows instead would make it constant per series whenever `series_count`
+is a multiple of `null_every` (128 and 4, for example), leaving series either
+entirely NULL or entirely NULL-free. Counting per series keeps NULL and non-NULL
+samples mixed inside range-function windows, which is what the nullable branches
+of the PromQL range functions observe.
+
 ### Query kinds
 
 `kind = "prom_http"` runs a Prometheus range query by POSTing form fields to

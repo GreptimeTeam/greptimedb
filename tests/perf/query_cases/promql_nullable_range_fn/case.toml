@@ -1,0 +1,183 @@
+# PromQL nullable range-function benchmark: regression evidence for the indexed
+# valid-sample lookup in nullable range functions (#9234).
+#
+# `rate`/`increase`/`delta` and the presence evaluator behind
+# `count_over_time`/`last_over_time` fall back to a per-window validity scan once
+# any sample of a series is NULL. `nullable_table` writes NULL on every fourth
+# sample of every series, so 25% of its samples are missing (one missing sample
+# per minute at the 15s cadence) and every window of every series contains both
+# NULL and non-NULL samples instead of being entirely NULL or entirely dense.
+# `dense_table` is the same fixture without NULLs; it keeps the no-NULL fast path
+# measured next to the nullable path.
+#
+# 128 series x 780 timestamps at 15s cadence = 99,840 rows per table, written as
+# 13 SSTs x 7,680 rows. Data starts one hour before evaluation; 481 evaluations
+# span two hours. Range windows are left-open and every series is dense on the
+# 15s grid, so a fully covered 5m window holds 20 slots and a 1m window holds 4.
+# Five of the 20 slots and one of the 4 slots are NULL, which makes
+# `count_over_time(nullable_table[5m])` return exactly 15 and
+# `count_over_time(nullable_table[1m])` return exactly 3 at every one of the 481
+# evaluations: no window is entirely NULL and none is NULL-free, so every window
+# of every series takes the nullable branch.
+
+[case]
+name = "promql_nullable_range_fn"
+description = "PromQL range functions over partially NULL series at 15-second scrape and evaluation cadence"
+
+[scenario]
+kind = "direct_readable_sst"
+seed = 9234
+
+[[scenario.tables]]
+database = "public"
+name = "nullable_table"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 128, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "nullable_wave", min = 0.0, max = 1000.0, null_every = 4 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[scenario.tables]]
+database = "public"
+name = "dense_table"
+engine = "mito"
+append_mode = true
+sst_format = "flat"
+primary_key = ["host", "instance"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 16, prefix = "host" }
+
+[[scenario.tables.columns]]
+name = "instance"
+type = "STRING"
+semantic = "tag"
+distribution = { kind = "cardinality", values = 128, prefix = "instance" }
+
+[[scenario.tables.columns]]
+name = "value"
+type = "DOUBLE"
+semantic = "field"
+distribution = { kind = "deterministic_wave", min = 0.0, max = 1000.0 }
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[scenario.layout]
+regions = 1
+sst_count = 13
+rows_per_sst = 7680
+row_group_size = 1920
+series_count = 128
+start_unix_nanos = 1704067200000000000
+step_nanos = 15000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "timestamp_major"
+
+# Twenty slots per window, five of them NULL: the counter correction and the
+# valid-sample lookup both walk a mixed window on every series.
+[[scenario.queries]]
+name = "rate_nullable_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') rate(nullable_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+[[scenario.queries]]
+name = "increase_nullable_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') increase(nullable_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# `delta` shares the nullable window-bounds path but skips the counter correction.
+[[scenario.queries]]
+name = "delta_nullable_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') delta(nullable_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# The presence evaluator counts valid slots per window instead of scanning bounds.
+[[scenario.queries]]
+name = "count_over_time_nullable_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') count_over_time(nullable_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# `last_over_time` searches backwards for the last valid slot of every window,
+# which the NULL at the window end forces for one evaluation in every four.
+[[scenario.queries]]
+name = "last_over_time_nullable_5m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') last_over_time(nullable_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Four slots per window, one of them NULL: fixed overhead and short-window control
+# for the same nullable path.
+[[scenario.queries]]
+name = "rate_nullable_1m"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') rate(nullable_table{host=~'host.*'}[1m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
+
+# Identical shape and values without NULLs: the fast path must not move.
+[[scenario.queries]]
+name = "rate_dense_5m_control"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') rate(dense_table{host=~'host.*'}[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 20
