@@ -2,7 +2,7 @@
 Feature Name: Metric Export and Import Optimization
 Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/9120
 Date: 2026-09-11
-Updated: 2026-09-19
+Updated: 2026-09-21
 Status: Draft for discussion
 ---
 
@@ -202,6 +202,70 @@ Update create, resume, verify, status and import together. Resume retains the
 snapshot's original version and layout; it does not migrate an unfinished
 version-1 snapshot. Validate old-reader rejection with supported release binaries.
 
+## Manifest and chunk schema
+
+The following is a complete version-2 manifest example. Field names and enum
+values are part of the persisted contract; the timestamps and object names are
+illustrative.
+
+```json
+{
+  "version": 2,
+  "data_layout": "metric-parquet-packs",
+  "snapshot_id": "123e4567-e89b-42d3-a456-426614174000",
+  "catalog": "greptime",
+  "schemas": ["public"],
+  "time_range": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z"},
+  "schema_only": false,
+  "format": "parquet",
+  "chunks": [{
+    "id": 1,
+    "time_range": {"start": "2026-09-01T00:00:00Z", "end": "2026-09-02T00:00:00Z"},
+    "status": "completed",
+    "files": [
+      "data/public/1/pack-000000.bin",
+      "data/public/1/table-000000.parquet",
+      "data/public/1/pack-index.json"
+    ]
+  }],
+  "created_at": "2026-09-19T00:00:00Z",
+  "updated_at": "2026-09-19T00:01:00Z"
+}
+```
+
+All top-level and chunk fields shown are required in version 2. `snapshot_id`
+is a UUID; timestamps are RFC3339; `time_range` retains the existing half-open interval semantics,
+with an absent or null bound meaning unbounded on that side. Schema names are
+literal identifiers and must be unique. Chunk IDs are unique positive `u32`
+integers. Chunk statuses remain `pending`, `in_progress`, `completed`, `skipped`
+and `failed`; a failed chunk may carry an optional string `error`.
+`schema_only = true` requires an empty `chunks` array and no data objects;
+schema-only exports continue to produce version 1.
+
+For version 1, an absent or null `data_layout` selects the existing layout and
+all existing field defaults remain valid. Version 2 requires the exact non-null
+`data_layout` above and `format = "parquet"`. Reject a layout marker on version
+1, a missing or unknown version-2 layout, an unsupported version, or an
+incompatible format before DDL, data writes or resume cleanup. Unknown manifest
+and chunk fields may be ignored as optional metadata; a required decoding or
+integrity feature must change the manifest version, not rely on such a field.
+
+For a completed version-2 chunk, `files` is the duplicate-free, order-independent
+inventory of **all** schema indexes, pack objects and standalone objects in that
+time chunk. It contains snapshot-relative paths using `/` on every platform.
+For each schema, its subset must equal `pack-index.json` plus every object named
+by that index, under `data/<encoded-schema>/<chunk-id>/`. No other files belong
+in this list, and DDL stays under `schema/`. Require canonical paths with no
+leading slash, backslash or traversal; use the existing schema path encoding.
+A filename extension never selects the layout or identifies a table.
+
+Every completed schema chunk has an index, including an empty index when its
+DDL selects no data-bearing tables. A selected table with no rows still has a
+zero-row Parquet entry. A chunk may be `skipped` with `files = []` only when
+none of its schemas selects a data-bearing table, not merely when a time window
+contains no rows. Pending, in-progress and failed chunks are never importable;
+their files or index presence cannot establish completion.
+
 ## Objects and index
 
 ```text
@@ -218,12 +282,33 @@ names are generated within the chunk; table identity comes from the index, not
 from a filename or a source ID. A dotted table name remains a literal identifier.
 Version-1 file naming and `file_stem` matching remain unchanged.
 
-The index has its own version (initially 1), an object list and a table entry
-list. Each object records a generated relative path, kind (`pack` or `parquet`)
-and byte length. Each entry records the literal table name, object reference,
-zero-based byte offset, byte length and row count. A standalone entry covers its
-entire object. Empty tables still have a nonempty, valid zero-row Parquet stream.
-Each selected table has exactly one entry per schema chunk.
+The matching `pack-index.json` has this shape; the lengths and row counts below
+illustrate the mapping rather than an actual encoded fixture:
+
+```json
+{
+  "version": 1,
+  "objects": [
+    {"path": "pack-000000.bin", "kind": "pack", "length": 4096},
+    {"path": "table-000000.parquet", "kind": "parquet", "length": 8192}
+  ],
+  "tables": [
+    {"table_name": "cpu", "object": "pack-000000.bin", "offset": 0, "length": 1536, "row_count": 10},
+    {"table_name": "requests", "object": "pack-000000.bin", "offset": 1536, "length": 2560, "row_count": 20},
+    {"table_name": "events", "object": "table-000000.parquet", "offset": 0, "length": 8192, "row_count": 100}
+  ]
+}
+```
+
+The index version is independent of the manifest version and starts at 1.
+All shown fields are required. Reject unknown index versions, fields or object
+kinds. `length`, `offset` and `row_count` are unsigned `u64` integers; offsets
+are zero-based bytes. Object paths are direct chunk children matching
+`pack-[0-9]+.bin` or `table-[0-9]+.parquet` according to kind. The `object` field
+references an object by its exact path. Table names are literal identifiers.
+A standalone entry covers its entire object. Empty tables still have a nonempty,
+valid zero-row Parquet stream. Each selected table has exactly one entry per
+schema chunk; an empty index has `objects = []` and `tables = []`.
 
 Validate unique object paths and table names, object kinds/references, unsigned
 range arithmetic, bounds, and nonoverlapping complete Parquet ranges. For a pack,
@@ -253,6 +338,33 @@ Record object lengths while writing and include all standalone outputs in the
 index. Restore need not list the directory or rediscover a pack's size for each
 table. Stream index serialization in bounded writes; account for retained table
 and index metadata independently of data buffers.
+
+## Validation and checksum coverage
+
+Before target DDL, import validates the manifest contract and, for every selected
+schema and completed chunk, loads the required index, matches its inventory to
+`files`, validates ranges and DDL membership, and checks object existence and
+length once per object. Perform the same preflight on import resume, even when
+local state records DDL or data tasks as completed. A malformed snapshot must
+not reach the DDL executor or create new completed-task records.
+
+Version 2 retains the existing optional `checksum` fields at manifest and chunk
+level, but writers omit both. Readers accept absent or null values and reject
+non-null values as unsupported before DDL or resume cleanup. The existing
+version-1 exporter does not compute these fields and `verify` does not validate
+cryptographic checksums; its behavior remains unchanged. This version-2 contract
+therefore provides no checksum coverage for the manifest, DDL, indexes or data
+objects. Object-store ETags are not substituted for content checksums. Adding
+checksums requires a versioned definition of the algorithm, covered bytes and
+aggregation order before readers may claim to verify them.
+
+For version 2, `verify` applies the same metadata/index checks across all schemas,
+checks completion and object lengths, and reports missing or unexpected data
+files. Its result establishes structural completeness, not content-hash or
+full row validation. Import additionally validates each Parquet stream and its
+decoded row count through COPY; a same-length payload change can escape the
+structural check. Detecting corrupt Parquet data during restore may leave partial
+target writes, as described in the retry contract below.
 
 ## DDL and target metadata
 
@@ -395,6 +507,21 @@ must verify its own correctness and failure behavior. Release acceptance require
 | V2 lifecycle | New-reader version-1/2 coverage, old-reader version-2 rejection, target capability preflight; local/object-store interruption, multipart abort, owned-output cleanup, index/manifest failure and import replay. |
 | Scale | Repeated release-build measurements varying table count up to approximately 100,000, rows/file, physical union width, regions and backend. Report median/spread, control execution order/cache, and include schema export and metadata discovery in end-to-end timing. |
 | Open decisions | Agreed batch-DDL interface, resource limits, compatibility targets and experimental gate. |
+
+## Snapshot format acceptance
+
+Run these cases against actual CLI entry points on local files and S3-compatible
+storage. Shared serialization tests alone do not establish lifecycle behavior.
+
+| Case | Required result |
+| --- | --- |
+| Version-1 compatibility | Existing Parquet, CSV, JSON and schema-only fixtures retain import, resume and verify behavior, including omitted optional fields. Resuming export preserves version 1. |
+| Valid version 2 | Round-trip multiple schemas/chunks, shared packs with different logical schemas, standalone ordinary/large tables, zero-row tables and empty schemas. Check index membership, typed rows and `/`-separated manifest paths on Windows too. |
+| Invalid format before DDL | Missing required fields, unsupported manifest/index version or layout, version/layout/format mismatch, non-null checksums, duplicate or unsafe paths, inventory mismatch, invalid ranges, missing/wrong-length objects, and DDL/index membership mismatch fail before any target DDL or data task, including import resume. Ignorable manifest metadata remains accepted. |
+| Old reader | Supported release binaries reject a valid version-2 snapshot before target DDL or writes. |
+| Export resume | Interrupt object upload, index finalization and manifest completion separately; resume preserves version/layout and completed chunks, cleans only owned incomplete outputs, then produces the same complete inventory. Reject incompatible metadata before cleanup. |
+| Import resume | Revalidate metadata before honoring saved state; skip successfully checkpointed tasks, retain DDL completion and replay semantics, and never mark a partially restored task complete. |
+| Verify | Valid completed snapshots pass; incomplete chunks, malformed indexes, inventory mismatch, missing/extra files and object-length mismatches fail. A same-length data mutation is not required to fail a structural-only check. |
 
 ## Performance acceptance
 
