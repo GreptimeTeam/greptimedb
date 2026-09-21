@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, RequestHeader};
-use common_time::util as time_util;
+use common_time::{Timestamp, util as time_util};
 use lazy_static::lazy_static;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -117,6 +117,12 @@ pub struct RegionStat {
     /// **Only used by remote WAL prune.**
     /// In mito engine, this is the same as `data_topic_latest_entry_id`.
     pub metadata_topic_latest_entry_id: u64,
+    /// The earliest timestamp of the region's current data, if it holds any.
+    #[serde(default)]
+    pub min_timestamp: Option<Timestamp>,
+    /// The latest timestamp of the region's current data, if it holds any.
+    #[serde(default)]
+    pub max_timestamp: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +337,8 @@ impl From<&api::v1::meta::RegionStat> for RegionStat {
             query_scanned_bytes: region_stat.query_scanned_bytes,
             data_topic_latest_entry_id: region_stat.data_topic_latest_entry_id,
             metadata_topic_latest_entry_id: region_stat.metadata_topic_latest_entry_id,
+            min_timestamp: region_stat.min_timestamp,
+            max_timestamp: region_stat.max_timestamp,
         }
     }
 }
@@ -593,6 +601,8 @@ mod tests {
                 query_scanned_bytes: 20,
                 data_topic_latest_entry_id: 0,
                 metadata_topic_latest_entry_id: 0,
+                min_timestamp: None,
+                max_timestamp: None,
             }],
             ..Default::default()
         };

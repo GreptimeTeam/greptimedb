@@ -33,7 +33,7 @@
 | `runtime.experimental_workload_scheduler.sample_every_polls` | Integer | `16` | Number of polls between scheduler fairness samples. Must be greater than zero. |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -74,6 +74,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
@@ -93,7 +100,7 @@
 | `prom_store.max_inflight_requests` | Integer | `3000` | Max inflight write requests before backpressure. |
 | `prom_store.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of logical-table flow notifications waiting in the shared queue. |
 | `wal` | -- | -- | The WAL options. |
-| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka. |
+| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `128MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `1GB` | The threshold of the WAL size to trigger a purge.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -113,9 +120,13 @@
 | `wal.topic_name_prefix` | String | `greptimedb_wal_topic` | A Kafka topic is constructed by concatenating `topic_name_prefix` and `topic_id`.<br/>i.g., greptimedb_wal_topic_0, greptimedb_wal_topic_1.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.replication_factor` | Integer | `1` | Expected number of replicas of each partition.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.create_topic_timeout` | String | `30s` | Above which a topic creation operation will be cancelled.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>Defaults to `8MB` when the provider is `experimental_object_store`.<br/>**It's only used when the provider is `kafka` or `experimental_object_store`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
+| `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.on_corrupted_segment` | String | `skip` | What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.<br/>- `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).<br/>- `fail`: the read fails, so the region does not open.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `metadata_store` | -- | -- | Metadata storage options. |
 | `metadata_store.file_size` | String | `64MB` | The size of the metadata store log file. |
 | `metadata_store.purge_threshold` | String | `256MB` | The threshold of the metadata store size to trigger a purge. |
@@ -166,6 +177,7 @@
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |
@@ -275,7 +287,7 @@
 | `runtime.compact_rt_max_blocking_threads` | Integer | `4` | The maximum number of blocking threads for compact operations.<br/>Defaults to max(num_cpus / 2, 2). |
 | `http` | -- | -- | The HTTP server options. |
 | `http.addr` | String | `127.0.0.1:4000` | The address to bind the HTTP server. |
-| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the<br/>`prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value. |
+| `http.timeout` | String | `0s` | HTTP request timeout. Set to 0 to disable timeout.<br/>When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is<br/>raised to at least the largest active flush interval plus 1 second. The intervals come from<br/>`prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`. |
 | `http.body_limit` | String | `64MB` | HTTP request body limit.<br/>The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.<br/>Set to 0 to disable limit. |
 | `http.enable_cors` | Bool | `true` | HTTP CORS support, it's turned on by default<br/>This allows browser to access http APIs without CORS restrictions |
 | `http.cors_allowed_origins` | Array | Unset | Customize allowed origins for HTTP CORS. |
@@ -328,6 +340,13 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
+| `pending_rows_batcher` | -- | -- | Shared experimental ordinary-table batching for opted-in ingestion protocols.<br/>Legacy Prometheus batching settings under prom_store remain supported.<br/>HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.<br/>Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.<br/>Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.<br/>Effective shared Prom settings take precedence; existing prom_store settings remain compatible. |
+| `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
+| `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
+| `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
+| `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
@@ -556,7 +575,7 @@
 | `meta_client.metadata_cache_ttl` | String | `10m` | TTL of the metadata cache. |
 | `meta_client.metadata_cache_tti` | String | `5m` | -- |
 | `wal` | -- | -- | The WAL options. |
-| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.** |
+| `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `noop`: it's a no-op WAL provider that does not store any WAL data.<br/>**Notes: any unflushed data will be lost when the datanode is shutdown.**<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.file_size` | String | `128MB` | The size of the WAL segment file.<br/>**It's only used when the provider is `raft_engine`**. |
 | `wal.purge_threshold` | String | `1GB` | The threshold of the WAL size to trigger a purge.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -570,11 +589,15 @@
 | `wal.broker_endpoints` | Array | -- | The Kafka broker endpoints.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.connect_timeout` | String | `3s` | The connect timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.timeout` | String | `5s` | The total request timeout for kafka client.<br/>**It's only used when the provider is `kafka`**. |
-| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>**It's only used when the provider is `kafka`**. |
+| `wal.max_batch_bytes` | String | `1MB` | The max size of a single producer batch.<br/>Warning: Kafka has a default limit of 1MB per message in a topic.<br/>Defaults to `8MB` when the provider is `experimental_object_store`.<br/>**It's only used when the provider is `kafka` or `experimental_object_store`**. |
 | `wal.consumer_wait_timeout` | String | `100ms` | The consumer wait timeout.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.create_index` | Bool | `false` | Whether to enable WAL index creation.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.dump_index_interval` | String | `60s` | The interval for dumping WAL indexes.<br/>**It's only used when the provider is `kafka`**. |
 | `wal.overwrite_entry_start_id` | Bool | `false` | Ignore missing entries during read WAL.<br/>**It's only used when the provider is `kafka`**.<br/><br/>This option ensures that when Kafka messages are deleted, the system<br/>can still successfully replay memtable data without throwing an<br/>out-of-range error.<br/>However, enabling this option might lead to unexpected data loss,<br/>as the system will skip over missing entries instead of treating<br/>them as critical errors. |
+| `wal.storage_provider` | String | `""` | The name of the storage provider that holds the WAL objects, an empty name selects the default object store.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.prefix` | String | `wal` | The path prefix of the WAL objects inside the storage provider.<br/>The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.flush_interval` | String | `100ms` | The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.<br/>Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.<br/>When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.<br/>**It's only used when the provider is `experimental_object_store`**. |
+| `wal.on_corrupted_segment` | String | `skip` | What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.<br/>- `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).<br/>- `fail`: the read fails, so the region does not open.<br/>**It's only used when the provider is `experimental_object_store`**. |
 | `query` | -- | -- | The query engine options. |
 | `query.parallelism` | Integer | `0` | Parallelism of the query engine.<br/>Default to 0, which means the number of CPU cores. |
 | `query.memory_pool_size` | String | `50%` | Memory pool size for query execution operators (aggregation, sorting, join).<br/>Supports absolute size (e.g., "2GB", "4GB") or percentage of system memory (e.g., "20%").<br/>Setting it to 0 disables the limit (unbounded, default behavior).<br/>When this limit is reached, queries will fail with ResourceExhausted error.<br/>NOTE: This does NOT limit memory used by table scans. |
@@ -616,6 +639,7 @@
 | `region_engine.mito.experimental_manifest_keep_removed_file_ttl` | String | `1h` | How long to keep removed files in the `removed_files` field of manifest<br/>after they are removed from manifest.<br/>files will only be removed from `removed_files` field<br/>if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
 | `region_engine.mito.max_background_flushes` | Integer | Auto | Max number of running background flush jobs (default: 1/2 of cpu cores). |

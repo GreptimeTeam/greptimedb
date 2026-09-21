@@ -17,6 +17,7 @@ pub mod jaeger;
 pub mod mysql;
 pub mod opentsdb;
 pub mod otlp;
+pub mod pending_rows_batcher;
 pub mod postgres;
 pub mod prom_store;
 
@@ -25,5 +26,6 @@ pub use jaeger::JaegerOptions;
 pub use mysql::MysqlOptions;
 pub use opentsdb::OpentsdbOptions;
 pub use otlp::OtlpOptions;
+pub use pending_rows_batcher::PendingRowsBatcherOptions;
 pub use postgres::PostgresOptions;
 pub use prom_store::PromStoreOptions;

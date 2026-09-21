@@ -29,6 +29,7 @@ cache.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
+common-batcher.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
@@ -97,5 +98,6 @@ hyper-util = { workspace = true, features = ["tokio"] }
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
+temp-env.workspace = true
 tower.workspace = true
 uuid.workspace = true

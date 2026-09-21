@@ -23,6 +23,7 @@ use common_base::BitVec;
 use common_time::Timestamp;
 
 use crate::sst::file::FileHandle;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// Trait for any items with specific range (both boundaries are inclusive).
 pub trait Ranged {
@@ -64,10 +65,12 @@ pub(crate) fn merge_primary_key_ranges(
     }
 }
 
+/// Uses the caller's inclusive overlap test after pruning disjoint time ranges.
 pub fn find_overlapping_items<T: Item + Clone>(
     l: &mut SortedRun<T>,
     r: &mut SortedRun<T>,
     result: &mut Vec<T>,
+    overlaps: impl Fn(&T, &T) -> bool,
 ) {
     if l.items.is_empty() || r.items.is_empty() {
         return;
@@ -114,7 +117,7 @@ pub fn find_overlapping_items<T: Item + Clone>(
             }
 
             // We have an overlap (inclusive: touching boundaries count)
-            if lhs.overlap_inclusive(&r.items[j]) {
+            if overlaps(lhs, &r.items[j]) {
                 if !selected[lhs_idx] {
                     result.push(lhs.clone());
                     selected.set(lhs_idx, true);
@@ -147,37 +150,41 @@ pub trait Item: Ranged + Clone {
     fn size(&self) -> usize;
 }
 
+// Physical handles only supply time ranges. PK-aware comparisons need a target schema.
 impl Ranged for FileHandle {
     type BoundType = Timestamp;
 
     fn range(&self) -> (Self::BoundType, Self::BoundType) {
         self.time_range()
     }
+}
 
-    fn overlap(&self, other: &Self) -> bool {
-        let (lhs_start, lhs_end) = self.range();
-        let (rhs_start, rhs_end) = other.range();
-        if lhs_start.max(rhs_start) >= lhs_end.min(rhs_end) {
-            return false;
-        }
+/// Tests exclusive time overlap and inclusive PK overlap in one pinned schema.
+pub(crate) fn files_overlap(
+    lhs: &FileHandle,
+    rhs: &FileHandle,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
+    lhs.overlap(rhs) && file_primary_keys_overlap(lhs, rhs, mapper)
+}
 
-        match (&self.primary_key_range(), &other.primary_key_range()) {
-            (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
-            _ => true,
-        }
-    }
+/// Includes touching time and PK boundaries when checking file dependencies.
+pub(crate) fn files_overlap_inclusive(
+    lhs: &FileHandle,
+    rhs: &FileHandle,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
+    lhs.overlap_inclusive(rhs) && file_primary_keys_overlap(lhs, rhs, mapper)
+}
 
-    fn overlap_inclusive(&self, other: &Self) -> bool {
-        let (lhs_start, lhs_end) = self.range();
-        let (rhs_start, rhs_end) = other.range();
-        if lhs_start.max(rhs_start) > lhs_end.min(rhs_end) {
-            return false;
-        }
-
-        match (&self.primary_key_range(), &other.primary_key_range()) {
-            (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(lhs, rhs),
-            _ => true,
-        }
+fn file_primary_keys_overlap(
+    lhs: &FileHandle,
+    rhs: &FileHandle,
+    mapper: &PrimaryKeyRangeMapper,
+) -> bool {
+    match (lhs.primary_key_range(mapper), rhs.primary_key_range(mapper)) {
+        (Some(lhs), Some(rhs)) => primary_key_ranges_overlap(&lhs, &rhs),
+        _ => true,
     }
 }
 
@@ -251,8 +258,8 @@ where
     }
 }
 
-/// Finds sorted runs in given items.
-pub fn find_sorted_runs<T>(items: &mut [T]) -> Vec<SortedRun<T>>
+/// Finds sorted runs using the caller's overlap test within each active time range.
+pub fn find_sorted_runs<T>(items: &mut [T], overlaps: impl Fn(&T, &T) -> bool) -> Vec<SortedRun<T>>
 where
     T: Item,
 {
@@ -296,7 +303,7 @@ where
                 let mut overlaps_any = false;
                 for idx in &active_run_item_indices {
                     let run_item = &current_run.items[*idx];
-                    if run_item.overlap(item) {
+                    if overlaps(run_item, item) {
                         overlaps_any = true;
                         break;
                     }
@@ -490,11 +497,13 @@ where
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
     use store_api::storage::FileId;
 
     use super::*;
-    use crate::compaction::test_util::new_file_handle_with_size_sequence_and_primary_key_range;
+    use crate::compaction::test_util::{
+        new_file_handle_with_size_sequence_and_primary_key_range, pk_range,
+        primary_key_mapper_for_test,
+    };
 
     #[derive(Clone, Debug, PartialEq)]
     struct MockFile {
@@ -528,10 +537,6 @@ mod tests {
             .collect()
     }
 
-    fn pk_range(min: &'static [u8], max: &'static [u8]) -> Option<(Bytes, Bytes)> {
-        Some((Bytes::from_static(min), Bytes::from_static(max)))
-    }
-
     fn check_sorted_runs(
         ranges: &[(i64, i64)],
         expected_runs: &[Vec<(i64, i64)>],
@@ -539,7 +544,7 @@ mod tests {
         let mut files = build_items(ranges);
         let mut files_clone = files.clone();
 
-        let runs = find_sorted_runs(&mut files);
+        let runs = find_sorted_runs(&mut files, Ranged::overlap);
 
         let result_file_ranges: Vec<Vec<_>> = runs
             .iter()
@@ -574,7 +579,7 @@ mod tests {
         let mut files = build_items(ranges);
         let mut files_for_original = files.clone();
 
-        let runs = find_sorted_runs(&mut files);
+        let runs = find_sorted_runs(&mut files, Ranged::overlap);
         let original_runs = find_sorted_runs_original(&mut files_for_original);
 
         assert_eq!(sorted_run_ranges(&original_runs), sorted_run_ranges(&runs));
@@ -661,6 +666,7 @@ mod tests {
             &mut SortedRun::from(Vec::<MockFile>::new()),
             &mut SortedRun::from(Vec::<MockFile>::new()),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result, Vec::<MockFile>::new());
 
@@ -669,6 +675,7 @@ mod tests {
             &mut SortedRun::from(files1.clone()),
             &mut SortedRun::from(Vec::<MockFile>::new()),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result, Vec::<MockFile>::new());
 
@@ -676,6 +683,7 @@ mod tests {
             &mut SortedRun::from(Vec::<MockFile>::new()),
             &mut SortedRun::from(files1.clone()),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result, Vec::<MockFile>::new());
 
@@ -686,6 +694,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result, Vec::<MockFile>::new());
 
@@ -696,6 +705,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].range(), (1, 5));
@@ -708,6 +718,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 6);
 
@@ -718,6 +729,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 2); // Should overlap since ranges are inclusive
 
@@ -728,6 +740,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 2);
 
@@ -738,6 +751,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 2);
 
@@ -748,6 +762,7 @@ mod tests {
             &mut SortedRun::from(files1),
             &mut SortedRun::from(files2),
             &mut result,
+            Ranged::overlap_inclusive,
         );
         assert_eq!(result.len(), 4); // Should find both overlaps
     }
@@ -773,7 +788,7 @@ mod tests {
             pk_range(b"x", b"z"),
         );
 
-        assert!(!lhs.overlap(&rhs));
+        assert!(!files_overlap(&lhs, &rhs, &primary_key_mapper_for_test()));
     }
 
     #[test]
@@ -799,7 +814,8 @@ mod tests {
             ),
         ];
 
-        let runs = find_sorted_runs(&mut files);
+        let ranges = primary_key_mapper_for_test();
+        let runs = find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, &ranges));
 
         assert_eq!(1, runs.len());
         assert_eq!(2, runs[0].items().len());
@@ -837,7 +853,8 @@ mod tests {
             ),
         ];
 
-        let runs = find_sorted_runs(&mut files);
+        let ranges = primary_key_mapper_for_test();
+        let runs = find_sorted_runs(&mut files, |lhs, rhs| files_overlap(lhs, rhs, &ranges));
 
         assert_eq!(2, runs.len());
         assert_eq!(2, runs[0].items().len());
@@ -870,7 +887,10 @@ mod tests {
         ]);
         let mut result = Vec::new();
 
-        find_overlapping_items(&mut left, &mut right, &mut result);
+        let ranges = primary_key_mapper_for_test();
+        find_overlapping_items(&mut left, &mut right, &mut result, |lhs, rhs| {
+            files_overlap_inclusive(lhs, rhs, &ranges)
+        });
 
         assert!(result.is_empty());
     }
@@ -896,6 +916,6 @@ mod tests {
             pk_range(b"a", b"f"),
         );
 
-        assert!(!lhs.overlap(&rhs));
+        assert!(!files_overlap(&lhs, &rhs, &primary_key_mapper_for_test()));
     }
 }

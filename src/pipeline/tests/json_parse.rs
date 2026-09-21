@@ -134,7 +134,6 @@ transform:
       json2:
         - path: "commitAuthor"
           type: string
-          nullable: false
 "#;
 
     let output = common::parse_and_exec(INPUT_VALUE_OBJ, pipeline_yaml);

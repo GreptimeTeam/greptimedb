@@ -24,6 +24,7 @@ use arrow_schema::{
 };
 use async_stream::stream;
 use common_catalog::parse_catalog_and_schema_from_db_string;
+use common_error::ext::BoxedError;
 use common_plugins::GREPTIME_EXEC_READ_COST;
 use common_query::request::QueryRequest;
 use common_recordbatch::adapter::{RecordBatchMetrics, region_scan_output_bytes};
@@ -39,7 +40,7 @@ use datafusion::physical_plan::metrics::{
 use datafusion::physical_plan::stream::RecordBatchStreamAdapter;
 use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, ExecutionPlan, Partitioning, PlanProperties,
-    SendableRecordBatchStream, apply_expression_roots,
+    SendableRecordBatchStream, StatisticsArgs, apply_expression_roots,
 };
 use datafusion_common::stats::Precision;
 use datafusion_common::tree_node::TreeNodeRecursion;
@@ -746,7 +747,7 @@ impl MergeScanExec {
                 }
                 let mut stream = do_get_result.map_err(|e| {
                     MERGE_SCAN_ERRORS_TOTAL.inc();
-                    DataFusionError::External(Box::new(e))
+                    DataFusionError::External(Box::new(BoxedError::new(e)))
                 })?;
 
                 if let Some(subscriber_rollback) = subscriber_rollback.as_mut() {
@@ -815,7 +816,8 @@ impl MergeScanExec {
                     let poll_elapsed = poll_timer.elapsed();
                     poll_duration += poll_elapsed;
 
-                    let batch = batch.map_err(|e| DataFusionError::External(Box::new(e)))?;
+                    let batch = batch
+                        .map_err(|e| DataFusionError::External(Box::new(BoxedError::new(e))))?;
                     let df_batch = batch.into_df_record_batch();
                     if !Arc::ptr_eq(&advertised_schema, df_batch.schema_ref()) {
                         validate_remote_schema(
@@ -1262,8 +1264,12 @@ impl ExecutionPlan for MergeScanExec {
         Some(self.metric.clone_inner())
     }
 
-    fn partition_statistics(&self, partition: Option<usize>) -> Result<Arc<Statistics>> {
-        if partition.is_some() {
+    fn statistics_from_inputs(
+        &self,
+        _input_stats: &[Arc<Statistics>],
+        args: &StatisticsArgs,
+    ) -> Result<Arc<Statistics>> {
+        if args.partition().is_some() {
             return Ok(Arc::new(Statistics::new_unknown(&self.arrow_schema)));
         }
 
@@ -1423,6 +1429,8 @@ mod tests {
     use arrow_schema::{DataType as TestArrowDataType, Field, TimeUnit};
     use async_trait::async_trait;
     use common_base::Plugins;
+    use common_error::ext::{ErrorExt, PlainError};
+    use common_error::status_code::StatusCode;
     use common_meta::peer::Peer;
     use common_query::request::{
         INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, InitialDynFilterRegs,
@@ -1434,6 +1442,7 @@ mod tests {
     use datafusion::config::ConfigOptions;
     use datafusion::execution::SessionStateBuilder;
     use datafusion::physical_plan::filter_pushdown::ChildFilterPushdownResult;
+    use datafusion::physical_plan::repartition::RepartitionExec;
     use datafusion::physical_plan::{StatisticsArgs, StatisticsContext};
     use datafusion_common::TableReference;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
@@ -1448,6 +1457,7 @@ mod tests {
     use session::ReadPreference;
     use session::context::QueryContext;
     use session::query_id::QueryId;
+    use snafu::IntoError;
     use table::table::scan::REGION_SCAN_EXEC_NAME;
     use table::table_name::TableName;
     use tokio::sync::{Notify, oneshot};
@@ -1830,7 +1840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_do_get_rolls_back_new_subscriber_without_starting_fanout() {
+    async fn failed_do_get_preserves_status_code_and_rolls_back_subscriber() {
         let handler = Arc::new(FailingRegionQueryHandler::default());
         let query_ctx = QueryContext::arc();
         let state = Arc::new(QueryEngineState::new(
@@ -1886,8 +1896,12 @@ mod tests {
         )
         .unwrap();
 
-        let mut stream = exec.to_stream(task_ctx, 0).unwrap();
-        assert!(stream.next().await.unwrap().is_err());
+        let mut stream = common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(
+            exec.to_stream(task_ctx, 0).unwrap(),
+        )
+        .unwrap();
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
         assert_eq!(handler.do_get_calls.load(Ordering::SeqCst), 1);
         assert!(handler.saw_subscriber.load(Ordering::SeqCst));
 
@@ -1895,6 +1909,46 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(entries[0].subscribers().is_empty());
         assert!(!entries[0].fanout_started_for_test());
+    }
+
+    #[tokio::test]
+    async fn repartitioned_merge_scan_later_stream_error_preserves_status_code() {
+        let region_id = RegionId::new(1024, 1);
+        let handler = Arc::new(TestRegionQueryHandler::with_responses(vec![(
+            region_id,
+            int64_schema(&["a", "b"]),
+            vec![Err(common_recordbatch::error::ExternalSnafu.into_error(
+                BoxedError::new(PlainError::new(
+                    "neutral stream error".to_string(),
+                    StatusCode::RequestOutdated,
+                )),
+            ))],
+        )]));
+        let merge_scan = Arc::new(merge_scan_exec_with_handler(
+            vec![region_id],
+            expected_int64_schema(),
+            handler,
+            1,
+        ));
+        let repartition =
+            RepartitionExec::try_new(merge_scan, Partitioning::RoundRobinBatch(2)).unwrap();
+        assert_eq!(
+            repartition
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            2
+        );
+
+        let mut stream = common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(
+            repartition
+                .execute(0, Arc::new(TaskContext::default()))
+                .unwrap(),
+        )
+        .unwrap();
+
+        let error = stream.next().await.unwrap().unwrap_err();
+        assert_eq!(error.status_code(), StatusCode::RequestOutdated);
     }
 
     #[tokio::test]
@@ -2097,10 +2151,9 @@ mod tests {
         assert_eq!(registry_manager.registry_count(), 0);
     }
 
-    #[derive(Clone)]
     struct TestRegionResponse {
         advertised_schema: Arc<Schema>,
-        batches: Vec<RecordBatch>,
+        batches: Vec<common_recordbatch::error::Result<RecordBatch>>,
     }
 
     #[derive(Default)]
@@ -2117,7 +2170,7 @@ mod tests {
                         region_id,
                         TestRegionResponse {
                             advertised_schema: batch.schema.clone(),
-                            batches: vec![batch],
+                            batches: vec![Ok(batch)],
                         },
                     )
                 })
@@ -2126,7 +2179,13 @@ mod tests {
         }
 
         fn with_responses(
-            responses: impl IntoIterator<Item = (RegionId, Arc<Schema>, Vec<RecordBatch>)>,
+            responses: impl IntoIterator<
+                Item = (
+                    RegionId,
+                    Arc<Schema>,
+                    Vec<common_recordbatch::error::Result<RecordBatch>>,
+                ),
+            >,
         ) -> Self {
             let responses = responses
                 .into_iter()
@@ -2146,19 +2205,17 @@ mod tests {
 
     struct TestRecordBatchStream {
         schema: Arc<Schema>,
-        batches: Vec<RecordBatch>,
-        index: usize,
+        batches: Vec<common_recordbatch::error::Result<RecordBatch>>,
     }
 
     impl Stream for TestRecordBatchStream {
         type Item = common_recordbatch::error::Result<RecordBatch>;
 
         fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Some(batch) = self.batches.get(self.index).cloned() {
-                self.index += 1;
-                Poll::Ready(Some(Ok(batch)))
-            } else {
+            if self.batches.is_empty() {
                 Poll::Ready(None)
+            } else {
+                Poll::Ready(Some(self.batches.remove(0)))
             }
         }
     }
@@ -2219,10 +2276,13 @@ mod tests {
                     }),
                 Ordering::SeqCst,
             );
-            crate::error::UnimplementedSnafu {
-                operation: "test do_get failure",
-            }
-            .fail()
+            Err(crate::error::Error::QueryExecution {
+                source: BoxedError::new(PlainError::new(
+                    "neutral do_get error".to_string(),
+                    StatusCode::RequestOutdated,
+                )),
+                location: snafu::Location::default(),
+            })
         }
 
         async fn handle_remote_dyn_filter_update(
@@ -2540,8 +2600,19 @@ mod tests {
                 .expect("test handler needs a response for every requested region");
             Ok(Box::pin(TestRecordBatchStream {
                 schema: response.advertised_schema.clone(),
-                batches: response.batches.clone(),
-                index: 0,
+                batches: response
+                    .batches
+                    .iter()
+                    .map(|batch| match batch {
+                        Ok(batch) => Ok(batch.clone()),
+                        Err(error) => Err(common_recordbatch::error::ExternalSnafu.into_error(
+                            BoxedError::new(PlainError::new(
+                                error.to_string(),
+                                error.status_code(),
+                            )),
+                        )),
+                    })
+                    .collect(),
             }))
         }
 
@@ -3102,7 +3173,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 RegionId::new(1024, 1),
                 remote_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         ))
@@ -3139,7 +3210,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         );
@@ -3172,7 +3243,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         );
@@ -3207,7 +3278,7 @@ mod tests {
             Arc::new(TestRegionQueryHandler::with_responses(vec![(
                 region_id,
                 advertised_schema,
-                vec![batch],
+                vec![Ok(batch)],
             )])),
             1,
         ))

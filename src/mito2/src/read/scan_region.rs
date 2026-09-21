@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use api::v1::SemanticType;
@@ -76,6 +76,7 @@ use crate::read::unordered_scan::UnorderedScan;
 use crate::read::{BoxedRecordBatchStream, RecordBatch};
 use crate::region::options::MergeMode;
 use crate::region::version::VersionRef;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierBuilder, BloomFilterIndexApplierRef,
@@ -89,6 +90,7 @@ use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexAp
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 #[cfg(feature = "vector_index")]
 const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
@@ -235,6 +237,8 @@ impl Scanner {
 pub(crate) struct ScanRegion {
     /// Version of the region at scan.
     version: VersionRef,
+    /// Pinned index snapshot and its storage for candidate discovery.
+    series_index: Option<SeriesIndexReadContext>,
     /// Access layer of the region.
     access_layer: AccessLayerRef,
     /// Scan request.
@@ -247,6 +251,8 @@ pub(crate) struct ScanRegion {
     scan_memory_pool: Arc<dyn MemoryPool>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
+    /// Whether to ignore range indexes during scans.
+    ignore_range_index: bool,
     /// Whether to ignore inverted index.
     ignore_inverted_index: bool,
     /// Whether to ignore fulltext index.
@@ -276,12 +282,14 @@ impl ScanRegion {
     ) -> ScanRegion {
         ScanRegion {
             version,
+            series_index: None,
             access_layer,
             request,
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
             experimental_series_scan_v2: false,
+            ignore_range_index: false,
             ignore_inverted_index: false,
             ignore_fulltext_index: false,
             ignore_bloom_filter: false,
@@ -292,6 +300,16 @@ impl ScanRegion {
             #[cfg(feature = "enterprise")]
             extension_range_provider: None,
         }
+    }
+
+    /// Pins the series-index snapshot used by candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.series_index = series_index;
+        self
     }
 
     /// Sets counters that should receive query-load metrics.
@@ -322,6 +340,13 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_experimental_series_scan_v2(mut self, enabled: bool) -> Self {
         self.experimental_series_scan_v2 = enabled;
+        self
+    }
+
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.ignore_range_index = ignore;
         self
     }
 
@@ -559,10 +584,13 @@ impl ScanRegion {
         });
 
         let input = ScanInput::builder(self.access_layer, mapper)
+            .with_series_index(self.series_index)
+            .with_ignore_range_index(self.ignore_range_index)
             .with_time_range(Some(time_range))
             .with_predicate(predicate)
             .with_memtables(mem_range_builders)
             .with_files(files)
+            .with_primary_key_mapper(self.version.ssts.primary_key_mapper())
             .with_cache(self.cache_strategy)
             .with_inverted_index_appliers(inverted_index_appliers)
             .with_bloom_filter_index_appliers(bloom_filter_appliers)
@@ -927,6 +955,10 @@ fn time_range_covers_file(time_range: Option<&TimestampRange>, file: &FileHandle
 
 /// Common input for different scanners.
 pub struct ScanInput {
+    /// Pinned series-index snapshot and its storage, when configured.
+    pub(crate) series_index: Option<SeriesIndexReadContext>,
+    /// Whether to ignore range indexes while retaining series-index candidate discovery.
+    ignore_range_index: bool,
     /// Region SST access layer.
     access_layer: AccessLayerRef,
     /// Maps projected Batches to RecordBatches.
@@ -947,6 +979,8 @@ pub struct ScanInput {
     pub(crate) memtables: Vec<MemRangeBuilder>,
     /// Handles to SST files to scan.
     pub(crate) files: Vec<FileHandle>,
+    /// Shares the pinned schema's encoded defaults across parallel range readers.
+    primary_key_mapper: OnceLock<Arc<PrimaryKeyRangeMapper>>,
     /// Scan-wide hint for rows in an execution batch.
     batch_size: usize,
     /// Cache.
@@ -1025,6 +1059,8 @@ impl ScanInput {
     ) -> ScanInputBuilder {
         ScanInputBuilder {
             input: ScanInput {
+                series_index: None,
+                ignore_range_index: false,
                 access_layer,
                 read_cols: mapper.read_columns().clone(),
                 mapper: Arc::new(mapper),
@@ -1034,6 +1070,7 @@ impl ScanInput {
                 region_partition_expr: None,
                 memtables: Vec::new(),
                 files: Vec::new(),
+                primary_key_mapper: OnceLock::new(),
                 batch_size: crate::sst::parquet::DEFAULT_READ_BATCH_SIZE,
                 cache_strategy: CacheStrategy::Disabled,
                 ignore_file_not_found: false,
@@ -1069,6 +1106,12 @@ impl ScanInput {
         self.batch_size
     }
 
+    /// Interprets file statistics using this scan's pinned schema.
+    pub(crate) fn primary_key_mapper(&self) -> &PrimaryKeyRangeMapper {
+        self.primary_key_mapper
+            .get_or_init(|| Arc::new(PrimaryKeyRangeMapper::new(self.region_metadata().clone())))
+    }
+
     /// Returns the range implied by the range-cache time filters.
     pub(crate) fn implied_time_range(&self) -> Option<&TimestampRange> {
         self.scan_analysis
@@ -1089,6 +1132,28 @@ impl ScanInput {
 }
 
 impl ScanInputBuilder {
+    fn with_primary_key_mapper(mut self, mapper: Arc<PrimaryKeyRangeMapper>) -> Self {
+        self.input.primary_key_mapper = OnceLock::from(mapper);
+        self
+    }
+
+    /// Sets whether to ignore range indexes during scans.
+    #[must_use]
+    pub(crate) fn with_ignore_range_index(mut self, ignore: bool) -> Self {
+        self.input.ignore_range_index = ignore;
+        self
+    }
+
+    /// Sets the pinned series-index context for candidate discovery.
+    #[must_use]
+    pub(crate) fn with_series_index(
+        mut self,
+        series_index: Option<SeriesIndexReadContext>,
+    ) -> Self {
+        self.input.series_index = series_index;
+        self
+    }
+
     /// Sets time range filter for time index.
     #[must_use]
     pub(crate) fn with_time_range(mut self, time_range: Option<TimestampRange>) -> Self {
@@ -1549,6 +1614,11 @@ impl ScanInput {
         let reader = self
             .access_layer
             .read_sst(file.clone())
+            .series_index(
+                self.series_index
+                    .clone()
+                    .filter(|_| !self.ignore_range_index),
+            )
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())

@@ -1033,6 +1033,17 @@ pub fn proto_value_type(value: &v1::Value) -> Option<ColumnDataType> {
     Some(value_type)
 }
 
+/// Checks protobuf value types using the write-path compatibility rules.
+/// Binary values also represent JSON and vector columns.
+pub fn proto_value_type_match(column_type: ColumnDataType, value_type: ColumnDataType) -> bool {
+    match (column_type, value_type) {
+        (ct, vt) if ct == vt => true,
+        (ColumnDataType::Vector, ColumnDataType::Binary) => true,
+        (ColumnDataType::Json, ColumnDataType::Binary) => true,
+        _ => false,
+    }
+}
+
 pub fn vectors_to_rows<'a>(
     columns: impl Iterator<Item = &'a VectorRef>,
     row_count: usize,
@@ -2084,5 +2095,19 @@ mod tests {
         );
         let value = decode_json_value(&proto);
         assert_eq!(json.as_ref(), value);
+    }
+
+    #[test]
+    fn test_proto_value_type_match() {
+        for (column, value, expected) in [
+            (ColumnDataType::Int32, ColumnDataType::Int32, true),
+            (ColumnDataType::Json, ColumnDataType::Binary, true),
+            (ColumnDataType::Vector, ColumnDataType::Binary, true),
+            (ColumnDataType::Float64, ColumnDataType::List, false),
+            (ColumnDataType::Float64, ColumnDataType::Struct, false),
+            (ColumnDataType::Binary, ColumnDataType::Json, false),
+        ] {
+            assert_eq!(expected, proto_value_type_match(column, value));
+        }
     }
 }

@@ -1565,8 +1565,8 @@ ALTER TABLE metrics REPARTITION
 MODIFY COLUMN attrs JSON2 (
     max_auto_expanded_paths = 2000,
     trace_id STRING,
-    user.id STRING NOT NULL,
-    user.name STRING DEFAULT 'anonymous',
+    user.id STRING,
+    user.name STRING,
     request_id STRING INVERTED INDEX
 )"#;
         let mut statements =
@@ -1590,8 +1590,6 @@ MODIFY COLUMN attrs JSON2 (
         assert_eq!(Some(2000), options.max_auto_expanded_paths);
         assert_eq!(4, options.type_hints.len());
         assert_eq!(vec!["user", "id"], options.type_hints[1].path);
-        assert!(!options.type_hints[1].nullable);
-        assert!(options.type_hints[2].default.is_some());
         assert!(options.type_hints[3].inverted_index);
 
         let formatted = alter_table.to_string();

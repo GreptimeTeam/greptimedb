@@ -162,17 +162,17 @@ EXPLAIN
 SELECT date_part('hour', to_timestamp_micros(arrow_cast(data.time_us, 'Int64'))) as hour_of_day
 FROM bluesky;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                          |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                               |
-|               | Projection: date_part(Utf8("hour"), to_timestamp_micros(json_get(bluesky.data, Utf8("time_us"), Int64(NULL)))) AS hour_of_day |
-|               |   TableScan: bluesky                                                                                                          |
-|               | ]]                                                                                                                            |
-| physical_plan | CooperativeExec                                                                                                               |
++---------------+---------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                            |
++---------------+---------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                 |
+|               | Projection: date_part(Utf8("hour"), to_timestamp_micros(json_get(bluesky.data, Utf8("$.time_us"), Int64(NULL)))) AS hour_of_day |
+|               |   TableScan: bluesky                                                                                                            |
+|               | ]]                                                                                                                              |
+| physical_plan | CooperativeExec                                                                                                                 |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                               |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                 |
++---------------+---------------------------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE bluesky;
 

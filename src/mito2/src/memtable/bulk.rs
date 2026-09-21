@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use serde_with::{DisplayFromStr, serde_as};
 use store_api::metadata::RegionMetadataRef;
 use store_api::mito_engine_options::FloatFieldEncoding;
-use store_api::storage::{ColumnId, FileId, RegionId, SequenceRange};
+use store_api::storage::{ColumnId, FileId, RegionId, SequenceNumber, SequenceRange};
 use tokio::sync::Semaphore;
 
 use crate::compaction::{
@@ -425,6 +425,7 @@ pub struct BulkMemtable {
     max_timestamp: AtomicI64,
     min_timestamp: AtomicI64,
     max_sequence: AtomicU64,
+    min_sequence: AtomicU64,
     num_rows: AtomicUsize,
     /// Compactor for merging bulk parts
     compactor: Arc<Mutex<MemtableCompactor>>,
@@ -478,6 +479,7 @@ impl Memtable for BulkMemtable {
             max_ts: fragment.max_timestamp,
             num_rows: fragment.num_rows(),
             max_sequence: fragment.sequence,
+            min_sequence: fragment.min_sequence,
         };
 
         {
@@ -639,6 +641,7 @@ impl Memtable for BulkMemtable {
                 num_rows: 0,
                 num_ranges: 0,
                 max_sequence: 0,
+                min_sequence: 0,
                 series_count: 0,
             };
         }
@@ -662,8 +665,16 @@ impl Memtable for BulkMemtable {
             num_rows: self.num_rows.load(Ordering::Relaxed),
             num_ranges,
             max_sequence: self.max_sequence.load(Ordering::Relaxed),
+            min_sequence: self.min_sequence.load(Ordering::Relaxed),
             series_count: self.estimated_series_count(),
         }
+    }
+
+    fn min_sequence(&self) -> SequenceNumber {
+        if self.alloc_tracker.bytes_allocated() == 0 || self.num_rows.load(Ordering::Relaxed) == 0 {
+            return 0;
+        }
+        self.min_sequence.load(Ordering::Relaxed)
     }
 
     fn fork(&self, id: MemtableId, metadata: &RegionMetadataRef) -> MemtableRef {
@@ -706,6 +717,7 @@ impl BulkMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
+            min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 metadata.region_id,
@@ -793,6 +805,7 @@ impl BulkMemtable {
             max_timestamp: AtomicI64::new(i64::MIN),
             min_timestamp: AtomicI64::new(i64::MAX),
             max_sequence: AtomicU64::new(0),
+            min_sequence: AtomicU64::new(u64::MAX),
             num_rows: AtomicUsize::new(0),
             compactor: Arc::new(Mutex::new(MemtableCompactor::new(
                 region_id,
@@ -842,6 +855,8 @@ impl BulkMemtable {
             .fetch_min(stats.min_ts, Ordering::Relaxed);
         self.max_sequence
             .fetch_max(stats.max_sequence, Ordering::Relaxed);
+        self.min_sequence
+            .fetch_min(stats.min_sequence, Ordering::Relaxed);
         self.num_rows.fetch_add(stats.num_rows, Ordering::Relaxed);
     }
 
@@ -1530,11 +1545,15 @@ impl CompactDispatcher {
     fn dispatch_compact(&self, task: MemCompactTask) {
         let semaphore = self.semaphore.clone();
         common_runtime::spawn_global(async move {
-            let Ok(_permit) = semaphore.acquire().await else {
+            let Ok(permit) = semaphore.acquire_owned().await else {
                 return;
             };
 
             common_runtime::spawn_blocking_global(move || {
+                // The async task above returns as soon as the blocking task is
+                // submitted, so the permit has to travel with it to bound the
+                // compaction that actually runs.
+                let _permit = permit;
                 if let Err(e) = task.compact() {
                     common_telemetry::error!(e; "Failed to compact memtable, region: {}", task.metadata.region_id);
                 }
@@ -1641,7 +1660,8 @@ mod tests {
     use api::v1::value::ValueData;
     use api::v1::{Mutation, Row, Rows, SemanticType};
     use common_error::ext::WhateverResult;
-    use datatypes::arrow::datatypes::DataType as ArrowDataType;
+    use datatypes::arrow::array::AsArray;
+    use datatypes::arrow::datatypes::{DataType as ArrowDataType, UInt64Type};
     use datatypes::data_type::ConcreteDataType;
     use datatypes::extension::json::{
         JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, Json2PhysicalLayout, JsonMetadata,
@@ -1658,6 +1678,7 @@ mod tests {
     use super::*;
     use crate::memtable::bulk::part::BulkPartConverter;
     use crate::read::scan_region::PredicateGroup;
+    use crate::sst::parquet::flat_format::sequence_column_index;
     use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
     use crate::test_util::memtable_util::{
         build_key_values_with_ts_seq_values, metadata_for_test, region_metadata_to_row_schema,
@@ -1732,6 +1753,64 @@ mod tests {
     }
 
     #[test]
+    fn test_min_sequence_survives_mixed_parts_compaction_and_fork() {
+        let metadata = metadata_for_test();
+        let config = BulkMemtableConfig {
+            merge_threshold: 3,
+            encode_row_threshold: 1,
+            encode_bytes_threshold: 1,
+            ..Default::default()
+        };
+        let memtable = BulkMemtable::new(
+            1,
+            config,
+            metadata.clone(),
+            None,
+            None,
+            false,
+            MergeMode::LastNonNull,
+        );
+        memtable.set_unordered_part_threshold(0);
+        for (sequence, expected_min, expected_ranges) in [(100, 100, 1), (10, 10, 2), (200, 10, 1)]
+        {
+            let part = create_bulk_part_with_converter(
+                "a",
+                1,
+                vec![2000, 1000],
+                vec![Some(1.0), Some(2.0)],
+                sequence,
+            )
+            .unwrap();
+            // Regular row writes produce heterogeneous parts, sorted by timestamp
+            // rather than sequence. Neither the scalar nor the first row is a minimum.
+            assert_eq!(sequence + 1, part.sequence);
+            assert_eq!(sequence, part.min_sequence);
+            let sequences = part
+                .batch
+                .column(sequence_column_index(part.batch.num_columns()))
+                .as_primitive::<UInt64Type>();
+            assert_eq!(&[sequence + 1, sequence], sequences.values().as_ref());
+            memtable.write_bulk(part).unwrap();
+            assert_eq!(expected_min, memtable.stats().min_sequence);
+            assert_eq!(expected_min, memtable.min_sequence());
+            assert_eq!(expected_ranges, memtable.stats().num_ranges);
+        }
+        // The third write synchronously merges all parts without a dispatcher.
+        // Dedup can remove the oldest rows, but their lower bound remains safe.
+        assert_eq!(10, memtable.stats().min_sequence);
+        assert_eq!(201, memtable.stats().max_sequence);
+        let fork = memtable.fork(2, &metadata);
+        assert!(fork.is_empty());
+        assert_eq!(0, fork.min_sequence());
+        fork.write_bulk(
+            create_bulk_part_with_converter("a", 1, vec![1000], vec![Some(1.0)], 50).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(50, fork.stats().min_sequence);
+        assert_eq!(50, fork.min_sequence());
+    }
+
+    #[test]
     fn test_bulk_memtable_write_read() {
         let metadata = metadata_for_test();
         let memtable = BulkMemtable::new(
@@ -1775,6 +1854,7 @@ mod tests {
         assert_eq!(5, stats.num_rows);
         assert_eq!(3, stats.num_ranges);
         assert_eq!(300, stats.max_sequence);
+        assert_eq!(100, stats.min_sequence);
 
         let (min_ts, max_ts) = stats.time_range.unwrap();
         assert_eq!(1000, min_ts.value());
@@ -1956,8 +2036,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["id".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),

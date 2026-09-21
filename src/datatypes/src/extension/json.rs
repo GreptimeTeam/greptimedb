@@ -15,10 +15,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
-use arrow_schema::{ArrowError, DataType, Field, FieldRef};
+use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, SchemaRef};
 use parquet_variant_compute::VariantType;
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, ensure};
@@ -26,6 +27,27 @@ use snafu::{ResultExt, ensure};
 use crate::error::InvalidJson2LayoutSnafu;
 pub use crate::json::JSON2_REMAINDER_FIELD_NAME;
 use crate::json::JsonSettings;
+
+/// Aligns JSON2 field types with their built arrays while preserving field and schema metadata.
+pub fn align_schema_with_json_array(schema: SchemaRef, columns: &[ArrayRef]) -> SchemaRef {
+    if schema.fields().iter().all(|f| !is_json2_extension_type(f)) {
+        return schema;
+    }
+
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    for (field, array) in schema.fields().iter().zip(columns) {
+        if !is_json2_extension_type(field) {
+            fields.push(field.clone());
+            continue;
+        }
+
+        let mut field = field.as_ref().clone();
+        field.set_data_type(array.data_type().clone());
+        fields.push(Arc::new(field));
+    }
+
+    Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone()))
+}
 
 const LEGACY_JSON_STRUCTURE_SETTINGS_KEY: &str = "json_structure_settings";
 const JSON2_LAYOUT_V1: u8 = 1;

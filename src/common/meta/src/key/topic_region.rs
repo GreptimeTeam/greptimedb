@@ -378,6 +378,7 @@ impl TopicRegionManager {
                     }
                     Some(WalOptions::RaftEngine) => None,
                     Some(WalOptions::Noop) => None,
+                    Some(WalOptions::ObjectStore(_)) => None,
                     None => None,
                 },
             )

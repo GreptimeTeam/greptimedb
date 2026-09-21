@@ -12,9 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! This crate manage dataflow in Greptime, including adapter, expr, plan, repr and utils.
-//! It can transform substrait plan into it's own plan and execute it.
-//! It also contains definition of expression, adapter and plan, and internal state management.
+//! Flow execution and flownode services.
 
 #![allow(dead_code)]
 #![warn(clippy::too_many_lines)]
@@ -25,17 +23,14 @@
 // allow unused for now because it should be use later
 mod adapter;
 pub(crate) mod batching_mode;
-mod compute;
 mod df_optimizer;
 pub(crate) mod engine;
 pub mod error;
 mod expr;
 pub mod heartbeat;
 mod metrics;
-mod plan;
 mod repr;
 mod server;
-mod transform;
 mod utils;
 
 #[cfg(test)]
@@ -43,11 +38,19 @@ mod test_utils;
 
 pub use adapter::flownode_impl::FlowDualEngineRef;
 pub use adapter::{FlowConfig, FlowStreamingEngineRef, StreamingEngine};
-pub use batching_mode::frontend_client::{FrontendClient, GrpcQueryHandlerWithBoxedError};
+pub use batching_mode::BatchingModeOptions;
+pub use batching_mode::batching_execution::{BatchingExecution, BatchingExecutionFactory};
+pub use batching_mode::frontend_client::{
+    FrontendClient, GrpcQueryHandlerWithBoxedError, PeerDesc,
+};
+pub use batching_mode::task::{
+    BatchingExecutionGuard, BatchingTask, DirtyRestore, ExecuteOnceOutcome, PlanInfo,
+    QueryCoverage, TaskArgs,
+};
+pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
+pub use batching_mode::utils::sql_to_df_plan;
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
-pub use server::{
-    FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder, FrontendInvoker,
-};
+pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder};
 
 pub use crate::adapter::FlownodeOptions;

@@ -302,6 +302,8 @@ mod tests {
             query_scanned_bytes: 0,
             data_topic_latest_entry_id: 200,
             metadata_topic_latest_entry_id: 200,
+            min_timestamp: None,
+            max_timestamp: None,
         }
     }
 

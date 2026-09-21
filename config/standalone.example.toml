@@ -77,8 +77,9 @@ max_concurrent_queries = 0
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-## When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the
-## `prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value.
+## When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is
+## raised to at least the largest active flush interval plus 1 second. The intervals come from
+## `prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -205,6 +206,37 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
+## Shared experimental ordinary-table batching for opted-in ingestion protocols.
+## Legacy Prometheus batching settings under prom_store remain supported.
+## HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.
+## Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.
+## Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.
+## Effective shared Prom settings take precedence; existing prom_store settings remain compatible.
+[pending_rows_batcher]
+# protocols = [
+#     "influxdb",
+#     "opentsdb",
+#     "otlp",
+#     "logs",
+#     "loki",
+#     "splunk",
+#     "elasticsearch",
+#     "http_sql",
+#     "prom",
+# ]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by the frontend batcher.
+max_concurrent_flushes = 256
+## Maximum queued submissions per table worker.
+worker_channel_capacity = 65526
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued table Flow notifications.
+flow_notification_queue_capacity = 1024
+
 ## Jaeger protocol options.
 [jaeger]
 ## Whether to enable Jaeger protocol in HTTP API.
@@ -255,6 +287,7 @@ experimental_enable_prometheus_native_histogram = false
 ## The provider of the WAL.
 ## - `raft_engine`: the wal is stored in the local file system by raft-engine.
 ## - `kafka`: it's remote wal that data is stored in Kafka.
+## - `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.**
 provider = "raft_engine"
 
 ## The directory to store the WAL files.
@@ -339,7 +372,8 @@ create_topic_timeout = "30s"
 
 ## The max size of a single producer batch.
 ## Warning: Kafka has a default limit of 1MB per message in a topic.
-## **It's only used when the provider is `kafka`**.
+## Defaults to `8MB` when the provider is `experimental_object_store`.
+## **It's only used when the provider is `kafka` or `experimental_object_store`**.
 max_batch_bytes = "1MB"
 
 ## The consumer wait timeout.
@@ -356,6 +390,27 @@ consumer_wait_timeout = "100ms"
 ## as the system will skip over missing entries instead of treating
 ## them as critical errors.
 overwrite_entry_start_id = false
+
+## The name of the storage provider that holds the WAL objects, an empty name selects the default object store.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ storage_provider = ""
+
+## The path prefix of the WAL objects inside the storage provider.
+## The objects are written under `<prefix>/datanodes/<node_id>/epochs/<generation>`, which is derived from this prefix.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ prefix = "wal"
+
+## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
+## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ flush_interval = "100ms"
+
+## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
+## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
+## - `fail`: the read fails, so the region does not open.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ on_corrupted_segment = "skip"
 
 # The Kafka SASL configuration.
 # **It's only used when the provider is `kafka`**.
@@ -638,6 +693,10 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Whether to build and query range indexes when series indexes are enabled.
+## Obsolete range-index metadata and files are still cleaned up when disabled.
+#+ experimental_enable_range_index = false
 
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"

@@ -214,10 +214,10 @@ impl OpenTelemetryProtocolHandler for Instance {
     #[tracing::instrument(skip_all)]
     async fn traces(
         &self,
-        pipeline_handler: PipelineHandlerRef,
+        _pipeline_handler: PipelineHandlerRef,
         request: ExportTraceServiceRequest,
         pipeline: PipelineWay,
-        pipeline_params: GreptimePipelineParams,
+        _pipeline_params: GreptimePipelineParams,
         table_name: String,
         ctx: QueryContextRef,
     ) -> ServerResult<TraceIngestOutcome> {
@@ -239,16 +239,8 @@ impl OpenTelemetryProtocolHandler for Instance {
         let targets = trace_permission_targets(&table_name, &spans, &ctx);
         self.check_table_permission(&ctx, PermissionReq::Action(OTLP_WRITE), targets)
             .context(AuthSnafu)?;
-        self.ingest_trace_spans(
-            pipeline_handler,
-            &pipeline,
-            &pipeline_params,
-            table_name,
-            spans,
-            &conventions,
-            ctx,
-        )
-        .await
+        self.ingest_trace_spans(&pipeline, table_name, spans, &conventions, ctx)
+            .await
     }
 
     #[tracing::instrument(skip_all)]

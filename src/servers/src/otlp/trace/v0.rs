@@ -18,19 +18,16 @@ use api::v1::value::ValueData;
 use api::v1::{ColumnDataType, RowInsertRequests};
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
-use pipeline::{GreptimePipelineParams, PipelineWay};
-use session::context::QueryContextRef;
 
 use crate::error::Result;
 use crate::otlp::trace::span::TraceSpan;
 use crate::otlp::trace::{
     DURATION_NANO_COLUMN, PARENT_SPAN_ID_COLUMN, SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN,
     SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN, SPAN_KIND_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
-    SPAN_STATUS_MESSAGE_COLUMN, TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
-    TraceAuxData,
+    SPAN_STATUS_MESSAGE_COLUMN, TIMESTAMP_COLUMN, TIMESTAMP_END_COLUMN, TRACE_ID_COLUMN,
+    TRACE_STATE_COLUMN, TraceAuxData,
 };
 use crate::otlp::utils::{make_column_data, make_string_column_data};
-use crate::query_handler::PipelineHandlerRef;
 use crate::row_writer::{self, MultiTableData, TableData};
 
 const APPROXIMATE_COLUMN_COUNT: usize = 24;
@@ -44,11 +41,7 @@ const MAX_TIMESTAMP: i64 = 4102444800000000000;
 /// caller can update them only after the main span write succeeds.
 pub fn v0_to_grpc_main_insert_requests(
     spans: &[TraceSpan],
-    _pipeline: &PipelineWay,
-    _pipeline_params: &GreptimePipelineParams,
     table_name: &str,
-    _query_ctx: &QueryContextRef,
-    _pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     let mut multi_table_writer = MultiTableData::default();
     let trace_writer = build_trace_table_data(spans)?;
@@ -102,7 +95,7 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     // write fields
     let fields = vec![
         make_column_data(
-            "timestamp_end",
+            TIMESTAMP_END_COLUMN,
             ColumnDataType::TimestampNanosecond,
             Some(ValueData::TimestampNanosecondValue(
                 span.end_in_nanosecond as i64,
@@ -159,14 +152,14 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_json(
         writer,
         "scope_attributes",
-        span.scope_attributes.into(),
+        span.scope_attributes.into_owned().into(),
         &mut row,
     )?;
 
     row_writer::write_json(
         writer,
         "resource_attributes",
-        span.resource_attributes.into(),
+        span.resource_attributes.into_owned().into(),
         &mut row,
     )?;
 
@@ -250,10 +243,10 @@ mod tests {
             trace_id: trace_id.to_string(),
             span_id: span_id.to_string(),
             parent_span_id: None,
-            resource_attributes: Attributes::from(vec![]),
+            resource_attributes: Attributes::from(vec![]).into(),
             scope_name: "scope".to_string(),
             scope_version: "v1".to_string(),
-            scope_attributes: Attributes::from(vec![]),
+            scope_attributes: Attributes::from(vec![]).into(),
             trace_state: String::new(),
             span_name: "op".to_string(),
             span_kind: "SPAN_KIND_SERVER".to_string(),

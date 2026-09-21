@@ -60,6 +60,8 @@ pub const FILE_TABLE_FORMAT_KEY: &str = "format";
 
 pub const TABLE_DATA_MODEL: &str = "table_data_model";
 pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
+/// Table data model used by the JSON2-based OTLP trace pipeline.
+pub const TABLE_DATA_MODEL_TRACE_V2: &str = "greptime_trace_v2";
 
 /// Returns true if the table stores spans in the `greptime_trace_v1` data model
 /// (fixed span columns), the shape the Jaeger query path and the entity-graph

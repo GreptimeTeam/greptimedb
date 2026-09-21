@@ -8,6 +8,7 @@ members = [
     "src/client",
     "src/cmd",
     "src/common/base",
+    "src/common/batcher",
     "src/common/catalog",
     "src/common/config",
     "src/common/datasource",
@@ -125,6 +126,7 @@ chrono-tz = { version = "0.10", features = ["case-insensitive"] }
 clap = { version = "4.4", features = ["derive"] }
 config = "0.13.0"
 const_format = "0.2"
+crc32fast = "1"
 criterion = "0.7"
 crossbeam-utils = "0.8"
 dashmap = "6.1"
@@ -170,7 +172,9 @@ hyper-util = "0.1"
 icu_properties = "2.0.1"
 indicatif = "0.17"
 itertools = "0.14"
-jsonb = { version = "0.4.4", default-features = false }
+jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9de38959328caa7628e81b6b1", default-features = false, features = [
+    "databend",
+] }
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
@@ -200,6 +204,7 @@ parquet-variant = "=59.2.0"
 parquet-variant-compute = "=59.2.0"
 parquet-variant-json = "=59.2.0"
 paste = "1.0"
+percent-encoding = "2.3"
 pin-project = "1.0"
 pretty_assertions = "1.4.0"
 prometheus = { version = "0.14", features = ["process"] }
@@ -251,6 +256,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 stringprep = "0.1"
 strum = { version = "0.27", features = ["derive"] }
 sysinfo = "0.33"
+temp-env = "0.3"
 tempfile = "3"
 tokio = { version = "1.47", features = ["full"] }
 tokio-postgres = "0.7.18"
@@ -287,6 +293,7 @@ cli = { path = "src/cli" }
 client = { path = "src/client" }
 cmd = { path = "src/cmd", default-features = false }
 common-base = { path = "src/common/base" }
+common-batcher = { path = "src/common/batcher" }
 common-catalog = { path = "src/common/catalog" }
 common-config = { path = "src/common/config" }
 common-datasource = { path = "src/common/datasource" }
@@ -369,8 +376,8 @@ datafusion-physical-plan = { git = "https://github.com/GreptimeTeam/datafusion.g
 datafusion-proto = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "2aa87d52cdce7006af492330064738f33ed294c1" }
 datafusion-sql = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "2aa87d52cdce7006af492330064738f33ed294c1" }
 datafusion-substrait = { git = "https://github.com/GreptimeTeam/datafusion.git", rev = "2aa87d52cdce7006af492330064738f33ed294c1" }
-datafusion-pg-catalog = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
-arrow-pg = { git = "https://github.com/GreptimeTeam/datafusion-postgres.git", rev = "3c77e6c32b8db80635a0d2f4b318a36b31170bc3" }
+datafusion-pg-catalog = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
+arrow-pg = { git = "https://github.com/datafusion-contrib/datafusion-postgres.git", rev = "ffb14a52b3d7c7489559812e1ec38096f225ce93" }
 sqlparser = { git = "https://github.com/GreptimeTeam/sqlparser-rs.git", rev = "9e9019bb1c7040ed956f654e39378dd42ab17884" }
 
 # Temporary: use the GreptimeTeam fork of tikv-jemalloc-sys embedding

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_datasource::file_format::Format;
 use common_error::define_into_tonic_status;
@@ -85,6 +86,12 @@ pub enum Error {
         source: common_meta::error::Error,
     },
 
+    #[snafu(display("Invalid database export: {reason}"))]
+    InvalidDatabaseExport { reason: String },
+
+    #[snafu(display("Database export cancelled"))]
+    DatabaseExportCancelled {},
+
     #[snafu(display("Invalid logical table export: {reason}"))]
     InvalidLogicalTableExport { reason: String },
 
@@ -97,6 +104,13 @@ pub enum Error {
     #[snafu(display("Unexpected, violated: {}", violated))]
     Unexpected {
         violated: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to flush pending batch: {source}"))]
+    BatchFlush {
+        source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -1051,6 +1065,7 @@ impl ErrorExt for Error {
             | Error::DescribeStatement { source, .. } => source.status_code(),
             Error::AlterExprToRequest { source, .. } => source.status_code(),
             Error::External { source, .. } => source.status_code(),
+            Error::BatchFlush { source, .. } => source.status_code(),
             Error::FindTablePartitionRule { source, .. }
             | Error::SplitInsert { source, .. }
             | Error::SplitDelete { source, .. }
@@ -1080,6 +1095,8 @@ impl ErrorExt for Error {
             Error::InvalidTimeIndexType { .. } | Error::InvalidTimezone { .. } => {
                 StatusCode::InvalidArguments
             }
+            Error::InvalidDatabaseExport { .. } => StatusCode::InvalidArguments,
+            Error::DatabaseExportCancelled { .. } => StatusCode::Cancelled,
             Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
             Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
             Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,
@@ -1156,6 +1173,7 @@ impl ErrorExt for Error {
             Error::Catalog { source, .. } => source.retry_hint(),
             Error::SubstraitCodec { source, .. } => source.retry_hint(),
             Error::External { source, .. } => source.retry_hint(),
+            Error::BatchFlush { source, .. } => source.retry_hint(),
             Error::BuildRecordBatch { source, .. } => source.retry_hint(),
             Error::DecodeFlightData { source, .. } => source.retry_hint(),
             Error::SqlCommon { source, .. } => source.retry_hint(),
@@ -1183,7 +1201,7 @@ define_into_tonic_status!(Error);
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::error::*;
 
     #[test]
     fn admin_function_preserves_external_error_metadata() {

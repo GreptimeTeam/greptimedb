@@ -27,8 +27,10 @@ use index::inverted_index::create::sort_create::SortIndexCreator;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
-use mito_codec::row_converter::{CompositeValues, SortField};
+use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
+use mito_codec::row_converter::{SortField, SparseOffsetsCache};
 use puffin::puffin_manager::{PuffinWriter, PutOptions};
+use smallvec::SmallVec;
 use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
@@ -37,17 +39,19 @@ use tokio::io::duplex;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::error::{
-    BiErrorsSnafu, EncodeSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu, PuffinAddBlobSnafu,
-    PushIndexValueSnafu, Result,
+    BiErrorsSnafu, DecodeSnafu, EncodeSnafu, IndexFinishSnafu, OperateAbortedIndexSnafu,
+    PuffinAddBlobSnafu, PushIndexValueSnafu, Result,
 };
 use crate::read::Batch;
+use crate::sst::index::TYPE_INVERTED_INDEX;
+use crate::sst::index::column::column_index_rows;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
 use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
+use crate::sst::index::primary_key::PrimaryKeyRuns;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
-use crate::sst::index::{TYPE_INVERTED_INDEX, decode_primary_keys_with_counts};
 
 /// The minimum memory usage threshold for one column.
 const MIN_MEMORY_USAGE_THRESHOLD_PER_COLUMN: usize = 1024 * 1024; // 1MB
@@ -66,6 +70,8 @@ pub struct InvertedIndexer {
     codec: IndexValuesCodec,
     /// Reusable buffer for encoding index values.
     value_buf: Vec<u8>,
+    /// Scratch offsets shared by indexed tags of one sparse primary key.
+    pk_offsets: SparseOffsetsCache,
 
     /// Statistics of index creation.
     stats: Statistics,
@@ -124,6 +130,7 @@ impl InvertedIndexer {
             index_creator,
             temp_file_provider,
             value_buf: vec![],
+            pk_offsets: SparseOffsetsCache::new(),
             stats: Statistics::new(TYPE_INVERTED_INDEX),
             aborted: false,
             memory_usage,
@@ -173,7 +180,7 @@ impl InvertedIndexer {
         guard.inc_row_count(batch.num_rows());
 
         let is_sparse = self.metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse;
-        let mut decoded_pks: Option<Vec<(CompositeValues, usize)>> = None;
+        let mut sparse_columns: SmallVec<[(ColumnId, &str); 8]> = SmallVec::new();
 
         for (col_id, target_key) in &self.indexed_column_ids {
             let Some(column_meta) = self.metadata.column_by_id(*col_id) else {
@@ -190,68 +197,21 @@ impl InvertedIndexer {
                     .context(crate::error::ConvertVectorSnafu)?;
                 let sort_field = SortField::new(vector.data_type());
 
-                for row in 0..batch.num_rows() {
-                    self.value_buf.clear();
-                    let value_ref = vector.get_ref(row);
-
-                    if value_ref.is_null() {
-                        self.index_creator
-                            .push_with_name(target_key, None)
-                            .await
-                            .context(PushIndexValueSnafu)?;
-                    } else {
-                        IndexValueCodec::encode_nonnull_value(
-                            value_ref,
-                            &sort_field,
-                            &mut self.value_buf,
-                        )
-                        .context(EncodeSnafu)?;
-                        self.index_creator
-                            .push_with_name(target_key, Some(&self.value_buf))
-                            .await
-                            .context(PushIndexValueSnafu)?;
-                    }
-                }
-            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
-                // Column not found in batch, tries to decode from primary keys for sparse encoding.
-                if decoded_pks.is_none() {
-                    decoded_pks = Some(decode_primary_keys_with_counts(batch, &self.codec)?);
-                }
-
-                let pk_values_with_counts = decoded_pks.as_ref().unwrap();
-                let Some(col_info) = self.codec.pk_col_info(*col_id) else {
-                    debug!(
-                        "Column {} not found in primary key during building bloom filter index",
-                        column_name
-                    );
-                    continue;
-                };
-                let pk_index = col_info.idx;
-                let field = &col_info.field;
-                for (decoded, count) in pk_values_with_counts {
-                    let value = match decoded {
-                        CompositeValues::Dense(dense) => dense.get(pk_index).map(|v| &v.1),
-                        CompositeValues::Sparse(sparse) => sparse.get(col_id),
-                    };
-
-                    let elem = value
-                        .filter(|v| !v.is_null())
-                        .map(|v| {
-                            self.value_buf.clear();
-                            IndexValueCodec::encode_nonnull_value(
-                                v.as_value_ref(),
-                                field,
-                                &mut self.value_buf,
-                            )
-                            .context(EncodeSnafu)?;
-                            Ok(self.value_buf.as_slice())
-                        })
-                        .transpose()?;
-
+                for (row, count) in column_index_rows(batch, column_meta.semantic_type) {
+                    let elem = IndexValueCodec::encode_value(
+                        vector.get_ref(row),
+                        &sort_field,
+                        &mut self.value_buf,
+                    )
+                    .context(EncodeSnafu)?;
                     self.index_creator
-                        .push_with_name_n(target_key, elem, *count)
+                        .push_with_name_n(target_key, elem, count)
                         .await
                         .context(PushIndexValueSnafu)?;
+                }
+            } else if is_sparse && column_meta.semantic_type == SemanticType::Tag {
+                if self.codec.pk_col_info(*col_id).is_some() {
+                    sparse_columns.push((*col_id, target_key));
                 }
             } else {
                 debug!(
@@ -261,12 +221,32 @@ impl InvertedIndexer {
             }
         }
 
+        if !sparse_columns.is_empty() {
+            for (pk, count) in PrimaryKeyRuns::try_new(batch)? {
+                let mut view =
+                    SparsePrimaryKeyView::new(pk, &mut self.pk_offsets).context(DecodeSnafu)?;
+                // Visit all needed tags before moving to the next PK so offset discovery is shared.
+                for &(col_id, target_key) in &sparse_columns {
+                    let value = IndexValueCodec::encode_sparse_value(
+                        &mut view,
+                        col_id,
+                        &mut self.value_buf,
+                    )
+                    .context(DecodeSnafu)?;
+                    self.index_creator
+                        .push_with_name_n(target_key, value, count)
+                        .await
+                        .context(PushIndexValueSnafu)?;
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Finishes index creation and cleans up garbage.
     /// Returns the number of rows and bytes written.
-    pub async fn finish(
+    pub(crate) async fn finish(
         &mut self,
         puffin_writer: &mut SstPuffinWriter,
     ) -> Result<(RowCount, ByteCount)> {

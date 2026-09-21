@@ -30,7 +30,7 @@ use snafu::{OptionExt, ResultExt};
 use store_api::ManifestVersion;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
-use store_api::storage::RegionId;
+use store_api::storage::{RegionId, SequenceNumber};
 
 use crate::access_layer::{
     AccessLayer, AccessLayerRef, Metrics, OperationType, SstWriteRequest, WriteType,
@@ -47,7 +47,7 @@ use crate::error::{
 };
 use crate::manifest::action::{RegionEdit, RegionMetaAction, RegionMetaActionList};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
-use crate::region::options::RegionOptions;
+use crate::region::options::{MergeMode, RegionOptions};
 use crate::region::version::VersionRef;
 use crate::region::{ManifestContext, RegionLeaderState, RegionRoleState};
 use crate::schedule::scheduler::LocalScheduler;
@@ -73,6 +73,10 @@ pub struct CompactionVersion {
     pub(crate) options: RegionOptions,
     /// SSTs of the region.
     pub(crate) ssts: SstVersionRef,
+    /// Lower bound of pending memtable sequences from the same Version as `ssts`.
+    /// None means no barrier; Some(0) conservatively represents an unknown bound.
+    /// Keep only the value so background compaction cannot pin flushed memtables.
+    pub(crate) memtable_min_sequence: Option<SequenceNumber>,
     /// Inferred compaction time window.
     pub(crate) compaction_time_window: Option<Duration>,
 }
@@ -83,6 +87,11 @@ impl From<VersionRef> for CompactionVersion {
             metadata: value.metadata.clone(),
             options: value.options.clone(),
             ssts: value.ssts.clone(),
+            memtable_min_sequence: if value.options.merge_mode() == MergeMode::LastNonNull {
+                value.memtables.min_sequence()
+            } else {
+                None
+            },
             compaction_time_window: value.compaction_time_window,
         }
     }
@@ -199,12 +208,15 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(region_metadata.clone());
         ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
         CompactionVersion {
             metadata: region_metadata.clone(),
             options: req.region_options.clone(),
             ssts: Arc::new(ssts),
+            // Remote execution uses an already picked output. A manifest-only
+            // opener cannot prove that a new LastNonNull pick is memtable-safe.
+            memtable_min_sequence: Some(0),
             compaction_time_window: manifest.compaction_time_window,
         }
     };
@@ -1158,9 +1170,10 @@ mod tests {
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             current_version: CompactionVersion {
-                metadata,
+                metadata: metadata.clone(),
                 options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new()),
+                ssts: Arc::new(SstVersion::new(metadata)),
+                memtable_min_sequence: None,
                 compaction_time_window: None,
             },
             file_purger: None,

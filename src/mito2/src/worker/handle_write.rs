@@ -788,6 +788,7 @@ mod tests {
             max_timestamp: num_rows - 1,
             min_timestamp: 0,
             sequence: 0,
+            min_sequence: 0,
             timestamp_index: 1,
             raw_data: None,
         }

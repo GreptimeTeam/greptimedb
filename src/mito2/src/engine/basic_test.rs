@@ -24,6 +24,7 @@ use common_base::readable_size::ReadableSize;
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
 use common_recordbatch::RecordBatches;
+use common_time::Timestamp;
 use common_wal::options::WAL_OPTIONS_KEY;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
@@ -806,6 +807,93 @@ async fn test_region_usage_with_format(flat_format: bool) {
     // region total usage
     // Some memtables may share items.
     assert!(region_stat.estimated_disk_size() > 3000);
+}
+
+#[tokio::test]
+async fn test_region_usage_time_range() {
+    test_region_usage_time_range_with_format(false).await;
+    test_region_usage_time_range_with_format(true).await;
+}
+
+async fn test_region_usage_time_range_with_format(flat_format: bool) {
+    let mut env = TestEnv::with_prefix("region_usage_time_range").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: flat_format,
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    let region = engine.get_region(region_id).unwrap();
+
+    // An empty region has nothing to bound.
+    let region_stat = region.region_statistic();
+    assert_eq!(region_stat.min_timestamp, None);
+    assert_eq!(region_stat.max_timestamp, None);
+
+    // Unflushed data lives only in the memtable, so the range must come from there.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("a", 10, 20, 0),
+        },
+    )
+    .await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(10_000))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
+
+    // After a flush the same range is served by the SST instead.
+    flush_region(&engine, region_id, None).await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(10_000))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
+
+    // A later write lands in the memtable below the SST range: the minimum must
+    // come from the memtable and the maximum from the SST, so a merge that drops
+    // either side is caught.
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows_for_key("b", 0, 5, 0),
+        },
+    )
+    .await;
+
+    let region_stat = region.region_statistic();
+    assert_eq!(
+        region_stat.min_timestamp,
+        Some(Timestamp::new_millisecond(0))
+    );
+    assert_eq!(
+        region_stat.max_timestamp,
+        Some(Timestamp::new_millisecond(19_000))
+    );
 }
 
 #[tokio::test]

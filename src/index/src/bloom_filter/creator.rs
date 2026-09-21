@@ -149,6 +149,39 @@ impl BloomFilterCreator {
         Ok(())
     }
 
+    /// Adds `nrows` copies of a single borrowed value (or null), copying it only when
+    /// it is new to a segment. Row counts advance for nulls as well.
+    pub async fn push_n_row_elem(&mut self, mut nrows: usize, elem: Option<&[u8]>) -> Result<()> {
+        while nrows > 0 {
+            let rows_to_seg_end =
+                self.rows_per_segment - (self.accumulated_row_count % self.rows_per_segment);
+            let rows_to_push = nrows.min(rows_to_seg_end);
+            nrows -= rows_to_push;
+            self.accumulated_row_count += rows_to_push;
+
+            if let Some(elem) = elem {
+                let old_len = self.cur_seg_distinct_elems.len();
+                // A borrowed entry lookup avoids hashing new values twice and only
+                // allocates when the value is absent from the current segment.
+                self.cur_seg_distinct_elems
+                    .get_or_insert_with(elem, <[u8]>::to_vec);
+                if self.cur_seg_distinct_elems.len() != old_len {
+                    self.cur_seg_distinct_elems_mem_usage += elem.len();
+                    self.global_memory_usage
+                        .fetch_add(elem.len(), Ordering::Relaxed);
+                }
+            }
+            if self
+                .accumulated_row_count
+                .is_multiple_of(self.rows_per_segment)
+            {
+                self.finalize_segment().await?;
+                self.finalized_row_count = self.accumulated_row_count;
+            }
+        }
+        Ok(())
+    }
+
     /// Adds a row of elements to the bloom filter. If the number of accumulated rows
     /// reaches `rows_per_segment`, it finalizes the current segment.
     pub async fn push_row_elems(&mut self, elems: impl IntoIterator<Item = Bytes>) -> Result<()> {
@@ -418,6 +451,42 @@ mod tests {
             assert!(bf.contains(&b"e"));
             assert!(bf.contains(&b"f"));
         }
+    }
+
+    #[tokio::test]
+    async fn borrowed_single_value_matches_owned_rows_across_segments() {
+        let make_creator = || {
+            BloomFilterCreator::new(
+                3,
+                0.01,
+                Arc::new(MockExternalTempFileProvider::new()),
+                Arc::new(AtomicUsize::new(0)),
+                None,
+            )
+        };
+        let mut borrowed = make_creator();
+        let mut owned = make_creator();
+        // Zero rows, nulls, empty values, duplicates and runs crossing segment boundaries.
+        for (rows, elem) in [
+            (0, Some(b"ignored".as_slice())),
+            (1, None),
+            (5, Some(b"".as_slice())),
+            (1, Some(b"".as_slice())),
+            (8, Some(b"label".as_slice())),
+            (1, None),
+        ] {
+            borrowed.push_n_row_elem(rows, elem).await.unwrap();
+            owned
+                .push_n_row_elems(rows, elem.map(<[u8]>::to_vec))
+                .await
+                .unwrap();
+            assert_eq!(borrowed.memory_usage(), owned.memory_usage());
+        }
+        let mut borrowed_blob = Cursor::new(Vec::new());
+        let mut owned_blob = Cursor::new(Vec::new());
+        borrowed.finish(&mut borrowed_blob).await.unwrap();
+        owned.finish(&mut owned_blob).await.unwrap();
+        assert_eq!(borrowed_blob.into_inner(), owned_blob.into_inner());
     }
 
     #[tokio::test]

@@ -75,10 +75,16 @@ impl Function for JsonPathMatchFunction {
 
             let result = match (json, path) {
                 (Some(json), Some(path)) => {
-                    if !jsonb::is_null(json) {
+                    if !jsonb::RawJsonb::new(json)
+                        .is_null()
+                        .map_err(|e| datafusion_common::DataFusionError::Execution(e.to_string()))?
+                    {
                         let json_path = jsonb::jsonpath::parse_json_path(path.as_bytes());
                         match json_path {
-                            Ok(json_path) => jsonb::path_match(json, json_path).ok(),
+                            Ok(json_path) => jsonb::RawJsonb::new(json)
+                                .path_match(&json_path)
+                                .ok()
+                                .flatten(),
                             Err(_) => None,
                         }
                     } else {
