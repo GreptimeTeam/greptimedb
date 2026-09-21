@@ -64,14 +64,17 @@ mod test {
     use session::context::QueryContextRef;
     use session::hints::INSERT_SKIP_WAL_HINT;
     use tokio::net::TcpListener;
-    use tokio_stream::wrappers::TcpListenerStream;
+    use tokio_stream::wrappers::{ReceiverStream, TcpListenerStream};
     use tonic::transport::Server as TonicServer;
     use tonic::{Response, Status};
     use tower::service_fn;
 
     use crate::cluster::GreptimeDbClusterBuilder;
     use crate::grpc::query_and_expect;
-    use crate::test_util::{MockInstanceImpl, StorageType, assert_wal_delta, setup_grpc_server};
+    use crate::test_util::{
+        MockInstanceImpl, StorageType, assert_wal_delta, setup_grpc_server,
+        setup_grpc_server_with_auto_create_table_disabled,
+    };
     use crate::tests::test_util::MockInstance;
 
     struct SlowFlightCraft;
@@ -465,6 +468,204 @@ mod test {
         db.shutdown().await;
     }
 
+    #[rstest]
+    #[case::standalone_single_region(false, false)]
+    #[case::standalone_partitioned(false, true)]
+    #[case::distributed_single_region(true, false)]
+    #[case::distributed_partitioned(true, true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_auto_add_columns(
+        #[case] distributed: bool,
+        #[case] partitioned: bool,
+    ) {
+        let mut db = MockInstanceImpl::new(
+            &format!("flight_bulk_auto_add_columns_{partitioned}"),
+            distributed,
+        )
+        .await;
+        let runtime = common_runtime::global_runtime().clone();
+        let handler = GreptimeRequestHandler::new(
+            db.frontend(),
+            None,
+            Some(runtime.clone()),
+            FlightCompression::default(),
+        );
+        let mut server = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime)
+            .flight_handler(Arc::new(handler))
+            .build();
+        server.start("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let client = Database::new(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+        let partition = if partitioned {
+            " PARTITION ON COLUMNS (a) (a < 0, a >= 0)"
+        } else {
+            ""
+        };
+        client.sql(&format!(
+            "CREATE TABLE foo (ts TIMESTAMP TIME INDEX, a INT NOT NULL, PRIMARY KEY (a)){partition}"
+        )).await.unwrap();
+        // Existing rows require the inferred column to be nullable.
+        client
+            .sql("INSERT INTO foo VALUES (100, 100)")
+            .await
+            .unwrap();
+        test_put_record_batches(&client, create_record_batches(-4)).await;
+
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT a, \"B\" FROM foo ORDER BY a",
+            "\
++-----+-----+
+| a   | B   |
++-----+-----+
+| -4  | s4  |
+| -3  | s3  |
+| -2  | s2  |
+| -1  | s1  |
+| 0   | s0  |
+| 1   | s-1 |
+| 2   | s-2 |
+| 3   | s-3 |
+| 4   | s-4 |
+| 100 |     |
++-----+-----+",
+        )
+        .await;
+        server.shutdown().await.unwrap();
+        db.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_auto_add_columns_once_per_stream() {
+        let (db, server) = setup_grpc_server(
+            StorageType::File,
+            "test_flight_bulk_auto_add_columns_once_per_stream",
+        )
+        .await;
+        let client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+        client
+            .sql("CREATE TABLE foo (ts TIMESTAMP TIME INDEX, a INT NOT NULL, PRIMARY KEY (a))")
+            .await
+            .unwrap();
+        let batches = create_record_batches(1);
+        let schema = batches[0].schema.arrow_schema().clone();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        // The client must be able to receive the handshake before sending its schema.
+        let mut responses = client
+            .do_put(ReceiverStream::new(rx).boxed())
+            .await
+            .unwrap();
+        assert_eq!(responses.next().await.unwrap().unwrap().affected_rows(), 0);
+        tx.send(encode_put_schema(schema.as_ref())).await.unwrap();
+
+        let empty_batch = common_recordbatch::DfRecordBatch::new_empty(schema);
+        for round in 0..2 {
+            for message in
+                FlightEncoder::default().encode(FlightMessage::RecordBatch(empty_batch.clone()))
+            {
+                tx.send(message).await.unwrap();
+            }
+            assert_eq!(responses.next().await.unwrap().unwrap().affected_rows(), 0);
+            if round == 0 {
+                // Even an empty first batch initializes the schema. Dropping the
+                // column makes a repeated reconciliation on the next batch observable.
+                client
+                    .sql("ALTER TABLE foo DROP COLUMN \"B\"")
+                    .await
+                    .unwrap();
+            }
+        }
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'foo' ORDER BY column_name",
+            "\
++-------------+
+| column_name |
++-------------+
+| a           |
+| ts          |
++-------------+",
+        )
+        .await;
+        drop(tx);
+        assert!(responses.next().await.is_none());
+
+        // A new stream reconciles again and persists the new column's values.
+        test_put_record_batches(&client, batches).await;
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT count(\"B\") AS n FROM foo",
+            "\
++---+
+| n |
++---+
+| 9 |
++---+",
+        )
+        .await;
+        server.shutdown().await.unwrap();
+    }
+
+    #[rstest]
+    #[case::hint(false)]
+    #[case::config(true)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_auto_add_columns_disabled(#[case] disabled_by_config: bool) {
+        let name = "test_flight_bulk_auto_add_columns_disabled";
+        let (db, server) = if disabled_by_config {
+            setup_grpc_server_with_auto_create_table_disabled(StorageType::File, name).await
+        } else {
+            setup_grpc_server(StorageType::File, name).await
+        };
+        let client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+        client
+            .sql("CREATE TABLE foo (ts TIMESTAMP TIME INDEX, a INT NOT NULL, PRIMARY KEY (a))")
+            .await
+            .unwrap();
+        let schema = create_record_batches(1)[0].schema.arrow_schema().clone();
+        let mut messages = vec![encode_put_schema(schema.as_ref())];
+        messages.extend(FlightEncoder::default().encode(FlightMessage::RecordBatch(
+            common_recordbatch::DfRecordBatch::new_empty(schema),
+        )));
+        // A request hint cannot override the server-side setting.
+        let hint = if disabled_by_config { "true" } else { "false" };
+        let responses = client
+            .do_put_with_hints(
+                tokio_stream::iter(messages).boxed(),
+                &[("auto_create_table", hint)],
+            )
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(responses.len(), 2);
+        for response in responses {
+            assert_eq!(response.unwrap().affected_rows(), 0);
+        }
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'foo' ORDER BY column_name",
+            "\
++-------------+
+| column_name |
++-------------+
+| a           |
+| ts          |
++-------------+",
+        )
+        .await;
+        server.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_standalone_flight_do_put() {
         common_telemetry::init_default_ut_logging();
@@ -814,34 +1015,23 @@ mod test {
         let requests_count = record_batches.len();
         let schema = record_batches[0].schema.arrow_schema().clone();
 
-        let stream = futures::stream::once(async move {
-            let mut schema_data = FlightEncoder::default().encode_schema(schema.as_ref());
-            let metadata = DoPutMetadata::new(0);
-            schema_data.app_metadata = serde_json::to_vec(&metadata).unwrap().into();
-            // first message in "DoPut" stream should carry table name in flight descriptor
-            schema_data.flight_descriptor = Some(FlightDescriptor {
-                r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
-                path: vec!["foo".to_string()],
-                ..Default::default()
-            });
-            schema_data
-        })
-        .chain(
-            tokio_stream::iter(record_batches)
-                .enumerate()
-                .flat_map(|(i, x)| {
-                    let mut encoder = FlightEncoder::default();
-                    let message = FlightMessage::RecordBatch(x.into_df_record_batch());
-                    let mut data = encoder.encode(message);
-                    let metadata = DoPutMetadata::new((i + 1) as i64);
-                    data.iter_mut().for_each(|x| {
-                        x.app_metadata = serde_json::to_vec(&metadata).unwrap().into()
-                    });
-                    tokio_stream::iter(data)
-                })
-                .boxed(),
-        )
-        .boxed();
+        let stream = futures::stream::once(async move { encode_put_schema(schema.as_ref()) })
+            .chain(
+                tokio_stream::iter(record_batches)
+                    .enumerate()
+                    .flat_map(|(i, x)| {
+                        let mut encoder = FlightEncoder::default();
+                        let message = FlightMessage::RecordBatch(x.into_df_record_batch());
+                        let mut data = encoder.encode(message);
+                        let metadata = DoPutMetadata::new((i + 1) as i64);
+                        data.iter_mut().for_each(|x| {
+                            x.app_metadata = serde_json::to_vec(&metadata).unwrap().into()
+                        });
+                        tokio_stream::iter(data)
+                    })
+                    .boxed(),
+            )
+            .boxed();
 
         let response_stream = client.do_put_with_hints(stream, hints).await.unwrap();
 
@@ -859,6 +1049,17 @@ mod test {
             }
         }
         assert_eq!(requests_count + 1, responses_count);
+    }
+
+    fn encode_put_schema(schema: &datatypes::arrow::datatypes::Schema) -> FlightData {
+        let mut schema_data = FlightEncoder::default().encode_schema(schema);
+        schema_data.app_metadata = serde_json::to_vec(&DoPutMetadata::new(0)).unwrap().into();
+        schema_data.flight_descriptor = Some(FlightDescriptor {
+            r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+            path: vec!["foo".to_string()],
+            ..Default::default()
+        });
+        schema_data
     }
 
     fn create_record_batches_without_nullable_column(start: i64) -> Vec<RecordBatch> {

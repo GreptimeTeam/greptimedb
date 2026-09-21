@@ -44,6 +44,10 @@ remote datanodes via `operator`/`client`.
   auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
   datanodes (distributed).
 
+- **Flight bulk insert** (`instance/grpc.rs`): initializes on the first batch after
+  the lazy schema handshake; checks permissions and reconciles missing columns
+  through `Inserter` once per stream, then reuses the refreshed table.
+
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through
   `QueryContext`. The primary inserter prepares eligible ordinary-table writes
   for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
