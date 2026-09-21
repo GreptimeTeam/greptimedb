@@ -2464,6 +2464,7 @@ mod test {
             PgSqlPlan {
                 plan: SqlPlan::Empty,
                 copy_to_stdout_format: None,
+                copy_from_stdin: None,
             },
             client_param_types,
         ));
