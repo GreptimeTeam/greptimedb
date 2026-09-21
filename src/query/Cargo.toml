@@ -8,8 +8,9 @@ license.workspace = true
 workspace = true
 
 [features]
+default = ["ai-functions"]
+ai-functions = ["common-function/ai-functions"]
 enterprise = ["sql/enterprise"]
-jev = ["common-function/jev"]
 vector_index = []
 
 [dependencies]

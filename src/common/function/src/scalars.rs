@@ -17,7 +17,7 @@ pub(crate) mod date;
 pub mod expression;
 #[cfg(feature = "geo")]
 pub mod geo;
-#[cfg(feature = "jev")]
+#[cfg(feature = "ai-functions")]
 pub(crate) mod jev;
 pub mod json;
 pub mod matches;

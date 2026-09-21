@@ -10,9 +10,9 @@ workspace = true
 [features]
 testing = []
 enterprise = []
-default = ["geo"]
+default = ["geo", "ai-functions"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
-jev = ["dep:futures", "dep:reqwest"]
+ai-functions = ["dep:futures", "dep:reqwest"]
 
 [dependencies]
 ahash.workspace = true

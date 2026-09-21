@@ -195,8 +195,8 @@ jobs:
       - name: Install latest nextest release
         uses: taiki-e/install-action@nextest
 
-      - name: Verify Jev is not registered by default
-        run: cargo nextest run -p common-function -E 'test(test_jev_registration_matches_feature)'
+      - name: Verify Jev is not registered without AI functions
+        run: cargo nextest run -p common-function --no-default-features -E 'test(test_jev_registration_matches_feature)'
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           CARGO_INCREMENTAL: 0
@@ -206,7 +206,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F jev
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F ai-functions
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
@@ -259,8 +259,8 @@ jobs:
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - name: Verify Jev is not registered by default
-        run: cargo nextest run -p common-function -E 'test(test_jev_registration_matches_feature)'
+      - name: Verify Jev is not registered without AI functions
+        run: cargo nextest run -p common-function --no-default-features -E 'test(test_jev_registration_matches_feature)'
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           CARGO_INCREMENTAL: 0
@@ -270,7 +270,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F jev
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F ai-functions
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1

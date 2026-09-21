@@ -6,22 +6,23 @@ It is an asynchronous SQL scalar function usable in `WHERE` and `SELECT`.
 
 ## Start GreptimeDB
 
-Jev is **not compiled or registered by default**. Build with the opt-in Cargo
-feature `jev`, then enable API evaluation in the server process:
+Jev is compiled and registered by the **default-enabled Cargo feature
+`ai-functions`**. Enable API evaluation separately in the server process:
 
 ```sh
 export GREPTIMEDB_EXPERIMENTAL_JEV=true
 export JEV_API_KEY='<your TypeSafe API key>'
-cargo run -p cmd --features jev -- standalone start
+cargo run -p cmd -- standalone start
 ```
 
 If your key is already exported in `~/.zshrc`, run `source ~/.zshrc` first.
 The optional `JEV_MODEL` defaults to `jev-latest`; `JEV_ENDPOINT` defaults to
 `https://api.typesafe.ai/v1/systemone` (the full evaluation endpoint URL).
 The MVP uses environment variables rather than TOML configuration.
-The Cargo feature enables the SQL function; the runtime environment variables
-enable and configure its API calls. Setting the environment variables alone
-does not enable Jev in a default build.
+The Cargo feature includes the SQL function in the build; the runtime environment
+variables enable and configure its API calls. Default compilation does not turn
+on external API calls. To enable the feature explicitly, use
+`--features ai-functions`.
 
 ## Query
 
@@ -89,29 +90,30 @@ These are follow-up work, not guarantees provided by the current implementation.
 
 ## Validation
 
-Check both the default build (where `jev` is absent from the function registry)
-and the feature-enabled build. Jev's regular tests use a local HTTP server and
-need no API key:
+Check both the default build (where `jev` is registered) and an isolated
+`common-function` build without default features. Jev's regular tests use a local
+HTTP server and need no API key:
 
 ```sh
 cargo nextest run -p common-function
-cargo nextest run -p common-function --features jev
+cargo nextest run -p common-function --no-default-features
+cargo nextest run -p common-function --no-default-features --features ai-functions
 ```
 
-The sqlness runner explicitly enables `jev` when building its test binary:
+The sqlness runner explicitly includes `ai-functions` when building its test binary:
 
 ```sh
 cargo sqlness bare -t jev
 ```
 
-If using `--bins-dir`, provide a binary built with `--features jev`.
-The unit-test and sqlness CI builds also opt in explicitly; normal and release
-builds keep the feature disabled by default.
+If using `--bins-dir`, provide a binary built with `ai-functions` (included by
+default). CI also runs the registry assertion in an isolated `common-function`
+invocation with `--no-default-features` to check the feature-off path.
 
 An opt-in test calls the real service on synthetic payment events:
 
 ```sh
 source ~/.zshrc
-GREPTIMEDB_EXPERIMENTAL_JEV=true cargo nextest run -p common-function --features jev \
+GREPTIMEDB_EXPERIMENTAL_JEV=true cargo nextest run -p common-function \
   -E 'test(test_jev_live)' --run-ignored ignored-only
 ```
