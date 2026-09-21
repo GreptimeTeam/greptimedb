@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use common_query::OutputData;
@@ -292,15 +293,13 @@ async fn database_export_roundtrip(instance: &Arc<Instance>) {
                 .path()
                 .join("data")
                 .join(format!("{name}.parquet"))
-                .to_str()
-                .unwrap()
-                .to_string()
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
         summary
             .output_files
             .into_iter()
+            .map(PathBuf::from)
             .collect::<std::collections::BTreeSet<_>>(),
         expected
     );
@@ -697,13 +696,24 @@ async fn database_export_preserves_valid_table_names() {
                     }
                 })
                 .collect::<std::collections::BTreeSet<_>>();
-            assert_eq!(
-                summary
-                    .output_files
-                    .into_iter()
-                    .collect::<std::collections::BTreeSet<_>>(),
-                expected
-            );
+            let actual = summary
+                .output_files
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            if file_url {
+                assert_eq!(actual, expected);
+            } else {
+                assert_eq!(
+                    actual
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect::<std::collections::BTreeSet<_>>(),
+                    expected
+                        .into_iter()
+                        .map(PathBuf::from)
+                        .collect::<std::collections::BTreeSet<_>>()
+                );
+            }
         }
         for name in &names {
             let path = directory.join(format!("{name}.parquet"));

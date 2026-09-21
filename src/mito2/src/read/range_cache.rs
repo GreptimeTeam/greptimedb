@@ -736,26 +736,33 @@ struct CacheBatchBuffer {
     buffered_rows: usize,
     buffered_size: usize,
     sender: Option<mpsc::UnboundedSender<CacheConcatCommand>>,
+    /// Handle of the background concat task. Cleared once the task owns a finish
+    /// command, so only unfinished scans cancel it.
+    concat_task: Option<common_runtime::JoinHandle<()>>,
 }
 
 impl CacheBatchBuffer {
     fn new(cache_strategy: &CacheStrategy) -> Self {
-        let sender = cache_strategy.range_result_memory_limiter().map(|limiter| {
-            let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
-            let (tx, rx) = mpsc::unbounded_channel();
-            common_runtime::spawn_query(run_cache_concat_task(
-                rx,
-                limiter.clone(),
-                skip_threshold_bytes,
-            ));
-            tx
-        });
+        let (sender, concat_task) = cache_strategy
+            .range_result_memory_limiter()
+            .map(|limiter| {
+                let skip_threshold_bytes = cache_strategy.range_result_cache_size().unwrap_or(0);
+                let (tx, rx) = mpsc::unbounded_channel();
+                let task = common_runtime::spawn_query(run_cache_concat_task(
+                    rx,
+                    limiter.clone(),
+                    skip_threshold_bytes,
+                ));
+                (tx, task)
+            })
+            .unzip();
 
         Self {
             buffered_batches: Vec::new(),
             buffered_rows: 0,
             buffered_size: 0,
             sender,
+            concat_task,
         }
     }
 
@@ -814,9 +821,22 @@ impl CacheBatchBuffer {
                 part_metrics,
                 result_tx,
             })
-            .is_err()
+            .is_ok()
         {
-            self.sender = None;
+            // The task now owns the finish command, so it may keep populating the
+            // cache after the scan stream is dropped.
+            self.concat_task = None;
+        }
+    }
+}
+
+impl Drop for CacheBatchBuffer {
+    fn drop(&mut self) {
+        // Still holding the handle means no finish command was sent: the scan was
+        // cancelled or failed and the queued batches can never reach the cache.
+        // Aborting releases them even while the task waits for a memory permit.
+        if let Some(task) = &self.concat_task {
+            task.abort();
         }
     }
 }
@@ -1568,6 +1588,43 @@ mod tests {
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].num_rows(), 2);
         assert_eq!(replayed[1].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn dropped_cache_buffer_releases_batches_while_waiting_for_memory() {
+        let strategy = test_cache_strategy();
+        let limiter = strategy.range_result_memory_limiter().unwrap();
+        // Take every permit so the concat task blocks before it can compact.
+        let _permit = limiter
+            .acquire(limiter.available_permits() * limiter.permit_bytes())
+            .await
+            .unwrap();
+        let batch = make_batch(&vec![1; DEFAULT_READ_BATCH_SIZE / 2 + 1]);
+        let weak = Arc::downgrade(batch.column(0));
+        let mut buffer = CacheBatchBuffer::new(&strategy);
+        buffer.push(batch.clone()).unwrap();
+        buffer.push(batch).unwrap();
+        // Both batches were handed to the task instead of staying in the buffer.
+        assert!(buffer.buffered_batches.is_empty());
+
+        // Cancel only once the task is parked on the permit, otherwise the abort
+        // could land on a task that was never polled.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while limiter.waited_acquires() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("concat task must wait for a memory permit");
+        drop(buffer);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while weak.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled cache work must release input without waiting for a permit");
     }
 
     #[tokio::test]

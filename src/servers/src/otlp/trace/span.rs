@@ -17,13 +17,13 @@ use std::fmt::Display;
 use common_time::timestamp::Timestamp;
 use itertools::Itertools;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
-use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, KeyValue, any_value};
+use opentelemetry_proto::tonic::common::v1::{InstrumentationScope, any_value};
 use opentelemetry_proto::tonic::trace::v1::span::{Event, Link};
 use opentelemetry_proto::tonic::trace::v1::{Span, Status};
 use serde::Serialize;
 
 use crate::otlp::trace::KEY_SERVICE_NAME;
-use crate::otlp::trace::attributes::Attributes;
+use crate::otlp::trace::attributes::{Attributes, SharedAttributes};
 use crate::otlp::utils::bytes_to_hex_string;
 
 #[derive(Debug, Clone)]
@@ -35,10 +35,10 @@ pub struct TraceSpan {
     pub parent_span_id: Option<String>,
 
     // the following are fields
-    pub resource_attributes: Attributes,
+    pub resource_attributes: SharedAttributes,
     pub scope_name: String,
     pub scope_version: String,
-    pub scope_attributes: Attributes,
+    pub scope_attributes: SharedAttributes,
     pub trace_state: String,
     pub span_name: String,
     pub span_kind: String,
@@ -56,10 +56,10 @@ pub type TraceSpans = Vec<TraceSpan>;
 #[derive(Debug, Clone)]
 pub struct TraceSpanGroup {
     pub service_name: Option<String>,
-    pub resource_attributes: Attributes,
+    pub resource_attributes: SharedAttributes,
     pub scope_name: String,
     pub scope_version: String,
-    pub scope_attributes: Attributes,
+    pub scope_attributes: SharedAttributes,
     pub spans: TraceSpans,
 }
 
@@ -205,8 +205,10 @@ impl SpanEvents {
 
 pub fn parse_span(
     service_name: Option<String>,
-    resource_attrs: &[KeyValue],
-    scope: &InstrumentationScope,
+    resource_attrs: &SharedAttributes,
+    scope_name: &str,
+    scope_version: &str,
+    scope_attrs: &SharedAttributes,
     span: Span,
 ) -> TraceSpan {
     let (span_status_code, span_status_message) = status_to_string(&span.status);
@@ -221,12 +223,12 @@ pub fn parse_span(
             Some(bytes_to_hex_string(&span.parent_span_id))
         },
 
-        resource_attributes: Attributes::from(resource_attrs),
+        resource_attributes: resource_attrs.clone(),
         trace_state: span.trace_state,
 
-        scope_name: scope.name.clone(),
-        scope_version: scope.version.clone(),
-        scope_attributes: Attributes::from(scope.attributes.clone()),
+        scope_name: scope_name.to_string(),
+        scope_version: scope_version.to_string(),
+        scope_attributes: scope_attrs.clone(),
 
         span_name: span.name,
         span_kind,
@@ -282,23 +284,32 @@ pub fn parse(request: ExportTraceServiceRequest) -> TraceSpanGroups {
                 _ => None,
             });
 
+        let resource_attrs = SharedAttributes::from(Attributes::from(resource_attrs));
         for scope_spans in resource_spans.scope_spans {
-            let scope = scope_spans.scope.unwrap_or_default();
+            let InstrumentationScope {
+                name: scope_name,
+                version: scope_version,
+                attributes: scope_attrs,
+                ..
+            } = scope_spans.scope.unwrap_or_default();
+            let scope_attrs = SharedAttributes::from(Attributes::from(scope_attrs));
             let mut spans = Vec::with_capacity(scope_spans.spans.len());
             for span in scope_spans.spans {
                 spans.push(parse_span(
                     service_name.clone(),
                     &resource_attrs,
-                    &scope,
+                    &scope_name,
+                    &scope_version,
+                    &scope_attrs,
                     span,
                 ));
             }
             groups.push(TraceSpanGroup {
                 service_name: service_name.clone(),
-                resource_attributes: Attributes::from(&resource_attrs[..]),
-                scope_name: scope.name,
-                scope_version: scope.version,
-                scope_attributes: Attributes::from(scope.attributes),
+                resource_attributes: resource_attrs.clone(),
+                scope_name,
+                scope_version,
+                scope_attributes: scope_attrs,
                 spans,
             });
         }
@@ -378,6 +389,7 @@ mod tests {
                         ScopeSpans {
                             scope: Some(InstrumentationScope {
                                 name: "scope-1".to_string(),
+                                attributes: vec![make_kv("scope.key", "scope-1-value")],
                                 ..Default::default()
                             }),
                             spans: vec![make_span(0x11, 0x21), make_span(0x12, 0x22)],
@@ -386,6 +398,7 @@ mod tests {
                         ScopeSpans {
                             scope: Some(InstrumentationScope {
                                 name: "scope-2".to_string(),
+                                attributes: vec![make_kv("scope.key", "scope-2-value")],
                                 ..Default::default()
                             }),
                             spans: vec![make_span(0x13, 0x23)],
@@ -421,5 +434,37 @@ mod tests {
         assert_eq!(groups[1].spans.len(), 1);
         assert_eq!(groups[2].service_name.as_deref(), Some("svc-b"));
         assert_eq!(groups[2].scope_name, "scope-3");
+        assert_eq!(
+            groups[0].scope_attributes.as_ref().get_ref(),
+            &[make_kv("scope.key", "scope-1-value")]
+        );
+
+        // Scopes of one resource share a single copy of the resource attributes,
+        // spans share their group's attributes, and unrelated resources and
+        // scopes stay separate.
+        assert!(std::ptr::eq(
+            groups[0].resource_attributes.as_ref(),
+            groups[1].resource_attributes.as_ref(),
+        ));
+        assert!(!std::ptr::eq(
+            groups[0].resource_attributes.as_ref(),
+            groups[2].resource_attributes.as_ref(),
+        ));
+        assert!(!std::ptr::eq(
+            groups[0].scope_attributes.as_ref(),
+            groups[1].scope_attributes.as_ref(),
+        ));
+        for group in &groups {
+            for span in &group.spans {
+                assert!(std::ptr::eq(
+                    group.resource_attributes.as_ref(),
+                    span.resource_attributes.as_ref()
+                ));
+                assert!(std::ptr::eq(
+                    group.scope_attributes.as_ref(),
+                    span.scope_attributes.as_ref()
+                ));
+            }
+        }
     }
 }

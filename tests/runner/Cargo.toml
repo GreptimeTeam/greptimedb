@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 clap.workspace = true
-client = { workspace = true, features = ["testing"] }
+client.workspace = true
 common-error.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
@@ -34,3 +34,6 @@ tokio.workspace = true
 tokio-postgres = { workspace = true }
 tokio-stream.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+client = { workspace = true, features = ["testing"] }

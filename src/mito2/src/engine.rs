@@ -1156,6 +1156,7 @@ impl EngineInner {
             CacheStrategy::EnableAll(cache_manager),
         )
         .with_series_index(series_index)
+        .with_ignore_range_index(!self.config.experimental_enable_range_index)
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
