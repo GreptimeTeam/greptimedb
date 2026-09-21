@@ -107,8 +107,8 @@ cargo sqlness bare -t jev
 ```
 
 If using `--bins-dir`, provide a binary built with `ai-functions` (included by
-default). CI also runs the registry assertion in an isolated `common-function`
-invocation with `--no-default-features` to check the feature-off path.
+default). CI covers the AI-enabled path through the regular unit tests and
+sqlness tests; the feature-off checks above can be run locally when needed.
 
 An opt-in test calls the real service on synthetic payment events:
 
