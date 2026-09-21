@@ -653,7 +653,7 @@ dependencies = [
 [[package]]
 name = "arrow-pg"
 version = "0.15.0"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=3c77e6c32b8db80635a0d2f4b318a36b31170bc3#3c77e6c32b8db80635a0d2f4b318a36b31170bc3"
+source = "git+https://github.com/datafusion-contrib/datafusion-postgres.git?rev=ffb14a52b3d7c7489559812e1ec38096f225ce93#ffb14a52b3d7c7489559812e1ec38096f225ce93"
 dependencies = [
  "arrow 59.2.0",
  "arrow-schema 59.2.0",
@@ -4280,7 +4280,7 @@ dependencies = [
 [[package]]
 name = "datafusion-pg-catalog"
 version = "0.18.3"
-source = "git+https://github.com/GreptimeTeam/datafusion-postgres.git?rev=3c77e6c32b8db80635a0d2f4b318a36b31170bc3#3c77e6c32b8db80635a0d2f4b318a36b31170bc3"
+source = "git+https://github.com/datafusion-contrib/datafusion-postgres.git?rev=ffb14a52b3d7c7489559812e1ec38096f225ce93#ffb14a52b3d7c7489559812e1ec38096f225ce93"
 dependencies = [
  "arrow-pg",
  "async-trait",
@@ -10698,9 +10698,9 @@ dependencies = [
 
 [[package]]
 name = "pg_interval"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c386dd54fce258fc04e668126ae68589a0d92e03a90ea67881d1300f70fd6170"
+checksum = "8408fb1e08ebf2e7676d001caa6482d1b33e7e1f1dad9d3a758a05640eea2026"
 dependencies = [
  "bytes",
  "chrono",
@@ -10709,9 +10709,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.40.7"
+version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8265901ede50d0879fe401c6fe282e7e4ff83ae10a48c1f8e4f89b92f7d5f604"
+checksum = "c667f8f4046889d52ed11e17aae954b1816d3df48dd23bdebcf199cef332df93"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
