@@ -24,8 +24,8 @@ use cap_std::fs::{Dir, DirEntry, OpenOptions, ReadDir};
 use opendal::layers::SimulateLayer;
 use opendal::raw::*;
 use opendal::{
-    Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, OperationContext,
-    Operator, Result,
+    Buffer, BytesRange, Capability, EntryMode, Error, ErrorKind, Metadata, MetadataBuilder,
+    OperationContext, Operator, Result,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -165,19 +165,18 @@ fn parse_write_error(error: io::Error, if_not_exists: bool) -> Error {
 }
 
 fn metadata_from_fs(metadata: cap_std::fs::Metadata) -> Result<Metadata> {
-    let mode = if metadata.is_dir() {
-        EntryMode::DIR
+    let mut builder = if metadata.is_dir() {
+        MetadataBuilder::dir()
     } else if metadata.is_file() {
-        EntryMode::FILE
+        MetadataBuilder::file(metadata.len())
     } else {
-        EntryMode::Unknown
+        MetadataBuilder::unknown()
     };
 
-    Ok(Metadata::new(mode)
-        .with_content_length(metadata.len())
-        .with_last_modified(Timestamp::try_from(
-            metadata.modified().map_err(new_std_io_error)?.into_std(),
-        )?))
+    builder.last_modified(Timestamp::try_from(
+        metadata.modified().map_err(new_std_io_error)?.into_std(),
+    )?);
+    Ok(builder.build())
 }
 
 #[derive(Clone, Debug)]
@@ -219,6 +218,7 @@ impl Service for SecureFsBackend {
     type Lister = SecureFsLister;
     type Deleter = oio::OneShotDeleter<SecureFsDeleter>;
     type Copier = ();
+    type Composer = ();
 
     fn info(&self) -> ServiceInfo {
         self.info.clone()
@@ -301,14 +301,7 @@ impl Service for SecureFsBackend {
         })
     }
 
-    fn copy(
-        &self,
-        _: &OperationContext,
-        _: &str,
-        _: &str,
-        _: OpCopy,
-        _: OpCopier,
-    ) -> Result<Self::Copier> {
+    fn copy(&self, _: &OperationContext, _: &str, _: &str, _: OpCopy) -> Result<Self::Copier> {
         Err(Error::new(
             ErrorKind::Unsupported,
             "operation is not supported",
@@ -449,11 +442,11 @@ impl oio::Write for SecureFsWriter {
         file.flush().await.map_err(new_std_io_error)?;
         file.sync_all().await.map_err(new_std_io_error)?;
         let metadata = file.metadata().await.map_err(new_std_io_error)?;
-        Ok(Metadata::new(EntryMode::FILE)
-            .with_content_length(metadata.len())
-            .with_last_modified(Timestamp::try_from(
-                metadata.modified().map_err(new_std_io_error)?,
-            )?))
+        let mut builder = MetadataBuilder::file(metadata.len());
+        builder.last_modified(Timestamp::try_from(
+            metadata.modified().map_err(new_std_io_error)?,
+        )?);
+        Ok(builder.build())
     }
 
     async fn abort(&mut self) -> Result<()> {
@@ -519,7 +512,7 @@ impl oio::List for SecureFsLister {
                 } else {
                     &display_prefix
                 },
-                Metadata::new(EntryMode::DIR),
+                MetadataBuilder::dir().build(),
             );
             self.entries = vec![current_path].into_iter();
         }
@@ -589,7 +582,7 @@ fn read_list_entry(entry: DirEntry, display_prefix: &str) -> io::Result<Option<o
         (format!("{display_prefix}{name}"), EntryMode::Unknown)
     };
     let metadata = if mode == EntryMode::Unknown {
-        Metadata::new(mode)
+        MetadataBuilder::unknown().build()
     } else {
         match entry.metadata() {
             Ok(metadata) => match metadata_from_fs(metadata) {
