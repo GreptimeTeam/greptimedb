@@ -470,6 +470,7 @@ impl TableMeta {
             .build()
         })?;
         let cx = AnnotationContext {
+            data_model: self.options.data_model(),
             schema: &self.schema,
             partition_key_indices: &self.partition_key_indices,
         };

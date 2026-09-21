@@ -2657,11 +2657,7 @@ fn validate_and_normalize_annotations(
     partition_key_indices: &[usize],
 ) -> Result<()> {
     use table::requests::AnnotationValidationError as CheckError;
-    let cx = AnnotationContext {
-        schema,
-        partition_key_indices,
-    };
-    validate_and_normalize_annotation_options(options, &cx).map_err(|e| match e {
+    let handle_error = |e: CheckError| match e {
         CheckError::ColumnNotFound { column } => ColumnNotFoundSnafu { msg: column }.build(),
         e @ (CheckError::UnknownKey { .. }
         | CheckError::InvalidValue { .. }
@@ -2676,7 +2672,9 @@ fn validate_and_normalize_annotations(
             reason: e.to_string(),
         }
         .build(),
-    })
+    };
+    validate_and_normalize_annotation_options(options, schema, partition_key_indices)
+        .map_err(handle_error)
 }
 
 fn find_partition_columns(partitions: &Option<Partitions>) -> Result<Vec<String>> {
