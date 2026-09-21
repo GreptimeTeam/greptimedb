@@ -36,12 +36,14 @@ use common_query::promql_annotations::{
     PromqlAnnotationCollector, get_promql_annotation_collector,
 };
 use common_query::{Output, OutputData};
-use common_recordbatch::RecordBatches;
+use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::ConcreteDataType;
-use indexmap::IndexMap;
+use datatypes::schema::Schema;
+use futures::TryStreamExt;
 use indexmap::map::RawEntryApiV1;
 use indexmap::map::raw_entry_v1::RawEntryMut;
+use indexmap::{Equivalent, IndexMap};
 use itertools::Either;
 use promql_parser::label::METRIC_NAME;
 use promql_parser::parser::value::ValueType;
@@ -236,16 +238,9 @@ impl PrometheusJsonResponse {
                     OutputData::RecordBatches(batches) => Self::success(
                         Self::record_batches_to_data(batches, metric_name, result_type)?,
                     ),
-                    OutputData::Stream(stream) => {
-                        let record_batches = RecordBatches::try_collect(stream)
-                            .await
-                            .context(CollectRecordbatchSnafu)?;
-                        Self::success(Self::record_batches_to_data(
-                            record_batches,
-                            metric_name,
-                            result_type,
-                        )?)
-                    }
+                    OutputData::Stream(stream) => Self::success(
+                        Self::consume_stream_to_data(stream, metric_name, result_type).await?,
+                    ),
                     OutputData::AffectedRows(_) => Self::error(
                         StatusCode::Unexpected,
                         "expected data result, but got affected rows",
@@ -299,22 +294,83 @@ impl PrometheusJsonResponse {
     ) -> Result<PrometheusResponse> {
         // Return empty result if no batches
         if batches.iter().next().is_none() {
-            return Ok(PrometheusResponse::PromData(PromData {
-                result_type: result_type.to_string(),
-                ..Default::default()
-            }));
+            return Ok(empty_data(result_type));
         }
 
-        // infer semantic type of each column from schema.
-        // TODO(ruihang): wish there is a better way to do this.
+        let layout = ColumnLayout::infer(&batches.schema())?;
+
+        // Preserves the order of output tags.
+        // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
+        let mut buffer = IndexMap::<Vec<(String, String)>, PromSeriesSamples>::new();
+
+        for batch in batches.iter() {
+            merge_batch(&mut buffer, &layout, batch, metric_name.as_deref())?;
+        }
+
+        samples_to_data(buffer, result_type)
+    }
+
+    /// Consume a streaming query result into [PromData].
+    ///
+    /// Every batch is merged into the per-series buffer and dropped before the
+    /// next one is polled, so the whole query result and the assembled series
+    /// never coexist in memory.
+    async fn consume_stream_to_data(
+        mut stream: SendableRecordBatchStream,
+        metric_name: Option<String>,
+        result_type: ValueType,
+    ) -> Result<PrometheusResponse> {
+        // An empty stream carries no batch to infer the column roles from, and
+        // reads as an empty result, like empty [RecordBatches].
+        let Some(first_batch) = stream.try_next().await.context(CollectRecordbatchSnafu)? else {
+            return Ok(empty_data(result_type));
+        };
+
+        let layout = ColumnLayout::infer(&stream.schema())?;
+
+        // Preserves the order of output tags.
+        // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
+        let mut buffer = IndexMap::<Vec<(String, String)>, PromSeriesSamples>::new();
+
+        merge_batch(&mut buffer, &layout, &first_batch, metric_name.as_deref())?;
+        // Release the batch before polling the next one.
+        drop(first_batch);
+
+        while let Some(batch) = stream.try_next().await.context(CollectRecordbatchSnafu)? {
+            merge_batch(&mut buffer, &layout, &batch, metric_name.as_deref())?;
+        }
+
+        samples_to_data(buffer, result_type)
+    }
+}
+
+/// The empty data of a Prometheus HTTP API response of `result_type`.
+fn empty_data(result_type: ValueType) -> PrometheusResponse {
+    PrometheusResponse::PromData(PromData {
+        result_type: result_type.to_string(),
+        ..Default::default()
+    })
+}
+
+/// The role of every column of a query result.
+struct ColumnLayout {
+    timestamp_column_index: usize,
+    tag_column_indices: Vec<usize>,
+    tag_names: Vec<String>,
+    first_field_column_index: Option<usize>,
+    native_histogram_column_index: Option<usize>,
+}
+
+impl ColumnLayout {
+    /// Infer the role of every column from `schema`.
+    // TODO(ruihang): wish there is a better way to do this.
+    fn infer(schema: &Schema) -> Result<Self> {
         let mut timestamp_column_index = None;
         let mut tag_column_indices = Vec::new();
         let mut first_field_column_index = None;
         let mut native_histogram_column_index = None;
 
-        let mut num_label_columns = 0;
-
-        for (i, column) in batches.schema().column_schemas().iter().enumerate() {
+        for (i, column) in schema.column_schemas().iter().enumerate() {
             match column.data_type {
                 ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_))
                     if timestamp_column_index.is_none() =>
@@ -343,7 +399,6 @@ impl PrometheusJsonResponse {
                 }
                 ConcreteDataType::String(_) => {
                     tag_column_indices.push(i);
-                    num_label_columns += 1;
                 }
                 _ => {}
             }
@@ -359,215 +414,255 @@ impl PrometheusJsonResponse {
             .fail();
         }
 
-        // Preserves the order of output tags.
-        // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
-        let mut buffer = IndexMap::<Vec<(&str, &str)>, PromSeriesSamples>::new();
+        let tag_names = tag_column_indices
+            .iter()
+            .map(|index| schema.column_name_by_index(*index).to_string())
+            .collect::<Vec<_>>();
 
-        // Only a series that is new to `buffer` needs its own key vector.
-        let mut tags = Vec::with_capacity(num_label_columns + 1);
+        Ok(Self {
+            timestamp_column_index,
+            tag_column_indices,
+            tag_names,
+            first_field_column_index,
+            native_histogram_column_index,
+        })
+    }
+}
 
-        let schema = batches.schema();
-        for batch in batches.iter() {
-            // prepare things...
-            let tag_columns = tag_column_indices
+/// The lookup key of a series in the per-series sample buffer.
+///
+/// The blanket `Equivalent` implementation compares through `Borrow`, which
+/// `Vec<(String, String)>` cannot provide for labels borrowed from a batch, so
+/// this wrapper compares the labels itself. It is built for a single lookup and
+/// hashes like the owned key it looks up.
+struct SeriesKeyLookup<'a>(&'a [(&'a str, &'a str)]);
+
+impl Equivalent<Vec<(String, String)>> for SeriesKeyLookup<'_> {
+    fn equivalent(&self, key: &Vec<(String, String)>) -> bool {
+        self.0.len() == key.len()
+            && self
+                .0
                 .iter()
-                .map(|i| batch.column(*i))
-                .collect::<Vec<_>>();
-            let tag_names = tag_column_indices
-                .iter()
-                .map(|c| schema.column_name_by_index(*c))
-                .collect::<Vec<_>>();
-            let timestamp_column = batch
-                .column(timestamp_column_index)
-                .as_primitive::<TimestampMillisecondType>();
+                .zip(key)
+                .all(|((name, value), (key_name, key_value))| {
+                    *name == key_name.as_str() && *value == key_value.as_str()
+                })
+    }
+}
 
-            let field_array = first_field_column_index
-                .map(|index| arrow::compute::cast(batch.column(index), &DataType::Float64))
-                .transpose()
-                .context(ArrowSnafu)?;
-            let field_column = field_array
-                .as_ref()
-                .map(|array| array.as_primitive::<Float64Type>());
-            let native_histogram_column = native_histogram_column_index
-                .map(|index| {
-                    batch
-                        .column(index)
-                        .as_any()
-                        .downcast_ref::<StructArray>()
-                        .with_context(|| UnexpectedResultSnafu {
-                            reason: "native histogram column is not a struct array",
-                        })
+/// Merge the rows of one batch into the per-series sample buffer.
+fn merge_batch(
+    buffer: &mut IndexMap<Vec<(String, String)>, PromSeriesSamples>,
+    layout: &ColumnLayout,
+    batch: &RecordBatch,
+    metric_name: Option<&str>,
+) -> Result<()> {
+    // Scratch buffer of the labels of the series being read, borrowed from
+    // `batch` and `layout` and refilled for every series that is not in
+    // `buffer` yet, so looking a series up allocates nothing and only a series
+    // that is new allocates its labels.
+    let mut tags: Vec<(&str, &str)> = Vec::with_capacity(layout.tag_column_indices.len() + 1);
+
+    // prepare things...
+    let tag_columns = layout
+        .tag_column_indices
+        .iter()
+        .map(|i| batch.column(*i))
+        .collect::<Vec<_>>();
+    let timestamp_column = batch
+        .column(layout.timestamp_column_index)
+        .as_primitive::<TimestampMillisecondType>();
+
+    let field_array = layout
+        .first_field_column_index
+        .map(|index| arrow::compute::cast(batch.column(index), &DataType::Float64))
+        .transpose()
+        .context(ArrowSnafu)?;
+    let field_column = field_array
+        .as_ref()
+        .map(|array| array.as_primitive::<Float64Type>());
+    let native_histogram_column = layout
+        .native_histogram_column_index
+        .map(|index| {
+            batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .with_context(|| UnexpectedResultSnafu {
+                    reason: "native histogram column is not a struct array",
+                })
+        })
+        .transpose()?;
+
+    // Read the labels once per run of rows that share them instead of
+    // once per row. `label_runs` finds every boundary, so the probe only
+    // decides whether looking for runs is worth its cost.
+    let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
+        Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
+    } else {
+        Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
+    };
+
+    // assemble rows
+    for run in label_runs {
+        let mut run_entry_index = None;
+        for row_index in run {
+            let value = field_column.and_then(|field_column| {
+                if !field_column.is_valid(row_index) {
+                    return None;
+                }
+                let value = field_column.value(row_index);
+                (!is_prometheus_stale_nan(value))
+                    .then_some((timestamp_column.value(row_index), value))
+            });
+            let histogram = native_histogram_column
+                .and_then(|column| {
+                    read_histogram(column, row_index)
+                        .context(DataFusionSnafu)
+                        .transpose()
+                })
+                .transpose()?
+                .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
+                .map(|histogram| {
+                    prometheus_native_histogram(&histogram)
+                        .map(|histogram| (timestamp_column.value(row_index), histogram))
                 })
                 .transpose()?;
 
-            // Read the labels once per run of rows that share them instead of
-            // once per row. `label_runs` finds every boundary, so the probe only
-            // decides whether looking for runs is worth its cost.
-            let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
-                Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
-            } else {
-                Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
-            };
+            if value.is_none() && histogram.is_none() {
+                continue;
+            }
 
-            // assemble rows
-            for run in label_runs {
-                let mut run_entry_index = None;
-                for row_index in run {
-                    let value = field_column.and_then(|field_column| {
-                        if !field_column.is_valid(row_index) {
-                            return None;
+            let entry_index = match run_entry_index {
+                Some(index) => index,
+                None => {
+                    // retrieve tags
+                    tags.clear();
+                    if let Some(metric_name) = metric_name {
+                        tags.push((METRIC_NAME, metric_name));
+                    }
+                    for (tag_column, tag_name) in tag_columns.iter().zip(layout.tag_names.iter()) {
+                        if let Some(tag_value) = string_array_value_at_index(tag_column, row_index)
+                        {
+                            tags.push((tag_name.as_str(), tag_value));
                         }
-                        let value = field_column.value(row_index);
-                        (!is_prometheus_stale_nan(value))
-                            .then_some((timestamp_column.value(row_index), value))
-                    });
-                    let histogram = native_histogram_column
-                        .and_then(|column| {
-                            read_histogram(column, row_index)
-                                .context(DataFusionSnafu)
-                                .transpose()
-                        })
-                        .transpose()?
-                        .filter(|histogram| !is_prometheus_stale_nan(histogram.sum))
-                        .map(|histogram| {
-                            prometheus_native_histogram(&histogram)
-                                .map(|histogram| (timestamp_column.value(row_index), histogram))
-                        })
-                        .transpose()?;
-
-                    if value.is_none() && histogram.is_none() {
-                        continue;
                     }
 
-                    let entry_index = match run_entry_index {
-                        Some(index) => index,
-                        None => {
-                            // retrieve tags
-                            tags.clear();
-                            if let Some(metric_name) = &metric_name {
-                                tags.push((METRIC_NAME, metric_name.as_str()));
-                            }
-                            for (tag_column, tag_name) in tag_columns.iter().zip(tag_names.iter()) {
-                                if let Some(tag_value) =
-                                    string_array_value_at_index(tag_column, row_index)
-                                {
-                                    tags.push((tag_name, tag_value));
-                                }
-                            }
-
-                            let hash = buffer.hasher().hash_one(&tags);
-                            let entry = buffer
-                                .raw_entry_mut_v1()
-                                .from_key_hashed_nocheck(hash, &tags);
-                            let index = entry.index();
-                            if let RawEntryMut::Vacant(entry) = entry {
-                                // Hand the key buffer over with the hash that was
-                                // just computed for the lookup.
-                                let key = std::mem::replace(
-                                    &mut tags,
-                                    Vec::with_capacity(num_label_columns + 1),
-                                );
-                                entry.insert_hashed_nocheck(
-                                    hash,
-                                    key,
-                                    PromSeriesSamples::default(),
-                                );
-                            }
-                            run_entry_index = Some(index);
-                            index
-                        }
-                    };
-                    let samples = &mut buffer[entry_index];
-                    if let Some((timestamp_millis, histogram)) = histogram {
-                        samples
-                            .histograms
-                            .push((timestamp_millis as f64 / 1000.0, histogram));
-                    } else if let Some((timestamp_millis, value)) = value {
-                        samples.values.push((
-                            timestamp_millis as f64 / 1000.0,
-                            PromSampleValue::Number(value),
-                        ));
+                    // Borrowed and owned labels hash the same: both
+                    // hash their `str` contents, so this hash serves the
+                    // lookup and the insertion of a new series below.
+                    let hash = buffer.hasher().hash_one(&tags);
+                    let entry = buffer
+                        .raw_entry_mut_v1()
+                        .from_key_hashed_nocheck(hash, &SeriesKeyLookup(tags.as_slice()));
+                    let index = entry.index();
+                    if let RawEntryMut::Vacant(entry) = entry {
+                        // A series that is new to the buffer takes
+                        // ownership of its labels.
+                        let key = tags
+                            .iter()
+                            .map(|(name, value)| (name.to_string(), value.to_string()))
+                            .collect::<Vec<_>>();
+                        entry.insert_hashed_nocheck(hash, key, PromSeriesSamples::default());
                     }
+                    run_entry_index = Some(index);
+                    index
                 }
+            };
+            let samples = &mut buffer[entry_index];
+            if let Some((timestamp_millis, histogram)) = histogram {
+                samples
+                    .histograms
+                    .push((timestamp_millis as f64 / 1000.0, histogram));
+            } else if let Some((timestamp_millis, value)) = value {
+                samples.values.push((
+                    timestamp_millis as f64 / 1000.0,
+                    PromSampleValue::Number(value),
+                ));
             }
         }
+    }
+    Ok(())
+}
 
-        // initialize result to return
-        let mut result = match result_type {
-            ValueType::Vector => PromQueryResult::Vector(vec![]),
-            ValueType::Matrix => PromQueryResult::Matrix(vec![]),
-            ValueType::Scalar => PromQueryResult::Scalar(None),
-            ValueType::String => PromQueryResult::String(None),
-        };
+/// Assemble the per-series samples of `buffer` into the data of a Prometheus
+/// HTTP API response of `result_type`.
+fn samples_to_data(
+    buffer: IndexMap<Vec<(String, String)>, PromSeriesSamples>,
+    result_type: ValueType,
+) -> Result<PrometheusResponse> {
+    // initialize result to return
+    let mut result = match result_type {
+        ValueType::Vector => PromQueryResult::Vector(vec![]),
+        ValueType::Matrix => PromQueryResult::Matrix(vec![]),
+        ValueType::Scalar => PromQueryResult::Scalar(None),
+        ValueType::String => PromQueryResult::String(None),
+    };
 
-        // accumulate data into result
-        buffer.into_iter().for_each(|(tags, mut samples)| {
-            let metric = tags
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<BTreeMap<_, _>>();
-            match result {
-                PromQueryResult::Vector(ref mut v) => {
-                    let histogram = samples.histograms.pop();
-                    let value = if histogram.is_none() {
-                        samples
-                            .values
-                            .pop()
-                            .map(|(timestamp, value)| (timestamp, value.into_string()))
-                    } else {
-                        None
-                    };
-                    v.push(PromSeriesVector {
-                        metric,
-                        value,
-                        histogram,
-                    });
-                }
-                PromQueryResult::Matrix(ref mut v) => {
-                    // sort values by timestamp
-                    if !samples.values.is_sorted_by(|a, b| a.0 <= b.0) {
-                        samples
-                            .values
-                            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-                    }
-                    if !samples.histograms.is_sorted_by(|a, b| a.0 <= b.0) {
-                        samples
-                            .histograms
-                            .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-                    }
-
-                    v.push(PromSeriesMatrix {
-                        metric,
-                        values: samples.values,
-                        histograms: samples.histograms,
-                    });
-                }
-                PromQueryResult::Scalar(ref mut v) => {
-                    *v = samples
+    // accumulate data into result
+    buffer.into_iter().for_each(|(tags, mut samples)| {
+        let metric = tags.into_iter().collect::<BTreeMap<String, String>>();
+        match result {
+            PromQueryResult::Vector(ref mut v) => {
+                let histogram = samples.histograms.pop();
+                let value = if histogram.is_none() {
+                    samples
                         .values
                         .pop()
-                        .map(|(timestamp, value)| (timestamp, value.into_string()));
-                }
-                PromQueryResult::String(ref mut _v) => {
-                    // TODO(ruihang): Not supported yet
-                }
+                        .map(|(timestamp, value)| (timestamp, value.into_string()))
+                } else {
+                    None
+                };
+                v.push(PromSeriesVector {
+                    metric,
+                    value,
+                    histogram,
+                });
             }
-        });
+            PromQueryResult::Matrix(ref mut v) => {
+                // sort values by timestamp
+                if !samples.values.is_sorted_by(|a, b| a.0 <= b.0) {
+                    samples
+                        .values
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                }
+                if !samples.histograms.is_sorted_by(|a, b| a.0 <= b.0) {
+                    samples
+                        .histograms
+                        .sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+                }
 
-        // sort matrix by metric
-        // see: https://prometheus.io/docs/prometheus/3.5/querying/api/#range-vectors
-        if let PromQueryResult::Matrix(ref mut v) = result {
-            v.sort_by(|a, b| a.metric.cmp(&b.metric));
+                v.push(PromSeriesMatrix {
+                    metric,
+                    values: samples.values,
+                    histograms: samples.histograms,
+                });
+            }
+            PromQueryResult::Scalar(ref mut v) => {
+                *v = samples
+                    .values
+                    .pop()
+                    .map(|(timestamp, value)| (timestamp, value.into_string()));
+            }
+            PromQueryResult::String(ref mut _v) => {
+                // TODO(ruihang): Not supported yet
+            }
         }
+    });
 
-        let result_type_string = result_type.to_string();
-        let data = PrometheusResponse::PromData(PromData {
-            result_type: result_type_string,
-            result,
-        });
-
-        Ok(data)
+    // sort matrix by metric
+    // see: https://prometheus.io/docs/prometheus/3.5/querying/api/#range-vectors
+    if let PromQueryResult::Matrix(ref mut v) = result {
+        v.sort_by(|a, b| a.metric.cmp(&b.metric));
     }
+
+    let result_type_string = result_type.to_string();
+    let data = PrometheusResponse::PromData(PromData {
+        result_type: result_type_string,
+        result,
+    });
+
+    Ok(data)
 }
 
 /// Ranges of consecutive rows whose label values are all equal.
@@ -660,12 +755,321 @@ mod tests {
     };
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{
         Float64Vector, StringVector, StructVector, TimestampMillisecondVector, VectorRef,
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn empty_stream_reads_as_empty_data() {
+        // No timestamp column on purpose: if the empty-stream short-circuit ran
+        // after `ColumnLayout::infer`, inference would fail with
+        // "no timestamp column found" instead of returning empty data.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let stream = RecordBatches::try_new(schema, vec![]).unwrap().as_stream();
+
+        let response =
+            PrometheusJsonResponse::consume_stream_to_data(stream, None, ValueType::Matrix).await;
+
+        assert!(matches!(
+            response.unwrap(),
+            PrometheusResponse::PromData(PromData {
+                result: PromQueryResult::Matrix(series),
+                ..
+            }) if series.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_result_matches_record_batches_result() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        // Two batches, with series "a" split across them: batch 0 holds its
+        // later samples, batch 1 its earlier ones plus series "b", so streaming
+        // must merge samples of one series across a batch boundary.
+        let batch_rows: [Vec<(&str, i64, f64)>; 2] = [
+            vec![
+                ("a", 4_000, 0.0),
+                ("a", 5_000, 1.0),
+                ("a", 6_000, 2.0),
+                ("a", 7_000, 3.0),
+            ],
+            vec![
+                ("a", 0, 4.0),
+                ("a", 1_000, 5.0),
+                ("b", 2_000, 6.0),
+                ("b", 3_000, 7.0),
+            ],
+        ];
+        let batches: Vec<_> = batch_rows
+            .into_iter()
+            .map(|rows| {
+                RecordBatch::new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondVector::from_values(
+                            rows.iter().map(|(_, ts, _)| *ts),
+                        )) as _,
+                        Arc::new(StringVector::from(
+                            rows.iter()
+                                .map(|(host, _, _)| Some(*host))
+                                .collect::<Vec<_>>(),
+                        )) as _,
+                        Arc::new(Float64Vector::from_values(rows.iter().map(|(_, _, v)| *v))) as _,
+                    ],
+                )
+                .unwrap()
+            })
+            .collect();
+
+        let streamed = PrometheusJsonResponse::consume_stream_to_data(
+            RecordBatches::try_new(schema.clone(), batches.clone())
+                .unwrap()
+                .as_stream(),
+            Some("metric".to_string()),
+            ValueType::Matrix,
+        )
+        .await
+        .unwrap();
+        let eager = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, batches).unwrap(),
+            Some("metric".to_string()),
+            ValueType::Matrix,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&streamed).unwrap(),
+            serde_json::to_value(&eager).unwrap()
+        );
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = streamed
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 2);
+        // Pin the merged content of the cross-batch series, not just the
+        // two-path agreement: both paths share merge_batch, so a regression
+        // there could make them agree on the same wrong output.
+        let series_a = series
+            .iter()
+            .find(|s| s.metric.get("host").map(String::as_str) == Some("a"))
+            .unwrap();
+        let samples_a: Vec<(i64, f64)> = series_a
+            .values
+            .iter()
+            .map(|(ts, value)| {
+                let PromSampleValue::Number(v) = value else {
+                    panic!("expected numeric sample");
+                };
+                ((ts * 1000.0) as i64, *v)
+            })
+            .collect();
+        assert_eq!(
+            samples_a,
+            vec![
+                (0, 4.0),
+                (1_000, 5.0),
+                (4_000, 0.0),
+                (5_000, 1.0),
+                (6_000, 2.0),
+                (7_000, 3.0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_mixed_histogram_result_matches_record_batches_result() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("kind", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new("float", ConcreteDataType::float64_datatype(), true),
+            ColumnSchema::new("histogram", native_histogram_value_type().clone(), true),
+        ]));
+        // The float series splits across the batch boundary so streaming must
+        // merge its samples like the eager path; the histogram row only arrives
+        // in the second batch.
+        let first = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000, 2_000])) as _,
+                Arc::new(StringVector::from(vec![Some("float"); 2])) as _,
+                Arc::new(Float64Vector::from(vec![Some(1.25), Some(0.5)])) as _,
+                histogram_vector(&[None, None]),
+            ],
+        )
+        .unwrap();
+        let second = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([3_000, 3_000])) as _,
+                Arc::new(StringVector::from(vec![Some("float"), Some("histogram")])) as _,
+                Arc::new(Float64Vector::from(vec![Some(2.0), None])) as _,
+                histogram_vector(&[None, Some(sample_histogram())]),
+            ],
+        )
+        .unwrap();
+
+        let streamed = PrometheusJsonResponse::consume_stream_to_data(
+            RecordBatches::try_new(schema.clone(), vec![first.clone(), second.clone()])
+                .unwrap()
+                .as_stream(),
+            Some("mixed_metric".to_string()),
+            ValueType::Vector,
+        )
+        .await
+        .unwrap();
+        let eager = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![first, second]).unwrap(),
+            Some("mixed_metric".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(&streamed).unwrap(),
+            serde_json::to_value(&eager).unwrap()
+        );
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = streamed
+        else {
+            panic!("expected vector response");
+        };
+        assert_eq!(series.len(), 2);
+        let histogram = series
+            .iter()
+            .find(|series| series.metric["kind"] == "histogram")
+            .unwrap();
+        assert!(histogram.histogram.is_some());
+        assert!(histogram.value.is_none());
+    }
+
+    /// A stream that lazily creates one batch per poll and asserts the previous
+    /// batch has been released before yielding the next one.
+    ///
+    /// Unlike `RecordBatches::as_stream`, this stream does not retain yielded
+    /// batches, so it can verify the consumer drops each batch before polling
+    /// the next one.
+    struct LazyDropCheckingStream {
+        schema: SchemaRef,
+        batch_index: usize,
+        /// Weak reference to the Arc wrapping the previously yielded batch.
+        /// The consumer must have dropped its clone by the next poll.
+        last_batch: Option<std::sync::Weak<RecordBatch>>,
+    }
+
+    impl LazyDropCheckingStream {
+        fn new(schema: SchemaRef) -> Self {
+            Self {
+                schema,
+                batch_index: 0,
+                last_batch: None,
+            }
+        }
+
+        fn make_batch(&self) -> RecordBatch {
+            let base = self.batch_index as i64 * 1000;
+            RecordBatch::new(
+                self.schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_values([base])) as _,
+                    Arc::new(StringVector::from(vec![Some("host")])) as _,
+                    Arc::new(Float64Vector::from_values([base as f64])) as _,
+                ],
+            )
+            .unwrap()
+        }
+    }
+
+    impl futures::Stream for LazyDropCheckingStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            // The consumer must have released the previous batch before polling
+            // for the next one.
+            if let Some(weak) = &self.last_batch {
+                assert!(
+                    weak.upgrade().is_none(),
+                    "previous batch was not released before polling the next one"
+                );
+            }
+
+            if self.batch_index >= 3 {
+                return std::task::Poll::Ready(None);
+            }
+
+            let batch = Arc::new(self.make_batch());
+            self.last_batch = Some(Arc::downgrade(&batch));
+            self.batch_index += 1;
+            std::task::Poll::Ready(Some(Ok((*batch).clone())))
+        }
+    }
+
+    impl common_recordbatch::RecordBatchStream for LazyDropCheckingStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<common_recordbatch::adapter::RecordBatchMetrics> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_drops_each_batch_before_polling_next() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let stream = LazyDropCheckingStream::new(schema);
+
+        let response = PrometheusJsonResponse::consume_stream_to_data(
+            Box::pin(stream),
+            None,
+            ValueType::Matrix,
+        )
+        .await;
+
+        assert!(matches!(
+            response.unwrap(),
+            PrometheusResponse::PromData(PromData {
+                result: PromQueryResult::Matrix(series),
+                ..
+            }) if series.len() == 1 && series[0].values.len() == 3
+        ));
+    }
 
     #[tokio::test]
     async fn query_response_preserves_and_merges_promql_annotations() {
