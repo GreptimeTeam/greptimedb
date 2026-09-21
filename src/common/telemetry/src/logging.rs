@@ -76,8 +76,9 @@ impl TraceReloadHandle {
         Self { inner }
     }
 
-    /// Enables or disables OTLP tracing for new spans, initializing it on first enable.
-    /// Spans already being traced continue through their remaining callbacks.
+    /// Enables or disables OTLP data collection, initializing it on first enable.
+    /// Disabling stops new spans, events, fields and links. Existing spans still
+    /// finish their lifecycle and export on close.
     pub fn set_enabled(&self, enabled: bool) -> Result<(), &'static str> {
         self.set_enabled_with(enabled, || {
             get_or_init_tracer().map(|tracer| tracing_opentelemetry::layer().with_tracer(tracer))
@@ -120,6 +121,10 @@ impl TraceLayer {
     fn with_layer<R>(&self, f: impl FnOnce(&OtelTraceLayer) -> R) -> Option<R> {
         self.inner.layer.get().map(f)
     }
+
+    fn is_enabled(&self) -> bool {
+        self.inner.enabled.load(Ordering::Acquire)
+    }
 }
 
 impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
@@ -150,7 +155,7 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        if self.inner.enabled.load(Ordering::Acquire) {
+        if self.is_enabled() {
             let _ = self.with_layer(|layer| layer.on_new_span(attrs, id, ctx));
         }
     }
@@ -165,7 +170,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_record(span, values, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_record(span, values, ctx));
+        }
     }
 
     fn on_follows_from(
@@ -174,7 +181,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         follows: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_follows_from(span, follows, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_follows_from(span, follows, ctx));
+        }
     }
 
     fn event_enabled(
@@ -191,7 +200,9 @@ impl tracing_subscriber::Layer<DynSubscriber> for TraceLayer {
         event: &tracing::Event<'_>,
         ctx: tracing_subscriber::layer::Context<'_, DynSubscriber>,
     ) {
-        let _ = self.with_layer(|layer| layer.on_event(event, ctx));
+        if self.is_enabled() {
+            let _ = self.with_layer(|layer| layer.on_event(event, ctx));
+        }
     }
 
     fn on_enter(
@@ -775,6 +786,7 @@ where
 #[cfg(test)]
 mod tests {
     use std::sync::Barrier;
+    use std::sync::atomic::AtomicUsize;
 
     use opentelemetry::trace::TraceContextExt;
     use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -864,6 +876,50 @@ mod tests {
                 .unwrap();
             let enabled = tracing::info_span!("after_successful_enable");
             assert!(enabled.context().span().span_context().is_valid());
+        });
+    }
+
+    #[test]
+    fn test_trace_switch_stops_collecting_fields_when_disabled() {
+        struct CountFormatting(AtomicUsize);
+
+        impl std::fmt::Debug for CountFormatting {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                f.write_str("value")
+            }
+        }
+
+        let value = CountFormatting(AtomicUsize::new(0));
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .build();
+        let (filter, _) = tracing_subscriber::reload::Layer::new(
+            Targets::new().with_default(tracing::Level::INFO),
+        );
+        let (layer, handle) = TraceLayer::new(Some(
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("fields")),
+        ));
+        tracing::subscriber::with_default(Registry::default().with(filter).with(layer), || {
+            let admitted = tracing::info_span!("admitted", field = tracing::field::Empty);
+            admitted.record("field", tracing::field::debug(&value));
+            admitted.in_scope(|| tracing::info!(value = ?value));
+            assert_eq!(value.0.load(Ordering::Relaxed), 2);
+
+            handle.set_enabled(false).unwrap();
+            let unadmitted = tracing::info_span!("unadmitted", field = tracing::field::Empty);
+            for span in [&admitted, &unadmitted] {
+                span.record("field", tracing::field::debug(&value));
+                span.in_scope(|| tracing::info!(value = ?value));
+            }
+            assert_eq!(value.0.load(Ordering::Relaxed), 2);
+
+            handle
+                .set_enabled_with(true, || panic!("layer must not be replaced"))
+                .unwrap();
+            admitted.record("field", tracing::field::debug(&value));
+            admitted.in_scope(|| tracing::info!(value = ?value));
+            assert_eq!(value.0.load(Ordering::Relaxed), 4);
         });
     }
 
