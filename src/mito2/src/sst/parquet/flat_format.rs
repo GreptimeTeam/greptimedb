@@ -42,7 +42,6 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::ValueRef;
 use datatypes::vectors::MutableVector;
-use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::sparse::{
     RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
 };
@@ -798,23 +797,10 @@ fn push_sparse_tag_value_in_view(
         RESERVED_COLUMN_ID_TABLE_ID => builder.push_value_ref(&ValueRef::UInt32(view.table_id())),
         RESERVED_COLUMN_ID_TSID => builder.push_value_ref(&ValueRef::UInt64(view.tsid())),
         _ => {
-            // `encode_sparse_value` returns None for missing and null labels
-            // and validates UTF-8 for string labels.
-            let value = IndexValueCodec::encode_sparse_value(view, column_id, value_buf)
-                .context(DecodeSnafu)?;
+            let value = view.label(column_id, value_buf).context(DecodeSnafu)?;
             match value {
                 None => builder.push_null(),
-                Some(bytes) => {
-                    let value = std::str::from_utf8(bytes).map_err(|_| {
-                        InvalidRecordBatchSnafu {
-                            reason: format!(
-                                "sparse tag value of column {column_id} is not valid UTF-8"
-                            ),
-                        }
-                        .build()
-                    })?;
-                    builder.push_value_ref(&ValueRef::String(value));
-                }
+                Some(value) => builder.push_value_ref(&ValueRef::String(value)),
             }
         }
     }

@@ -84,6 +84,17 @@ mod test {
                         "spanId": "9630f2916e2f7909", "name": "op", "kind": 2,
                         "startTimeUnixNano": "1736480942444376000",
                         "endTimeUnixNano": "1736480942444499000",
+                        "events": [{
+                            "timeUnixNano": "1736480942444400000",
+                            "name": "cache.hit",
+                            "attributes": [{"key": "event.code", "value": {"intValue": "7"}}]
+                        }],
+                        "links": [{
+                            "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                            "spanId": "8f847259b0f6e1ab",
+                            "traceState": "vendor=value",
+                            "attributes": [{"key": "link.type", "value": {"stringValue": "follows_from"}}]
+                        }],
                         "attributes": [
                             {"key": "http.status_code", "value": {"intValue": "200"}},
                             {"key": "latency", "value": {"doubleValue": 12.5}},
@@ -147,6 +158,8 @@ mod test {
   "resource_attributes" JSON2(
     max_auto_expanded_paths = 100
   ) NULL,
+  "span_events" JSON NULL,
+  "span_links" JSON NULL,
   TIME INDEX ("timestamp"),
   PRIMARY KEY ("service_name")
 )
@@ -199,7 +212,7 @@ WITH(
         .await?;
         assert_trace_v2_query(
             instance,
-            "SELECT COUNT(*) = 17
+            "SELECT COUNT(*) = 19
              FROM information_schema.columns
              WHERE table_name = 'trace_v2'",
             ctx.clone(),
@@ -226,7 +239,22 @@ WITH(
         .await?;
 
         // Exercise each JSON2 column and expressions combining columns, before and after flush.
+        let event_time =
+            common_time::Timestamp::new_nanosecond(1736480942444400000).to_iso8601_string();
+        let event_query = format!(
+            r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
+                 WHEN json_get_string(span_events, '$[0].name') = 'cache.hit'
+                   AND json_get_string(span_events, '$[0].time') = '{event_time}'
+                   AND json_get_int(span_events, '$[0].attributes."event.code"') = 7
+                   AND json_get_string(span_links, '$[0].trace_id') = 'cc9e0991a2e63d274984bd44ee669203'
+                   AND json_get_string(span_links, '$[0].span_id') = '8f847259b0f6e1ab'
+                   AND json_get_string(span_links, '$[0].trace_state') = 'vendor=value'
+                   AND json_get_string(span_links, '$[0].attributes."link.type"') = 'follows_from'
+                 THEN 1 END)
+             FROM trace_v2"#
+        );
         let json_queries = [
+            event_query.as_str(),
             r#"SELECT COUNT(*) > 0 AND COUNT(*) = COUNT(CASE
                  WHEN span_attributes.latency::DOUBLE * 2 = 25
                    AND upper(span_attributes.nested."a.b"[1]::STRING) = 'OK'
@@ -358,7 +386,7 @@ WITH(
         );
         assert_trace_v2_query(
             instance,
-            "SELECT COUNT(*) = 17
+            "SELECT COUNT(*) = 19
              FROM information_schema.columns
              WHERE table_name = 'trace_v2'",
             ctx.clone(),
@@ -393,7 +421,7 @@ WITH(
         let error = instance
             .traces(
                 instance.clone(),
-                request,
+                request.clone(),
                 PipelineWay::OtlpTraceDirectV2,
                 GreptimePipelineParams::default(),
                 "trace_v1".to_string(),
@@ -423,6 +451,29 @@ WITH(
         for sql in json_queries {
             assert_trace_v2_query(instance, sql, ctx.clone()).await?;
         }
+        // Empty events and links are stored as JSON arrays in the same 19-column table.
+        let mut empty_request = request;
+        let empty_span = &mut empty_request.resource_spans[0].scope_spans[0].spans[0];
+        empty_span.events.clear();
+        empty_span.links.clear();
+        let result = instance
+            .traces(
+                instance.clone(),
+                empty_request,
+                PipelineWay::OtlpTraceDirectV2,
+                GreptimePipelineParams::default(),
+                "trace_v2".to_string(),
+                ctx.clone(),
+            )
+            .await?;
+        assert_eq!((result.accepted_spans, result.rejected_spans), (1, 0));
+        assert_trace_v2_query(
+            instance,
+            "SELECT COUNT(*) = 1 FROM trace_v2
+             WHERE json_to_string(span_events) = '[]' AND json_to_string(span_links) = '[]'",
+            ctx.clone(),
+        )
+        .await?;
         Ok(())
     }
 

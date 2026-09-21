@@ -1,10 +1,10 @@
 CREATE TABLE json2_type_hints (
     ts TIMESTAMP TIME INDEX,
     j JSON2 (
-        user.age BIGINT NOT NULL DEFAULT 18,
-        user.name STRING DEFAULT 'unknown',
-        user.active BOOLEAN NULL,
-        score DOUBLE NULL DEFAULT 1.5
+        user.age BIGINT,
+        user.name STRING,
+        user.active BOOLEAN,
+        score DOUBLE
     )
 ) WITH (
     'append_mode' = 'true'
@@ -14,26 +14,26 @@ Affected Rows: 0
 
 SHOW CREATE TABLE json2_type_hints;
 
-+------------------+--------------------------------------------------+
-| Table            | Create Table                                     |
-+------------------+--------------------------------------------------+
-| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" (  |
-|                  |   "ts" TIMESTAMP(3) NOT NULL,                    |
-|                  |   "j" JSON2(                                     |
-|                  |     max_auto_expanded_paths = 100,               |
-|                  |     "user"."age" BIGINT NOT NULL DEFAULT 18,     |
-|                  |     "user"."name" STRING NULL DEFAULT 'unknown', |
-|                  |     "user"."active" BOOLEAN NULL,                |
-|                  |     "score" DOUBLE NULL DEFAULT 1.5              |
-|                  |   ) NULL,                                        |
-|                  |   TIME INDEX ("ts")                              |
-|                  | )                                                |
-|                  |                                                  |
-|                  | ENGINE=mito                                      |
-|                  | WITH(                                            |
-|                  |   append_mode = 'true'                           |
-|                  | )                                                |
-+------------------+--------------------------------------------------+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| json2_type_hints | CREATE TABLE IF NOT EXISTS "json2_type_hints" ( |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "j" JSON2(                                    |
+|                  |     max_auto_expanded_paths = 100,              |
+|                  |     "user"."age" BIGINT,                        |
+|                  |     "user"."name" STRING,                       |
+|                  |     "user"."active" BOOLEAN,                    |
+|                  |     "score" DOUBLE                              |
+|                  |   ) NULL,                                       |
+|                  |   TIME INDEX ("ts")                             |
+|                  | )                                               |
+|                  |                                                 |
+|                  | ENGINE=mito                                     |
+|                  | WITH(                                           |
+|                  |   append_mode = 'true'                          |
+|                  | )                                               |
++------------------+-------------------------------------------------+
 
 INSERT INTO json2_type_hints
 VALUES
@@ -51,34 +51,18 @@ SELECT
 FROM json2_type_hints
 ORDER BY ts;
 
-+-------------------------------------------------+--------------------------------------------------+----------------------------------------------------+----------------------------------------------+
-| json_get(json2_type_hints.j,Utf8("$.user.age")) | json_get(json2_type_hints.j,Utf8("$.user.name")) | json_get(json2_type_hints.j,Utf8("$.user.active")) | json_get(json2_type_hints.j,Utf8("$.score")) |
-+-------------------------------------------------+--------------------------------------------------+----------------------------------------------------+----------------------------------------------+
-| 42                                              | Alice                                            | true                                               | 3.25                                         |
-| 18                                              | Bob                                              |                                                    | 1.5                                          |
-| 18                                              | unknown                                          |                                                    | 1.5                                          |
-+-------------------------------------------------+--------------------------------------------------+----------------------------------------------------+----------------------------------------------+
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
+| json_get(json2_type_hints.j,Utf8("$.user.age"),Int64(NULL)) | json_get(json2_type_hints.j,Utf8("$.user.name"),Utf8View(NULL)) | json_get(json2_type_hints.j,Utf8("$.user.active"),Boolean(NULL)) | json_get(json2_type_hints.j,Utf8("$.score"),Float64(NULL)) |
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
+| 42                                                          | Alice                                                           | true                                                             | 3.25                                                       |
+|                                                             | Bob                                                             |                                                                  |                                                            |
+|                                                             |                                                                 |                                                                  |                                                            |
++-------------------------------------------------------------+-----------------------------------------------------------------+------------------------------------------------------------------+------------------------------------------------------------+
 
 INSERT INTO json2_type_hints
 VALUES (4, '{"user":{"age":"bad"}}');
 
 Error: 1004(InvalidArguments), Invalid JSON: JSON value at user.age does not match JSON2 type hint Int64
-
-CREATE TABLE json2_type_hints_required (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        user.age BIGINT NOT NULL
-    )
-) WITH (
-    'append_mode' = 'true'
-);
-
-Affected Rows: 0
-
-INSERT INTO json2_type_hints_required
-VALUES (1, '{}');
-
-Error: 1004(InvalidArguments), Invalid JSON: missing non-null JSON2 type hint path user.age
 
 CREATE TABLE json2_type_hints_timestamp (
     ts TIMESTAMP TIME INDEX,
@@ -88,30 +72,6 @@ CREATE TABLE json2_type_hints_timestamp (
 );
 
 Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP
-
-CREATE TABLE json2_default_null_ok (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        a BIGINT NULL DEFAULT NULL
-    )
-) WITH (
-    'append_mode' = 'true'
-);
-
-Affected Rows: 0
-
-DROP TABLE json2_default_null_ok;
-
-Affected Rows: 0
-
-CREATE TABLE json2_default_null_check (
-    ts TIMESTAMP TIME INDEX,
-    j JSON2 (
-        a BIGINT NOT NULL DEFAULT NULL
-    )
-);
-
-Error: 2000(InvalidSyntax), Invalid SQL, error: invalid DEFAULT for JSON2 type hint 'a': Default value should not be null for non null column
 
 -- A type hint at the maximum supported depth is accepted.
 CREATE TABLE json2_type_hint_depth_50 (
@@ -138,10 +98,6 @@ CREATE TABLE json2_type_hint_depth_51 (
 Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 type hint path cannot exceed 50 segments
 
 DROP TABLE json2_type_hints;
-
-Affected Rows: 0
-
-DROP TABLE json2_type_hints_required;
 
 Affected Rows: 0
 

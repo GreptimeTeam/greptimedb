@@ -29,7 +29,33 @@
 //! range, byte range and CRC32. The fixed-size trailer points at the footer and
 //! carries the CRC32 of the footer and of the whole object, so a reader locates
 //! the footer by reading the fixed-length trailer at the end of the object.
+//!
+//! Object sequences increase monotonically within one prefix and may leave
+//! gaps, so recovery continues after the largest sequence it indexed. An object
+//! is created conditionally: rewriting a sequence with the content it already
+//! holds is a no-op at the object store, while different content under a taken
+//! sequence is a conflict. Recovery lists the objects, reads and verifies only
+//! the header, trailer and footer of each, and indexes the footers in sequence
+//! order to rebuild the object catalog, which rejects a sequence it already
+//! holds. Segments are read and checksummed only when a read decodes them.
+//!
+//! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
+//! id name the object that holds the entry, the low bits its position among
+//! the entries of its region in that object.
 
-// The format has no callers until the store that writes and reads objects lands.
+#[allow(dead_code)]
+mod batch;
+#[allow(dead_code)]
+mod catalog;
 #[allow(dead_code)]
 mod format;
+#[allow(dead_code)]
+mod io;
+
+#[allow(dead_code)]
+mod store;
+
+#[allow(unused_imports)]
+pub(crate) use batch::entry_id;
+#[allow(unused_imports)]
+pub(crate) use store::ObjectStoreLogStore;

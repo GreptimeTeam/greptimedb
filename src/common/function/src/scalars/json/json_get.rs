@@ -18,8 +18,7 @@ use arrow::array::{ArrayRef, BinaryViewArray, new_null_array};
 use arrow::compute;
 use arrow_schema::Field;
 use datafusion_common::arrow::array::{
-    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, Int64Builder,
-    StringViewBuilder,
+    Array, AsArray, BinaryViewBuilder, BooleanBuilder, Float64Builder, StringViewBuilder,
 };
 use datafusion_common::arrow::datatypes::DataType;
 use datafusion_common::{DataFusionError, Result, ScalarValue, exec_datafusion_err, exec_err};
@@ -40,8 +39,6 @@ pub fn parse_json_get_path(path: &str) -> std::result::Result<JsonPath<'_>, json
             paths: vec![Path::Root],
         });
     }
-    // TODO(LFC): Fix jsonb's unterminated quoted-field panic (e.g. `$."a`) and
-    // update the dependency; malformed paths must return InvalidJsonPath.
     parse_json_path(path.as_bytes())
 }
 
@@ -74,7 +71,6 @@ fn result_builder(len: usize, with_type: &DataType) -> Result<Box<dyn JsonGetRes
             inner: StringViewBuilder::with_capacity(len),
         })
             as Box<dyn JsonGetResultBuilder>,
-        DataType::Int64 => Box::new(IntResultBuilder(Int64Builder::with_capacity(len))),
         DataType::Float64 => Box::new(FloatResultBuilder(Float64Builder::with_capacity(len))),
         DataType::Boolean => Box::new(BoolResultBuilder(BooleanBuilder::with_capacity(len))),
         t => {
@@ -91,7 +87,8 @@ struct StringResultBuilder {
 
 impl JsonGetResultBuilder for StringResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.inner.append_option(jsonb::to_str(value).ok());
+        self.inner
+            .append_option(jsonb::RawJsonb::new(value).to_str().ok());
         Ok(())
     }
 
@@ -147,23 +144,6 @@ impl Function for JsonGetString {
     }
 }
 
-struct IntResultBuilder(Int64Builder);
-
-impl JsonGetResultBuilder for IntResultBuilder {
-    fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_i64(value).ok());
-        Ok(())
-    }
-
-    fn append_null(&mut self) {
-        self.0.append_null();
-    }
-
-    fn build(&mut self) -> ArrayRef {
-        Arc::new(self.0.finish())
-    }
-}
-
 #[derive(Default, Display, Debug)]
 #[display("{}", Self::NAME.to_ascii_uppercase())]
 pub struct JsonGetInt(JsonGetWithType);
@@ -196,7 +176,8 @@ struct FloatResultBuilder(Float64Builder);
 
 impl JsonGetResultBuilder for FloatResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_f64(value).ok());
+        self.0
+            .append_option(jsonb::RawJsonb::new(value).to_f64().ok());
         Ok(())
     }
 
@@ -241,7 +222,8 @@ struct BoolResultBuilder(BooleanBuilder);
 
 impl JsonGetResultBuilder for BoolResultBuilder {
     fn append_value(&mut self, value: &[u8]) -> Result<()> {
-        self.0.append_option(jsonb::to_bool(value).ok());
+        self.0
+            .append_option(jsonb::RawJsonb::new(value).to_bool().ok());
         Ok(())
     }
 
@@ -295,14 +277,13 @@ fn jsonb_get(
             builder.append_null();
             continue;
         }
-        let mut value = Vec::new();
-        let mut offsets = Vec::new();
-        jsonb::get_by_path(jsons.value(i), json_path.clone(), &mut value, &mut offsets)
+        let value = jsonb::RawJsonb::new(jsons.value(i))
+            .select_value_by_path(&json_path)
             .map_err(|e| exec_datafusion_err!("Failed to evaluate JSONPath {path:?}: {e}"))?;
-        if value.is_empty() {
-            builder.append_null();
+        if let Some(value) = value {
+            builder.append_value(value.as_ref())?;
         } else {
-            builder.append_value(&value)?;
+            builder.append_null();
         }
     }
     Ok(())
@@ -440,7 +421,8 @@ impl Function for JsonGetWithType {
                 let arg0 = compute::cast(&arg0, &DataType::BinaryView)?;
                 let is_json2 = args.arg_fields.first().is_some_and(is_json2_extension_type);
 
-                if is_json2 {
+                // Share integer conversion with JSON2: truncate floats and reject decimal strings.
+                if is_json2 || with_type == DataType::Int64 {
                     let mut builder = BinaryViewBuilder::with_capacity(len);
                     jsonb_get(arg0.as_binary_view(), path, &mut builder)?;
                     JsonArray::from(&builder.build())
@@ -519,10 +501,14 @@ impl Function for JsonGetObject {
             let path = paths.is_valid(i).then(|| paths.value(i));
             let result = if let (Some(json), Some(path)) = (json, path) {
                 let result = jsonb::jsonpath::parse_json_path(path.as_bytes()).and_then(|path| {
-                    let mut data = Vec::new();
-                    let mut offset = Vec::new();
-                    jsonb::get_by_path(json, path, &mut data, &mut offset)
-                        .map(|()| jsonb::is_object(&data).then_some(data))
+                    let Some(value) = jsonb::RawJsonb::new(json).select_value_by_path(&path)?
+                    else {
+                        return Ok(None);
+                    };
+                    value
+                        .as_raw()
+                        .is_object()
+                        .map(|is_object| is_object.then(|| value.to_vec()))
                 });
                 result.map_err(|e| DataFusionError::Execution(e.to_string()))?
             } else {
@@ -549,6 +535,55 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
+
+    #[test]
+    fn test_json_get_int_conversion() -> Result<()> {
+        let cases = [
+            ("1", Some(1)),
+            ("1.0", Some(1)),
+            ("1.5", Some(1)),
+            ("-1.5", Some(-1)),
+            ("9223372036854775807", Some(i64::MAX)),
+            ("-9223372036854775808", Some(i64::MIN)),
+            ("18446744073709551615", None),
+            (r#""42""#, Some(42)),
+            (r#""1.5""#, None),
+            ("true", Some(1)),
+            ("null", None),
+        ];
+        let jsons = cases
+            .iter()
+            .map(|(input, _)| {
+                jsonb::parse_value_standard_mode(input.as_bytes())
+                    .map(|value| value.to_vec())
+                    .map_err(|e| exec_datafusion_err!("{e}"))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let array: ArrayRef = Arc::new(BinaryArray::from_iter_values(jsons));
+        for is_json2 in [false, true] {
+            let result = JsonGetInt::default()
+                .invoke_with_args(ScalarFunctionArgs {
+                    args: vec![
+                        ColumnarValue::Array(array.clone()),
+                        ColumnarValue::Scalar("$".into()),
+                    ],
+                    arg_fields: vec![test_json_field(&array, is_json2)],
+                    number_rows: array.len(),
+                    return_field: Arc::new(Field::new("x", DataType::Int64, true)),
+                    config_options: Arc::new(Default::default()),
+                })?
+                .into_array(array.len())?;
+            let actual = result.as_primitive::<Int64Type>();
+            for (i, (input, expected)) in cases.iter().enumerate() {
+                assert_eq!(
+                    actual.is_valid(i).then(|| actual.value(i)),
+                    *expected,
+                    "{input}, is_json2={is_json2}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_parse_json_get_path_expression() -> std::result::Result<(), Box<dyn std::error::Error>>
@@ -592,6 +627,28 @@ mod tests {
         assert!(json_object_path("a[").is_err());
         assert_eq!(json_object_path("$")?, Some(vec![]));
         Ok(())
+    }
+
+    #[test]
+    fn test_parse_json_get_path_unterminated_quotes() {
+        for path in [
+            r#"$."a"#,
+            r#""a"#,
+            r#"$["a"#,
+            r#"$."a\""#,
+            r#"$."a\\"#,
+            r#"$."\u0061"#,
+            r#"$."中文"#,
+            r#"$.a ? (@ == "value"#,
+        ] {
+            assert!(
+                matches!(
+                    parse_json_get_path(path),
+                    Err(jsonb::Error::InvalidJsonPath)
+                ),
+                "{path}",
+            );
+        }
     }
 
     #[test]
@@ -760,7 +817,7 @@ mod tests {
     fn test_jsonb_get_evaluation_error() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let json = parse_string_to_jsonb(r#"{"a": 1}"#)?;
         let truncated = BinaryViewArray::from_iter_values([&json[..1]]);
-        let mut builder = IntResultBuilder(Int64Builder::new());
+        let mut builder = BinaryViewBuilder::new();
         let err = jsonb_get(&truncated, "$.a", &mut builder).unwrap_err();
         assert!(
             err.to_string().contains("Failed to evaluate JSONPath"),
@@ -908,21 +965,25 @@ mod tests {
     }
 
     #[test]
-    fn test_json_get_bool() {
+    fn test_json_get_bool() -> Result<()> {
         let json_get_bool = JsonGetBool::default();
 
         assert_eq!("json_get_bool", json_get_bool.name());
         assert_eq!(
             DataType::Boolean,
-            json_get_bool
-                .return_type(&[DataType::Binary, DataType::Utf8])
-                .unwrap()
+            json_get_bool.return_type(&[DataType::Binary, DataType::Utf8])?
         );
 
         let json_strings = [
             r#"{"a": {"b": true}, "b": false, "c": true}"#,
             r#"{"a": false, "b": {"c": true}, "c": false}"#,
             r#"{"a": true, "b": false, "c": {"a": true}}"#,
+            r#""yes""#,
+            r#""no""#,
+            r#""YeS""#,
+            r#""nO""#,
+            r#""invalid""#,
+            r#""""#,
         ];
         let json_struct = test_json_struct();
 
@@ -930,6 +991,12 @@ mod tests {
             ("$.a.b", Some(true)),
             ("$.a", Some(false)),
             ("$.c", None),
+            ("$", Some(true)),
+            ("$", Some(false)),
+            ("$", Some(true)),
+            ("$", Some(false)),
+            ("$", None),
+            ("$", None),
             ("$.kind", None),
             ("$.payload.code", Some(true)),
             ("$.payload.success", Some(false)),
@@ -942,10 +1009,11 @@ mod tests {
         let mut jsons = json_strings
             .iter()
             .map(|s| {
-                let value = jsonb::parse_value(s.as_bytes()).unwrap();
-                Arc::new(BinaryArray::from_iter_values([value.to_vec()])) as ArrayRef
+                let value = jsonb::parse_value_standard_mode(s.as_bytes())
+                    .map_err(|e| exec_datafusion_err!("{e}"))?;
+                Ok(Arc::new(BinaryArray::from_iter_values([value.to_vec()])) as ArrayRef)
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         let json_struct_arrays =
             std::iter::repeat_n(json_struct, path_expects.len() - jsons.len()).collect::<Vec<_>>();
         jsons.extend(json_struct_arrays);
@@ -966,14 +1034,14 @@ mod tests {
             };
             let result = json_get_bool
                 .invoke_with_args(args)
-                .and_then(|x| x.to_array(1))
-                .unwrap();
+                .and_then(|x| x.to_array(1))?;
 
             let result = result.as_boolean();
             assert_eq!(1, result.len());
             let actual = result.is_valid(0).then(|| result.value(0));
             assert_eq!(actual, expect);
         }
+        Ok(())
     }
 
     #[test]

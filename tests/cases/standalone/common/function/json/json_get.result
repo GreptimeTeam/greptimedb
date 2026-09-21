@@ -12,6 +12,71 @@ SELECT json_get_int(parse_json('{"a": 1}'), '$.missing');
 |                                                              |
 +--------------------------------------------------------------+
 
+-- Unterminated quoted fields must return errors without panicking.
+SELECT json_get_int(parse_json('{"a": 1}'), '$."a');
+
+Error: 3001(EngineExecuteQuery), Execution error: Invalid JSONPath "$.\"a": InvalidJsonPath
+
+SELECT json_get_object(parse_json('{"a": {}}'), '$["a');
+
+Error: 3001(EngineExecuteQuery), Execution error: InvalidJsonPath
+
+CREATE TABLE jsonpath_unterminated(j JSON2, ts TIMESTAMP TIME INDEX) WITH (append_mode='true');
+
+Affected Rows: 0
+
+INSERT INTO jsonpath_unterminated VALUES ('{"a": 1}', 1);
+
+Affected Rows: 1
+
+SELECT json_get(j, '$."a') FROM jsonpath_unterminated;
+
+Error: 3000(PlanQuery), Error during planning: Invalid JSONPath "$.\"a": InvalidJsonPath
+
+SELECT json_get(j, '$."a"')::BIGINT FROM jsonpath_unterminated;
+
++-------------------------------------------------+
+| json_get(jsonpath_unterminated.j,Utf8("$."a"")) |
++-------------------------------------------------+
+| 1                                               |
++-------------------------------------------------+
+
+DROP TABLE jsonpath_unterminated;
+
+Affected Rows: 0
+
+-- JSON and JSON2 share integer conversion rules.
+CREATE TABLE json_integer_conversion(j JSON, j2 JSON2, ts TIMESTAMP TIME INDEX)
+WITH (append_mode='true');
+
+Affected Rows: 0
+
+INSERT INTO json_integer_conversion VALUES
+    ('{"a":1.5}', '{"a":1.5}', 1),
+    ('{"a":-1.5}', '{"a":-1.5}', 2),
+    ('{"a":"1.5"}', '{"a":"1.5"}', 3);
+
+Affected Rows: 3
+
+SELECT
+    json_get(j, 'a')::BIGINT AS json_int,
+    json_get(j2, 'a')::BIGINT AS json2_int,
+    json_get_int(j, 'a') AS json_get_int,
+    json_get_int(j2, 'a') AS json2_get_int
+FROM json_integer_conversion ORDER BY ts;
+
++----------+-----------+--------------+---------------+
+| json_int | json2_int | json_get_int | json2_get_int |
++----------+-----------+--------------+---------------+
+| 1        | 1         | 1            | 1             |
+| -1       | -1        | -1           | -1            |
+|          |           |              |               |
++----------+-----------+--------------+---------------+
+
+DROP TABLE json_integer_conversion;
+
+Affected Rows: 0
+
 SELECT json_get_int(parse_json('{"a": {"b": {"c": 1}}}'), 'a.b.c');
 
 +------------------------------------------------------------------------+
@@ -111,7 +176,7 @@ SELECT json_get_int(j, 'a.b.c') FROM jsons;
 | json_get_int(jsons.j,Utf8("a.b.c")) |
 +-------------------------------------+
 | 1                                   |
-|                                     |
+| 1                                   |
 |                                     |
 | 1                                   |
 +-------------------------------------+
@@ -155,7 +220,7 @@ SELECT json_get_int(j, 'a.b["c"]') FROM jsons;
 | json_get_int(jsons.j,Utf8("a.b["c"]")) |
 +----------------------------------------+
 | 1                                      |
-|                                        |
+| 1                                      |
 |                                        |
 | 1                                      |
 +----------------------------------------+
@@ -230,7 +295,7 @@ SELECT json_get_int(j, '[0]') FROM jsons;
 |                                   |
 | 1                                 |
 | 1                                 |
-|                                   |
+| 1                                 |
 |                                   |
 +-----------------------------------+
 
@@ -266,7 +331,7 @@ SELECT json_get_string(j, '[3]') FROM jsons;
 | Long time ago, there is a little pig flying in the sky |
 | false                                                  |
 | 2147483648                                             |
-| 1e100                                                  |
+| 1e+100                                                 |
 |                                                        |
 +--------------------------------------------------------+
 
@@ -314,7 +379,7 @@ SELECT json_get(j, '[0]')::int8 FROM jsons;
 |                                                         |
 | 1                                                       |
 | 1                                                       |
-|                                                         |
+| 1                                                       |
 |                                                         |
 +---------------------------------------------------------+
 
@@ -338,7 +403,7 @@ SELECT json_get(j, '[1]')::int8 FROM jsons;
 |                                                         |
 | 0                                                       |
 | 0                                                       |
-|                                                         |
+| 3                                                       |
 |                                                         |
 +---------------------------------------------------------+
 
@@ -374,7 +439,7 @@ SELECT json_get(j, '[3]')::string FROM jsons;
 | Long time ago, there is a little pig flying in the sky |
 | false                                                  |
 | 2147483648                                             |
-| 1e100                                                  |
+| 1e+100                                                 |
 |                                                        |
 +--------------------------------------------------------+
 
@@ -409,6 +474,7 @@ SELECT json_to_string(j) FROM jsons WHERE json_get_int(j, 'a.b.c') = 1;
 | json_to_string(jsons.j) |
 +-------------------------+
 | {"a":{"b":{"c":1}}}     |
+| {"a":{"b":{"c":1.234}}} |
 | {"a":{"b":{"c":true}}}  |
 +-------------------------+
 
@@ -442,6 +508,7 @@ SELECT json_to_string(j) FROM jsons WHERE CAST(json_get_int(j, 'a.b.c') AS BOOLE
 | json_to_string(jsons.j) |
 +-------------------------+
 | {"a":{"b":{"c":1}}}     |
+| {"a":{"b":{"c":1.234}}} |
 | {"a":{"b":{"c":true}}}  |
 +-------------------------+
 

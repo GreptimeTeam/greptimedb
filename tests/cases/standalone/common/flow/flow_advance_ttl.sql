@@ -39,6 +39,8 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -65,6 +67,8 @@ VALUES
     (23, "2021-07-01 00:00:01.600"),
     (23, "2021-07-01 00:00:01.600");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -138,6 +142,8 @@ VALUES
     (20, "2021-07-01 00:00:00.200"),
     (22, "2021-07-01 00:00:00.600");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 
@@ -160,6 +166,8 @@ INSERT INTO
 VALUES
     (23, "2021-07-01 00:00:01.600");
 
+-- Mirror inserts reach the flownode asynchronously; wait before flushing.
+-- SQLNESS SLEEP 3s
 -- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
 ADMIN FLUSH_FLOW('test_distinct_basic');
 

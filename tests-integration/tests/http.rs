@@ -194,6 +194,7 @@ macro_rules! http_tests {
                 test_log_query,
                 test_jaeger_query_api,
                 test_jaeger_query_api_for_trace_v1,
+                test_jaeger_query_api_for_trace_v2,
 
                 test_influxdb_write,
                 test_influxdb_write_with_hints,
@@ -1524,6 +1525,117 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         .unwrap()
     );
 
+    // query `__name__` by a matcher on an ordinary label: the metric engine
+    // physical tables are scanned, so only metrics carrying the label value are
+    // returned. `demo_metrics` shares `phy` with `demo` but has no `host` value.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    let status = res.status();
+    let text = res.text().await;
+    assert_eq!(status, StatusCode::OK, "{text}");
+    let prom_resp = serde_json::from_str::<PrometheusJsonResponse>(&text).unwrap();
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
+    // `__name__` matchers narrow the names the data resolved: `multi_labels`
+    // also carries `idc="idc1"` but its name does not match.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\"demo.*\", idc=\"idc1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(prom_resp.status, "success");
+    assert!(prom_resp.error.is_none());
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    // The time range selects the series: `demo` carries `host="host2"` only at
+    // t=600, so narrowing the range drops it while `multi_labels` at t=0 stays.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host2\"}&start=0&end=300")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["multi_labels"])).unwrap()
+    );
+
+    // Logical metrics sharing a physical table have NULL in the label columns
+    // they don't use. Prometheus reads a label a series doesn't carry as the
+    // empty string, so `demo_metrics` and `demo_metrics_with_nanos` — neither of
+    // which has a `host` label — match both of these.
+    //
+    // `.%2B` is `.+`; a bare `+` decodes to a space in a query string. Grafana
+    // encodes it the same way.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host=\"\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+        ]))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={__name__=~\".%2B\", host!=\"host1\"}&start=0&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!([
+            "demo",
+            "demo_metrics",
+            "demo_metrics_with_nanos",
+            "multi_labels",
+        ]))
+        .unwrap()
+    );
+
+    // A pre-epoch RFC3339 bound is a valid range, not a panic.
+    let res = client
+        .get("/v1/prometheus/api/v1/label/__name__/values?match[]={host=\"host1\"}&start=1969-12-31T23:59:59Z&end=600")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let prom_resp = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        prom_resp.data,
+        serde_json::from_value::<PrometheusResponse>(json!(["demo", "multi_labels"])).unwrap()
+    );
+
     // buildinfo
     let res = client
         .get("/v1/prometheus/api/v1/status/buildinfo")
@@ -2399,6 +2511,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
 experimental_compaction_memory_limit = "unlimited"
@@ -7827,9 +7940,19 @@ pub(crate) async fn test_otlp_traces_v2(
         "otlp_traces_v2_fixed_schema",
         &client,
         "select count(*) from information_schema.columns where table_name = 'trace_v2_spans' \
-         and (column_name like 'span_attributes.%' \
-         or column_name in ('span_events', 'span_links'));",
+         and column_name like 'span_attributes.%';",
         "[[0]]",
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_events_links",
+        &client,
+        r#"select json_get_string(span_events, '$[0].name'),
+                  json_get_int(span_events, '$[0].attributes."event.code"'),
+                  json_get_string(span_links, '$[0].trace_id'),
+                  json_get_string(span_links, '$[0].attributes."link.type"')
+           from trace_v2_spans;"#,
+        r#"[["cache.hit",7,"cc9e0991a2e63d274984bd44ee669203","follows_from"]]"#,
     )
     .await;
     validate_data(
@@ -10282,6 +10405,193 @@ pub async fn test_jaeger_query_api(store_type: StorageType) {
     assert_eq!(resp, expected);
 
     guard.remove_all().await;
+}
+
+pub async fn test_jaeger_query_api_for_trace_v2(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    common_telemetry::init_default_ut_logging();
+
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_query_api_v2").await;
+    let client = TestClient::new(app).await;
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+        "resourceSpans": [{
+            "resource": {"attributes": [
+                make_string_attr("service.name", "jaeger-v2"),
+                make_string_attr("region", "west"),
+                make_string_attr("shared", "resource"),
+                make_string_attr("nullable", "resource"),
+                make_int_attr("count", 7),
+                make_int_attr("complex", 7)
+            ]},
+            "scopeSpans": [{
+                "scope": {"name": "v2-scope", "version": "1.0"},
+                "spans": [{
+                    "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                    "spanId": "9630f2916e2f7909", "parentSpanId": "8f847259b0f6e1ab",
+                    "name": "op", "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000",
+                    "attributes": [
+                        make_string_attr("shared", "span"),
+                        {"key": "nullable"},
+                        make_string_attr("a\"b\\c.d", "escaped"),
+                        make_int_attr("http.status_code", 500),
+                        make_bool_attr("enabled", true),
+                        {"key": "ratio", "value": {"doubleValue": 1.5}},
+                        make_string_attr("count", "invalid"),
+                        {"key": "complex", "value": {"arrayValue": {"values": [{"intValue":"7"}]}}}
+                    ],
+                    "events": [{"name": "cache.hit", "timeUnixNano": "1736480942444400000",
+                        "attributes": [make_int_attr("event.code", 7)]}],
+                    "links": [{"traceId": "cc9e0991a2e63d274984bd44ee669203",
+                        "spanId": "8f847259b0f6e1ab"}],
+                    "status": {"code": 2, "message": "failure"}
+                }, {
+                    "traceId": "cc9e0991a2e63d274984bd44ee669203",
+                    "spanId": "8f847259b0f6e1ab", "name": "op", "kind": 2,
+                    "startTimeUnixNano": "1736480942444376000",
+                    "endTimeUnixNano": "1736480942444499000"
+                }]
+            }]
+        }]
+    }))?;
+    let response = send_req(
+        &client,
+        vec![
+            (
+                HeaderName::from_static("content-type"),
+                HeaderValue::from_static("application/x-protobuf"),
+            ),
+            (
+                HeaderName::from_static("x-greptime-pipeline-name"),
+                HeaderValue::from_static(GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME),
+            ),
+            (
+                HeaderName::from_static("x-greptime-trace-table-name"),
+                HeaderValue::from_static("jaeger_v2"),
+            ),
+        ],
+        "/v1/otlp/v1/traces",
+        request.encode_to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for (path, expected) in [
+        ("/v1/jaeger/api/services", json!(["jaeger-v2"])),
+        (
+            "/v1/jaeger/api/operations?service=jaeger-v2",
+            json!([{"name":"op", "spanKind":"server"}]),
+        ),
+        (
+            "/v1/jaeger/api/services/jaeger-v2/operations",
+            json!(["op"]),
+        ),
+    ] {
+        let response = client
+            .get(path)
+            .header("x-greptime-trace-table-name", "jaeger_v2")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["data"], expected, "{path}: {body}");
+    }
+
+    for flushed in [false, true] {
+        if flushed {
+            let response = client
+                .post("/v1/sql")
+                .form(&[("sql", "ADMIN FLUSH_TABLE('jaeger_v2')")])
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        for (tags, expected) in [
+            (json!({"shared":"span"}), 1),
+            (json!({"shared":"resource"}), 1),
+            (json!({"region":"west"}), 2),
+            (json!({"nullable":"resource"}), 2),
+            (json!({"count":7}), 2),
+            (json!({"complex":7}), 2),
+            (json!({"a\"b\\c.d":"escaped"}), 1),
+            (
+                json!({"http.status_code":500, "enabled":true, "ratio":1.5}),
+                1,
+            ),
+            (json!({"error":true}), 1),
+            (json!({"missing":"absent"}), 0),
+            (json!({"missing":null}), 2),
+            (json!({"count":u64::MAX}), 0),
+        ] {
+            let url = format!(
+                "/v1/jaeger/api/traces?service=jaeger-v2&start=1736480942444376&end=1736480942444500&tags={}",
+                encode(&tags.to_string())
+            );
+            let response = client
+                .get(&url)
+                .header("user-agent", if flushed { "Grafana" } else { "Jaeger" })
+                .header("x-greptime-trace-table-name", "jaeger_v2")
+                .send()
+                .await;
+            let status = response.status();
+            let body: Value = serde_json::from_str(&response.text().await)?;
+            assert_eq!(status, StatusCode::OK, "{tags}: {body}");
+            assert_eq!(
+                body["data"].as_array().map_or(0, Vec::len),
+                expected,
+                "{tags}: {body}"
+            );
+        }
+        let response = client
+            .get("/v1/jaeger/api/traces/c05d7a4ec8e1f231f02ed6e8da8655b4")
+            .header("x-greptime-trace-table-name", "jaeger_v2")
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        let process = &body["data"][0]["processes"]["p1"];
+        assert_eq!(process["serviceName"], "jaeger-v2");
+        assert!(
+            process["tags"]
+                .as_array()
+                .ok_or("Expected process tags")?
+                .iter()
+                .any(|tag| tag["key"] == "region" && tag["value"] == "west")
+        );
+        let span = &body["data"][0]["spans"][0];
+        assert_eq!(span["startTime"], 1736480942444376u64);
+        assert_eq!(span["duration"], 123);
+        assert_eq!(
+            span["references"],
+            json!([
+                {"refType":"CHILD_OF", "traceID":"c05d7a4ec8e1f231f02ed6e8da8655b4", "spanID":"8f847259b0f6e1ab"},
+                {"refType":"FOLLOWS_FROM", "traceID":"cc9e0991a2e63d274984bd44ee669203", "spanID":"8f847259b0f6e1ab"},
+            ])
+        );
+        assert_eq!(span["logs"][0]["timestamp"], 1736480942444400u64);
+        assert!(
+            span["logs"][0]["fields"]
+                .as_array()
+                .ok_or("Expected event fields")?
+                .iter()
+                .any(|field| field["key"] == "event.code" && field["value"] == 7)
+        );
+        assert!(
+            span["tags"]
+                .as_array()
+                .ok_or("Expected span tags")?
+                .iter()
+                .any(|tag| tag["key"] == "http.status_code"
+                    && tag["type"] == "int64"
+                    && tag["value"] == 500)
+        );
+    }
+    guard.remove_all().await;
+    Ok(())
 }
 
 pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {

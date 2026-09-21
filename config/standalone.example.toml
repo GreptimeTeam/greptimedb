@@ -694,6 +694,10 @@ compress_manifest = false
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
 
+## Whether to build and query range indexes when series indexes are enabled.
+## Obsolete range-index metadata and files are still cleaned up when disabled.
+#+ experimental_enable_range_index = false
+
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"
 

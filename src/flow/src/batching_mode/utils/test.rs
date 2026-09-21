@@ -12,13 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use catalog::RegisterTableRequest;
-use common_recordbatch::RecordBatch;
+use common_function::aggrs::approximate::avg::AvgState;
+use common_query::OutputData;
+use common_recordbatch::recordbatch::merge_record_batches;
+use common_recordbatch::{RecordBatch, util};
 use common_time::Timestamp;
+use datafusion_common::ScalarValue;
 use datafusion_common::tree_node::TreeNode as _;
 use datafusion_expr::{GroupingSet, TableScanBuilder};
+use datatypes::arrow::array::{Array, AsArray};
+use datatypes::arrow::datatypes::{Float64Type, Int64Type, UInt64Type};
 use datatypes::prelude::{ConcreteDataType, MutableVector, Scalar, ScalarVectorBuilder, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::timestamp::TimestampMillisecond;
@@ -740,6 +747,108 @@ async fn test_gen_plan_with_matching_schema_allows_null_positional_alias() {
 }
 
 #[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_injects_physical_sink_order() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("epoch", ConcreteDataType::uint64_datatype(), true),
+    ]));
+    let plan = gen_plan_with_matching_schema_and_values(
+        "SELECT number, ts FROM numbers_with_ts",
+        QueryContext::arc(),
+        create_test_query_engine(),
+        sink_schema,
+        &[],
+        false,
+        &BTreeMap::from([
+            ("epoch".to_string(), ScalarValue::UInt64(Some(7))),
+            ("marker".to_string(), ScalarValue::UInt8(None)),
+        ]),
+    )
+    .await
+    .unwrap();
+    let names = plan
+        .schema()
+        .fields()
+        .iter()
+        .map(|field| field.name().clone())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["number", "marker", "ts", "epoch"]);
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_rejects_unknown_collision_and_type() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new(
+            "ts",
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+    ]));
+    for (values, expected) in [
+        (
+            BTreeMap::from([("unknown".to_string(), ScalarValue::UInt8(None))]),
+            "is not found in sink schema",
+        ),
+        (
+            BTreeMap::from([("number".to_string(), ScalarValue::UInt32(None))]),
+            "collides with flow output",
+        ),
+        (
+            BTreeMap::from([("marker".to_string(), ScalarValue::UInt64(None))]),
+            "has type UInt64",
+        ),
+    ] {
+        let err = gen_plan_with_matching_schema_and_values(
+            "SELECT number, ts FROM numbers_with_ts",
+            QueryContext::arc(),
+            create_test_query_engine(),
+            sink_schema.clone(),
+            &[],
+            false,
+            &values,
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains(expected), "{err}");
+    }
+}
+
+#[tokio::test]
+async fn test_gen_plan_with_matching_schema_and_values_rejects_duplicate_output() {
+    let sink_schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+        ColumnSchema::new("marker", ConcreteDataType::uint8_datatype(), true),
+    ]));
+    let err = gen_plan_with_matching_schema_and_values(
+        "SELECT number, number AS number FROM numbers_with_ts",
+        QueryContext::arc(),
+        create_test_query_engine(),
+        sink_schema,
+        &[],
+        false,
+        &BTreeMap::from([("marker".to_string(), ScalarValue::UInt8(None))]),
+    )
+    .await
+    .unwrap_err();
+    let err = format!("{err:?}");
+    assert!(
+        err.contains("Projections require unique expression names"),
+        "DataFusion should reject duplicate output aliases during query planning: {err}"
+    );
+}
+
+#[tokio::test]
 async fn test_gen_plan_with_matching_schema_accepts_matching_flow_schema() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
@@ -1104,13 +1213,16 @@ async fn test_rewrite_incremental_aggregate_allows_alias_wrapped_scan() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(n.number) AS number, n.ts FROM numbers_with_ts AS n GROUP BY n.ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
 
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         single_row_u32_table("alias_wrapped_sink", vec!["ts", "number"]),
         &[
             "greptime".to_string(),
@@ -1362,6 +1474,7 @@ async fn test_analyze_incremental_aggregate_plan_allows_literal_outputs() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,
@@ -1435,7 +1548,9 @@ async fn test_rewrite_incremental_aggregate_preserves_non_identifier_aliases() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number) AS \"max value\", number, 42 AS \"literal value\" FROM numbers_with_ts GROUP BY number";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
     assert_eq!(
@@ -1447,6 +1562,7 @@ async fn test_rewrite_incremental_aggregate_preserves_non_identifier_aliases() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table,
         &[
             "greptime".to_string(),
@@ -1520,24 +1636,34 @@ async fn test_datafusion_rejects_duplicate_output_names() {
 }
 
 #[tokio::test]
-async fn test_analyze_incremental_aggregate_plan_rejects_same_aggregate_multiple_aliases() {
-    let query_engine = create_test_query_engine();
-    let ctx = QueryContext::arc();
-    let sql = "SELECT sum(number) AS a, sum(number) AS b, ts FROM numbers_with_ts GROUP BY ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+async fn test_analyze_incremental_aggregate_plan_supports_same_aggregate_multiple_aliases() {
+    let analysis = analyze_test_sql(
+        "SELECT sum(number) AS a, sum(number) AS b, ts FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
 
-    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+    assert_eq!(analysis.merge_columns.len(), 2);
+    assert_eq!(analysis.merge_columns[0].input_field_name, "a");
+    assert_eq!(analysis.merge_columns[1].input_field_name, "a");
     assert!(
         analysis
-            .unsupported_exprs
+            .merge_columns
             .iter()
-            .any(|expr| expr.contains("same aggregate output")
-                && expr.contains("a")
-                && expr.contains("b")),
-        "same aggregate with multiple aliases should be unsupported until explicit reproduction is implemented: {:?}",
-        analysis.unsupported_exprs
+            .all(|column| { column.merge_op == IncrementalAggregateMergeOp::Sum })
     );
-    assert!(analysis.merge_columns.is_empty());
+    assert!(
+        analysis
+            .merge_columns
+            .iter()
+            .any(|column| column.output_field_name == "a")
+    );
+    assert!(
+        analysis
+            .merge_columns
+            .iter()
+            .any(|column| column.output_field_name == "b")
+    );
 }
 
 #[test]
@@ -1579,6 +1705,487 @@ async fn test_analyze_incremental_aggregate_plan_rejects_avg() {
 
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(!analysis.unsupported_exprs.is_empty());
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_supports_avg_state() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT avg_state(number) AS avg_num, ts FROM numbers_with_ts GROUP BY ts";
+    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "avg_state should be supported: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert_eq!(analysis.merge_columns.len(), 1);
+    assert_eq!(analysis.merge_columns[0].output_field_name, "avg_num");
+    assert!(matches!(
+        &analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name: "__avg_state_delta_merge",
+            params,
+        } if params.is_empty()
+    ));
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_supports_avg_merge() {
+    let query_engine = create_test_query_engine();
+    let producer_sql = "SELECT avg_state(number) AS avg_state, CASE WHEN number <= 5 THEN 1 ELSE 2 END AS grp FROM numbers_with_ts GROUP BY grp";
+    let producer_plan = sql_to_df_plan(
+        QueryContext::arc(),
+        query_engine.clone(),
+        producer_sql,
+        false,
+    )
+    .await
+    .unwrap();
+    let producer_output = query_engine
+        .execute(producer_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(producer_stream) = producer_output.data else {
+        panic!("expected AVG state producer execution to be a stream");
+    };
+    let producer_batches = util::collect(producer_stream).await.unwrap();
+    let producer_schema = producer_batches.first().unwrap().schema.clone();
+    let avg_states = merge_record_batches(producer_schema, &producer_batches).unwrap();
+    assert_eq!(avg_states.num_rows(), 2);
+    let avg_states_table = MemTable::table("avg_states", avg_states);
+    query_engine
+        .engine_state()
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap()
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "avg_states".to_string(),
+            table_id: 4096,
+            table: avg_states_table,
+        })
+        .unwrap();
+
+    let sql = "SELECT avg_merge(avg_state) AS avg_num, grp FROM avg_states GROUP BY grp";
+    let plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+    assert!(
+        analysis.unsupported_exprs.is_empty(),
+        "avg_merge should be supported: {:?}",
+        analysis.unsupported_exprs
+    );
+    assert_eq!(analysis.merge_columns.len(), 1);
+    assert!(matches!(
+        &analysis.merge_columns[0].merge_op,
+        IncrementalAggregateMergeOp::StateDeltaMerge {
+            function_name: "__avg_state_delta_merge",
+            params,
+        } if params.is_empty()
+    ));
+
+    let output = query_engine
+        .execute(plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(stream) = output.data else {
+        panic!("expected AVG merge execution to be a stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let schema = batches.first().unwrap().schema.clone();
+    let batch = merge_record_batches(schema, &batches).unwrap();
+    let groups = batch
+        .column_by_name("grp")
+        .unwrap()
+        .as_primitive::<Int64Type>();
+    let averages = batch.column_by_name("avg_num").unwrap().as_binary::<i32>();
+    let mut values = (0..batch.num_rows())
+        .map(|index| {
+            (
+                groups.value(index),
+                AvgState::decode(averages.value(index)).unwrap().average(),
+            )
+        })
+        .collect::<Vec<_>>();
+    values.sort_unstable_by_key(|(group, _)| *group);
+    assert_eq!(values, [(1, Some(3.0)), (2, Some(8.0))]);
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_supports_duplicate_avg_projections() {
+    let analysis = analyze_test_sql(
+        "SELECT avg_state(number) AS avg_a, avg_state(number) AS avg_b, avg_state(number + 1) AS avg_num_plus, ts FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
+
+    assert!(analysis.unsupported_exprs.is_empty());
+    assert_eq!(analysis.merge_columns.len(), 3);
+    assert!(analysis.merge_columns.iter().all(|column| {
+        matches!(
+            &column.merge_op,
+            IncrementalAggregateMergeOp::StateDeltaMerge {
+                function_name: "__avg_state_delta_merge",
+                params,
+            } if params.is_empty()
+        )
+    }));
+    assert_eq!(analysis.merge_columns[0].output_field_name, "avg_a");
+    assert_eq!(analysis.merge_columns[0].input_field_name, "avg_a");
+    let avg_b = analysis
+        .merge_columns
+        .iter()
+        .find(|column| column.output_field_name == "avg_b")
+        .unwrap();
+    assert_eq!(avg_b.input_field_name, "avg_a");
+    assert!(
+        analysis
+            .merge_columns
+            .iter()
+            .any(|column| column.output_field_name == "avg_num_plus")
+    );
+}
+
+#[tokio::test]
+async fn test_rewrite_incremental_aggregate_merges_populated_mixed_state_families() {
+    let query_engine = create_test_query_engine();
+    let old_sql = "SELECT avg_state(number) AS avg_num, hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) ELSE 2 END AS grp FROM numbers_with_ts WHERE number <= 3 OR number = 6 GROUP BY grp";
+    let new_sql = "SELECT avg_state(number) AS avg_num, hll(CAST(number AS VARCHAR)) AS hll_a, hll(CAST(number AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, number) AS percentile_a, uddsketch_state(256, 0.02, number) AS percentile_b, stddev_pop_state(number) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) WHEN number <= 8 THEN 2 ELSE 3 END AS grp FROM numbers_with_ts WHERE number >= 4 AND number != 6 GROUP BY grp";
+    let old_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), old_sql, false)
+        .await
+        .unwrap();
+    let old_output = query_engine
+        .execute(old_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(old_stream) = old_output.data else {
+        panic!("expected old aggregate execution to be a stream");
+    };
+    let old_batches = util::collect(old_stream).await.unwrap();
+    let old_schema = old_batches.first().unwrap().schema.clone();
+    let old_batch = merge_record_batches(old_schema, &old_batches).unwrap();
+    assert_eq!(
+        old_batch.num_rows(),
+        2,
+        "old state must have one row per group"
+    );
+    let empty_state_sink_batch = old_batch.clone();
+    let sink_table = MemTable::table("state_merge_sink", old_batch);
+    let sink_table_name = [
+        "greptime".to_string(),
+        "public".to_string(),
+        "state_merge_sink".to_string(),
+    ];
+
+    let new_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), new_sql, false)
+        .await
+        .unwrap();
+    let analysis = analyze_incremental_aggregate_plan(&new_plan)
+        .unwrap()
+        .unwrap();
+    assert!(analysis.unsupported_exprs.is_empty());
+    let rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &new_plan,
+        &analysis,
+        &query_engine,
+        sink_table,
+        &sink_table_name,
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        analysis.output_field_names,
+        vec![
+            "avg_num",
+            "hll_a",
+            "hll_b",
+            "percentile_a",
+            "percentile_b",
+            "stddev_state",
+            "total",
+            "grp",
+        ],
+        "repeated HLL aliases must preserve output order"
+    );
+
+    let output = query_engine
+        .execute(rewritten, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(stream) = output.data else {
+        panic!("expected rewritten plan to execute as a stream");
+    };
+    let batches = util::collect(stream).await.unwrap();
+    let merged_schema = batches.first().unwrap().schema.clone();
+    let merged_batch = merge_record_batches(merged_schema, &batches).unwrap();
+    assert_eq!(
+        merged_batch.num_rows(),
+        3,
+        "rewrite must produce one row per group"
+    );
+    let avg_states = merged_batch
+        .column_by_name("avg_num")
+        .unwrap()
+        .as_binary::<i32>();
+    let merged_groups = merged_batch
+        .column_by_name("grp")
+        .unwrap()
+        .as_primitive::<Int64Type>();
+    assert_eq!(avg_states.null_count(), 0);
+    for index in 0..merged_batch.num_rows() {
+        let expected = match (!merged_groups.is_null(index)).then(|| merged_groups.value(index)) {
+            None => Some(3.0),
+            Some(2) => Some(7.0),
+            Some(3) => Some(9.5),
+            group => panic!("unexpected group: {group:?}"),
+        };
+        assert_eq!(
+            AvgState::decode(avg_states.value(index)).unwrap().average(),
+            expected
+        );
+    }
+    let merged_table = MemTable::table("merged_states", merged_batch);
+    query_engine
+        .engine_state()
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap()
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "merged_states".to_string(),
+            table_id: 4097,
+            table: merged_table,
+        })
+        .unwrap();
+    let checks = "SELECT grp, sum(total) AS total, hll_count(hll_merge(hll_a)) AS hll_a, hll_count(hll_merge(hll_b)) AS hll_b, stddev_pop_calc(stddev_pop_merge(stddev_state)) AS stddev, uddsketch_calc(0.5, uddsketch_merge(128, 0.000001, percentile_a)) AS p50_a, uddsketch_calc(0.5, uddsketch_merge(256, 0.02, percentile_b)) AS p50_b FROM merged_states GROUP BY grp ORDER BY grp NULLS FIRST";
+    let checks_plan = sql_to_df_plan(QueryContext::arc(), query_engine.clone(), checks, false)
+        .await
+        .unwrap();
+    let checks_output = query_engine
+        .execute(checks_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(checks_stream) = checks_output.data else {
+        panic!("expected state check execution to be a stream");
+    };
+    let checks_batches = util::collect(checks_stream).await.unwrap();
+    let checks_schema = checks_batches.first().unwrap().schema.clone();
+    let checks = merge_record_batches(checks_schema, &checks_batches).unwrap();
+    assert_eq!(checks.num_rows(), 3);
+    assert_eq!(
+        checks
+            .schema
+            .column_schemas()
+            .iter()
+            .map(|column| column.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["grp", "total", "hll_a", "hll_b", "stddev", "p50_a", "p50_b"]
+    );
+    let group = checks.column(0).as_primitive::<Int64Type>();
+    let total = checks.column(1).as_primitive::<UInt64Type>();
+    let hll_a = checks.column(2).as_primitive::<UInt64Type>();
+    let hll_b = checks.column(3).as_primitive::<UInt64Type>();
+    let stddev = checks.column(4).as_primitive::<Float64Type>();
+    let p50_a = checks.column(5).as_primitive::<Float64Type>();
+    let p50_b = checks.column(6).as_primitive::<Float64Type>();
+    assert_eq!(group.null_count(), 1);
+    assert_eq!(total.null_count(), 0);
+    assert_eq!(hll_a.null_count(), 0);
+    assert_eq!(hll_b.null_count(), 0);
+    assert_eq!(stddev.null_count(), 0);
+    assert_eq!(p50_a.null_count(), 0);
+    assert_eq!(p50_b.null_count(), 0);
+    for (index, expected) in [
+        (None, 15_u64, 5_u64, 2_f64.sqrt(), 3_f64, 3_f64),
+        (
+            Some(2_i64),
+            21_u64,
+            3_u64,
+            (2_f64 / 3.0).sqrt(),
+            7_f64,
+            7_f64,
+        ),
+        (Some(3_i64), 19_u64, 2_u64, 0.5_f64, 10_f64, 10_f64),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            (!group.is_null(index)).then(|| group.value(index)),
+            expected.0
+        );
+        assert_eq!(total.value(index), expected.1);
+        assert_eq!(hll_a.value(index), expected.2);
+        assert_eq!(hll_b.value(index), expected.2);
+        assert!((stddev.value(index) - expected.3).abs() < 1e-12);
+        // UDDSketch's relative-error bounds are 1e-6 and 2e-2 respectively.
+        assert!((p50_a.value(index) - expected.4).abs() <= expected.4 * 0.000001);
+        assert!((p50_b.value(index) - expected.5).abs() <= expected.5 * 0.02);
+    }
+
+    let empty_state_plan = sql_to_df_plan(
+        QueryContext::arc(),
+        query_engine.clone(),
+        "SELECT hll(CAST(NULL AS VARCHAR)) AS hll_a, hll(CAST(NULL AS VARCHAR)) AS hll_b, uddsketch_state(128, 0.000001, CAST(NULL AS DOUBLE)) AS percentile_a, uddsketch_state(256, 0.02, CAST(NULL AS DOUBLE)) AS percentile_b, stddev_pop_state(CAST(NULL AS DOUBLE)) AS stddev_state, sum(number) AS total, CASE WHEN number <= 5 THEN CAST(NULL AS BIGINT) WHEN number <= 8 THEN 2 ELSE 3 END AS grp FROM numbers_with_ts WHERE number = 10 GROUP BY grp",
+        false,
+    )
+    .await
+    .unwrap();
+    let empty_state_analysis = analyze_incremental_aggregate_plan(&empty_state_plan)
+        .unwrap()
+        .unwrap();
+    assert!(empty_state_analysis.unsupported_exprs.is_empty());
+    let empty_state_rewritten = rewrite_incremental_aggregate_with_sink_merge(
+        &empty_state_plan,
+        &empty_state_analysis,
+        &query_engine,
+        MemTable::table("empty_state_sink", empty_state_sink_batch),
+        &[
+            "greptime".to_string(),
+            "public".to_string(),
+            "empty_state_sink".to_string(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    let empty_state_output = query_engine
+        .execute(empty_state_rewritten, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(empty_state_stream) = empty_state_output.data else {
+        panic!("expected empty state merge to execute as a stream");
+    };
+    let empty_state_batches = util::collect(empty_state_stream).await.unwrap();
+    let empty_state_schema = empty_state_batches.first().unwrap().schema.clone();
+    let empty_state_batch = merge_record_batches(empty_state_schema, &empty_state_batches).unwrap();
+    assert_eq!(empty_state_batch.num_rows(), 1);
+    let group_index = empty_state_batch
+        .schema
+        .column_index_by_name("grp")
+        .unwrap();
+    let total_index = empty_state_batch
+        .schema
+        .column_index_by_name("total")
+        .unwrap();
+    let group = empty_state_batch
+        .column(group_index)
+        .as_primitive::<Int64Type>();
+    let total = empty_state_batch
+        .column(total_index)
+        .as_primitive::<UInt64Type>();
+    assert!(!group.is_null(0));
+    assert_eq!(group.value(0), 3);
+    assert!(!total.is_null(0));
+    assert_eq!(total.value(0), 10);
+    let empty_state_table = MemTable::table("empty_states", empty_state_batch);
+    query_engine
+        .engine_state()
+        .catalog_manager()
+        .as_any()
+        .downcast_ref::<catalog::memory::MemoryCatalogManager>()
+        .unwrap()
+        .register_table_sync(RegisterTableRequest {
+            catalog: "greptime".to_string(),
+            schema: "public".to_string(),
+            table_name: "empty_states".to_string(),
+            table_id: 4098,
+            table: empty_state_table,
+        })
+        .unwrap();
+    let empty_checks_plan = sql_to_df_plan(
+        QueryContext::arc(),
+        query_engine.clone(),
+        "SELECT hll_count(hll_merge(hll_a)) AS hll, stddev_pop_calc(stddev_pop_merge(stddev_state)) AS stddev, uddsketch_calc(0.5, uddsketch_merge(128, 0.000001, percentile_a)) AS p50_a, uddsketch_calc(0.5, uddsketch_merge(256, 0.02, percentile_b)) AS p50_b FROM empty_states",
+        false,
+    )
+    .await
+    .unwrap();
+    let empty_checks_output = query_engine
+        .execute(empty_checks_plan, QueryContext::arc())
+        .await
+        .unwrap();
+    let OutputData::Stream(empty_checks_stream) = empty_checks_output.data else {
+        panic!("expected empty state check to execute as a stream");
+    };
+    let empty_checks_batches = util::collect(empty_checks_stream).await.unwrap();
+    let empty_checks_schema = empty_checks_batches.first().unwrap().schema.clone();
+    let empty_checks = merge_record_batches(empty_checks_schema, &empty_checks_batches).unwrap();
+    assert_eq!(empty_checks.num_rows(), 1);
+    assert_eq!(
+        empty_checks.column(0).as_primitive::<UInt64Type>().value(0),
+        0
+    );
+    assert!(
+        empty_checks
+            .column(1)
+            .as_primitive::<Float64Type>()
+            .is_null(0)
+    );
+    assert!(
+        empty_checks
+            .column(2)
+            .as_primitive::<Float64Type>()
+            .is_null(0)
+    );
+    assert!(
+        empty_checks
+            .column(3)
+            .as_primitive::<Float64Type>()
+            .is_null(0)
+    );
+}
+
+#[tokio::test]
+async fn test_analyze_incremental_aggregate_plan_state_producer_metadata_and_rejections() {
+    let analysis = analyze_test_sql(
+        "SELECT hll(CAST(number AS VARCHAR)) AS hll_state, \
+         stddev_pop_state(number) AS stddev_state, \
+         uddsketch_state(128, 0.000001, number) AS percentile_state, ts \
+         FROM numbers_with_ts GROUP BY ts",
+    )
+    .await;
+    assert!(analysis.unsupported_exprs.is_empty());
+    let percentile = analysis
+        .merge_columns
+        .iter()
+        .find(|column| column.output_field_name == "percentile_state")
+        .unwrap();
+    let IncrementalAggregateMergeOp::StateDeltaMerge {
+        function_name,
+        params,
+    } = &percentile.merge_op
+    else {
+        panic!("expected UDDSketch state delta merge");
+    };
+    assert_eq!(*function_name, "__uddsketch_state_delta_merge");
+    assert_eq!(params.len(), 2);
+    assert!(matches!(
+        params[0],
+        Expr::Literal(ScalarValue::Int64(Some(128)), _)
+    ));
+    assert!(matches!(
+        params[1],
+        Expr::Literal(ScalarValue::Float64(Some(rate)), _) if rate == 0.000001
+    ));
+
+    for sql in [
+        "SELECT uddsketch_state(CAST(number AS BIGINT), 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT uddsketch_state(128, NULL, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT uddsketch_state(NULL, 0.01, number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT avg(number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+        "SELECT stddev_pop(number) AS state, ts FROM numbers_with_ts GROUP BY ts",
+    ] {
+        let analysis = analyze_test_sql(sql).await;
+        assert!(!analysis.unsupported_exprs.is_empty(), "must reject {sql}");
+    }
 }
 
 #[tokio::test]
@@ -1638,6 +2245,7 @@ async fn test_rewrite_incremental_aggregate_with_left_join() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,
@@ -1699,6 +2307,7 @@ async fn test_rewrite_incremental_aggregate_filters_sink_dirty_time_window() {
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         Some(sink_filter.clone()),
@@ -1749,7 +2358,9 @@ async fn test_rewrite_incremental_aggregate_rejects_empty_group_keys() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number) AS number FROM numbers_with_ts";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = IncrementalAggregateAnalysis {
         group_key_names: vec![],
         merge_columns: vec![IncrementalAggregateMergeColumn::new(
@@ -1770,6 +2381,7 @@ async fn test_rewrite_incremental_aggregate_rejects_empty_group_keys() {
     let err = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table,
         &sink_table_name,
         None,
@@ -1788,7 +2400,9 @@ async fn test_rewrite_incremental_aggregate_preserves_raw_aggregate_field_name()
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
     let sql = "SELECT max(number), number FROM numbers_with_ts GROUP BY number";
-    let plan = sql_to_df_plan(ctx, query_engine, sql, false).await.unwrap();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), sql, false)
+        .await
+        .unwrap();
     let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
     assert!(analysis.unsupported_exprs.is_empty());
 
@@ -1802,6 +2416,7 @@ async fn test_rewrite_incremental_aggregate_preserves_raw_aggregate_field_name()
     let rewritten = rewrite_incremental_aggregate_with_sink_merge(
         &plan,
         &analysis,
+        &query_engine,
         sink_table.clone(),
         &sink_table_name,
         None,

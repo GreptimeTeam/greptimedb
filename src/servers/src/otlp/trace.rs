@@ -39,6 +39,7 @@ pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_STATUS_MESSAGE_COLUMN: &str = "span_status_message";
 pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
+pub const SPAN_LINKS_COLUMN: &str = "span_links";
 pub const SCOPE_NAME_COLUMN: &str = "scope_name";
 pub const SCOPE_VERSION_COLUMN: &str = "scope_version";
 /// Column containing instrumentation scope attributes as a JSON2 object.

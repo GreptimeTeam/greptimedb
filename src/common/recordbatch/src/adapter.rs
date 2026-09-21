@@ -907,7 +907,7 @@ fn convert_map_to_json_binary(
                             )));
                         }
                     };
-                    match jsonb::parse_value(json_string.as_bytes()) {
+                    match jsonb::parse_value_standard_mode(json_string.as_bytes()) {
                         Ok(jsonb_value) => jsonb_value.to_vec(),
                         Err(e) => {
                             return Err(ArrowError::CastError(format!(
