@@ -383,6 +383,9 @@ mod tests {
         async fn read_manifest(&self) -> Result<Manifest> {
             unreachable!()
         }
+        async fn file_size(&self, _: &str) -> Result<Option<u64>> {
+            unreachable!()
+        }
         async fn write_schema(
             &self,
             _: &crate::data::export_v2::schema::SchemaSnapshot,
