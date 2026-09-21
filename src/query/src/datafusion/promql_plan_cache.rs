@@ -20,6 +20,7 @@
 //! hit rebinds the evaluation bounds, the generated time filters and the table
 //! source of the current request before physical planning runs.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, LazyLock};
@@ -29,16 +30,25 @@ use datafusion::datasource::empty::EmptyTable;
 use datafusion::datasource::{DefaultTableSource, provider_as_source};
 use datafusion::execution::SessionState;
 use datafusion::functions_aggregate::average::avg_udaf;
+use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion::functions_aggregate::sum::sum_udaf;
+use datafusion::functions_window::row_number::RowNumber;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result, ScalarValue};
+use datafusion_expr::expr::WindowFunctionDefinition;
 use datafusion_expr::{
-    Expr, Extension, LogicalPlan, Operator, ScalarUDF, TableSource, UserDefinedLogicalNodeCore,
+    AggregateUDF, Expr, Extension, LogicalPlan, Operator, ScalarUDF, TableSource,
+    UserDefinedLogicalNodeCore, WindowFrameBound, WindowUDF,
 };
 use datafusion_optimizer::{OptimizerContext, OptimizerRule};
 use moka::future::Cache;
 use promql::extension_plan::{InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize};
-use promql::functions::{Delta, Increase, Rate};
+use promql::functions::{
+    AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, IDelta, Increase,
+    LastOverTime, MaxOverTime, MinOverTime, PresentOverTime, Rate, Resets, StddevOverTime,
+    StdvarOverTime, SumOverTime,
+};
 use session::context::QueryContext;
 use session::hints::{
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
@@ -72,13 +82,49 @@ const EXECUTION_ONLY_EXTENSIONS: [&str; 2] = [
 /// The float range functions a template may contain. Admitted occurrences are
 /// replaced by these process-wide instances, so a template can never retain a
 /// request's annotation collector or any other per-request closure.
-static RANGE_FUNCTIONS: LazyLock<[Arc<ScalarUDF>; 3]> = LazyLock::new(|| {
+///
+/// This is the complete set of float range functions the PromQL planner builds
+/// without an extra parameter, not a hand-picked subset: they all share one
+/// safety argument, so leaving any of them out would be arbitrary. Functions
+/// taking a parameter (`quantile_over_time`, `predict_linear`, ...) are out
+/// until their literal handling is covered by a test.
+///
+/// Only the float implementations belong here. Their native-histogram
+/// counterparts are built with `scalar_udf_with_collector` and carry a
+/// per-request collector; they live in a separate `prom_native_histogram_*`
+/// name space, so matching on name and signature cannot confuse the two.
+static RANGE_FUNCTIONS: LazyLock<[Arc<ScalarUDF>; 18]> = LazyLock::new(|| {
     [
         Arc::new(Rate::scalar_udf()),
         Arc::new(Increase::scalar_udf()),
         Arc::new(Delta::scalar_udf()),
+        Arc::new(IDelta::<true>::scalar_udf()),
+        Arc::new(IDelta::<false>::scalar_udf()),
+        Arc::new(Resets::scalar_udf()),
+        Arc::new(Changes::scalar_udf()),
+        Arc::new(Deriv::scalar_udf()),
+        Arc::new(AvgOverTime::scalar_udf()),
+        Arc::new(MinOverTime::scalar_udf()),
+        Arc::new(MaxOverTime::scalar_udf()),
+        Arc::new(SumOverTime::scalar_udf()),
+        Arc::new(CountOverTime::scalar_udf()),
+        Arc::new(LastOverTime::scalar_udf()),
+        Arc::new(AbsentOverTime::scalar_udf()),
+        Arc::new(PresentOverTime::scalar_udf()),
+        Arc::new(StddevOverTime::scalar_udf()),
+        Arc::new(StdvarOverTime::scalar_udf()),
     ]
 });
+
+/// The only window function an admitted plan may contain.
+static ROW_NUMBER: LazyLock<WindowUDF> = LazyLock::new(|| RowNumber::new().into());
+
+/// The aggregate functions a template may contain, all of them DataFusion
+/// process-wide instances that the PromQL planner calls directly. Unlike the
+/// range functions these are kept as-is: there is no per-request variant to
+/// canonicalize away.
+static AGGREGATE_FUNCTIONS: LazyLock<[Arc<AggregateUDF>; 5]> =
+    LazyLock::new(|| [sum_udaf(), avg_udaf(), max_udaf(), min_udaf(), count_udaf()]);
 
 fn canonical_range_function(func: &ScalarUDF) -> Option<Arc<ScalarUDF>> {
     RANGE_FUNCTIONS
@@ -100,14 +146,15 @@ enum Dependency {
 
 impl Dependency {
     fn from_source(source: &Arc<dyn TableSource>) -> Option<Self> {
-        let provider = &source
-            .as_any()
+        let source: &dyn Any = source.as_ref();
+        let provider: &dyn Any = source
             .downcast_ref::<DefaultTableSource>()?
-            .table_provider;
-        if let Some(table) = provider.as_any().downcast_ref::<DfTableProviderAdapter>() {
+            .table_provider
+            .as_ref();
+        if let Some(table) = provider.downcast_ref::<DfTableProviderAdapter>() {
             Some(Self::Table(table.table().table_info()))
         } else {
-            let region = provider.as_any().downcast_ref::<DummyTableProvider>()?;
+            let region = provider.downcast_ref::<DummyTableProvider>()?;
             Some(Self::Region(region.region_metadata()))
         }
     }
@@ -343,6 +390,7 @@ impl Shape {
             LogicalPlan::Projection(_)
             | LogicalPlan::Filter(_)
             | LogicalPlan::Aggregate(_)
+            | LogicalPlan::Window(_)
             | LogicalPlan::Sort(_) => {}
             LogicalPlan::SubqueryAlias(alias) => {
                 self.bytes += alias.alias.to_string().len();
@@ -449,8 +497,34 @@ impl Shape {
             Expr::ScalarFunction(function) => {
                 canonical_range_function(&function.func)?;
             }
+            Expr::WindowFunction(window) => {
+                // `row_number` is the only window function the PromQL planner
+                // emits (the `topk`/`bottomk` rewrite). It is stateless, so the
+                // template may keep the instance.
+                let WindowFunctionDefinition::WindowUDF(udwf) = &window.fun else {
+                    return None;
+                };
+                if udwf.name() != ROW_NUMBER.name() || udwf.signature() != ROW_NUMBER.signature() {
+                    return None;
+                }
+                // `apply_children` does not descend into the frame, so its
+                // bounds are neither checked below nor shifted by `rebind`. A
+                // bound that moved with the request would therefore key a new
+                // entry on every query instead of reusing one.
+                let frame = &window.params.window_frame;
+                if !stable_frame_bound(frame.start_bound.clone())
+                    || !stable_frame_bound(frame.end_bound.clone())
+                {
+                    return None;
+                }
+            }
             Expr::AggregateFunction(function) => {
-                if function.func != avg_udaf() && function.func != sum_udaf() {
+                // The PromQL planner builds these from DataFusion's process-wide
+                // instances, so a template that keeps one holds no request state.
+                if !AGGREGATE_FUNCTIONS
+                    .iter()
+                    .any(|allowed| &function.func == allowed)
+                {
                     return None;
                 }
             }
@@ -472,6 +546,22 @@ impl Shape {
         })
         .ok()?;
         (admitted && self.bytes <= MAX_BYTES).then_some(())
+    }
+}
+
+/// Whether a window frame bound is independent of the request's evaluation
+/// bounds, so that the same query shape keys the same entry over time.
+fn stable_frame_bound(bound: WindowFrameBound) -> bool {
+    match bound {
+        WindowFrameBound::CurrentRow => true,
+        WindowFrameBound::Preceding(value) | WindowFrameBound::Following(value) => matches!(
+            value,
+            ScalarValue::Null
+                | ScalarValue::UInt64(_)
+                | ScalarValue::Int64(_)
+                | ScalarValue::UInt32(_)
+                | ScalarValue::Int32(_)
+        ),
     }
 }
 
