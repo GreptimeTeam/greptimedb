@@ -870,7 +870,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
 /// This function extracts the necessary info including catalog/database name, time range, etc.
-fn to_copy_database_request(
+pub fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,
 ) -> Result<CopyDatabaseRequest> {

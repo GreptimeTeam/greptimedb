@@ -15125,6 +15125,7 @@ dependencies = [
  "catalog",
  "chrono",
  "clap",
+ "cli",
  "client",
  "cmd",
  "common-base",

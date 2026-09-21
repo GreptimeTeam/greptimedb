@@ -99,6 +99,18 @@ impl DatabaseClient {
 
     /// Execute sql query.
     pub async fn sql(&self, sql: &str, schema: &str) -> Result<Option<Vec<Vec<Value>>>> {
+        let body = self.sql_response(sql, schema).await?;
+        Ok(body.output().first().and_then(|output| match output {
+            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
+            GreptimeQueryOutput::AffectedRows(_) => None,
+        }))
+    }
+
+    pub(crate) async fn sql_response(
+        &self,
+        sql: &str,
+        schema: &str,
+    ) -> Result<GreptimedbV1Response> {
         let url = format!("http://{}/v1/sql", self.addr);
         let params = [
             ("db", format!("{}-{}", self.catalog, schema)),
@@ -138,11 +150,7 @@ impl DatabaseClient {
             reason: "cannot get response text".to_string(),
         })?;
 
-        let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
-        Ok(body.output().first().and_then(|output| match output {
-            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
-            GreptimeQueryOutput::AffectedRows(_) => None,
-        }))
+        serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)
     }
 }
 
