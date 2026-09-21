@@ -300,7 +300,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "Duplicate region engine config '{engine}' at region_engine[{first_index}] and region_engine[{duplicate_index}]; each engine type may be configured only once"
+        "Duplicate region engine config '{engine}' at region_engine[{first_index}] and region_engine[{duplicate_index}] (indices are zero-based); each engine type may be configured only once"
     ))]
     DuplicateRegionEngineConfig {
         engine: &'static str,
