@@ -467,6 +467,7 @@ impl Instance {
                         request.record_batch,
                         request.schema_bytes,
                         ctx.skip_wal(),
+                        ctx.channel(),
                     )
                     .await
                     .context(TableOperationSnafu)?;

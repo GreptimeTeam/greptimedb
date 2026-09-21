@@ -325,6 +325,57 @@ PARTITION ON COLUMNS (n) (
     check_output_stream(output, expected).await;
 }
 
+#[apply(both_instances_cases)]
+async fn test_database_ingest_rate_limit_not_inherited(instance: Arc<dyn MockInstance>) {
+    let frontend = instance.frontend();
+    execute_sql(
+        &frontend,
+        "CREATE DATABASE limited WITH ('ingest_rows_rate_limit'='1000', 'skip_wal'='true')",
+    )
+    .await;
+    let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, "limited"));
+
+    for (name, sql) in [
+        ("source", "CREATE TABLE source (ts TIMESTAMP TIME INDEX)"),
+        ("copy", "CREATE TABLE copy LIKE source"),
+    ] {
+        execute_sql_with(&frontend, sql, ctx.clone()).await;
+        let table = frontend
+            .catalog_manager()
+            .table(DEFAULT_CATALOG_NAME, "limited", name, None)
+            .await
+            .unwrap()
+            .unwrap();
+        let options = &table.table_info().meta.options;
+        assert!(!options.extra_options.contains_key("ingest_rows_rate_limit"));
+        assert!(options.skip_wal);
+
+        let output =
+            execute_sql_with(&frontend, &format!("SHOW CREATE TABLE {name}"), ctx.clone()).await;
+        let OutputData::RecordBatches(batches) = output.data else {
+            unreachable!()
+        };
+        let batch = batches.iter().next().unwrap();
+        let ddl = batch
+            .column_by_name("Create Table")
+            .unwrap()
+            .as_string::<i32>()
+            .value(0);
+        assert!(!ddl.contains("ingest_rows_rate_limit"));
+        execute_sql_with(&frontend, &format!("DROP TABLE {name}"), ctx.clone()).await;
+        execute_sql_with(&frontend, ddl, ctx.clone()).await;
+    }
+
+    let output = execute_sql(&frontend, "SHOW CREATE DATABASE limited").await;
+    assert!(
+        output
+            .data
+            .pretty_print()
+            .await
+            .contains("ingest_rows_rate_limit")
+    );
+}
+
 #[apply(standalone_instance_case)]
 async fn test_extra_external_table_options(instance: Arc<dyn MockInstance>) {
     let frontend = instance.frontend();

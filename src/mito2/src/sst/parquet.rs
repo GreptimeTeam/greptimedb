@@ -212,10 +212,10 @@ mod tests {
     };
     use crate::test_util::TestEnv;
     use crate::test_util::sst_util::{
-        build_test_binary_test_region_metadata, new_flat_source_from_record_batches,
-        new_primary_key, new_record_batch_by_range, new_record_batch_with_custom_sequence,
-        new_sparse_primary_key, sst_file_handle, sst_file_handle_with_file_id, sst_region_metadata,
-        sst_region_metadata_with_encoding,
+        WriteChunkRecorder, build_test_binary_test_region_metadata,
+        new_flat_source_from_record_batches, new_primary_key, new_record_batch_by_range,
+        new_record_batch_with_custom_sequence, new_sparse_primary_key, sst_file_handle,
+        sst_file_handle_with_file_id, sst_region_metadata, sst_region_metadata_with_encoding,
     };
 
     const FILE_DIR: &str = "/";
@@ -901,12 +901,14 @@ mod tests {
         .await;
     }
 
+    #[rstest::rstest]
     #[tokio::test]
-    async fn test_write_multiple_files() {
+    async fn test_write_multiple_files(#[values(1024, 4096)] write_buffer_size: usize) {
         common_telemetry::init_default_ut_logging();
         // create test env
         let mut env = TestEnv::new().await;
-        let object_store = env.init_object_store_manager();
+        let chunks = WriteChunkRecorder::default();
+        let object_store = env.init_object_store_manager().layer(chunks.layer());
         let metadata = Arc::new(sst_region_metadata());
         let batches = vec![
             new_record_batch_by_range(&["a", "a"], 0, 1000),
@@ -921,6 +923,7 @@ mod tests {
 
         let source = new_flat_source_from_record_batches(batches);
         let write_opts = WriteOptions {
+            write_buffer_size: ReadableSize(write_buffer_size as u64),
             row_group_size: 50,
             max_file_size: Some(1024 * 16),
             ..Default::default()
@@ -936,7 +939,7 @@ mod tests {
             metadata.clone(),
             IndexConfig::default(),
             NoopIndexBuilder,
-            path_provider,
+            path_provider.clone(),
             &mut metrics,
         )
         .await;
@@ -947,8 +950,18 @@ mod tests {
             .unwrap();
         assert_eq!(2, files.len());
 
+        // The configured buffer size must reach every writer, including split files.
+        assert_eq!(files.len(), chunks.num_files());
+
         let mut rows_read = 0;
         for f in &files {
+            assert!(f.file_size > write_buffer_size as u64);
+            chunks.assert_chunks(
+                &path_provider
+                    .build_sst_file_path(RegionFileId::new(metadata.region_id, f.file_id)),
+                write_buffer_size,
+                f.file_size as usize,
+            );
             let file_handle = sst_file_handle_with_file_id(
                 f.file_id,
                 f.time_range.0.value(),

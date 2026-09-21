@@ -28,6 +28,7 @@ use servers::opentsdb::codec::DataPoint;
 use servers::query_handler::OpentsdbProtocolHandler;
 use servers::query_handler::sql::SqlQueryHandler;
 use session::context::QueryContextRef;
+use snafu::IntoError;
 use sql::statements::statement::Statement;
 use tokio::sync::mpsc;
 
@@ -43,6 +44,11 @@ impl OpentsdbProtocolHandler for DummyInstance {
 
     async fn exec(&self, data_points: Vec<DataPoint>, _ctx: QueryContextRef) -> Result<usize> {
         let data_point = data_points.first().unwrap();
+        if data_point.metric() == "rate_limited" {
+            return Err(error::WriteRejectedSnafu.into_error(
+                meter_core::collect::WriteRejected::new("database row quota exhausted"),
+            ));
+        }
         if data_point.metric() == "should_failed" {
             return error::InternalSnafu {
                 err_msg: "expected",
@@ -155,6 +161,14 @@ async fn test_opentsdb_put() {
         .await;
     assert_eq!(result.status(), 500);
     assert_eq!(result.text().await, "{\"error\":\"Internal error: 1003\"}");
+
+    let result = client
+        .post("/v1/opentsdb/api/put")
+        .body(create_data_point("rate_limited"))
+        .send()
+        .await;
+    assert_eq!(result.status(), 429);
+    assert!(result.text().await.contains("database row quota exhausted"));
 
     let mut metrics = vec![];
     while let Ok(s) = rx.try_recv() {

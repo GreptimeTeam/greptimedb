@@ -106,6 +106,9 @@ pub const DDL_WAIT: &str = "wait";
 
 pub const VALID_DDL_OPTION_KEYS: [&str; 2] = [DDL_TIMEOUT, DDL_WAIT];
 
+/// The key of ingest rows rate limit option (rows per second, cluster-wide) in database options.
+pub const INGEST_ROWS_RATE_LIMIT_KEY: &str = "ingest_rows_rate_limit";
+
 // Valid option keys when creating a db.
 static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     let mut set = HashSet::new();
@@ -129,6 +132,7 @@ static VALID_DB_OPT_KEYS: Lazy<HashSet<&str>> = Lazy::new(|| {
     set.insert(TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER);
     set.insert(TWCS_MAX_OUTPUT_FILE_SIZE);
     set.insert(SST_FORMAT_KEY);
+    set.insert(INGEST_ROWS_RATE_LIMIT_KEY);
     set
 });
 
@@ -142,6 +146,12 @@ pub fn validate_database_option_value(
     key: &str,
     value: Option<&str>,
 ) -> std::result::Result<(), &'static str> {
+    if key == INGEST_ROWS_RATE_LIMIT_KEY {
+        return value
+            .and_then(|value| value.parse::<u64>().ok())
+            .map(|_| ())
+            .ok_or("expected a non-negative integer fitting in u64");
+    }
     let (minimum, constraint) = match key {
         TWCS_TRIGGER_FILE_NUM
         | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
@@ -933,6 +943,8 @@ mod tests {
         assert!(validate_database_option(
             "compaction.twcs.inactive_window.l1_merge_trigger"
         ));
+        assert!(validate_database_option(INGEST_ROWS_RATE_LIMIT_KEY));
+        assert!(validate_database_option("ingest_rows_rate_limit"));
         assert!(!validate_database_option("foo"));
     }
 
@@ -991,6 +1003,27 @@ mod tests {
                     "{key}: {boundary}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn test_database_ingest_rate_limit_value_boundaries() {
+        for invalid in [
+            None,
+            Some(""),
+            Some("abc"),
+            Some("1000/s"),
+            Some("-1"),
+            Some("1.5"),
+            Some("18446744073709551616"),
+        ] {
+            assert!(validate_database_option_value(INGEST_ROWS_RATE_LIMIT_KEY, invalid).is_err());
+        }
+        let maximum = u64::MAX.to_string();
+        for valid in ["0", "1", maximum.as_str()] {
+            assert!(
+                validate_database_option_value(INGEST_ROWS_RATE_LIMIT_KEY, Some(valid)).is_ok()
+            );
         }
     }
 

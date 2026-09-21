@@ -62,12 +62,30 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// as well constrain a value field, which the parsed expression does not distinguish from a
 /// label. For an aggregated operand they are its grouping labels, which is what makes filtering
 /// its input equivalent to filtering its output.
+///
+/// A value field is not a series identity though: its value may vary between the samples of one
+/// series, so a matcher on it must not be lowered below sample selection (`PromInstantManipulate`,
+/// `PromSeriesDivide`), where discarding a sample promotes an older one out of the lookback window
+/// and fabricates a match. An aggregated operand's tag columns are its grouping labels rather than
+/// the tags of its input, so those labels may name value fields; a matcher therefore only crosses
+/// an aggregation when it names one of the grouping labels that aggregation partitions by, and
+/// `left_field_labels`/`right_field_labels` rule out the grouping labels the planner found to be
+/// value fields of the aggregated operand's input
+/// (`PromPlannerContext::aggregation_field_labels`).
 pub(super) fn propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
+    left_field_labels: &[String],
+    right_field_labels: &[String],
 ) -> Option<BinaryExpr> {
-    match try_propagate(binary, left_tags, right_tags) {
+    match try_propagate(
+        binary,
+        left_tags,
+        right_tags,
+        left_field_labels,
+        right_field_labels,
+    ) {
         Ok(rewritten) => Some(rewritten),
         Err(reason) => {
             common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
@@ -81,6 +99,8 @@ fn try_propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
+    left_field_labels: &[String],
+    right_field_labels: &[String],
 ) -> Result<BinaryExpr, &'static str> {
     if !matches!(
         binary.op.id(),
@@ -101,9 +121,18 @@ fn try_propagate(
         .as_ref()
         .and_then(|modifier| modifier.matching.as_ref());
 
+    // The grouping labels of every aggregation the operands cross, collected before `rewritten`
+    // takes the mutable borrows that rule out borrowing `binary` again.
+    let left_grouped = modifier_label_names(&binary.lhs);
+    let left_ignored = modifier_excluded_label_names(&binary.lhs);
+    let right_grouped = modifier_label_names(&binary.rhs);
+    let right_ignored = modifier_excluded_label_names(&binary.rhs);
+
     let mut rewritten = binary.clone();
-    let left = selector_matchers(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
-    let right = selector_matchers(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
+    let (left, left_restricted) =
+        targeted_selector(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
+    let (right, right_restricted) =
+        targeted_selector(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
     if !left.or_matchers.is_empty() || !right.or_matchers.is_empty() {
         return Err("selector has an or matcher group");
     }
@@ -113,11 +142,16 @@ fn try_propagate(
         !name.starts_with("__")
             && left_tags.contains(name)
             && right_tags.contains(name)
+            // A grouping label that is a value field of the operand's input is not a series tag.
+            && !left_field_labels.contains(name)
+            && !right_field_labels.contains(name)
             && match matching {
                 None => true,
                 Some(LabelModifier::Include(on)) => on.labels.contains(name),
                 Some(LabelModifier::Exclude(ignoring)) => !ignoring.labels.contains(name),
             }
+            && (!left_restricted || crosses_aggregation(name, &left_grouped, &left_ignored))
+            && (!right_restricted || crosses_aggregation(name, &right_grouped, &right_ignored))
     };
     let constraints = left
         .matchers
@@ -150,9 +184,9 @@ fn matches_every_value(matcher: &Matcher) -> bool {
 /// by a grouping label drops exactly the matching output series and leaves the remaining
 /// aggregated values untouched.
 ///
-/// `topk`, `bottomk` and `limitk` rank across a group and carry the input labels through, so
-/// filtering before them changes the candidate set. `count_values` adds an output label that
-/// does not exist in its input.
+/// `topk` and `bottomk` rank across a group and carry the input labels through, so filtering
+/// before them changes the candidate set. `count_values` adds an output label that does not exist
+/// in its input.
 fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     matches!(
         aggregate.op.id(),
@@ -168,25 +202,70 @@ fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     )
 }
 
-/// Returns the matchers of the vector selector an operand scans, or `None` when the operand's
-/// output labels are not proven to be that selector's labels.
-fn selector_matchers(expr: &mut Expr) -> Option<&mut Matchers> {
+/// Returns the matchers of the vector selector an operand scans, together with whether the
+/// operand is restricted to the grouping labels an aggregation on its path partitions by, or
+/// `None` when the operand's output labels are not proven to be that selector's labels.
+fn targeted_selector(expr: &mut Expr) -> Option<(&mut Matchers, bool)> {
     match expr {
-        Expr::VectorSelector(selector) => Some(&mut selector.matchers),
-        Expr::Paren(paren) => selector_matchers(&mut paren.expr),
+        Expr::VectorSelector(selector) => Some((&mut selector.matchers, false)),
+        Expr::Paren(paren) => targeted_selector(&mut paren.expr),
         Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => {
-            selector_matchers(&mut aggregate.expr)
+            let (matchers, _) = targeted_selector(&mut aggregate.expr)?;
+            Some((matchers, aggregate.modifier.is_some()))
         }
         Expr::Call(call) if LABEL_PRESERVING_RANGE_FUNCTIONS.contains(&call.func.name) => {
             // Every other argument is a scalar, so position does not matter.
             let matrix = single_matrix_argument(&call.args.args)?;
             match call.args.args[matrix].as_mut() {
-                Expr::MatrixSelector(selector) => Some(&mut selector.vs.matchers),
+                Expr::MatrixSelector(selector) => Some((&mut selector.vs.matchers, false)),
                 _ => None,
             }
         }
         // Label rewriting and subqueries need separate proofs.
         _ => None,
+    }
+}
+
+/// Collects the labels every partitioning aggregation on [`targeted_selector`]' path to the
+/// scanned selector groups by (`by(...)`, the `LabelModifier::Include` of an aggregation).
+fn modifier_label_names(expr: &Expr) -> Vec<&String> {
+    let mut grouped = Vec::new();
+    collect_modifier_label_names(expr, true, &mut grouped);
+    grouped
+}
+
+/// Collects the labels every partitioning aggregation on [`targeted_selector`]' path to the
+/// scanned selector excludes from its grouping labels (`without(...)`, the
+/// `LabelModifier::Exclude` of an aggregation).
+fn modifier_excluded_label_names(expr: &Expr) -> Vec<&String> {
+    let mut ignored = Vec::new();
+    collect_modifier_label_names(expr, false, &mut ignored);
+    ignored
+}
+
+fn collect_modifier_label_names<'a>(expr: &'a Expr, included: bool, out: &mut Vec<&'a String>) {
+    match expr {
+        Expr::Paren(paren) => collect_modifier_label_names(&paren.expr, included, out),
+        Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => {
+            match aggregate.modifier.as_ref() {
+                Some(LabelModifier::Include(labels)) if included => out.extend(&labels.labels),
+                Some(LabelModifier::Exclude(labels)) if !included => out.extend(&labels.labels),
+                _ => (),
+            }
+            collect_modifier_label_names(&aggregate.expr, included, out);
+        }
+        _ => (),
+    }
+}
+
+/// Whether an operand an aggregation partitions by `grouped` labels (with `without(...)`, by
+/// every label but `ignored`) still carries `name` as an output label, so that a matcher on
+/// `name` reaches it on both sides of that aggregation.
+fn crosses_aggregation(name: &String, grouped: &[&String], ignored: &[&String]) -> bool {
+    if grouped.is_empty() {
+        !ignored.contains(&name)
+    } else {
+        grouped.contains(&name)
     }
 }
 
@@ -210,11 +289,30 @@ mod tests {
     use super::*;
 
     fn rewrite_with(query: &str, left_tags: &[&str], right_tags: &[&str]) -> Option<Expr> {
+        rewrite_labels_with(query, left_tags, &[], right_tags, &[])
+    }
+
+    /// [`rewrite_with`] with the grouping labels of each operand that the planner found to be
+    /// value fields of its input rather than tags (the metric's tags are `["host", "zone"]`).
+    fn rewrite_labels_with(
+        query: &str,
+        left_tags: &[&str],
+        left_field_labels: &[&str],
+        right_tags: &[&str],
+        right_field_labels: &[&str],
+    ) -> Option<Expr> {
         let Expr::Binary(binary) = parse(query).unwrap() else {
             panic!("expected binary")
         };
         let owned = |tags: &[&str]| tags.iter().map(|tag| tag.to_string()).collect::<Vec<_>>();
-        propagate(&binary, &owned(left_tags), &owned(right_tags)).map(Expr::Binary)
+        propagate(
+            &binary,
+            &owned(left_tags),
+            &owned(right_tags),
+            &owned(left_field_labels),
+            &owned(right_field_labels),
+        )
+        .map(Expr::Binary)
     }
 
     fn rewrite(query: &str) -> Option<Expr> {
@@ -295,6 +393,59 @@ mod tests {
         assert_rewrite(
             r#"avg without(zone) (rate(a[5m])) / b{host="x"}"#,
             r#"avg without(zone) (rate(a{host="x"}[5m])) / b{host="x"}"#,
+        );
+    }
+
+    #[test]
+    fn does_not_propagate_grouping_labels_that_are_value_fields() {
+        // `status` is a value field of both metrics, though `count by(status)` reports it as a
+        // grouping label of the aggregate; its value varies between the samples of one series.
+        assert!(
+            rewrite_labels_with(
+                r#"count by(status) (a) / on(status) count by(status) (b{status="ready"})"#,
+                &["status"],
+                &["status"],
+                &["status"],
+                &["status"],
+            )
+            .is_none()
+        );
+        // `host` is a tag, `status` is a value field: only the tag may propagate.
+        assert!(
+            rewrite_labels_with(
+                r#"sum by(host, status) (a) / on(status) sum by(host, status) (b{status="ready"})"#,
+                &["host", "status"],
+                &["status"],
+                &["host", "status"],
+                &["status"],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn propagates_grouping_labels_of_aggregated_operands() {
+        assert_rewrite(
+            r#"count by(host) (a) / on(host) count by(host) (b{host="x"})"#,
+            r#"count by(host) (a{host="x"}) / on(host) count by(host) (b{host="x"})"#,
+        );
+        assert_rewrite(
+            r#"sum by(host) (rate(a[5m])) / on(host) sum by(host) (b{host="x"})"#,
+            r#"sum by(host) (rate(a{host="x"}[5m])) / on(host) sum by(host) (b{host="x"})"#,
+        );
+    }
+
+    #[test]
+    fn keeps_matchers_outside_the_grouping_labels_on_their_own_operand() {
+        assert_rewrite(
+            r#"sum by(host) (a) / on(host) sum by(host) (b{host="x",status="ready"})"#,
+            r#"sum by(host) (a{host="x"}) / on(host) sum by(host) (b{host="x",status="ready"})"#,
+        );
+        // `without(host)` leaves `host` out of the grouping labels, so nothing may cross it.
+        assert!(rewrite(r#"avg without(host) (a) / on(host) b{host="x"}"#).is_none());
+        assert_rewrite(
+            r#"avg without(zone) (a) / on(host) b{host="x"}"#,
+            r#"avg without(zone) (a{host="x"}) / on(host) b{host="x"}"#,
         );
     }
 

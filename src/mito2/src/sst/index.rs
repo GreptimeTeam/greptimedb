@@ -51,7 +51,7 @@ use vector_index::creator::VectorIndexer;
 
 use crate::access_layer::{AccessLayerRef, FilePathProvider, OperationType, RegionFilePathFactory};
 use crate::cache::file_cache::{FileCacheRef, FileType, IndexKey};
-use crate::cache::write_cache::{UploadTracker, WriteCacheRef};
+use crate::cache::write_cache::{UploadOptions, UploadTracker, WriteCacheRef};
 use crate::cache::{CacheManagerRef, CacheStrategy};
 #[cfg(feature = "vector_index")]
 use crate::config::VectorIndexConfig;
@@ -1022,7 +1022,10 @@ impl IndexBuildTask {
                     puffin_key,
                     &puffin_path,
                     remote_store,
-                    OperationType::Compact,
+                    UploadOptions {
+                        op_type: OperationType::Compact,
+                        write_buffer_size: crate::sst::DEFAULT_WRITE_BUFFER_SIZE,
+                    },
                 )
                 .await
             {

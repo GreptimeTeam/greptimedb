@@ -41,8 +41,15 @@ remote datanodes via `operator`/`client`.
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
-  auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  auto-create, partition routing, meter admission) → local `RegionServer`
+  (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
+  request channel to `Inserter` and check meter admission for each nonempty batch.
+- Finite ingestion requests split internally admit their total rows per database
+  before dispatch (`operator::insert::admit_write` / `admit_row_insert_batches`).
+  The returned context covers chunks and derived writes while preserving WCU
+  accounting and the original protocol channel.
+- Internal gRPC listeners mark requests with `Channel::Internal` in middleware
+  (`server.rs`), including requests handled by Enterprise Flight wrappers.
 
 - **Flight bulk insert** (`instance/grpc.rs`): initializes on the first batch after
   the lazy schema handshake; checks permissions and reconciles missing columns
