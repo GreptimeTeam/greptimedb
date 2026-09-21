@@ -2917,14 +2917,14 @@ impl PromPlanner {
             .collect::<Result<Vec<_>>>()?;
 
         // The sort, the series splitting and the manipulators all refer to the time index by
-        // name and compare native timestamps.
+        // name, so every branch must expose the same column. Candidate metric tables may store
+        // that column at different precisions (a millisecond table next to a `timestamp(9)`
+        // one), so the branches are cast to a common unit below instead of being rejected.
         let time_index_column = branches[0].time_index_column.clone();
         ensure!(
             branches
                 .iter()
-                .all(|branch| branch.time_index_column == time_index_column
-                    && branch.optional_column_type(&time_index_column)
-                        == branches[0].optional_column_type(&time_index_column)),
+                .all(|branch| branch.time_index_column == time_index_column),
             UnsupportedMetricUnionSnafu {
                 reason: format!(
                     "candidate metric tables have different time index columns: {}",
@@ -2939,6 +2939,7 @@ impl PromPlanner {
                 ),
             }
         );
+        let time_index_type = Self::union_time_index_type(&time_index_column, &branches)?;
 
         // A branch that lacks a label contributes NULL for it; labels may have different types
         // in different tables (for example a dictionary encoded label in one table and a plain
@@ -3008,9 +3009,17 @@ impl PromPlanner {
                 });
             }
             exprs.push(lit(branch.metric_name.clone()).alias(METRIC_NAME));
-            exprs.push(DfExpr::Column(Column::new_unqualified(
-                time_index_column.clone(),
-            )));
+            let time_index = DfExpr::Column(Column::new_unqualified(time_index_column.clone()));
+            exprs.push(
+                if branch.optional_column_type(&time_index_column).as_ref()
+                    == Some(&time_index_type)
+                {
+                    time_index
+                } else {
+                    DfExpr::Cast(Cast::new(Box::new(time_index), time_index_type.clone()))
+                        .alias(time_index_column.clone())
+                },
+            );
 
             let branch_plan = LogicalPlanBuilder::from(branch.plan.clone())
                 .project(exprs)
@@ -3119,6 +3128,53 @@ impl PromPlanner {
         target.with_context(|| UnexpectedPlanExprSnafu {
             desc: format!("value column {field} is missing in every union branch"),
         })
+    }
+
+    /// Returns the common type of the time index column across the union branches.
+    ///
+    /// Every branch must expose the column under the same name. Their precisions may differ, and
+    /// `UNION ALL` needs one type, so all branches are aligned to the finest candidate unit
+    /// (Second < Millisecond < Microsecond < Nanosecond). Widening is the lossless direction: the
+    /// native tick count of a coarser unit is exactly representable in a finer one, while
+    /// narrowing would truncate (and could collapse) samples of the finer table. A cast between
+    /// timestamp units only rescales the tick count per row, so the ordering the sort and the
+    /// series splitting rely on is preserved, and the manipulators keep deriving their
+    /// millisecond payloads from the native ticks of the (now common) unit. GreptimeDB time
+    /// indexes are timezone-less, and a timezone is Arrow display metadata anyway, so the common
+    /// type carries none. Aligning to the query's own unit instead would reject the finer
+    /// candidate or silently truncate its sub-unit samples, which is why the finest branch wins.
+    ///
+    /// The cast is a no-op for a single candidate (the common unit is its own unit). It can
+    /// overflow the finer unit's `i64` range for a far-future coarser sample; the cast then
+    /// reports an error rather than truncating the timestamp.
+    fn union_time_index_type(
+        time_index_column: &str,
+        branches: &[UnionBranchScan],
+    ) -> Result<ArrowDataType> {
+        let mut unit: Option<ArrowTimeUnit> = None;
+        for branch in branches {
+            let data_type = branch
+                .optional_column_type(time_index_column)
+                .with_context(|| ColumnNotFoundSnafu {
+                    col: time_index_column.to_string(),
+                })?;
+            let ArrowDataType::Timestamp(branch_unit, _) = &data_type else {
+                return UnsupportedMetricUnionSnafu {
+                    reason: format!(
+                        "time index column {time_index_column} is not a timestamp in candidate metric tables"
+                    ),
+                }
+                .fail();
+            };
+            unit = Some(match unit {
+                Some(current) => current.max(*branch_unit),
+                None => *branch_unit,
+            });
+        }
+        let unit = unit.with_context(|| UnexpectedPlanExprSnafu {
+            desc: format!("time index column {time_index_column} is missing in every union branch"),
+        })?;
+        Ok(ArrowDataType::Timestamp(unit, None))
     }
 
     /// Convert [LabelModifier] to [Column] exprs for aggregation.
@@ -7848,7 +7904,8 @@ mod test {
     use common_query::test_util::DummyDecoder;
     use common_recordbatch::RecordBatch as GreptimeRecordBatch;
     use datafusion::arrow::array::{
-        Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+        Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
     };
     use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -15125,6 +15182,26 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         timestamps: &[i64],
         fields: &[UnionField],
     ) -> table::TableRef {
+        union_metric_table_with_time_unit(
+            name,
+            table_id,
+            tags,
+            timestamps,
+            fields,
+            ArrowTimeUnit::Millisecond,
+        )
+    }
+
+    /// Like [`union_metric_table`], with an explicit time index unit: a real deployment can hold
+    /// a `timestamp(9)` metric table next to a millisecond one.
+    fn union_metric_table_with_time_unit(
+        name: &str,
+        table_id: u32,
+        tags: &[(&str, Option<&str>)],
+        timestamps: &[i64],
+        fields: &[UnionField],
+        unit: ArrowTimeUnit,
+    ) -> table::TableRef {
         let mut columns = tags
             .iter()
             .map(|(tag, _)| {
@@ -15139,7 +15216,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         columns.push(
             ColumnSchema::new(
                 "timestamp".to_string(),
-                ConcreteDataType::timestamp_millisecond_datatype(),
+                ConcreteDataType::from_arrow_time_unit(&unit),
                 false,
             )
             .with_time_index(true),
@@ -15159,9 +15236,20 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 Arc::new(StringArray::from(vec![*value; timestamps.len()])) as Arc<dyn Array>
             })
             .collect();
-        arrays.push(Arc::new(TimestampMillisecondArray::from(
-            timestamps.to_vec(),
-        )));
+        arrays.push(match unit {
+            ArrowTimeUnit::Second => {
+                Arc::new(TimestampSecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Millisecond => {
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Microsecond => {
+                Arc::new(TimestampMicrosecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Nanosecond => {
+                Arc::new(TimestampNanosecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+        });
         arrays.extend(fields.iter().map(|field| field.array.clone()));
 
         let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
@@ -15240,6 +15328,33 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                     &[("instance", Some("host"))],
                     &[1_000],
                     &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    /// A provider whose candidate tables store the time index at different precisions: `m_ms` is
+    /// millisecond based, `m_ns` is a `timestamp(9)` table. Both hold the same instant, `m_ms` as
+    /// `1_000` native ticks and `m_ns` as `1_000_000_000` of them.
+    fn build_union_mixed_precision_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table_with_time_unit(
+                    "m_ms",
+                    3_008,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                    ArrowTimeUnit::Millisecond,
+                ),
+                union_metric_table_with_time_unit(
+                    "m_ns",
+                    3_009,
+                    &[("job", Some("api"))],
+                    &[1_000_000_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                    ArrowTimeUnit::Nanosecond,
                 ),
             ],
         )
@@ -15585,6 +15700,90 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         )
         .await;
         assert_eq!(float_values(&batches), vec![3.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_aligns_mixed_time_index_precisions() {
+        // Candidate metric tables may store the time index at different precisions, which is what
+        // a `timestamp(9)` table next to a millisecond one looks like. The union used to reject
+        // such candidates; the branches are aligned to the finest unit instead.
+        let eval_stmt = build_eval_stmt(r#"{__name__=~"m_.*"}"#);
+        let mut planner = PromPlanner {
+            table_provider: build_union_mixed_precision_table_provider(),
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        planner.ctx.metric_names = Some(vec!["m_ms".to_string(), "m_ns".to_string()]);
+
+        let plan = match planner
+            .selector_union_to_series_normalize_plan(
+                &None,
+                Matchers::new(vec![]),
+                vec!["m_ms".to_string(), "m_ns".to_string()],
+                false,
+            )
+            .await
+            .unwrap()
+        {
+            UnionSelectorPlan::Union(plan) => plan,
+            UnionSelectorPlan::Empty(_) => panic!("expected a union plan"),
+        };
+
+        // Only the millisecond branch needs a cast: the nanosecond branch already has the common
+        // unit, and every branch ends up with the same time index type.
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("CAST(m_ms.timestamp AS Timestamp(ns)) AS timestamp"),
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan.schema()
+                .field_with_name(None, "timestamp")
+                .unwrap()
+                .data_type(),
+            &ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            "{plan_str}"
+        );
+
+        // The cast rescales the native tick count, so a millisecond sample keeps its instant:
+        // both branches report the very same timestamp.
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        let mut samples = Vec::new();
+        for batch in &batches {
+            let names = batch
+                .column(batch.schema().index_of(METRIC_NAME).unwrap())
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let timestamps = batch
+                .column(batch.schema().index_of("timestamp").unwrap())
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap();
+            samples.extend(
+                (0..batch.num_rows())
+                    .map(|index| (names.value(index).to_string(), timestamps.value(index))),
+            );
+        }
+        samples.sort();
+        assert_eq!(
+            samples,
+            vec![
+                ("m_ms".to_string(), 1_000_000_000),
+                ("m_ns".to_string(), 1_000_000_000),
+            ]
+        );
+
+        // The enclosing manipulators see the aligned column, so every candidate is aggregated.
+        let batches = execute_union_query(
+            build_union_mixed_precision_table_provider(),
+            &["m_ms", "m_ns"],
+            r#"sum by(__name__) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![1.0, 2.0]);
     }
 
     #[tokio::test]

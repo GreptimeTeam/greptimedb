@@ -118,6 +118,64 @@ TQL EVAL (0, 0, '1s') {__name__!="metric_name_regex_b", __schema__="metric_name_
 | 1.0            | host1 | metric_name_regex_a | 1970-01-01T00:00:00 |
 +----------------+-------+---------------------+---------------------+
 
+-- Candidate metric tables may store their time index at different precisions: `_c` is a
+-- `timestamp(9)` table next to the millisecond `_a`/`_b`. The union aligns every branch to the
+-- finest candidate unit, so a millisecond sample keeps its instant through the cast.
+CREATE TABLE metric_name_regex.metric_name_regex_phy_ns (
+    ts TIMESTAMP(9) TIME INDEX,
+    greptime_value DOUBLE
+) ENGINE=metric WITH ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE metric_name_regex.metric_name_regex_c (
+    host STRING NULL,
+    ts TIMESTAMP(9) NOT NULL,
+    greptime_value DOUBLE NULL,
+    TIME INDEX (ts),
+    PRIMARY KEY (host)
+) ENGINE=metric WITH (on_physical_table = 'metric_name_regex_phy_ns');
+
+Affected Rows: 0
+
+-- One sample at the epoch and one sub-millisecond past 1s (1s + 1ns).
+INSERT INTO metric_name_regex.metric_name_regex_c (ts, host, greptime_value) VALUES (0, 'host1', 3), (1000000001, 'host1', 4);
+
+Affected Rows: 2
+
+-- Every candidate is scanned, including the nanosecond one, and no branch is rejected.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"};
+
++----------------+-------+------+---------------------+---------------------+
+| greptime_value | host  | idc  | __name__            | ts                  |
++----------------+-------+------+---------------------+---------------------+
+| 1.0            | host1 |      | metric_name_regex_a | 1970-01-01T00:00:00 |
+| 3.0            | host1 |      | metric_name_regex_c | 1970-01-01T00:00:00 |
+| 5.0            |       | idc1 | metric_name_regex_b | 1970-01-01T00:00:00 |
++----------------+-------+------+---------------------+---------------------+
+
+-- `sum` aggregates across the mixed precision tables as well.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') sum({__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"});
+
++---------------------+---------------------+
+| ts                  | sum(greptime_value) |
++---------------------+---------------------+
+| 1970-01-01T00:00:00 | 9.0                 |
++---------------------+---------------------+
+
+-- The aligned time index keeps native nanosecond resolution: the 1s + 1ns sample is past the
+-- `1s` lookback boundary, so it belongs to the 2s step only. Aligning the branch to milliseconds
+-- would truncate it onto the boundary and drop it.
+TQL EVAL (2, 2, '1s', '1s') {__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"};
+
++----------------+-------+-----+---------------------+---------------------+
+| greptime_value | host  | idc | __name__            | ts                  |
++----------------+-------+-----+---------------------+---------------------+
+| 4.0            | host1 |     | metric_name_regex_c | 1970-01-01T00:00:02 |
++----------------+-------+-----+---------------------+---------------------+
+
 DROP TABLE metric_name_regex.metric_name_regex_a;
 
 Affected Rows: 0
@@ -126,7 +184,15 @@ DROP TABLE metric_name_regex.metric_name_regex_b;
 
 Affected Rows: 0
 
+DROP TABLE metric_name_regex.metric_name_regex_c;
+
+Affected Rows: 0
+
 DROP TABLE metric_name_regex.metric_name_regex_phy;
+
+Affected Rows: 0
+
+DROP TABLE metric_name_regex.metric_name_regex_phy_ns;
 
 Affected Rows: 0
 

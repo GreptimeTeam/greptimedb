@@ -63,10 +63,46 @@ TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_nonexistent.*", __schema__="
 -- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 0, '1s') {__name__!="metric_name_regex_b", __schema__="metric_name_regex"};
 
+-- Candidate metric tables may store their time index at different precisions: `_c` is a
+-- `timestamp(9)` table next to the millisecond `_a`/`_b`. The union aligns every branch to the
+-- finest candidate unit, so a millisecond sample keeps its instant through the cast.
+CREATE TABLE metric_name_regex.metric_name_regex_phy_ns (
+    ts TIMESTAMP(9) TIME INDEX,
+    greptime_value DOUBLE
+) ENGINE=metric WITH ("physical_metric_table" = "");
+
+CREATE TABLE metric_name_regex.metric_name_regex_c (
+    host STRING NULL,
+    ts TIMESTAMP(9) NOT NULL,
+    greptime_value DOUBLE NULL,
+    TIME INDEX (ts),
+    PRIMARY KEY (host)
+) ENGINE=metric WITH (on_physical_table = 'metric_name_regex_phy_ns');
+
+-- One sample at the epoch and one sub-millisecond past 1s (1s + 1ns).
+INSERT INTO metric_name_regex.metric_name_regex_c (ts, host, greptime_value) VALUES (0, 'host1', 3), (1000000001, 'host1', 4);
+
+-- Every candidate is scanned, including the nanosecond one, and no branch is rejected.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"};
+
+-- `sum` aggregates across the mixed precision tables as well.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') sum({__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"});
+
+-- The aligned time index keeps native nanosecond resolution: the 1s + 1ns sample is past the
+-- `1s` lookback boundary, so it belongs to the 2s step only. Aligning the branch to milliseconds
+-- would truncate it onto the boundary and drop it.
+TQL EVAL (2, 2, '1s', '1s') {__name__=~"metric_name_regex_[abc]", __schema__="metric_name_regex"};
+
 DROP TABLE metric_name_regex.metric_name_regex_a;
 
 DROP TABLE metric_name_regex.metric_name_regex_b;
 
+DROP TABLE metric_name_regex.metric_name_regex_c;
+
 DROP TABLE metric_name_regex.metric_name_regex_phy;
+
+DROP TABLE metric_name_regex.metric_name_regex_phy_ns;
 
 DROP SCHEMA metric_name_regex;
