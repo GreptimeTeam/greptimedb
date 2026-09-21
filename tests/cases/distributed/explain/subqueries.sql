@@ -202,3 +202,52 @@ EXPLAIN SELECT x FROM (SELECT a AS x FROM t) sq ORDER BY x LIMIT 2;
 DROP TABLE t;
 DROP TABLE t1;
 DROP TABLE t2;
+
+-- Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+-- nested scalar subqueries must get a MergeScan inside every subquery level.
+CREATE TABLE nested_scalar (k INT, v BIGINT, ts TIMESTAMP TIME INDEX);
+
+INSERT INTO nested_scalar VALUES (1, 10, '2024-01-01 00:00:00'), (2, NULL, '2024-01-01 00:00:01');
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+SELECT (SELECT MAX(v) FROM nested_scalar WHERE v > (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+SELECT (SELECT (SELECT MAX(v) FROM nested_scalar)) AS m FROM nested_scalar LIMIT 1;
+
+DROP TABLE nested_scalar;
+
+-- Same regression as above, but on a range-partitioned table so the inner
+-- aggregate must merge partial results from multiple regions (the global
+-- AVG must be computed across regions before the outer SUM filter runs).
+CREATE TABLE nested_scalar_part (k INT, v BIGINT, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (k) (
+  k < 20,
+  k >= 20 AND k < 40,
+  k >= 40
+);
+
+INSERT INTO nested_scalar_part VALUES
+  (1, 10, '2024-01-01 00:00:00'),
+  (2, NULL, '2024-01-01 00:00:01'),
+  (21, 20, '2024-01-01 00:00:02'),
+  (25, 30, '2024-01-01 00:00:03'),
+  (41, 40, '2024-01-01 00:00:04'),
+  (50, 50, '2024-01-01 00:00:05');
+
+-- global AVG(v) = 30, so the outer SUM(v) must be 40 + 50 = 90
+SELECT (SELECT SUM(v) FROM nested_scalar_part WHERE v > (SELECT AVG(v) FROM nested_scalar_part)) AS m FROM nested_scalar_part LIMIT 1;
+
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT (SELECT SUM(v) FROM nested_scalar_part WHERE v > (SELECT AVG(v) FROM nested_scalar_part)) AS m FROM nested_scalar_part LIMIT 1;
+
+DROP TABLE nested_scalar_part;

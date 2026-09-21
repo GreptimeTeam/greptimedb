@@ -332,6 +332,59 @@ tql eval(0, 5, '5s') counter_metric / on(host) sum by(host)(gauge_metric{device=
 | host2 | 1970-01-01T00:00:05 | 20.0                                                    |
 +-------+---------------------+---------------------------------------------------------+
 
+-- A grouping label that is a value field, not a tag: its value varies between samples of one
+-- series, so a matcher on it must not filter the scan before sample selection (#9242).
+create table pr9202_a (
+    ts timestamp time index,
+    host string,
+    val double,
+    `status` string,
+    primary key (host)
+);
+
+Affected Rows: 0
+
+create table pr9202_b (
+    ts timestamp time index,
+    host string,
+    val double,
+    `status` string,
+    primary key (host)
+);
+
+Affected Rows: 0
+
+insert into pr9202_a values
+    (0, 'h1', 10, 'ready'),
+    (5000, 'h1', 20, 'busy');
+
+Affected Rows: 2
+
+insert into pr9202_b values
+    (5000, 'h1', 5, 'ready');
+
+Affected Rows: 1
+
+-- The 5s sample of pr9202_a has status="busy" and no partner; filtering it before sample
+-- selection would fall back to the stale "ready" sample and fabricate a result row.
+tql eval (5, 5, '1s', '1m')
+    count by(status) (pr9202_a)
+    / on(status)
+    count by(status) (pr9202_b{status="ready"});
+
++--------+----+-------------------------------------------------------------+-------------------------------------------------------------------+
+| status | ts | pr9202_a.count(pr9202_a.val) / pr9202_b.count(pr9202_b.val) | pr9202_a.count(pr9202_a.status) / pr9202_b.count(pr9202_b.status) |
++--------+----+-------------------------------------------------------------+-------------------------------------------------------------------+
++--------+----+-------------------------------------------------------------+-------------------------------------------------------------------+
+
+drop table pr9202_a;
+
+Affected Rows: 0
+
+drop table pr9202_b;
+
+Affected Rows: 0
+
 -- `topk` preserves its input labels, and filtering before `topk` changes the set of
 -- candidates it ranks, so the rewrite must not reach its input.
 -- SQLNESS SORT_RESULT 3 1

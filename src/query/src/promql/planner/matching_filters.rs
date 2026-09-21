@@ -63,12 +63,23 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
 /// as well constrain a value field, which the parsed expression does not distinguish from a
 /// label. Matchers can cross an aggregate only on labels that partition its input.
+/// `left_field_labels` and `right_field_labels` exclude value fields promoted to grouping
+/// labels: filtering them before sample selection could replace the latest sample with an
+/// older one (#9242).
 pub(super) fn propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
+    left_field_labels: &[String],
+    right_field_labels: &[String],
 ) -> Option<BinaryExpr> {
-    match try_propagate(binary, left_tags, right_tags) {
+    match try_propagate(
+        binary,
+        left_tags,
+        right_tags,
+        left_field_labels,
+        right_field_labels,
+    ) {
         Ok(rewritten) => Some(rewritten),
         Err(reason) => {
             common_telemetry::debug!("Matching filter not propagated ({reason}): {binary}");
@@ -82,6 +93,8 @@ fn try_propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
     right_tags: &[String],
+    left_field_labels: &[String],
+    right_field_labels: &[String],
 ) -> Result<BinaryExpr, &'static str> {
     if !matches!(
         binary.op.id(),
@@ -104,6 +117,9 @@ fn try_propagate(
         !name.starts_with("__")
             && left_tags.contains(name)
             && right_tags.contains(name)
+            // A grouping label that is a value field of the operand's input is not a series tag.
+            && !left_field_labels.contains(name)
+            && !right_field_labels.contains(name)
             && match matching {
                 None => true,
                 Some(LabelModifier::Include(on)) => on.labels.contains(name),
@@ -291,11 +307,30 @@ mod tests {
     use super::*;
 
     fn rewrite_with(query: &str, left_tags: &[&str], right_tags: &[&str]) -> Option<Expr> {
+        rewrite_labels_with(query, left_tags, &[], right_tags, &[])
+    }
+
+    /// [`rewrite_with`] with the grouping labels of each operand that the planner found to be
+    /// value fields of its input rather than tags (the metric's tags are `["host", "zone"]`).
+    fn rewrite_labels_with(
+        query: &str,
+        left_tags: &[&str],
+        left_field_labels: &[&str],
+        right_tags: &[&str],
+        right_field_labels: &[&str],
+    ) -> Option<Expr> {
         let Expr::Binary(binary) = parse(query).unwrap() else {
             panic!("expected binary")
         };
         let owned = |tags: &[&str]| tags.iter().map(|tag| tag.to_string()).collect::<Vec<_>>();
-        propagate(&binary, &owned(left_tags), &owned(right_tags)).map(Expr::Binary)
+        propagate(
+            &binary,
+            &owned(left_tags),
+            &owned(right_tags),
+            &owned(left_field_labels),
+            &owned(right_field_labels),
+        )
+        .map(Expr::Binary)
     }
 
     fn rewrite(query: &str) -> Option<Expr> {
@@ -376,6 +411,59 @@ mod tests {
         assert_rewrite(
             r#"avg without(zone) (rate(a[5m])) / b{host="x"}"#,
             r#"avg without(zone) (rate(a{host="x"}[5m])) / b{host="x"}"#,
+        );
+    }
+
+    #[test]
+    fn does_not_propagate_grouping_labels_that_are_value_fields() {
+        // `status` is a value field of both metrics, though `count by(status)` reports it as a
+        // grouping label of the aggregate; its value varies between the samples of one series.
+        assert!(
+            rewrite_labels_with(
+                r#"count by(status) (a) / on(status) count by(status) (b{status="ready"})"#,
+                &["status"],
+                &["status"],
+                &["status"],
+                &["status"],
+            )
+            .is_none()
+        );
+        // `host` is a tag, `status` is a value field: only the tag may propagate.
+        assert!(
+            rewrite_labels_with(
+                r#"sum by(host, status) (a) / on(status) sum by(host, status) (b{status="ready"})"#,
+                &["host", "status"],
+                &["status"],
+                &["host", "status"],
+                &["status"],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn propagates_grouping_labels_of_aggregated_operands() {
+        assert_rewrite(
+            r#"count by(host) (a) / on(host) count by(host) (b{host="x"})"#,
+            r#"count by(host) (a{host="x"}) / on(host) count by(host) (b{host="x"})"#,
+        );
+        assert_rewrite(
+            r#"sum by(host) (rate(a[5m])) / on(host) sum by(host) (b{host="x"})"#,
+            r#"sum by(host) (rate(a{host="x"}[5m])) / on(host) sum by(host) (b{host="x"})"#,
+        );
+    }
+
+    #[test]
+    fn keeps_matchers_outside_the_grouping_labels_on_their_own_operand() {
+        assert_rewrite(
+            r#"sum by(host) (a) / on(host) sum by(host) (b{host="x",status="ready"})"#,
+            r#"sum by(host) (a{host="x"}) / on(host) sum by(host) (b{host="x",status="ready"})"#,
+        );
+        // `without(host)` leaves `host` out of the grouping labels, so nothing may cross it.
+        assert!(rewrite(r#"avg without(host) (a) / on(host) b{host="x"}"#).is_none());
+        assert_rewrite(
+            r#"avg without(zone) (a) / on(host) b{host="x"}"#,
+            r#"avg without(zone) (a{host="x"}) / on(host) b{host="x"}"#,
         );
     }
 
