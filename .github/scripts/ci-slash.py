@@ -58,7 +58,7 @@ def main():
     head=pr.get('head',{}).get('sha','')
     if head != os.environ.get('DISPATCH_HEAD_SHA') or not re.fullmatch('[0-9a-f]{40}',head): return reject(number,'PR head changed; comment again.')
     actor=comment.get('user',{}).get('login','')
-    permission=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/collaborators/'+actor+'/permission').get('user',{}).get('permission')
+    permission=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/collaborators/'+actor+'/permission').get('permission')
     if permission!='admin': return reject(number,'repository admin permission is required.')
     workflow, profile, label=OPTIONS[arg]
     out(skip='false',pr_number=number,head_sha=head,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for `{head}`.')

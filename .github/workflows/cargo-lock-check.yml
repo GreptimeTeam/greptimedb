@@ -5,6 +5,7 @@ name: Cargo.lock Diff Check
 # posts/updates a PR comment when the threshold is exceeded.
 on:
     pull_request:
+        types: [opened, synchronize, reopened, ready_for_review]
         paths:
             - "Cargo.lock"
 

@@ -54,11 +54,11 @@ class CiSlashTest(unittest.TestCase):
         self.assertIn("skip=true", output)
         self.assertIn("Available draft-PR CI commands", output)
 
-    def test_dispatches_full_suite_at_verified_head(self):
+    def test_dispatches_full_suite_with_top_level_admin_permission(self):
         output = self.run_main([
             {"body": "/ci", "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "admin"}},
             {"state": "open", "draft": True, "head": {"sha": "a" * 40, "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
-            {"user": {"permission": "admin"}},
+            {"permission": "admin", "user": {"login": "admin"}},
         ])
         self.assertIn("skip=false", output)
         self.assertIn("workflow=rust.yml,integration.yml,checks.yml,docs.yml", output)

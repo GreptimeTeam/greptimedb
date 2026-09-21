@@ -30,13 +30,6 @@ jobs:
           DISPATCH_SENDER: ${{ github.event.sender.login }}
           DISPATCH_HEAD_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
         run: python3 .github/scripts/ci-slash.py
-      - name: Reply with command result
-        if: ${{ steps.admit.outputs.reply != '' }}
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPLY: ${{ steps.admit.outputs.reply }}
-          PR_NUMBER: ${{ steps.admit.outputs.pr_number }}
-        run: printf '%s\n' "${REPLY}" | gh pr comment "${PR_NUMBER}" --body-file -
       - name: Dispatch selected CI workflow
         if: ${{ steps.admit.outputs.skip == 'false' }}
         env:
@@ -47,6 +40,17 @@ jobs:
         run: |
           IFS=, read -ra workflows <<<"${WORKFLOWS}"
           for workflow in "${workflows[@]}"; do
+            inputs=(-F 'inputs[ci_command]=true')
+            if [[ "${workflow}" == 'integration.yml' ]]; then
+              inputs+=(-f "inputs[fuzz_profile]=${FUZZ_PROFILE}")
+            fi
             gh api --method POST "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
-              -f ref="${HEAD_SHA}" -F 'inputs[ci_command]=true' -f "inputs[fuzz_profile]=${FUZZ_PROFILE}"
+              -f ref="${HEAD_SHA}" "${inputs[@]}"
           done
+      - name: Reply with command result
+        if: ${{ steps.admit.outputs.reply != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPLY: ${{ steps.admit.outputs.reply }}
+          PR_NUMBER: ${{ steps.admit.outputs.pr_number }}
+        run: printf '%s\n' "${REPLY}" | gh pr comment "${PR_NUMBER}" --body-file -
