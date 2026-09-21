@@ -1537,9 +1537,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
             )
             .await
             .remove(0);
-            let error = result
-                .err()
-                .expect("export must reject import-only layouts");
+            let error = result.expect_err("export must reject import-only layouts");
             assert!(
                 format!("{error:?}").contains("metric_data_layout"),
                 "{error:?}"
