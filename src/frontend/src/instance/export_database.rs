@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{PermissionSnafu, Result};
 use crate::instance::Instance;
 
-pub(crate) fn metric_export_requested(options: &OptionMap) -> Result<bool> {
+pub(crate) fn parse_metric_export_requested(options: &OptionMap) -> Result<bool> {
     match options.get("experimental_metric_export") {
         None | Some("false") => Ok(false),
         Some("true") => Ok(true),

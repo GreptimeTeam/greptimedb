@@ -403,7 +403,7 @@ impl Instance {
                 if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
                     arg,
                 ))) = &stmt
-                    && export_database::metric_export_requested(&arg.with)?
+                    && export_database::parse_metric_export_requested(&arg.with)?
                 {
                     return self.copy_metric_database(arg.clone(), query_ctx).await;
                 }

@@ -111,6 +111,7 @@ impl GreptimeDbStandaloneBuilder {
         }
     }
 
+    /// Enables experimental Metric export for the standalone test instance.
     #[must_use]
     pub fn with_experimental_metric_export(mut self) -> Self {
         self.experimental_metric_export = true;
