@@ -755,7 +755,7 @@ mod tests {
     };
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, Schema};
+    use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
     use datatypes::vectors::{
         Float64Vector, StringVector, StructVector, TimestampMillisecondVector, VectorRef,
     };
@@ -862,6 +862,34 @@ mod tests {
             panic!("expected matrix response");
         };
         assert_eq!(series.len(), 2);
+        // Pin the merged content of the cross-batch series, not just the
+        // two-path agreement: both paths share merge_batch, so a regression
+        // there could make them agree on the same wrong output.
+        let series_a = series
+            .iter()
+            .find(|s| s.metric.get("host").map(String::as_str) == Some("a"))
+            .unwrap();
+        let samples_a: Vec<(i64, f64)> = series_a
+            .values
+            .iter()
+            .map(|(ts, value)| {
+                let PromSampleValue::Number(v) = value else {
+                    panic!("expected numeric sample");
+                };
+                ((ts * 1000.0) as i64, *v)
+            })
+            .collect();
+        assert_eq!(
+            samples_a,
+            vec![
+                (0, 4.0),
+                (1_000, 5.0),
+                (4_000, 0.0),
+                (5_000, 1.0),
+                (6_000, 2.0),
+                (7_000, 3.0),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -934,6 +962,113 @@ mod tests {
             .unwrap();
         assert!(histogram.histogram.is_some());
         assert!(histogram.value.is_none());
+    }
+
+    /// A stream that lazily creates one batch per poll and asserts the previous
+    /// batch has been released before yielding the next one.
+    ///
+    /// Unlike `RecordBatches::as_stream`, this stream does not retain yielded
+    /// batches, so it can verify the consumer drops each batch before polling
+    /// the next one.
+    struct LazyDropCheckingStream {
+        schema: SchemaRef,
+        batch_index: usize,
+        /// Weak reference to the Arc wrapping the previously yielded batch.
+        /// The consumer must have dropped its clone by the next poll.
+        last_batch: Option<std::sync::Weak<RecordBatch>>,
+    }
+
+    impl LazyDropCheckingStream {
+        fn new(schema: SchemaRef) -> Self {
+            Self {
+                schema,
+                batch_index: 0,
+                last_batch: None,
+            }
+        }
+
+        fn make_batch(&self) -> RecordBatch {
+            let base = self.batch_index as i64 * 1000;
+            RecordBatch::new(
+                self.schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondVector::from_values([base])) as _,
+                    Arc::new(StringVector::from(vec![Some("host")])) as _,
+                    Arc::new(Float64Vector::from_values([base as f64])) as _,
+                ],
+            )
+            .unwrap()
+        }
+    }
+
+    impl futures::Stream for LazyDropCheckingStream {
+        type Item = common_recordbatch::error::Result<RecordBatch>;
+
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            // The consumer must have released the previous batch before polling
+            // for the next one.
+            if let Some(weak) = &self.last_batch {
+                assert!(
+                    weak.upgrade().is_none(),
+                    "previous batch was not released before polling the next one"
+                );
+            }
+
+            if self.batch_index >= 3 {
+                return std::task::Poll::Ready(None);
+            }
+
+            let batch = Arc::new(self.make_batch());
+            self.last_batch = Some(Arc::downgrade(&batch));
+            self.batch_index += 1;
+            std::task::Poll::Ready(Some(Ok((*batch).clone())))
+        }
+    }
+
+    impl common_recordbatch::RecordBatchStream for LazyDropCheckingStream {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+            None
+        }
+
+        fn metrics(&self) -> Option<common_recordbatch::adapter::RecordBatchMetrics> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_drops_each_batch_before_polling_next() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let stream = LazyDropCheckingStream::new(schema);
+
+        let response = PrometheusJsonResponse::consume_stream_to_data(
+            Box::pin(stream),
+            None,
+            ValueType::Matrix,
+        )
+        .await;
+
+        assert!(matches!(
+            response.unwrap(),
+            PrometheusResponse::PromData(PromData {
+                result: PromQueryResult::Matrix(series),
+                ..
+            }) if series.len() == 1 && series[0].values.len() == 3
+        ));
     }
 
     #[tokio::test]
