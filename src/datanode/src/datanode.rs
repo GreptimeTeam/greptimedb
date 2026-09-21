@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::Plugins;
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -718,9 +719,9 @@ fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
     let mut engine_indices = HashMap::new();
     for (index, config) in configs.iter().enumerate() {
         let engine = match config {
-            RegionEngineConfig::Mito(_) => "mito",
-            RegionEngineConfig::File(_) => "file",
-            RegionEngineConfig::Metric(_) => "metric",
+            RegionEngineConfig::Mito(_) => MITO_ENGINE,
+            RegionEngineConfig::File(_) => FILE_ENGINE,
+            RegionEngineConfig::Metric(_) => METRIC_ENGINE,
         };
         if let Some(first_index) = engine_indices.insert(engine, index) {
             return DuplicateRegionEngineConfigSnafu {
