@@ -1521,6 +1521,32 @@ async fn metric_export_v2_cli_roundtrip(s3: bool) {
     }
     let (addr, server) = export_http(instance.clone()).await;
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
+    for experimental in [false, true] {
+        for layout in ["packed", "invalid"] {
+            let path = destination
+                .path()
+                .join(format!("unsupported-{experimental}-{layout}"));
+            let uri = url::Url::from_directory_path(&path).unwrap();
+            let statement = format!(
+                "COPY DATABASE public TO '{uri}' WITH (FORMAT='parquet', experimental_metric_export='{experimental}', metric_data_layout='{layout}')"
+            );
+            let result = servers::query_handler::sql::SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &statement,
+                QueryContext::arc(),
+            )
+            .await
+            .remove(0);
+            let error = result
+                .err()
+                .expect("export must reject import-only layouts");
+            assert!(
+                format!("{error:?}").contains("metric_data_layout"),
+                "{error:?}"
+            );
+            assert!(!path.exists());
+        }
+    }
     let (uri, store, storage_args) = if s3 {
         let endpoint = std::env::var("GT_S3_ENDPOINT_URL").unwrap();
         let bucket = std::env::var("GT_S3_BUCKET").unwrap();
