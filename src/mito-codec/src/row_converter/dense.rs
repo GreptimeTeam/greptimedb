@@ -497,7 +497,15 @@ impl DensePrimaryKeyCodec {
                 return Ok(index);
             }
             let start = deserializer.position();
-            let len = SortField::encoded_length(field.encode_data_type(), &bytes[start..])?;
+            // Preserve the prefix error contract used by primary-key range mapping.
+            let len = SortField::encoded_length(field.encode_data_type(), &bytes[start..])
+                .map_err(|source| match source {
+                    error::Error::DeserializeField { .. } => error::InvalidDensePrimaryKeySnafu {
+                        reason: "truncated field or invalid encoding",
+                    }
+                    .build(),
+                    source => source,
+                })?;
             // Production range mapping only needs boundaries, not allocated field values.
             #[cfg(any(debug_assertions, test))]
             field.deserialize(&mut Deserializer::new(&bytes[start..start + len]))?;
