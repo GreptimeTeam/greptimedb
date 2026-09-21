@@ -427,12 +427,6 @@ impl ColumnLayout {
             native_histogram_column_index,
         })
     }
-
-    /// Capacity of a scratch label buffer: one slot per label plus the metric
-    /// name.
-    fn tags_capacity(&self) -> usize {
-        self.tag_column_indices.len() + 1
-    }
 }
 
 /// The lookup key of a series in the per-series sample buffer.
@@ -467,7 +461,7 @@ fn merge_batch(
     // `batch` and `layout` and refilled for every series that is not in
     // `buffer` yet, so looking a series up allocates nothing and only a series
     // that is new allocates its labels.
-    let mut tags: Vec<(&str, &str)> = Vec::with_capacity(layout.tags_capacity());
+    let mut tags: Vec<(&str, &str)> = Vec::with_capacity(layout.tag_column_indices.len() + 1);
 
     // prepare things...
     let tag_columns = layout
@@ -770,12 +764,10 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stream_reads_as_empty_data() {
+        // No timestamp column on purpose: if the empty-stream short-circuit ran
+        // after `ColumnLayout::infer`, inference would fail with
+        // "no timestamp column found" instead of returning empty data.
         let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                "timestamp",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
         ]));
@@ -804,24 +796,43 @@ mod tests {
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
         ]));
-        // Two batches with the same series split across them, so streaming
-        // merges the samples of one series across a batch boundary.
-        let mut batches = Vec::new();
-        for (batch_index, host) in [(0, "a"), (1, "b")].into_iter() {
-            let timestamps = (0..4).map(|i| (batch_index * 4 + i) as i64 * 1000);
-            let values = (0..4).map(|i| (batch_index * 4 + i) as f64);
-            batches.push(
+        // Two batches, with series "a" split across them: batch 0 holds its
+        // later samples, batch 1 its earlier ones plus series "b", so streaming
+        // must merge samples of one series across a batch boundary.
+        let batch_rows: [Vec<(&str, i64, f64)>; 2] = [
+            vec![
+                ("a", 4_000, 0.0),
+                ("a", 5_000, 1.0),
+                ("a", 6_000, 2.0),
+                ("a", 7_000, 3.0),
+            ],
+            vec![
+                ("a", 0, 4.0),
+                ("a", 1_000, 5.0),
+                ("b", 2_000, 6.0),
+                ("b", 3_000, 7.0),
+            ],
+        ];
+        let batches: Vec<_> = batch_rows
+            .into_iter()
+            .map(|rows| {
                 RecordBatch::new(
                     schema.clone(),
                     vec![
-                        Arc::new(TimestampMillisecondVector::from_values(timestamps)) as _,
-                        Arc::new(StringVector::from(vec![Some(host); 4])) as _,
-                        Arc::new(Float64Vector::from_values(values)) as _,
+                        Arc::new(TimestampMillisecondVector::from_values(
+                            rows.iter().map(|(_, ts, _)| *ts),
+                        )) as _,
+                        Arc::new(StringVector::from(
+                            rows.iter()
+                                .map(|(host, _, _)| Some(*host))
+                                .collect::<Vec<_>>(),
+                        )) as _,
+                        Arc::new(Float64Vector::from_values(rows.iter().map(|(_, _, v)| *v))) as _,
                     ],
                 )
-                .unwrap(),
-            );
-        }
+                .unwrap()
+            })
+            .collect();
 
         let streamed = PrometheusJsonResponse::consume_stream_to_data(
             RecordBatches::try_new(schema.clone(), batches.clone())
