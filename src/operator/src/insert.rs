@@ -553,6 +553,8 @@ impl Inserter {
 /// Admits a finite request before it is split into internal writes.
 /// The returned context preserves accounting while preventing a second row debit.
 pub async fn admit_write(rows: u64, ctx: &QueryContextRef) -> Result<QueryContextRef> {
+    // The zero value is WCU: this record only admits rows. Actual inserts retain
+    // their existing WCU accounting, so charging here would count it twice.
     write_meter!(MeterRecord::new(
         ctx.current_catalog().to_string(),
         ctx.current_schema(),

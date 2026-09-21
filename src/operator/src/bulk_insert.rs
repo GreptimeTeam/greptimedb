@@ -140,7 +140,8 @@ impl Inserter {
             return Ok(0);
         }
 
-        // Bulk writes consume row quota without introducing WCU accounting.
+        // The zero value is WCU, not bytes. Bulk writes have no WCU accounting;
+        // preserve that behavior while admitting their rows before dispatch.
         write_meter!(MeterRecord::new(
             table_info.catalog_name.clone(),
             table_info.schema_name.clone(),

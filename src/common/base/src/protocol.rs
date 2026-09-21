@@ -36,7 +36,7 @@ pub enum Channel {
     Promql = 13,
     Splunk = 14,
     /// Trusted internal requests and local subsystem execution.
-    Internal = 15,
+    Internal = 255,
 }
 
 impl From<u32> for Channel {
@@ -98,13 +98,14 @@ mod tests {
             (12, "log"),
             (13, "promql"),
             (14, "splunk"),
-            (15, "internal"),
+            (255, "internal"),
         ];
 
         for (value, name) in expected {
             assert_eq!(name, Channel::from(value).as_ref());
         }
         assert_eq!("unknown", Channel::from(0).as_ref());
-        assert_eq!("unknown", Channel::from(16).as_ref());
+        assert_eq!("unknown", Channel::from(15).as_ref());
+        assert_eq!("unknown", Channel::from(256).as_ref());
     }
 }
