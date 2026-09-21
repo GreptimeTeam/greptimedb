@@ -26,7 +26,7 @@ use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
@@ -684,6 +684,7 @@ impl Inserter {
 
     /// Adds missing columns from a bulk stream's schema and returns the refreshed table.
     /// Call once when initializing the stream, before writing its first batch.
+    /// Does not infer new nested or dictionary columns.
     pub async fn ensure_bulk_insert_schema(
         &self,
         table: TableRef,
@@ -704,6 +705,19 @@ impl Inserter {
             .iter()
             .filter(|field| table_schema.column_schema_by_name(field.name()).is_none())
             .map(|field| {
+                let data_type = field.data_type();
+                // Dictionary values can reach the same infallible child-type conversion
+                // as nested types, even when Arrow's is_nested() returns false.
+                ensure!(
+                    !data_type.is_nested() && !matches!(data_type, ArrowDataType::Dictionary(..)),
+                    crate::error::NotSupportedSnafu {
+                        feat: format!(
+                            "automatically adding bulk insert column '{}' with type {:?}",
+                            field.name(),
+                            data_type
+                        ),
+                    }
+                );
                 let column = datatypes::schema::ColumnSchema::try_from(field.as_ref())
                     .context(crate::error::ConvertSchemaSnafu)?;
                 // Arrow fields do not carry primary-key semantics. New columns are

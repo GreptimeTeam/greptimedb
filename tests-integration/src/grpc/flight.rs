@@ -45,6 +45,9 @@ mod test {
         RecordBatch, RecordBatchStreamWrapper, RecordBatches, SendableRecordBatchStream,
     };
     use common_telemetry::tracing_context::TracingContext;
+    use datatypes::arrow::datatypes::{
+        DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit,
+    };
     use datatypes::prelude::{ConcreteDataType, ScalarVector, VectorRef};
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::vectors::{Int32Vector, StringVector, TimestampMillisecondVector};
@@ -659,6 +662,93 @@ mod test {
 | column_name |
 +-------------+
 | a           |
+| ts          |
++-------------+",
+        )
+        .await;
+        server.shutdown().await.unwrap();
+    }
+
+    #[rstest]
+    #[case::list(ArrowDataType::List(Arc::new(Field::new("item", ArrowDataType::Int32, true))))]
+    #[case::list_unsupported_child(ArrowDataType::List(Arc::new(Field::new(
+        "item",
+        ArrowDataType::FixedSizeBinary(16),
+        true,
+    ))))]
+    #[case::struct_unsupported_child(ArrowDataType::Struct(
+        vec![Field::new("item", ArrowDataType::FixedSizeBinary(16), true)].into(),
+    ))]
+    #[case::dictionary(ArrowDataType::Dictionary(
+        Box::new(ArrowDataType::Int32),
+        Box::new(ArrowDataType::Utf8),
+    ))]
+    #[case::dictionary_unsupported_value(ArrowDataType::Dictionary(
+        Box::new(ArrowDataType::Int32),
+        Box::new(ArrowDataType::FixedSizeBinary(16)),
+    ))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_flight_bulk_rejects_nested_auto_add_without_altering_table(
+        #[case] data_type: ArrowDataType,
+    ) {
+        let (db, server) = setup_grpc_server(
+            StorageType::File,
+            "test_flight_bulk_rejects_nested_auto_add_without_altering_table",
+        )
+        .await;
+        let client = Database::new_with_dbname(
+            "greptime-public",
+            Client::with_urls(vec![server.bind_addr().unwrap().to_string()]),
+        );
+        client
+            .sql("CREATE TABLE foo (ts TIMESTAMP TIME INDEX)")
+            .await
+            .unwrap();
+
+        // Use raw Arrow fields: Greptime's schema conversion itself used to panic
+        // on unsupported child types. A preceding scalar must not be partially added.
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "ts",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("new_scalar", ArrowDataType::Int32, true),
+            Field::new("new_nested", data_type.clone(), true),
+        ]));
+        let mut encoder = FlightEncoder::default();
+        let mut schema_data = encoder.encode_schema(schema.as_ref());
+        schema_data.flight_descriptor = Some(FlightDescriptor {
+            r#type: arrow_flight::flight_descriptor::DescriptorType::Path as i32,
+            path: vec!["foo".to_string()],
+            ..Default::default()
+        });
+        let mut messages = vec![schema_data];
+        // An empty first batch still performs schema reconciliation.
+        messages.extend(encoder.encode(FlightMessage::RecordBatch(
+            common_recordbatch::DfRecordBatch::new_empty(schema),
+        )));
+        let mut responses = client
+            .do_put(tokio_stream::iter(messages).boxed())
+            .await
+            .unwrap();
+        assert_eq!(responses.next().await.unwrap().unwrap().affected_rows(), 0);
+        let Some(Err(err)) = responses.next().await else {
+            panic!("expected an unsupported bulk schema error");
+        };
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        let message = err.to_string();
+        assert!(message.contains("new_nested"), "{message}");
+        assert!(message.contains(&format!("{data_type:?}")), "{message}");
+        assert!(responses.next().await.is_none());
+
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'foo' ORDER BY column_name",
+            "\
++-------------+
+| column_name |
++-------------+
 | ts          |
 +-------------+",
         )
