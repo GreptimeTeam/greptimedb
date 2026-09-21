@@ -15,6 +15,7 @@
 //! Deferred deletion of aggregate series-index files.
 
 use std::fmt::{self, Debug, Formatter};
+use std::sync::Arc;
 
 use common_telemetry::{info, warn};
 use object_store::{ErrorKind, ObjectStore};
@@ -22,6 +23,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
 use crate::series_index::catalog::series_index_path;
+use crate::series_index::disk_budget::SeriesIndexDiskBudget;
 use crate::sst::file::RegionFileId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,6 +50,7 @@ pub(crate) struct PurgeRequest {
 pub(crate) struct IndexFilePurger {
     store: ObjectStore,
     sender: UnboundedSender<PurgeRequest>,
+    budget: Option<Arc<SeriesIndexDiskBudget>>,
 }
 
 impl Debug for IndexFilePurger {
@@ -57,11 +60,21 @@ impl Debug for IndexFilePurger {
 }
 
 impl IndexFilePurger {
+    pub(crate) fn with_budget(mut self, budget: Option<Arc<SeriesIndexDiskBudget>>) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    pub(crate) fn budget(&self) -> Option<&Arc<SeriesIndexDiskBudget>> {
+        self.budget.as_ref()
+    }
+
     pub(crate) fn purge(&self, request: PurgeRequest) {
         if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
+            let budget = self.budget.clone();
             common_runtime::spawn_compact(async move {
-                purge_file(&store, error.0).await;
+                purge_file(&store, error.0, budget.as_ref()).await;
             });
         }
     }
@@ -74,20 +87,41 @@ pub(crate) fn file_operation(index_type: IndexFileType, operation: &str, result:
 }
 
 /// Processes queued deletions once each, independently of periodic maintenance.
+#[cfg(test)]
 pub(crate) async fn run_index_purge_task(
     worker_id: u32,
     store: ObjectStore,
+    receiver: UnboundedReceiver<PurgeRequest>,
+) {
+    run_index_purge_task_with_budget(worker_id, store, receiver, None).await;
+}
+
+pub(crate) async fn run_index_purge_task_with_budget(
+    worker_id: u32,
+    store: ObjectStore,
     mut receiver: UnboundedReceiver<PurgeRequest>,
+    budget: Option<Arc<SeriesIndexDiskBudget>>,
 ) {
     info!("Start series-index purge task, worker: {worker_id}");
     while let Some(request) = receiver.recv().await {
-        purge_file(&store, request).await;
+        purge_file(&store, request, budget.as_ref()).await;
     }
     info!("Stop series-index purge task, worker: {worker_id}");
 }
 
-async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
+async fn purge_file(
+    store: &ObjectStore,
+    request: PurgeRequest,
+    budget: Option<&Arc<SeriesIndexDiskBudget>>,
+) {
     let path = series_index_path(request.file_id.region_id(), request.file_id.file_id());
+    if let Some(budget) = budget {
+        if let Err(error) = budget.delete(store, &path).await {
+            file_operation(IndexFileType::Series, "delete", "failure");
+            warn!(error; "Failed to delete budgeted series index, path: {path}");
+        }
+        return;
+    }
     match store.delete(&path).await {
         Ok(()) => {
             file_operation(IndexFileType::Series, "delete", "success");
@@ -106,7 +140,14 @@ pub(crate) fn series_index_channel(
     store: ObjectStore,
 ) -> (IndexFilePurger, UnboundedReceiver<PurgeRequest>) {
     let (sender, receiver) = unbounded_channel();
-    (IndexFilePurger { store, sender }, receiver)
+    (
+        IndexFilePurger {
+            store,
+            sender,
+            budget: None,
+        },
+        receiver,
+    )
 }
 
 #[cfg(test)]

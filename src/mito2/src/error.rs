@@ -824,6 +824,12 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Series-index disk budget exhausted"))]
+    SeriesIndexCapacity {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid config, {reason}"))]
     InvalidConfig {
         reason: String,
@@ -1580,6 +1586,7 @@ impl ErrorExt for Error {
             | PuffinPurgeStager { source, .. } => source.status_code(),
             CleanDir { .. } => StatusCode::Unexpected,
             InvalidConfig { .. } => StatusCode::InvalidArguments,
+            SeriesIndexCapacity { .. } => StatusCode::StorageUnavailable,
             StaleLogEntry { .. }
             | InvalidNativeHistogramSubfield { .. }
             | InvalidNativeHistogramFieldId { .. } => StatusCode::Unexpected,

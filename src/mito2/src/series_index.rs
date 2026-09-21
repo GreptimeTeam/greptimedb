@@ -19,8 +19,10 @@
 mod bucket;
 mod builder;
 mod catalog;
+pub(crate) mod disk_budget;
 mod maintenance;
 mod purger;
+mod recovery;
 mod searcher;
 mod task;
 #[cfg(test)]
@@ -41,7 +43,7 @@ use crate::error::Result;
 #[cfg(test)]
 pub(crate) use crate::series_index::catalog::SeriesIndexEntry;
 pub(crate) use crate::series_index::catalog::{
-    delete_catalogs, load_version_control, series_index_path,
+    delete_catalogs_with_budget, load_version_control, series_index_path,
 };
 pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
 pub use crate::series_index::searcher::SeriesIndexSearcher;

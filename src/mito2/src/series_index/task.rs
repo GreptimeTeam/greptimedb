@@ -28,7 +28,9 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::metrics::SERIES_INDEX_RECONCILE_TOTAL;
 use crate::region::{RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::series_index::maintenance::reconcile_series_indexes;
-use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
+use crate::series_index::purger::{
+    IndexFilePurger, PurgeRequest, run_index_purge_task_with_budget,
+};
 use crate::time_provider::TimeProviderRef;
 
 /// Shared lifecycle state for a worker's series-index task.
@@ -80,10 +82,14 @@ pub(crate) fn spawn_series_index_tasks(
     enable_range_index: bool,
 ) -> JoinHandle<()> {
     // Snapshots may retain senders after the worker stops; purge until all senders drop.
-    common_runtime::spawn_compact(run_index_purge_task(
+    if let Some(budget) = purger.budget() {
+        budget.register_regions(&regions);
+    }
+    common_runtime::spawn_compact(run_index_purge_task_with_budget(
         worker_id,
         store.clone(),
         purge_receiver,
+        purger.budget().cloned(),
     ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {

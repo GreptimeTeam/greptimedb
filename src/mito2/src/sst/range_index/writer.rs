@@ -132,6 +132,16 @@ impl SstRangeIndexWriter {
         path: &str,
         options: SstRangeIndexWriterOptions,
     ) -> Result<Self> {
+        Self::try_new_with_budget(metadata, object_store, path, options, None).await
+    }
+
+    pub(crate) async fn try_new_with_budget(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        path: &str,
+        options: SstRangeIndexWriterOptions,
+        budget: Option<&Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+    ) -> Result<Self> {
         let open_start = Instant::now();
         ensure!(
             options.index_row_group_size > 0,
@@ -141,13 +151,14 @@ impl SstRangeIndexWriter {
         );
         validate_metadata(&metadata)?;
         let schema = range_index_schema();
-        let writer = ParquetIndexWriter::try_new(
+        let writer = ParquetIndexWriter::try_new_with_budget(
             "range index",
             object_store,
             path,
             &schema,
             options.index_row_group_size,
             None,
+            budget,
         )
         .await?;
         let codec = SparsePrimaryKeyCodec::new(&metadata);

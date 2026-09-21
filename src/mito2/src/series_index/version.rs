@@ -51,6 +51,12 @@ impl SeriesIndexFileHandle {
         Self {
             inner: Arc::new(SeriesIndexFileHandleInner {
                 file_id: RegionFileId::new(region_id, entry.index_uuid),
+                _disk_pin: purger.budget().and_then(|budget| {
+                    budget.pin(&crate::series_index::catalog::series_index_path(
+                        region_id,
+                        entry.index_uuid,
+                    ))
+                }),
                 entry,
                 deleted: AtomicBool::new(false),
                 purger,
@@ -75,6 +81,7 @@ impl SeriesIndexFileHandle {
 struct SeriesIndexFileHandleInner {
     file_id: RegionFileId,
     entry: SeriesIndexEntry,
+    _disk_pin: Option<Arc<()>>,
     deleted: AtomicBool,
     purger: IndexFilePurger,
 }
@@ -97,6 +104,8 @@ pub(crate) struct SeriesIndexVersion {
     pub(crate) range_indexes: HashSet<FileId>,
     pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
+    /// Keeps budgeted files alive even when SST garbage collection requests their deletion.
+    pub(crate) disk_pins: Vec<Arc<()>>,
 }
 
 impl SeriesIndexVersion {
@@ -113,7 +122,42 @@ impl SeriesIndexVersion {
             range_indexes,
             series_indexes,
             index_buckets,
+            disk_pins: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_disk_pins(
+        mut self,
+        region_id: RegionId,
+        budget: Option<&Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+    ) -> Self {
+        if let Some(budget) = budget {
+            self.range_indexes.retain(|id| {
+                if let Some(pin) = budget.pin(&crate::series_index::catalog::range_index_path(
+                    region_id, *id,
+                )) {
+                    self.disk_pins.push(pin);
+                    true
+                } else {
+                    false
+                }
+            });
+            self.series_indexes.retain(|id, _| {
+                if let Some(pin) = budget.pin(&crate::series_index::catalog::series_index_path(
+                    region_id, *id,
+                )) {
+                    self.disk_pins.push(pin);
+                    true
+                } else {
+                    false
+                }
+            });
+            self.index_buckets.clear();
+            for handle in self.series_indexes.values() {
+                IndexBucket::from_entry(handle.entry()).insert_into(&mut self.index_buckets);
+            }
+        }
+        self
     }
 
     fn mark_all_deleted(&self) {

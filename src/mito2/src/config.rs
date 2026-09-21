@@ -92,6 +92,9 @@ pub struct MitoConfig {
     /// Under development; do not enable. Whether to enable series indexes (default false).
     /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
     pub experimental_enable_series_index: bool,
+    /// Maximum local series-index disk usage, including range indexes, catalogs and temporary files.
+    /// Uses a shared KiB-granularity budget; older data is evicted first (default: 5 GiB).
+    pub experimental_series_index_max_size: ReadableSize,
     /// Whether to build and query range indexes when series indexes are enabled (default false).
     /// Obsolete range-index metadata and files are still cleaned up when disabled.
     pub experimental_enable_range_index: bool,
@@ -220,6 +223,7 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
+            experimental_series_index_max_size: ReadableSize::gb(5),
             experimental_enable_range_index: false,
             experimental_series_index_maintenance_interval:
                 DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL,
@@ -279,6 +283,11 @@ impl MitoConfig {
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
     pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
+        if self.experimental_enable_series_index {
+            crate::series_index::disk_budget::validate_limit(
+                self.experimental_series_index_max_size,
+            )?;
+        }
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
@@ -441,12 +450,17 @@ mod tests {
         let mut config: MitoConfig = toml::from_str(
             "experimental_enable_series_index = true
              experimental_enable_range_index = false
+             experimental_series_index_max_size = '64MiB'
              experimental_series_index_maintenance_interval = '30s'
              experimental_series_index_bucket_width = '2days'",
         )
         .unwrap();
         config.sanitize("/data").unwrap();
         assert!(config.experimental_enable_series_index);
+        assert_eq!(
+            ReadableSize::mb(64),
+            config.experimental_series_index_max_size
+        );
         assert!(!config.experimental_enable_range_index);
         assert_eq!(
             config.experimental_series_index_maintenance_interval,

@@ -455,8 +455,13 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
-                self.series_index_store
-                    .map(|store| RangeIndexDeleter::new(store, region_id)),
+                self.series_index_store.map(|store| {
+                    RangeIndexDeleter::new(store, region_id).with_budget(
+                        self.series_index_purger
+                            .as_ref()
+                            .and_then(|purger| purger.budget().cloned()),
+                    )
+                }),
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -572,9 +577,13 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
-            self.series_index_store
-                .clone()
-                .map(|store| RangeIndexDeleter::new(store, region_id)),
+            self.series_index_store.clone().map(|store| {
+                RangeIndexDeleter::new(store, region_id).with_budget(
+                    self.series_index_purger
+                        .as_ref()
+                        .and_then(|purger| purger.budget().cloned()),
+                )
+            }),
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self

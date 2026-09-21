@@ -14,6 +14,7 @@
 
 //! Behavioral coverage for series-index reconciliation.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -52,11 +53,18 @@ async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
+    prepare_region_with_id(env, timestamps, RegionId::new(1, 1)).await
+}
+
+async fn prepare_region_with_id(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    region_id: RegionId,
+) -> (MitoEngine, MitoRegionRef) {
     let engine = env.create_engine(MitoConfig::default()).await;
     let metadata = Arc::new(sst_region_metadata_with_encoding(
         PrimaryKeyEncoding::Sparse,
     ));
-    let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build();
     request.column_metadatas = metadata.column_metadatas.clone();
     request.primary_key = metadata.primary_key.clone();
@@ -319,16 +327,13 @@ async fn test_reconcile_restores_and_reuses_indexes() {
         store.delete(path).await.unwrap();
     }
 
-    // Restore catalog entries even when their index files are missing.
+    // Missing files must not be advertised as usable coverage after reopening.
     let restored = load_version_control(store, region.region_id, purger)
         .await
         .current();
-    assert_eq!(first.range_indexes, restored.range_indexes);
-    assert_eq!(first.index_buckets, restored.index_buckets);
-    assert_eq!(
-        first.series_indexes[&first_id].entry(),
-        restored.series_indexes[&first_id].entry()
-    );
+    assert_eq!(first.range_indexes.len() - 1, restored.range_indexes.len());
+    assert!(restored.index_buckets.is_empty());
+    assert!(restored.series_indexes.is_empty());
 
     // Catalog changes are not reloaded, and missing index files are not repaired.
     for path in [
@@ -935,4 +940,205 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     })
     .await
     .unwrap();
+}
+
+/// Real Parquet output under a small shared budget: eviction must respect readers,
+/// prevent older regions displacing newer data, and preserve useful coverage on restart.
+#[tokio::test]
+async fn test_disk_budget_eviction_pins_and_restart() {
+    use common_base::readable_size::ReadableSize;
+    use futures::TryStreamExt;
+
+    use super::disk_budget::SeriesIndexDiskBudget;
+    use super::version::SeriesIndexVersion;
+
+    let mut old_env = TestEnv::with_prefix("index-budget-old").await;
+    let mut new_env = TestEnv::with_prefix("index-budget-new").await;
+    let (old_engine, old_region) =
+        prepare_region_with_id(&mut old_env, &[1000, 2000, 3000, 4000], RegionId::new(1, 1)).await;
+    let (new_engine, new_region) = prepare_region_with_id(
+        &mut new_env,
+        &[201000, 202000, 203000, 204000],
+        RegionId::new(2, 1),
+    )
+    .await;
+    let root = common_test_util::temp_dir::create_temp_dir("series-index-budget");
+    let store = crate::access_layer::new_fs_cache_store(root.path().to_str().unwrap())
+        .await
+        .unwrap();
+    let mut config = MitoConfig {
+        experimental_series_index_max_size: ReadableSize::kb(64),
+        ..Default::default()
+    };
+    let initial = SeriesIndexDiskBudget::open(&store, config.experimental_series_index_max_size)
+        .await
+        .unwrap();
+    let (purger, _receiver) = series_index_channel(store.clone());
+    let initial_test = IndexTest {
+        region: old_region.clone(),
+        store: store.clone(),
+        purger: purger.with_budget(Some(initial.clone())),
+    };
+    initial_test.reconcile(store.clone()).await.unwrap();
+    let used = initial.capacity_bytes() - initial.available_bytes();
+    assert!(!old_region.series_index_version().series_indexes.is_empty());
+    old_region
+        .series_index_version_control
+        .publish(Arc::new(SeriesIndexVersion::default()));
+    drop(initial_test);
+    drop(initial);
+
+    // Leave too little spare space for another aggregate, without depending on
+    // a particular Parquet encoding size.
+    config.experimental_series_index_max_size = ReadableSize(used + 1024);
+    let budget = SeriesIndexDiskBudget::open(&store, config.experimental_series_index_max_size)
+        .await
+        .unwrap();
+    let (purger, _receiver) = series_index_channel(store.clone());
+    let purger = purger.with_budget(Some(budget.clone()));
+    let restored = load_version_control(&store, old_region.region_id, &purger).await;
+    old_region
+        .series_index_version_control
+        .publish(restored.current());
+    drop(restored);
+    let old = IndexTest {
+        region: old_region.clone(),
+        store: store.clone(),
+        purger: purger.clone(),
+    };
+    let new = IndexTest {
+        region: new_region.clone(),
+        store: store.clone(),
+        purger: purger.clone(),
+    };
+    let old_worker = Arc::new(RegionMap::default());
+    old_worker.insert_region(old_region.clone());
+    let new_worker = Arc::new(RegionMap::default());
+    new_worker.insert_region(new_region.clone());
+    budget.register_regions(&old_worker);
+    budget.register_regions(&new_worker);
+
+    let pinned = old_region.series_index_version();
+    let old_paths = pinned
+        .series_indexes
+        .keys()
+        .map(|id| series_index_path(old_region.region_id, *id))
+        .chain(
+            pinned
+                .range_indexes
+                .iter()
+                .map(|id| range_index_path(old_region.region_id, *id)),
+        )
+        .collect::<Vec<_>>();
+    new.reconcile(store.clone()).await.unwrap();
+    assert!(new_region.series_index_version().series_indexes.is_empty());
+    for path in &old_paths {
+        assert!(store.exists(path).await.unwrap());
+    }
+    let searcher = super::SeriesIndexSearcher::try_new(
+        old_region.metadata(),
+        store.clone(),
+        pinned.series_indexes.values().next().unwrap().clone(),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rows = searcher
+        .search()
+        .unwrap()
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(1, rows.iter().map(Vec::len).sum::<usize>());
+    // A searcher can outlive the snapshot from which it obtained its file handle.
+    drop(pinned);
+    budget.retry_cleanup(&store).await;
+    assert!(
+        !searcher
+            .search()
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    drop(searcher);
+    budget.retry_cleanup(&store).await;
+    new.reconcile(store.clone()).await.unwrap();
+    let newest = new_region
+        .series_index_version()
+        .series_indexes
+        .keys()
+        .copied()
+        .collect::<HashSet<_>>();
+    assert!(!newest.is_empty());
+    for _ in 0..3 {
+        let (old_result, new_result) =
+            tokio::join!(old.reconcile(store.clone()), new.reconcile(store.clone()));
+        old_result.unwrap();
+        new_result.unwrap();
+        assert_eq!(
+            newest,
+            new_region
+                .series_index_version()
+                .series_indexes
+                .keys()
+                .copied()
+                .collect()
+        );
+        assert!(
+            index_disk_bytes(&store).await <= config.experimental_series_index_max_size.as_bytes()
+        );
+    }
+
+    // Lower the limit enough to trim companions while preserving the newest aggregate.
+    let id = *newest.iter().next().unwrap();
+    let path = series_index_path(new_region.region_id, id);
+    let series_bytes = store
+        .stat(&path)
+        .await
+        .unwrap()
+        .content_length()
+        .div_ceil(1024)
+        * 1024;
+    let catalog_bytes = store
+        .stat(&series_catalog_path(new_region.region_id))
+        .await
+        .unwrap()
+        .content_length()
+        .div_ceil(1024)
+        * 1024;
+    old_region
+        .series_index_version_control
+        .publish(Arc::new(SeriesIndexVersion::default()));
+    new_region
+        .series_index_version_control
+        .publish(Arc::new(SeriesIndexVersion::default()));
+    budget.retry_cleanup(&store).await;
+    drop(old);
+    drop(new);
+    drop(purger);
+    drop(budget);
+    config.experimental_series_index_max_size = ReadableSize(series_bytes + catalog_bytes);
+    let restarted = SeriesIndexDiskBudget::open(&store, config.experimental_series_index_max_size)
+        .await
+        .unwrap();
+    let (purger, _receiver) = series_index_channel(store.clone());
+    let purger = purger.with_budget(Some(restarted));
+    let restored = load_version_control(&store, new_region.region_id, &purger).await;
+    assert!(restored.current().series_indexes.contains_key(&id));
+    assert!(index_disk_bytes(&store).await <= config.experimental_series_index_max_size.as_bytes());
+    old_engine.stop().await.unwrap();
+    new_engine.stop().await.unwrap();
+}
+
+async fn index_disk_bytes(store: &ObjectStore) -> u64 {
+    let mut bytes = 0;
+    for entry in store.list_with("").recursive(true).await.unwrap() {
+        if !entry.metadata().is_dir() {
+            bytes += store.stat(entry.path()).await.unwrap().content_length();
+        }
+    }
+    bytes
 }

@@ -20,7 +20,7 @@ use async_stream::try_stream;
 use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::FileId;
 
 use crate::error::{Result, UnexpectedSnafu};
@@ -69,18 +69,44 @@ pub(crate) async fn build_range_index(
     version: &VersionRef,
     file: FileHandle,
 ) -> Result<Option<FileId>> {
+    build_range_index_with_budget(store, region, version, file, None).await
+}
+
+pub(crate) async fn build_range_index_with_budget(
+    store: &ObjectStore,
+    region: &MitoRegionRef,
+    version: &VersionRef,
+    file: FileHandle,
+    budget: Option<&Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+) -> Result<Option<FileId>> {
     let file_id = file.file_id().file_id();
+    let end = file.meta_ref().time_range.1;
+    let path = range_index_path(region.region_id, file_id);
+    if let Some(budget) = budget {
+        if budget.is_retired(&path) {
+            return Ok(None);
+        }
+        if store
+            .exists(&path)
+            .await
+            .context(crate::error::OpenDalSnafu)?
+        {
+            budget.set_end(&path, end);
+            return Ok(Some(file_id));
+        }
+    }
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
     };
     let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
     let compat = FlatCompatBatch::try_new(&mapper, context.read_format(), false)?;
     let path = range_index_path(region.region_id, file_id);
-    let mut writer = SstRangeIndexWriter::try_new(
+    let mut writer = SstRangeIndexWriter::try_new_with_budget(
         version.metadata.clone(),
         store.clone(),
         &path,
         SstRangeIndexWriterOptions::default(),
+        budget,
     )
     .await?;
     let result: Result<()> = async {
@@ -117,6 +143,9 @@ pub(crate) async fn build_range_index(
         return Err(error);
     }
     writer.finish().await?;
+    if let Some(budget) = budget {
+        budget.set_end(&path, end);
+    }
     file_operation(IndexFileType::Range, "build", "success");
     Ok(Some(file_id))
 }
@@ -179,12 +208,13 @@ pub(crate) async fn build_series_index(
     };
     // TODO(yingwen): Deduplicate update-mode rows before series indexes are used by queries.
     let path = series_index_path(region.region_id, entry.index_uuid);
-    let mut writer = SeriesIndexWriter::try_new(
+    let mut writer = SeriesIndexWriter::try_new_with_budget(
         version.metadata.clone(),
         store.clone(),
         &path,
         SeriesIndexWriterOptions::default(),
         Some(series_metadata(entry)?),
+        purger.budget(),
     )
     .await?;
     let result: Result<()> = async {
@@ -201,6 +231,9 @@ pub(crate) async fn build_series_index(
         return Err(error);
     }
     writer.finish().await?;
+    if let Some(budget) = purger.budget() {
+        budget.set_end(&path, entry.bucket_end);
+    }
     file_operation(IndexFileType::Series, "build", "success");
     Ok(SeriesIndexFileHandle::new(
         region.region_id,

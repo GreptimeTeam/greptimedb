@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use datatypes::arrow::datatypes::SchemaRef;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -27,6 +29,7 @@ use snafu::{OptionExt, ResultExt};
 
 use crate::access_layer::TempFileCleaner;
 use crate::error::{OpenDalSnafu, Result, UnexpectedSnafu, WriteParquetSnafu};
+use crate::series_index::disk_budget::{IndexOutput, SeriesIndexDiskBudget};
 use crate::sst::{DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY};
 
 type ArrowWriter = AsyncArrowWriter<AsyncWriter>;
@@ -34,14 +37,19 @@ type ArrowWriter = AsyncArrowWriter<AsyncWriter>;
 /// Bridges an OpenDAL [`Writer`] with Parquet's [`AsyncFileWriter`] and tracks
 /// the number of bytes successfully submitted to the object store.
 struct AsyncWriter {
-    inner: Writer,
+    inner: IndexWriter,
     output_bytes: u64,
+}
+
+enum IndexWriter {
+    Store(Writer),
+    Budgeted(IndexOutput),
 }
 
 impl AsyncWriter {
     fn new(inner: Writer) -> Self {
         Self {
-            inner,
+            inner: IndexWriter::Store(inner),
             output_bytes: 0,
         }
     }
@@ -50,8 +58,15 @@ impl AsyncWriter {
         self.output_bytes
     }
 
-    fn into_inner(self) -> Writer {
-        self.inner
+    async fn abort(mut self) {
+        match &mut self.inner {
+            IndexWriter::Budgeted(output) => output.abort().await,
+            IndexWriter::Store(writer) => {
+                if let Err(error) = writer.abort().await {
+                    common_telemetry::warn!(error; "Failed to abort index writer");
+                }
+            }
+        }
     }
 }
 
@@ -59,10 +74,16 @@ impl AsyncFileWriter for AsyncWriter {
     fn write(&mut self, bytes: Bytes) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
             let len = bytes.len() as u64;
-            self.inner
-                .write(bytes)
-                .await
-                .map_err(|error| ParquetError::External(Box::new(error)))?;
+            match &mut self.inner {
+                IndexWriter::Budgeted(output) => output
+                    .write(bytes)
+                    .await
+                    .map_err(|error| ParquetError::External(Box::new(error)))?,
+                IndexWriter::Store(writer) => writer
+                    .write(bytes)
+                    .await
+                    .map_err(|error| ParquetError::External(Box::new(error)))?,
+            }
             self.output_bytes += len;
             Ok(())
         })
@@ -70,11 +91,17 @@ impl AsyncFileWriter for AsyncWriter {
 
     fn complete(&mut self) -> BoxFuture<'_, parquet::errors::Result<()>> {
         Box::pin(async move {
-            self.inner
-                .close()
-                .await
-                .map(|_| ())
-                .map_err(|error| ParquetError::External(Box::new(error)))
+            match &mut self.inner {
+                IndexWriter::Budgeted(output) => output
+                    .close()
+                    .await
+                    .map_err(|error| ParquetError::External(Box::new(error))),
+                IndexWriter::Store(writer) => writer
+                    .close()
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| ParquetError::External(Box::new(error))),
+            }
         })
     }
 }
@@ -88,22 +115,32 @@ pub(crate) struct ParquetIndexWriter {
 }
 
 impl ParquetIndexWriter {
-    /// Opens an index file with the common Parquet writer configuration.
-    pub(crate) async fn try_new(
+    /// Opens an index file with optional local disk reservations.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn try_new_with_budget(
         name: &'static str,
         object_store: ObjectStore,
         path: &str,
         schema: &SchemaRef,
         row_group_size: usize,
         key_value_metadata: Option<Vec<KeyValue>>,
+        budget: Option<&Arc<SeriesIndexDiskBudget>>,
     ) -> Result<Self> {
         let file_name = path.rsplit('/').next().unwrap_or(path).to_string();
-        let output = object_store
-            .writer_with(path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
-            .concurrent(DEFAULT_WRITE_CONCURRENCY)
-            .await
-            .context(OpenDalSnafu)?;
+        let output = if let Some(budget) = budget {
+            AsyncWriter {
+                inner: IndexWriter::Budgeted(budget.output(object_store.clone(), path).await?),
+                output_bytes: 0,
+            }
+        } else {
+            let output = object_store
+                .writer_with(path)
+                .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+                .concurrent(DEFAULT_WRITE_CONCURRENCY)
+                .await
+                .context(OpenDalSnafu)?;
+            AsyncWriter::new(output)
+        };
         let properties = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
             .set_encoding(Encoding::PLAIN)
@@ -112,9 +149,8 @@ impl ParquetIndexWriter {
             .set_statistics_truncate_length(None)
             .set_key_value_metadata(key_value_metadata)
             .build();
-        let writer =
-            AsyncArrowWriter::try_new(AsyncWriter::new(output), schema.clone(), Some(properties))
-                .context(WriteParquetSnafu)?;
+        let writer = AsyncArrowWriter::try_new(output, schema.clone(), Some(properties))
+            .context(WriteParquetSnafu)?;
 
         Ok(Self {
             name,
@@ -155,10 +191,7 @@ impl ParquetIndexWriter {
     /// Aborts an incomplete output and removes its atomic-write temporary files.
     pub(crate) async fn abort(&mut self) {
         if let Some(writer) = self.writer.take() {
-            let mut writer = writer.into_inner().into_inner();
-            if let Err(error) = writer.abort().await {
-                common_telemetry::warn!(error; "Failed to abort {} writer", self.name);
-            }
+            writer.into_inner().abort().await;
         }
 
         TempFileCleaner::clean_atomic_dir_files(&self.object_store, &[&self.file_name]).await;

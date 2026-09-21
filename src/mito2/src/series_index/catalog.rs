@@ -147,11 +147,33 @@ where
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn store_catalog<T>(store: &ObjectStore, path: &str, catalog: &T) -> Result<()>
 where
     T: Serialize,
 {
+    store_catalog_with_budget(store, path, catalog, None).await
+}
+
+pub(crate) async fn store_catalog_with_budget<T: Serialize>(
+    store: &ObjectStore,
+    path: &str,
+    catalog: &T,
+    budget: Option<&std::sync::Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(catalog).context(SerdeJsonSnafu)?;
+    if let Some(budget) = budget {
+        let mut output = budget.output(store.clone(), path).await?;
+        if let Err(error) = output.write(bytes.into()).await {
+            output.abort().await;
+            return Err(error);
+        }
+        if let Err(error) = output.close().await {
+            output.abort().await;
+            return Err(error);
+        }
+        return Ok(());
+    }
     store
         .write(path, bytes)
         .await
@@ -160,11 +182,26 @@ where
 }
 
 /// Best-effort removal of both catalogs when dropping a region.
+#[cfg(test)]
 pub(crate) async fn delete_catalogs(store: &ObjectStore, region_id: RegionId) {
+    delete_catalogs_with_budget(store, region_id, None).await;
+}
+
+pub(crate) async fn delete_catalogs_with_budget(
+    store: &ObjectStore,
+    region_id: RegionId,
+    budget: Option<&std::sync::Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+) {
     for path in [
         series_catalog_path(region_id),
         range_catalog_path(region_id),
     ] {
+        if let Some(budget) = budget {
+            if let Err(error) = budget.delete(store, &path).await {
+                warn!(error; "Failed to delete index catalog, path: {path}");
+            }
+            continue;
+        }
         if let Err(error) = store.delete(&path).await
             && error.kind() != ErrorKind::NotFound
         {
@@ -179,13 +216,40 @@ pub(crate) async fn load_version_control(
     region_id: RegionId,
     purger: &IndexFilePurger,
 ) -> SeriesIndexVersionControl {
+    let _guard = match purger.budget() {
+        Some(budget) => Some(budget.maintenance.lock().await),
+        None => None,
+    };
     let range = load_catalog::<RangeIndexCatalog>(store, &range_catalog_path(region_id))
         .await
         .unwrap_or_default();
     let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id))
         .await
         .unwrap_or_default();
-    // TODO: Handle catalog entries whose index files are missing from storage.
+    let mut range = range;
+    let mut series = series;
+    let mut range_ids = Vec::new();
+    for id in range.indexes {
+        if store
+            .exists(&range_index_path(region_id, id))
+            .await
+            .unwrap_or(false)
+        {
+            range_ids.push(id);
+        }
+    }
+    range.indexes = range_ids;
+    let mut entries = Vec::new();
+    for entry in series.indexes {
+        if store
+            .exists(&series_index_path(region_id, entry.index_uuid))
+            .await
+            .unwrap_or(false)
+        {
+            entries.push(entry);
+        }
+    }
+    series.indexes = entries;
     let version = SeriesIndexVersion::new(
         range.indexes.into_iter().collect(),
         series
@@ -198,7 +262,8 @@ pub(crate) async fn load_version_control(
                 )
             })
             .collect(),
-    );
+    )
+    .with_disk_pins(region_id, purger.budget());
     let control = SeriesIndexVersionControl::default();
     control.publish(std::sync::Arc::new(version));
     control
@@ -315,7 +380,7 @@ mod tests {
             .await
             .unwrap();
         let control = load_version_control(&store, region_id, &purger).await;
-        assert!(control.current().range_indexes.contains(&file_id));
+        assert!(control.current().range_indexes.is_empty());
         assert!(control.current().series_indexes.is_empty());
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(|_, _, _| Box::new(FailingCatalogReader)))
@@ -377,6 +442,13 @@ mod tests {
         )
         .await
         .unwrap();
+        store
+            .write(
+                &super::series_index_path(region_id, entry.index_uuid),
+                "index",
+            )
+            .await
+            .unwrap();
         let (purger, _receiver) = series_index_channel(store.clone());
         let current = load_version_control(&store, region_id, &purger)
             .await

@@ -127,7 +127,14 @@ where
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
         if let Some(store) = &self.series_index_store {
-            crate::series_index::delete_catalogs(store, region_id).await;
+            crate::series_index::delete_catalogs_with_budget(
+                store,
+                region_id,
+                self.series_index_purger
+                    .as_ref()
+                    .and_then(|purger| purger.budget()),
+            )
+            .await;
         }
 
         // Marks region version as dropped

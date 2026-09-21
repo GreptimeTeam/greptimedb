@@ -198,6 +198,16 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
+        let series_index_budget = match &series_index_store {
+            Some(store) => Some(
+                crate::series_index::disk_budget::SeriesIndexDiskBudget::open(
+                    store,
+                    config.experimental_series_index_max_size,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -251,6 +261,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
+                    series_index_budget: series_index_budget.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -410,6 +421,16 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
+        let series_index_budget = match &series_index_store {
+            Some(store) => Some(
+                crate::series_index::disk_budget::SeriesIndexDiskBudget::open(
+                    store,
+                    config.experimental_series_index_max_size,
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -464,6 +485,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
+                    series_index_budget: series_index_budget.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -572,6 +594,7 @@ struct WorkerStarter<S> {
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
     series_index_store: Option<ObjectStore>,
+    series_index_budget: Option<Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -611,6 +634,7 @@ impl<S: LogStore> WorkerStarter<S> {
             .zip(series_index_task_state.clone())
             .map(|(store, state)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
+                let purger = purger.with_budget(self.series_index_budget.clone());
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,

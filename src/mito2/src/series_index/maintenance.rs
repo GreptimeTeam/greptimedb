@@ -19,7 +19,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_telemetry::{debug, info};
+use common_time::Timestamp;
 use object_store::ObjectStore;
+use snafu::ResultExt;
 use store_api::storage::RegionId;
 
 use crate::error::Result;
@@ -30,11 +32,15 @@ use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::series_index::bucket::{
     group_files_into_series_buckets, plan_series_indexes, rounded_bucket_width,
 };
-use crate::series_index::builder::{build_range_index, build_series_index};
-use crate::series_index::catalog::{
-    RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path,
-    series_catalog_path, store_catalog,
+use crate::series_index::builder::{
+    build_range_index, build_range_index_with_budget, build_series_index,
 };
+use crate::series_index::catalog::{
+    RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs_with_budget, load_catalog,
+    range_catalog_path, range_index_path, series_catalog_path, series_index_path,
+    store_catalog_with_budget,
+};
+use crate::series_index::disk_budget::{SeriesIndexDiskBudget, is_capacity_error};
 use crate::series_index::purger::IndexFilePurger;
 use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
 
@@ -65,6 +71,7 @@ pub(crate) struct ReconcileStats {
     pub(crate) removed_series: usize,
     pub(crate) computed_buckets: usize,
     pub(crate) skipped_buckets: usize,
+    deferred: Vec<(Timestamp, Vec<String>, u64)>,
 }
 
 impl ReconcileStats {
@@ -84,6 +91,14 @@ pub(crate) async fn reconcile_series_indexes(
     enable_range_index: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
+    let budget = purger.budget().cloned();
+    let _guard = match &budget {
+        Some(budget) => Some(budget.maintenance.lock().await),
+        None => None,
+    };
+    if let Some(budget) = &budget {
+        budget.retry_cleanup(&store).await;
+    }
     // Use this snapshot throughout reconciliation, even if the region version advances.
     let version = region.version_control.current().version;
     if !is_sparse_metric_metadata(&version.metadata) {
@@ -112,9 +127,31 @@ pub(crate) async fn reconcile_series_indexes(
     // Persist changed catalogs before making the new snapshot visible to readers.
     let publish_result: Result<()> = async {
         if let Some(next) = next {
-            persist_index_catalogs(&store, region.region_id, &next, &stats).await?;
+            persist_index_catalogs(&store, region.region_id, &next, &stats, budget.as_ref())
+                .await?;
             publish_index_version(&region, Arc::new(next));
             unpublished.disarm();
+        } else if let Some(budget) = &budget {
+            let current = region.series_index_version();
+            let missing = ReconcileStats {
+                built_range: usize::from(
+                    !current.range_indexes.is_empty()
+                        && !store
+                            .exists(&range_catalog_path(region.region_id))
+                            .await
+                            .context(crate::error::OpenDalSnafu)?,
+                ),
+                built_series: usize::from(
+                    !current.series_indexes.is_empty()
+                        && !store
+                            .exists(&series_catalog_path(region.region_id))
+                            .await
+                            .context(crate::error::OpenDalSnafu)?,
+                ),
+                ..Default::default()
+            };
+            persist_index_catalogs(&store, region.region_id, &current, &missing, Some(budget))
+                .await?;
         }
         Ok(())
     }
@@ -123,11 +160,19 @@ pub(crate) async fn reconcile_series_indexes(
     // If dropping starts after this check, the normal drop path cleans up our publication.
     // This assumes the region ID is not reopened or replaced during cleanup.
     if region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping) {
-        delete_catalogs(&store, region.region_id).await;
+        delete_catalogs_with_budget(&store, region.region_id, budget.as_ref()).await;
         region.series_index_version_control.mark_dropped();
         stats = ReconcileStats::default();
     }
     publish_result?;
+    if let Some(budget) = &budget {
+        for (end, superseded, required) in &stats.deferred {
+            crate::metrics::SERIES_INDEX_CAPACITY_DEFERRED.inc();
+            if *required > 0 && *required <= budget.capacity_bytes() {
+                evict_older_indexes(&store, budget, &region, *end, superseded, *required).await?;
+            }
+        }
+    }
     let result = if stats.changed() { "changed" } else { "noop" };
     SERIES_INDEX_RECONCILE_TOTAL
         .with_label_values(&[result])
@@ -199,7 +244,7 @@ async fn build_index_version(
             Vec::new()
         }
     };
-    let plan = plan_series_indexes(
+    let mut plan = plan_series_indexes(
         buckets,
         current.index_buckets.clone(),
         version.options.ttl,
@@ -217,17 +262,41 @@ async fn build_index_version(
     let mut range_indexes = current.range_indexes.clone();
     range_indexes.retain(|file_id| visible.contains(file_id));
     let mut series_indexes = current.series_indexes.clone();
-    for id in plan
-        .expired_index_ids
-        .iter()
-        .chain(&plan.superseded_index_ids)
-    {
+    for id in &plan.expired_index_ids {
         series_indexes.remove(id);
     }
+    if purger.budget().is_some() {
+        plan.builds
+            .sort_by_key(|(_, entry)| std::cmp::Reverse(entry.bucket_end));
+    }
     for (bucket, expected) in plan.builds {
+        let key = format!(
+            "{}/series/{:?}/{}",
+            region.region_id, expected.bucket_start, expected.max_file_sequence
+        );
+        let superseded = current
+            .series_indexes
+            .iter()
+            .filter(|(id, handle)| {
+                plan.superseded_index_ids.contains(id)
+                    && handle.entry().bucket_start < expected.bucket_end
+                    && expected.bucket_start < handle.entry().bucket_end
+            })
+            .map(|(id, _)| series_index_path(region.region_id, *id))
+            .collect::<Vec<_>>();
+        if let Some(budget) = purger.budget() {
+            let required = budget.required_bytes(&key);
+            if required > budget.available_bytes() {
+                stats
+                    .deferred
+                    .push((expected.bucket_end, superseded, required));
+                continue;
+            }
+        }
         // Complete companion indexes independently so a failed series build preserves them.
         for file in &bucket.files {
-            if enable_range_index
+            if purger.budget().is_none()
+                && enable_range_index
                 && !range_indexes.contains(&file.file_id().file_id())
                 && let Some(file_id) =
                     build_range_index(store, region, version, file.clone()).await?
@@ -237,21 +306,65 @@ async fn build_index_version(
             }
         }
         let series_handle =
-            build_series_index(store, region, version, &bucket, &expected, purger).await?;
+            match build_series_index(store, region, version, &bucket, &expected, purger).await {
+                Ok(handle) => handle,
+                Err(error) if purger.budget().is_some() && is_capacity_error(&error) => {
+                    if let Some(budget) = purger.budget() {
+                        let required = budget.defer(key);
+                        stats
+                            .deferred
+                            .push((expected.bucket_end, superseded, required));
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        if let Some(budget) = purger.budget() {
+            budget.built(&key);
+        }
+        series_indexes
+            .retain(|id, _| !superseded.contains(&series_index_path(region.region_id, *id)));
         unpublished.0.push(series_handle.clone());
         stats.built_series += 1;
         series_indexes.insert(expected.index_uuid, series_handle);
     }
     // Cover SSTs outside planned aggregate builds, including skipped buckets.
     if enable_range_index {
+        let mut files = files;
+        if purger.budget().is_some() {
+            files.sort_by_key(|file| std::cmp::Reverse(file.meta_ref().time_range.1));
+        }
         for file in files {
             let file_id = file.file_id().file_id();
             if range_indexes.contains(&file_id) {
                 continue;
             }
-            if let Some(file_id) = build_range_index(store, region, version, file).await? {
-                stats.built_range += 1;
-                range_indexes.insert(file_id);
+            let end = file.meta_ref().time_range.1;
+            let key = range_index_path(region.region_id, file_id);
+            if let Some(budget) = purger.budget() {
+                let required = budget.required_bytes(&key);
+                if required > budget.available_bytes() {
+                    stats.deferred.push((end, Vec::new(), required));
+                    continue;
+                }
+            }
+            match build_range_index_with_budget(store, region, version, file, purger.budget()).await
+            {
+                Ok(Some(file_id)) => {
+                    if let Some(budget) = purger.budget() {
+                        budget.built(&key);
+                    }
+                    stats.built_range += 1;
+                    range_indexes.insert(file_id);
+                }
+                Ok(None) => {}
+                Err(error) if purger.budget().is_some() && is_capacity_error(&error) => {
+                    if let Some(budget) = purger.budget() {
+                        let required = budget.defer(key);
+                        stats.deferred.push((end, Vec::new(), required));
+                    }
+                }
+                Err(error) => return Err(error),
             }
         }
     }
@@ -265,11 +378,11 @@ async fn build_index_version(
     if !stats.changed() {
         return Ok((None, stats));
     }
-    let next = SeriesIndexVersion {
-        range_indexes,
-        series_indexes,
-        index_buckets: plan.index_buckets,
-    };
+    let mut next = SeriesIndexVersion::new(range_indexes, series_indexes)
+        .with_disk_pins(region.region_id, purger.budget());
+    if purger.budget().is_none() {
+        next.index_buckets = plan.index_buckets;
+    }
     Ok((Some(next), stats))
 }
 
@@ -279,20 +392,32 @@ async fn persist_index_catalogs(
     region_id: RegionId,
     next: &SeriesIndexVersion,
     stats: &ReconcileStats,
+    budget: Option<&Arc<SeriesIndexDiskBudget>>,
 ) -> Result<()> {
-    if stats.built_range + stats.removed_range > 0 {
+    if next.range_indexes.is_empty() && budget.is_some() {
+        if let Some(budget) = budget {
+            budget.delete(store, &range_catalog_path(region_id)).await?;
+        }
+    } else if stats.built_range + stats.removed_range > 0 {
         let mut range_entries = next.range_indexes.iter().copied().collect::<Vec<_>>();
         range_entries.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-        store_catalog(
+        persist_catalog(
             store,
             &range_catalog_path(region_id),
             &RangeIndexCatalog {
                 indexes: range_entries,
             },
+            budget,
         )
         .await?;
     }
-    if stats.built_series + stats.removed_series > 0 {
+    if next.series_indexes.is_empty() && budget.is_some() {
+        if let Some(budget) = budget {
+            budget
+                .delete(store, &series_catalog_path(region_id))
+                .await?;
+        }
+    } else if stats.built_series + stats.removed_series > 0 {
         let mut series_entries = next
             .series_indexes
             .values()
@@ -306,12 +431,13 @@ async fn persist_index_catalogs(
                 entry.max_file_sequence,
             )
         });
-        store_catalog(
+        persist_catalog(
             store,
             &series_catalog_path(region_id),
             &SeriesIndexCatalog {
                 indexes: series_entries,
             },
+            budget,
         )
         .await?;
     }
@@ -327,4 +453,125 @@ fn publish_index_version(region: &MitoRegionRef, next: Arc<SeriesIndexVersion>) 
             handle.mark_deleted();
         }
     }
+}
+
+/// A missing catalog durably invalidates its previous coverage and can be rebuilt.
+async fn persist_catalog<T: serde::Serialize>(
+    store: &ObjectStore,
+    path: &str,
+    catalog: &T,
+    budget: Option<&Arc<SeriesIndexDiskBudget>>,
+) -> Result<()> {
+    match store_catalog_with_budget(store, path, catalog, budget).await {
+        Err(error) if is_capacity_error(&error) => {
+            if let Some(budget) = budget {
+                if !budget.delete(store, path).await? {
+                    return Err(error);
+                }
+                match store_catalog_with_budget(store, path, catalog, Some(budget)).await {
+                    Err(error) if is_capacity_error(&error) => Ok(()),
+                    result => result,
+                }
+            } else {
+                Err(error)
+            }
+        }
+        result => result,
+    }
+}
+
+/// Retires coverage before requesting deletion; pinned snapshots keep their permits.
+async fn evict_older_indexes(
+    store: &ObjectStore,
+    budget: &Arc<SeriesIndexDiskBudget>,
+    current_region: &MitoRegionRef,
+    end: Timestamp,
+    superseded: &[String],
+    required: u64,
+) -> Result<()> {
+    let mut candidates = budget.candidates();
+    candidates.retain(|(path, age)| age.is_none_or(|age| age < end) || superseded.contains(path));
+    candidates.sort_by_key(|(path, age)| (*age, path.clone()));
+    let mut regions = budget.regions();
+    if !regions
+        .iter()
+        .any(|region| region.region_id == current_region.region_id)
+    {
+        regions.push(current_region.clone());
+    }
+    for (path, _) in candidates {
+        if budget.available_bytes() >= required {
+            break;
+        }
+        let Some(region_id) = path
+            .split('/')
+            .next()
+            .and_then(|id| id.parse::<u64>().ok())
+            .map(RegionId::from)
+        else {
+            continue;
+        };
+        let is_series = path.contains("/series/");
+        let catalog_path = if is_series {
+            series_catalog_path(region_id)
+        } else {
+            range_catalog_path(region_id)
+        };
+        let closed_series =
+            if !regions.iter().any(|region| region.region_id == region_id) && is_series {
+                load_catalog::<SeriesIndexCatalog>(store, &catalog_path).await
+            } else {
+                None
+            };
+        let closed_range =
+            if !regions.iter().any(|region| region.region_id == region_id) && !is_series {
+                load_catalog::<RangeIndexCatalog>(store, &catalog_path).await
+            } else {
+                None
+            };
+        // Delete instead of allocating a replacement while the budget is full.
+        if !budget.delete(store, &catalog_path).await? {
+            continue;
+        }
+        if let Some(region) = regions.iter().find(|region| region.region_id == region_id) {
+            let current = region.series_index_version();
+            let mut series = current.series_indexes.clone();
+            let mut range = current.range_indexes.clone();
+            series.retain(|id, _| series_index_path(region_id, *id) != path);
+            range.retain(|id| range_index_path(region_id, *id) != path);
+            let next = Arc::new(
+                SeriesIndexVersion::new(range, series).with_disk_pins(region_id, Some(budget)),
+            );
+            publish_index_version(region, next.clone());
+            drop(current);
+            // Recreate both catalogs where space permits, including earlier invalidations.
+            persist_index_catalogs(
+                store,
+                region_id,
+                &next,
+                &ReconcileStats {
+                    removed_range: 1,
+                    removed_series: 1,
+                    ..Default::default()
+                },
+                Some(budget),
+            )
+            .await?;
+        }
+        budget.delete(store, &path).await?;
+        if let Some(mut catalog) = closed_series {
+            catalog
+                .indexes
+                .retain(|entry| series_index_path(region_id, entry.index_uuid) != path);
+            persist_catalog(store, &catalog_path, &catalog, Some(budget)).await?;
+        }
+        if let Some(mut catalog) = closed_range {
+            catalog
+                .indexes
+                .retain(|id| range_index_path(region_id, *id) != path);
+            persist_catalog(store, &catalog_path, &catalog, Some(budget)).await?;
+        }
+        crate::metrics::SERIES_INDEX_EVICTED.inc();
+    }
+    Ok(())
 }

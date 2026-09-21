@@ -140,6 +140,25 @@ impl SeriesIndexWriter {
         options: SeriesIndexWriterOptions,
         key_value_metadata: Option<Vec<KeyValue>>,
     ) -> Result<Self> {
+        Self::try_new_with_budget(
+            metadata,
+            object_store,
+            path,
+            options,
+            key_value_metadata,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn try_new_with_budget(
+        metadata: RegionMetadataRef,
+        object_store: ObjectStore,
+        path: &str,
+        options: SeriesIndexWriterOptions,
+        key_value_metadata: Option<Vec<KeyValue>>,
+        budget: Option<&Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+    ) -> Result<Self> {
         let open_start = Instant::now();
         ensure!(
             options.row_group_size > 0,
@@ -150,13 +169,14 @@ impl SeriesIndexWriter {
         let time_unit = time_index_unit(&metadata)?;
         let schema = series_index_schema(&metadata)?;
         let tag_columns = tag_columns(&metadata);
-        let writer = ParquetIndexWriter::try_new(
+        let writer = ParquetIndexWriter::try_new_with_budget(
             "series index",
             object_store,
             path,
             &schema,
             options.row_group_size,
             key_value_metadata,
+            budget,
         )
         .await?;
 
