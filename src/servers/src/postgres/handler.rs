@@ -56,7 +56,7 @@ use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, InferParameterTypesSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
-use crate::postgres::{PostgresServerHandlerInner, fixtures};
+use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 #[async_trait]
@@ -80,6 +80,25 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         }
 
         let parsed_query = self.query_parser.compatibility_parser.parse(query);
+
+        // A COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol and must run alone.
+        if let Ok(statements) = &parsed_query {
+            for statement in statements {
+                if let Some(copy_from_stdin) = copy_in::parse_copy_from_stdin(statement)? {
+                    if copy_in::has_multiple_statements(query) {
+                        return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                            "ERROR".to_string(),
+                            PgErrorCode::Ec0A000.code(),
+                            "COPY FROM STDIN must be executed alone".to_string(),
+                        ))));
+                    }
+                    let response = self.begin_copy_in(copy_from_stdin).await?;
+                    send_warning_opt(client, query_ctx).await?;
+                    return Ok(vec![response]);
+                }
+            }
+        }
 
         let query = if let Ok(statements) = &parsed_query {
             statements
@@ -306,6 +325,7 @@ impl DefaultQueryParser {
 pub struct PgSqlPlan {
     pub(crate) plan: SqlPlan,
     pub(crate) copy_to_stdout_format: Option<String>,
+    pub(crate) copy_from_stdin: Option<copy_in::CopyFromStdin>,
 }
 
 #[async_trait]
@@ -330,19 +350,40 @@ impl QueryParser for DefaultQueryParser {
             return Ok(Some(PgSqlPlan {
                 plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
+                copy_from_stdin: None,
             }));
         }
 
         let parsed_statements = self.compatibility_parser.parse(sql);
-        let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
-            let first_stmt = statements.remove(0);
-            let format = check_copy_to_stdout(&first_stmt);
-            (first_stmt.to_string(), format)
-        } else {
-            // bypass the error: it can run into error because of different
-            // versions of sqlparser
-            (sql.to_string(), None)
-        };
+        let (sql, copy_to_stdout_format, copy_from_stdin) =
+            if let Ok(mut statements) = parsed_statements {
+                let first_stmt = statements.remove(0);
+                let format = check_copy_to_stdout(&first_stmt);
+                // A COPY FROM STDIN cannot be planned by the internal SQL
+                // layer; keep the statement as a shortcut and let the
+                // extended query handler start the copy sub-protocol.
+                let copy_from_stdin = copy_in::parse_copy_from_stdin(&first_stmt)?;
+                if copy_from_stdin.is_some() && copy_in::has_multiple_statements(sql) {
+                    return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
+                        "ERROR".to_string(),
+                        PgErrorCode::Ec0A000.code(),
+                        "COPY FROM STDIN must be executed alone".to_string(),
+                    ))));
+                }
+                (first_stmt.to_string(), format, copy_from_stdin)
+            } else {
+                // bypass the error: it can run into error because of different
+                // versions of sqlparser
+                (sql.to_string(), None, None)
+            };
+
+        if let Some(copy_from_stdin) = copy_from_stdin {
+            return Ok(Some(PgSqlPlan {
+                plan: SqlPlan::Shortcut(sql),
+                copy_to_stdout_format: None,
+                copy_from_stdin: Some(copy_from_stdin),
+            }));
+        }
 
         let mut stmts = ParserContext::create_with_dialect(
             &sql,
@@ -367,11 +408,13 @@ impl QueryParser for DefaultQueryParser {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Plan(logical_plan, stmt),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             } else {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Statement(stmt, sql),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             }
         }
@@ -426,6 +469,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
         let pg_sql_plan = &portal.statement.statement;
         let sql_plan = &pg_sql_plan.plan;
+
+        // A COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol.
+        if let Some(copy_from_stdin) = &pg_sql_plan.copy_from_stdin {
+            let response = self.begin_copy_in(copy_from_stdin.clone()).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(response);
+        }
 
         let output = match sql_plan {
             SqlPlan::Empty => {

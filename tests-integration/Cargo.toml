@@ -96,6 +96,7 @@ uuid.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+bytes.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 client = { workspace = true, features = ["testing"] }
 common-meta = { workspace = true, features = ["testing"] }

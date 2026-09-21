@@ -13,6 +13,7 @@
 // limitations under the License.
 
 mod auth_handler;
+mod copy_in;
 mod fixtures;
 mod handler;
 mod server;
@@ -41,6 +42,7 @@ use session::context::Channel;
 
 use self::auth_handler::PgLoginVerifier;
 use self::handler::DefaultQueryParser;
+use crate::query_handler::CopyInHandlerRef;
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 pub(crate) struct GreptimeDBStartupParameters {
@@ -76,17 +78,23 @@ impl ServerParameterProvider for GreptimeDBStartupParameters {
 
 pub struct PostgresServerHandlerInner {
     query_handler: ServerSqlQueryHandlerRef,
+    copy_in_handler: CopyInHandlerRef,
     login_verifier: PgLoginVerifier,
     force_tls: bool,
     param_provider: Arc<GreptimeDBStartupParameters>,
 
     session: Arc<Session>,
     query_parser: Arc<DefaultQueryParser>,
+
+    /// State of an in-progress `COPY ... FROM STDIN`; set when the copy
+    /// starts and taken when it finishes, fails or the connection drops.
+    copy_in_state: tokio::sync::Mutex<Option<copy_in::CopyInState>>,
 }
 
 #[derive(Builder)]
 pub(crate) struct MakePostgresServerHandler {
     query_handler: ServerSqlQueryHandlerRef,
+    copy_in_handler: CopyInHandlerRef,
     user_provider: Option<UserProviderRef>,
     #[builder(default = "Arc::new(GreptimeDBStartupParameters::new())")]
     param_provider: Arc<GreptimeDBStartupParameters>,
@@ -108,6 +116,10 @@ impl PgWireServerHandlers for PostgresServerHandler {
         self.0.clone()
     }
 
+    fn copy_handler(&self) -> Arc<impl pgwire::api::copy::CopyHandler> {
+        self.0.clone()
+    }
+
     fn error_handler(&self) -> Arc<impl ErrorHandler> {
         self.0.clone()
     }
@@ -123,12 +135,14 @@ impl MakePostgresServerHandler {
         ));
         let handler = PostgresServerHandlerInner {
             query_handler: self.query_handler.clone(),
+            copy_in_handler: self.copy_in_handler.clone(),
             login_verifier: PgLoginVerifier::new(self.user_provider.clone()),
             force_tls: self.force_tls,
             param_provider: self.param_provider.clone(),
 
             session: session.clone(),
             query_parser: Arc::new(DefaultQueryParser::new(self.query_handler.clone(), session)),
+            copy_in_state: tokio::sync::Mutex::new(None),
         };
         PostgresServerHandler(Arc::new(handler))
     }
