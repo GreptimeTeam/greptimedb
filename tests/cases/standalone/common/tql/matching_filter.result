@@ -333,7 +333,7 @@ tql eval(0, 5, '5s') counter_metric / on(host) sum by(host)(gauge_metric{device=
 +-------+---------------------+---------------------------------------------------------+
 
 -- A grouping label that is a value field, not a tag: its value varies between samples of one
--- series, so a matcher on it must not filter the scan before sample selection (#9202).
+-- series, so a matcher on it must not filter the scan before sample selection (#9242).
 create table pr9202_a (
     ts timestamp time index,
     host string,
