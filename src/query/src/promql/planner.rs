@@ -2723,13 +2723,17 @@ impl PromPlanner {
 
             let accepts_empty = matcher.is_match("");
             let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
+            // Prometheus reads a label a series does not carry as the empty
+            // string. A row can miss a label two ways: the table has no column
+            // for it, or the column exists but is NULL on that row — the latter
+            // is the norm for logical metrics sharing a physical table, which
+            // holds the union of their label columns.
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && column_name == OTLP_AGGREGATION_TEMPORALITY_LABEL
                     && let Some(data_type) = field
                         .filter(|field| {
                             field.is_nullable()
@@ -2748,7 +2752,6 @@ impl PromPlanner {
                 }
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
-                    .alias(matcher.name.clone())
             };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {

@@ -208,7 +208,7 @@ pub async fn open_compaction_region(
     };
 
     let current_version = {
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(region_metadata.clone());
         ssts.add_files(file_purger.clone(), manifest.files.values().cloned());
         CompactionVersion {
             metadata: region_metadata.clone(),
@@ -1170,9 +1170,9 @@ mod tests {
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             current_version: CompactionVersion {
-                metadata,
+                metadata: metadata.clone(),
                 options: RegionOptions::default(),
-                ssts: Arc::new(SstVersion::new()),
+                ssts: Arc::new(SstVersion::new(metadata)),
                 memtable_min_sequence: None,
                 compaction_time_window: None,
             },

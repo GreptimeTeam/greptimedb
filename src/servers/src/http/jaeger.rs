@@ -45,9 +45,9 @@ use crate::otlp::trace::{
     KEY_OTEL_STATUS_ERROR_KEY, KEY_OTEL_STATUS_MESSAGE, KEY_OTEL_TRACE_STATE, KEY_SERVICE_NAME,
     KEY_SPAN_KIND, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_NAME_COLUMN, SCOPE_VERSION_COLUMN,
     SERVICE_NAME_COLUMN, SPAN_ATTRIBUTES_COLUMN, SPAN_EVENTS_COLUMN, SPAN_ID_COLUMN,
-    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_NAME_COLUMN, SPAN_STATUS_CODE, SPAN_STATUS_ERROR,
-    SPAN_STATUS_MESSAGE_COLUMN, SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET, TIMESTAMP_COLUMN,
-    TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
+    SPAN_KIND_COLUMN, SPAN_KIND_PREFIX, SPAN_LINKS_COLUMN, SPAN_NAME_COLUMN, SPAN_STATUS_CODE,
+    SPAN_STATUS_ERROR, SPAN_STATUS_MESSAGE_COLUMN, SPAN_STATUS_PREFIX, SPAN_STATUS_UNSET,
+    TIMESTAMP_COLUMN, TRACE_ID_COLUMN, TRACE_STATE_COLUMN,
 };
 use crate::query_handler::JaegerQueryHandlerRef;
 
@@ -779,6 +779,7 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
     for row in records.rows.into_iter() {
         let mut span = Span::default();
         let mut service_name = None;
+        let mut parent_span_id = None;
         let mut resource_tags = vec![];
 
         for (idx, cell) in row.into_iter().enumerate() {
@@ -818,14 +819,14 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 SPAN_ATTRIBUTES_COLUMN => {
-                    // for v0 data model, span_attributes are nested as a json
+                    // For v0 and v2, span_attributes are nested as a JSON
                     // data structure
                     if let JsonValue::Object(span_attrs) = cell {
                         span.tags.extend(object_to_tags(span_attrs));
                     }
                 }
                 RESOURCE_ATTRIBUTES_COLUMN => {
-                    // for v0 data model, resource_attributes are nested as a json
+                    // For v0 and v2, resource_attributes are nested as a JSON
                     // data structure
 
                     if let JsonValue::Object(mut resource_attrs) = cell {
@@ -834,14 +835,26 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
                 PARENT_SPAN_ID_COLUMN => {
-                    if let JsonValue::String(parent_span_id) = cell
-                        && !parent_span_id.is_empty()
+                    if let JsonValue::String(id) = cell
+                        && !id.is_empty()
                     {
-                        span.references.push(Reference {
-                            trace_id: span.trace_id.clone(),
-                            span_id: parent_span_id,
-                            ref_type: REF_TYPE_CHILD_OF.to_string(),
-                        });
+                        parent_span_id = Some(id);
+                    }
+                }
+                SPAN_LINKS_COLUMN => {
+                    if let JsonValue::Array(links) = cell {
+                        for link in links {
+                            if let (Some(trace_id), Some(span_id)) = (
+                                link.get("trace_id").and_then(JsonValue::as_str),
+                                link.get("span_id").and_then(JsonValue::as_str),
+                            ) {
+                                span.references.push(Reference {
+                                    trace_id: trace_id.to_string(),
+                                    span_id: span_id.to_string(),
+                                    ref_type: "FOLLOWS_FROM".to_string(),
+                                });
+                            }
+                        }
                     }
                 }
                 SPAN_EVENTS_COLUMN => {
@@ -992,6 +1005,17 @@ fn traces_from_records(records: HttpRecordsOutput) -> Result<Vec<Trace>> {
                     }
                 }
             }
+        }
+
+        if let Some(parent_span_id) = parent_span_id {
+            span.references.insert(
+                0,
+                Reference {
+                    trace_id: span.trace_id.clone(),
+                    span_id: parent_span_id,
+                    ref_type: REF_TYPE_CHILD_OF.to_string(),
+                },
+            );
         }
 
         if let Some(service_name) = service_name {
