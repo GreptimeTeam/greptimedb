@@ -104,6 +104,25 @@ TQL EVAL (0, 0, '1s') bottomk without(zone)(1, matching_groups_left) / on(host,z
 | x    | a    | 1970-01-01T00:00:00 | 6.0                                                                        |
 +------+------+---------------------+----------------------------------------------------------------------------+
 
+-- A matcher can leave a global ranking operand without changing its candidates.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') topk(1, matching_groups_left{host="x"}) / on(host,zone) matching_groups_right;
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | b    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left / on(host,zone) bottomk(1, matching_groups_right{host="x"});
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
 -- The global winner is host y. Pushing host=x below either topk would change the result.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk(1, max by(host)(matching_groups_right));

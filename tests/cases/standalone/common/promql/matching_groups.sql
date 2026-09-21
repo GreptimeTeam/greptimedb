@@ -37,6 +37,12 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host!~"x|y"} / on(host) group_left ma
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') bottomk without(zone)(1, matching_groups_left) / on(host,zone) matching_groups_right{host="x"};
 
+-- A matcher can leave a global ranking operand without changing its candidates.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') topk(1, matching_groups_left{host="x"}) / on(host,zone) matching_groups_right;
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left / on(host,zone) bottomk(1, matching_groups_right{host="x"});
+
 -- The global winner is host y. Pushing host=x below either topk would change the result.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk(1, max by(host)(matching_groups_right));

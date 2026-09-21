@@ -57,7 +57,8 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
 /// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
 /// matching label, so it does not affect a one-to-one cardinality check such as #9209.
-/// Grouped matching additionally requires a provably unique one-side operand.
+/// Grouped matching is conservatively restricted to a provably unique one-side operand until
+/// its cardinality checks are implemented (#9208).
 ///
 /// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
 /// as well constrain a value field, which the parsed expression does not distinguish from a
@@ -111,9 +112,9 @@ fn try_propagate(
     };
     if let Some(modifier) = &binary.modifier {
         let unique_on_matching_labels = |expr: &Expr, tags: &[String]| {
-            has_unique_output_labels(expr) && tags.iter().all(&is_matching_label)
+            has_unique_aggregate_output(expr) && tags.iter().all(&is_matching_label)
         };
-        let safe_cardinality = match &modifier.card {
+        let supported_cardinality = match &modifier.card {
             VectorMatchCardinality::OneToOne => true,
             VectorMatchCardinality::ManyToOne(_) => {
                 unique_on_matching_labels(&binary.rhs, right_tags)
@@ -123,8 +124,7 @@ fn try_propagate(
             }
             VectorMatchCardinality::ManyToMany => false,
         };
-        // Preserve duplicate-series behavior when the one-side is not provably unique.
-        if !safe_cardinality {
+        if !supported_cardinality {
             return Err("one-side uniqueness is not proven");
         }
     }
@@ -139,19 +139,17 @@ fn try_propagate(
         .matchers
         .iter()
         .chain(&right.matchers)
-        .filter(|matcher| {
-            is_matching_label(&matcher.name)
-                && preserves_filter(&binary.lhs, &matcher.name)
-                && preserves_filter(&binary.rhs, &matcher.name)
-                && !matches_every_value(matcher)
-        })
+        .filter(|matcher| is_matching_label(&matcher.name) && !matches_every_value(matcher))
         .cloned()
         .collect::<Vec<_>>();
 
     let mut changed = false;
     for matcher in constraints {
-        for target in [&mut left.matchers, &mut right.matchers] {
-            if !target.contains(&matcher) {
+        for (target, operand) in [
+            (&mut left.matchers, &binary.lhs),
+            (&mut right.matchers, &binary.rhs),
+        ] {
+            if !target.contains(&matcher) && preserves_filter(operand, &matcher.name) {
                 target.push(matcher.clone());
                 changed = true;
             }
@@ -187,16 +185,19 @@ fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     )
 }
 
+/// Ranking operators supported by the planner; limitk and limit_ratio are not implemented.
 fn ranks_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     matches!(aggregate.op.id(), token::T_TOPK | token::T_BOTTOMK)
 }
 
-fn has_unique_output_labels(expr: &Expr) -> bool {
+/// Proves output-label uniqueness through a partitioning aggregate, not through selectors.
+/// All output tags must also be matching labels to prove uniqueness per match signature.
+fn has_unique_aggregate_output(expr: &Expr) -> bool {
     match expr {
-        Expr::Paren(paren) => has_unique_output_labels(&paren.expr),
+        Expr::Paren(paren) => has_unique_aggregate_output(&paren.expr),
         Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => true,
         Expr::Aggregate(aggregate) if ranks_by_grouping_labels(aggregate) => {
-            has_unique_output_labels(&aggregate.expr)
+            has_unique_aggregate_output(&aggregate.expr)
         }
         _ => false,
     }
@@ -219,8 +220,8 @@ fn vector_operand_is_lhs(binary: &BinaryExpr) -> Option<bool> {
     }
 }
 
-// A filter may cross an aggregate only when it removes whole groups. In particular,
-// a label retained by topk is not necessarily one of its partitioning labels.
+/// A filter may cross an aggregate only when it removes whole groups. In particular,
+/// a label retained by topk is not necessarily one of its partitioning labels.
 fn preserves_filter(expr: &Expr, label: &str) -> bool {
     match expr {
         Expr::Paren(paren) => preserves_filter(&paren.expr, label),
@@ -304,7 +305,7 @@ mod tests {
     #[track_caller]
     fn assert_rewrite(query: &str, expected: &str) {
         assert_eq!(rewrite(query).unwrap(), parse(expected).unwrap(), "{query}");
-        // The rewrite adds every constraint to both sides, so re-running it is a no-op.
+        // Re-running the rewrite must be a no-op, including one-way propagation.
         assert!(rewrite(expected).is_none(), "{expected}");
     }
 
@@ -420,7 +421,15 @@ mod tests {
     }
 
     #[test]
-    fn propagates_through_scalar_arithmetic_and_partitioned_ranking() {
+    fn propagates_through_scalar_arithmetic_and_ranking() {
+        assert_rewrite(
+            r#"topk(1, a{host="x"}) / on(host) b"#,
+            r#"topk(1, a{host="x"}) / on(host) b{host="x"}"#,
+        );
+        assert_rewrite(
+            r#"a / on(host) bottomk(1, b{host="x"})"#,
+            r#"a{host="x"} / on(host) bottomk(1, b{host="x"})"#,
+        );
         assert_rewrite(
             r#"(8 * rate(a{host="x"}[5m])) / on(host) topk by(host)(1, b)"#,
             r#"(8 * rate(a{host="x"}[5m])) / on(host) topk by(host)(1, b{host="x"})"#,
