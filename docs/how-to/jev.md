@@ -1,9 +1,16 @@
-# Natural-language matching with Jev (experimental MVP)
+# Natural-language evaluation with Jev (experimental MVP)
 
-`jev(text, prompt)` returns a `Float64` matching probability in **[0, 1]**:
-how likely Jev judges the prompt's statement to be true for the text.
-It is an asynchronous SQL scalar function usable in `SELECT`, comparisons in
-`WHERE`, and `ORDER BY`.
+Three asynchronous SQL scalar functions expose Jev's question types:
+
+| Function | Mode | Result |
+| --- | --- | --- |
+| `jev(text, prompt)` | Noul | `Float64` probability in **[0, 1]** that the prompt's statement is true |
+| `jev_choice(text, prompt, criteria)` | Choice | `String` containing the selected option's name |
+| `jev_score(text, prompt, criteria)` | Score | `Float64` rating in **[0, N − 1]**, where N is the number of levels |
+
+All are usable in `SELECT`, comparisons in `WHERE`, and `ORDER BY`.
+All arguments are SQL strings. Any SQL NULL argument produces SQL `NULL`
+without validating that row's criteria or calling the API.
 
 ## Start GreptimeDB
 
@@ -20,7 +27,7 @@ If your key is already exported in `~/.zshrc`, run `source ~/.zshrc` first.
 The optional `JEV_MODEL` defaults to `jev-latest`; `JEV_ENDPOINT` defaults to
 `https://api.typesafe.ai/v1/systemone` (the full evaluation endpoint URL).
 The MVP uses environment variables rather than TOML configuration.
-The Cargo feature includes the SQL function in the build; the runtime environment
+The Cargo feature includes all three SQL functions in the build; the runtime environment
 variables enable and configure its API calls. Default compilation does not turn
 on external API calls. To enable the feature explicitly, use
 `--features ai_functions`.
@@ -38,6 +45,8 @@ CREATE TABLE events (
     PRIMARY KEY ("service")
 );
 ```
+
+### Matching probability (Noul)
 
 ```sql
 SELECT occurred_at, service, message
@@ -73,12 +82,54 @@ The former `jev(text, statement, threshold) -> Boolean` signature is replaced by
 this two-argument function. Migrate `WHERE jev(text, statement, 0.8)` to
 `WHERE jev(text, statement) >= 0.8` to preserve the inclusive threshold behavior.
 
+### Classification (Choice)
+
+`criteria` is a JSON object with **1 to 255 options**. Each key is an option name;
+its value is a description (string, object, or array), or JSON `null` if the name
+is sufficient. The function returns the selected key, suitable for filtering
+or grouping:
+
+```sql
+SELECT occurred_at, message,
+       jev_choice(message, 'Which team should handle this event?',
+                  '{"billing":"Payments, invoices, refunds","technical":"Bugs and outages","other":null}') AS team
+FROM events
+WHERE occurred_at >= '2026-09-19T00:00:00Z'
+  AND occurred_at <  '2026-09-20T00:00:00Z';
+```
+
+### Rating (Score)
+
+`criteria` is a JSON array of **2 to 10 ordered level descriptions**, from low
+to high. Descriptions can be strings, objects, or arrays. Level numbers start
+at zero. The returned score is the probability-weighted level number, so it can
+fall between levels. For three levels, the range is `[0, 2]`; a score such as
+`1.25` is a rating, not a probability or confidence value.
+
+```sql
+SELECT occurred_at, message,
+       jev_score(message, 'How severe is this event?',
+                 '["No impact to functionality","Degraded service with a workaround","Blocking issue with no workaround"]') AS severity
+FROM events
+WHERE occurred_at >= '2026-09-19T00:00:00Z'
+  AND occurred_at <  '2026-09-20T00:00:00Z'
+ORDER BY severity DESC NULLS LAST;
+```
+
+These scalar functions return only the selected option or rating, not the API's
+additional confidence, probability distribution, or legend fields.
+
 ## MVP behavior
 
-- Each non-null row makes one HTTP request: the text is `state`, and the prompt
-  is a `noul` question's `instructions`. The returned `noul` probability is the
-  function's result; this is not the separate Choice/Score confidence. Responses
-  outside `[0, 1]` fail the query rather than being clamped.
+- Each non-null row makes one HTTP request per function invocation: the text is
+  `state`, and the prompt is the question's `instructions`. Choice and Score pass
+  the parsed JSON as `criteria`. Calls to different functions are separate requests.
+- Criteria for all non-null rows in a batch are validated before sending that
+  batch's requests. Malformed JSON, invalid description types, or invalid option/
+  level counts fail the query locally.
+- Answers must have the requested question type. Noul probabilities outside
+  `[0, 1]`, Choice labels not in the criteria, and Score values outside `[0, N − 1]`
+  fail the query rather than being clamped or replaced with NULL.
 - Up to eight requests run concurrently per expression/batch invocation, not per
   query or process. Concurrent partitions and queries can exceed eight requests
   in total. Each request has a 30-second timeout. Errors (including rate limits
@@ -107,7 +158,7 @@ These are follow-up work, not guarantees provided by the current implementation.
 
 ## Validation
 
-Check both the default build (where `jev` is registered) and an isolated
+Check both the default build (where all three functions are registered) and an isolated
 `common-function` build without default features. Jev's regular tests use a local
 HTTP server and need no API key:
 

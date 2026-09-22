@@ -16,75 +16,127 @@
 mod tests;
 
 use std::fmt;
+use std::hash::Hash;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::Float64Array;
+use arrow::array::{Array, ArrayRef, new_null_array};
 use arrow::datatypes::DataType;
 use async_trait::async_trait;
 use datafusion_common::cast::as_string_view_array;
-use datafusion_common::utils::take_function_args;
-use datafusion_common::{Result, exec_datafusion_err, exec_err, not_impl_err};
+use datafusion_common::{Result, ScalarValue, exec_datafusion_err, exec_err, not_impl_err};
 use datafusion_expr::async_udf::{AsyncScalarUDF, AsyncScalarUDFImpl};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
 use futures::{StreamExt, TryStreamExt, stream};
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 
 use crate::function_factory::ScalarFunctionFactory;
 use crate::function_registry::FunctionRegistry;
 
-/// Experimental natural-language matching: `jev(text, prompt) -> Float64`.
-/// Returns the Noul probability in `[0, 1]`, or SQL NULL if either argument is NULL.
+/// Registers the experimental Noul, Choice, and Score SQL functions.
+pub(crate) fn register(registry: &FunctionRegistry) {
+    JevFunction::<Noul>::register(registry);
+    JevFunction::<Choice>::register(registry);
+    JevFunction::<Score>::register(registry);
+}
+
+/// Shared asynchronous execution for the three typed Jev questions.
 #[derive(PartialEq, Eq, Hash)]
-pub(crate) struct JevFunction {
+struct JevFunction<Q> {
     signature: Signature,
+    question: PhantomData<Q>,
     enabled: bool,
     api_key: Option<String>,
     endpoint: String,
     model: String,
 }
 
-impl JevFunction {
-    pub(crate) fn register(registry: &FunctionRegistry) {
+struct JevRequest<'a, Q: JevQuestion> {
+    text: &'a str,
+    prompt: &'a str,
+    criteria: Q::Criteria,
+}
+
+impl<Q: JevQuestion> JevFunction<Q> {
+    fn register(registry: &FunctionRegistry) {
         registry.register(ScalarFunctionFactory {
-            name: "jev".to_string(),
+            name: Q::NAME.to_string(),
             factory: Arc::new(|_| AsyncScalarUDF::new(Arc::new(Self::default())).into_scalar_udf()),
         });
     }
 
-    async fn evaluate(&self, client: &Client, text: &str, prompt: &str) -> Result<f64> {
+    async fn evaluate(&self, client: &Client, request: JevRequest<'_, Q>) -> Result<ScalarValue> {
+        let mut question = json!({ "type": Q::TYPE, "instructions": request.prompt });
+        if Q::ARG_COUNT == 3 {
+            question["criteria"] = json!(request.criteria);
+        }
         let response: Value = client
             .post(&self.endpoint)
             .json(&json!({
                 "model": self.model,
-                "state": text,
-                "questions": {
-                    "matches": { "type": "noul", "instructions": prompt }
-                }
+                "state": request.text,
+                "questions": { "matches": question }
             }))
             .send()
             .await
             .and_then(|response| response.error_for_status())
-            .map_err(|e| exec_datafusion_err!("jev request failed: {e}"))?
+            .map_err(|e| exec_datafusion_err!("{} request failed: {e}", Q::NAME))?
             .json()
             .await
-            .map_err(|e| exec_datafusion_err!("jev response is not valid JSON: {e}"))?;
+            .map_err(|e| exec_datafusion_err!("{} response is not valid JSON: {e}", Q::NAME))?;
 
         let answer = &response["answers"]["matches"];
-        let probability = answer["noul"].as_f64().filter(|p| (0.0..=1.0).contains(p));
-        match (answer["type"].as_str(), probability) {
-            (Some("noul"), Some(probability)) => Ok(probability),
-            _ => exec_err!(
-                "jev response must contain answers.matches with type noul and a probability in [0, 1]"
-            ),
+        if answer["type"].as_str() != Some(Q::TYPE) {
+            return exec_err!(
+                "{} response must contain answers.matches with type {}",
+                Q::NAME,
+                Q::TYPE
+            );
         }
+        Q::parse_answer(answer, &request.criteria)
+    }
+
+    fn prepare_requests<'a>(
+        &self,
+        arrays: &'a [ArrayRef],
+        number_rows: usize,
+    ) -> Result<Vec<Option<JevRequest<'a, Q>>>> {
+        if arrays.len() != Q::ARG_COUNT {
+            return exec_err!("{} requires {} arguments", Q::NAME, Q::ARG_COUNT);
+        }
+        let arrays = arrays
+            .iter()
+            .map(|array| as_string_view_array(array))
+            .collect::<Result<Vec<_>>>()?;
+
+        // Validate all non-null rows before making any billable requests.
+        (0..number_rows)
+            .map(|row| {
+                let values: Option<Vec<_>> = arrays
+                    .iter()
+                    .map(|array| array.is_valid(row).then(|| array.value(row)))
+                    .collect();
+                values
+                    .map(|values| {
+                        Ok(JevRequest {
+                            text: values[0],
+                            prompt: values[1],
+                            criteria: Q::parse_criteria(&values[2..])?,
+                        })
+                    })
+                    .transpose()
+            })
+            .collect()
     }
 
     fn client(&self) -> Result<Client> {
         if !self.enabled {
             return exec_err!(
-                "jev is experimental; set GREPTIMEDB_EXPERIMENTAL_JEV=true to enable it"
+                "{} is experimental; set GREPTIMEDB_EXPERIMENTAL_JEV=true to enable it",
+                Q::NAME
             );
         }
         let key = self
@@ -92,7 +144,7 @@ impl JevFunction {
             .as_deref()
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| {
-                exec_datafusion_err!("jev requires the JEV_API_KEY environment variable")
+                exec_datafusion_err!("{} requires the JEV_API_KEY environment variable", Q::NAME)
             })?;
         let mut authorization = reqwest::header::HeaderValue::from_str(&format!("Bearer {key}"))
             .map_err(|_| exec_datafusion_err!("JEV_API_KEY is not a valid HTTP header value"))?;
@@ -103,18 +155,19 @@ impl JevFunction {
             .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .build()
-            .map_err(|e| exec_datafusion_err!("failed to create jev HTTP client: {e}"))
+            .map_err(|e| exec_datafusion_err!("failed to create {} HTTP client: {e}", Q::NAME))
     }
 }
 
-impl Default for JevFunction {
+impl<Q: JevQuestion> Default for JevFunction<Q> {
     fn default() -> Self {
         Self {
             // External model evaluations must not be constant-folded during planning.
             signature: Signature::exact(
-                vec![DataType::Utf8View, DataType::Utf8View],
+                vec![DataType::Utf8View; Q::ARG_COUNT],
                 Volatility::Volatile,
             ),
+            question: PhantomData,
             enabled: std::env::var("GREPTIMEDB_EXPERIMENTAL_JEV").as_deref() == Ok("true"),
             api_key: std::env::var("JEV_API_KEY").ok(),
             endpoint: std::env::var("JEV_ENDPOINT")
@@ -124,10 +177,11 @@ impl Default for JevFunction {
     }
 }
 
-impl fmt::Debug for JevFunction {
+impl<Q: JevQuestion> fmt::Debug for JevFunction<Q> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Credentials must never appear in plans or diagnostic output.
         f.debug_struct("JevFunction")
+            .field("name", &Q::NAME)
             .field("signature", &self.signature)
             .field("enabled", &self.enabled)
             .field("model", &self.model)
@@ -135,9 +189,9 @@ impl fmt::Debug for JevFunction {
     }
 }
 
-impl ScalarUDFImpl for JevFunction {
+impl<Q: JevQuestion> ScalarUDFImpl for JevFunction<Q> {
     fn name(&self) -> &str {
-        "jev"
+        Q::NAME
     }
 
     fn signature(&self) -> &Signature {
@@ -145,57 +199,177 @@ impl ScalarUDFImpl for JevFunction {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Float64)
+        Ok(Q::return_type())
     }
 
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        not_impl_err!("jev can only be called from async contexts")
+        not_impl_err!("{} can only be called from async contexts", Q::NAME)
     }
 }
 
 #[async_trait]
-impl AsyncScalarUDFImpl for JevFunction {
+impl<Q: JevQuestion> AsyncScalarUDFImpl for JevFunction<Q> {
     async fn invoke_async_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let arrays = args
             .args
             .into_iter()
             .map(|arg| arg.into_array(args.number_rows))
             .collect::<Result<Vec<_>>>()?;
-        let [texts, prompts] = take_function_args(self.name(), arrays)?;
-        let texts = as_string_view_array(&texts)?;
-        let prompts = as_string_view_array(&prompts)?;
-        let rows: Vec<_> = texts
-            .iter()
-            .zip(prompts.iter())
-            .map(|(text, prompt)| Some((text?, prompt?)))
-            .collect();
+        let rows = self.prepare_requests(&arrays, args.number_rows)?;
 
         if rows.iter().all(Option::is_none) {
-            return Ok(ColumnarValue::Array(Arc::new(Float64Array::new_null(
+            return Ok(ColumnarValue::Array(new_null_array(
+                &Q::return_type(),
                 args.number_rows,
-            ))));
+            )));
         }
 
         // Reuse connections within the batch; bound in-flight requests and preserve row order.
         let client = self.client()?;
+        // Collect futures to avoid async_trait's higher-ranked lifetime inference issue.
         let requests: Vec<_> = rows
             .into_iter()
             .map(|row| {
                 let client = &client;
                 async move {
                     match row {
-                        Some((text, prompt)) => self.evaluate(client, text, prompt).await.map(Some),
-                        None => Ok(None),
+                        Some(request) => self.evaluate(client, request).await,
+                        None => ScalarValue::try_from(&Q::return_type()),
                     }
                 }
             })
             .collect();
         // This limit is per expression/batch invocation, not per query or process.
         // Concurrent partitions and queries can each have their own in-flight requests.
-        let probabilities: Vec<Option<f64>> =
-            stream::iter(requests).buffered(8).try_collect().await?;
-        Ok(ColumnarValue::Array(Arc::new(Float64Array::from(
-            probabilities,
-        ))))
+        let answers: Vec<ScalarValue> = stream::iter(requests).buffered(8).try_collect().await?;
+        Ok(ColumnarValue::Array(ScalarValue::iter_to_array(answers)?))
     }
+}
+
+/// The request criteria and scalar answer contract for a Jev question type.
+trait JevQuestion: fmt::Debug + Eq + Hash + Send + Sync + 'static {
+    type Criteria: Serialize + Send + Sync;
+
+    const NAME: &'static str;
+    const TYPE: &'static str;
+    const ARG_COUNT: usize;
+
+    fn return_type() -> DataType;
+    fn parse_criteria(args: &[&str]) -> Result<Self::Criteria>;
+    fn parse_answer(answer: &Value, criteria: &Self::Criteria) -> Result<ScalarValue>;
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Noul;
+
+impl JevQuestion for Noul {
+    type Criteria = ();
+
+    const NAME: &'static str = "jev";
+    const TYPE: &'static str = "noul";
+    const ARG_COUNT: usize = 2;
+
+    fn return_type() -> DataType {
+        DataType::Float64
+    }
+
+    fn parse_criteria(_args: &[&str]) -> Result<()> {
+        Ok(())
+    }
+
+    fn parse_answer(answer: &Value, _criteria: &()) -> Result<ScalarValue> {
+        numeric_answer(Self::NAME, &answer["noul"], 1.0)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Choice;
+
+impl JevQuestion for Choice {
+    type Criteria = Map<String, Value>;
+
+    const NAME: &'static str = "jev_choice";
+    const TYPE: &'static str = "choice";
+    const ARG_COUNT: usize = 3;
+
+    fn return_type() -> DataType {
+        DataType::Utf8
+    }
+
+    fn parse_criteria(args: &[&str]) -> Result<Self::Criteria> {
+        let criteria: Value = serde_json::from_str(args[0])
+            .map_err(|e| exec_datafusion_err!("jev_choice criteria is not valid JSON: {e}"))?;
+        match criteria {
+            Value::Object(options)
+                if (1..=255).contains(&options.len())
+                    && options.values().all(|v| v.is_null() || is_description(v)) =>
+            {
+                Ok(options)
+            }
+            _ => exec_err!(
+                "jev_choice criteria must be a JSON object with 1 to 255 options; descriptions must be strings, objects, arrays, or null"
+            ),
+        }
+    }
+
+    fn parse_answer(answer: &Value, criteria: &Self::Criteria) -> Result<ScalarValue> {
+        let choice = answer["choice"]
+            .as_str()
+            .filter(|choice| criteria.contains_key(*choice))
+            .ok_or_else(|| {
+                exec_datafusion_err!("jev_choice response must contain a choice from the criteria")
+            })?;
+        Ok(ScalarValue::Utf8(Some(choice.to_string())))
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Hash)]
+struct Score;
+
+impl JevQuestion for Score {
+    type Criteria = Vec<Value>;
+
+    const NAME: &'static str = "jev_score";
+    const TYPE: &'static str = "score";
+    const ARG_COUNT: usize = 3;
+
+    fn return_type() -> DataType {
+        DataType::Float64
+    }
+
+    fn parse_criteria(args: &[&str]) -> Result<Self::Criteria> {
+        let criteria: Value = serde_json::from_str(args[0])
+            .map_err(|e| exec_datafusion_err!("jev_score criteria is not valid JSON: {e}"))?;
+        match criteria {
+            Value::Array(levels)
+                if (2..=10).contains(&levels.len()) && levels.iter().all(is_description) =>
+            {
+                Ok(levels)
+            }
+            _ => exec_err!(
+                "jev_score criteria must be a JSON array with 2 to 10 levels; descriptions must be strings, objects, or arrays"
+            ),
+        }
+    }
+
+    fn parse_answer(answer: &Value, criteria: &Self::Criteria) -> Result<ScalarValue> {
+        numeric_answer(Self::NAME, &answer["score"], (criteria.len() - 1) as f64)
+    }
+}
+
+fn is_description(description: &Value) -> bool {
+    matches!(
+        description,
+        Value::String(_) | Value::Object(_) | Value::Array(_)
+    )
+}
+
+fn numeric_answer(name: &str, answer: &Value, max: f64) -> Result<ScalarValue> {
+    let score = answer
+        .as_f64()
+        .filter(|score| (0.0..=max).contains(score))
+        .ok_or_else(|| {
+            exec_datafusion_err!("{name} response must contain a finite value in [0, {max}]")
+        })?;
+    Ok(ScalarValue::Float64(Some(score)))
 }

@@ -23,6 +23,35 @@ SELECT arrow_typeof(jev(NULL, 'condition')) AS score_type;
 | Float64    |
 +------------+
 
+SELECT jev_choice(NULL, 'Route the ticket', '{"billing":null}') AS null_text,
+       jev_choice('message', NULL, 'invalid JSON') AS null_prompt,
+       jev_choice('message', 'Route the ticket', NULL) AS null_criteria;
+
++-----------+-------------+---------------+
+| null_text | null_prompt | null_criteria |
++-----------+-------------+---------------+
+|           |             |               |
++-----------+-------------+---------------+
+
+SELECT jev_score(NULL, 'Rate severity', '["low","high"]') AS null_text,
+       jev_score('message', NULL, 'invalid JSON') AS null_prompt,
+       jev_score('message', 'Rate severity', NULL) AS null_criteria;
+
++-----------+-------------+---------------+
+| null_text | null_prompt | null_criteria |
++-----------+-------------+---------------+
+|           |             |               |
++-----------+-------------+---------------+
+
+SELECT arrow_typeof(jev_choice(NULL, 'prompt', '{"billing":null}')) AS choice_type,
+       arrow_typeof(jev_score(NULL, 'prompt', '["low","high"]')) AS score_type;
+
++-------------+------------+
+| choice_type | score_type |
++-------------+------------+
+| Utf8        | Float64    |
++-------------+------------+
+
 -- Validate SQL registration, coercion, and asynchronous filtering on a real table.
 CREATE TABLE jev_events (
     occurred_at TIMESTAMP TIME INDEX,
@@ -51,6 +80,19 @@ ORDER BY occurred_at;
 +-------------+---------+---------+
 +-------------+---------+---------+
 
+SELECT occurred_at,
+       jev_choice(message, 'Route the ticket', '{"billing":"Payments","technical":"Errors"}') AS team,
+       jev_score(message, 'Rate severity', '["low","medium","high"]') AS severity
+FROM jev_events
+ORDER BY occurred_at;
+
++---------------------+------+----------+
+| occurred_at         | team | severity |
++---------------------+------+----------+
+| 2026-09-19T01:00:00 |      |          |
+| 2026-09-19T02:00:00 |      |          |
++---------------------+------+----------+
+
 DROP TABLE jev_events;
 
 Affected Rows: 0
@@ -61,4 +103,30 @@ SELECT jev('message', 'condition', 0.8);
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'jev' function: coercion from Utf8, Utf8, Float64 to the signature Exact(Utf8View, Utf8View) failed. No function matches the given name and argument types 'jev(Utf8, Utf8, Float64)'. You might need to add explicit type casts.
 	Candidate functions:
 	jev(Utf8View, Utf8View)
+
+-- Invalid criteria fail locally before any HTTP request.
+SELECT jev_choice('message', 'prompt', 'not json');
+
+Error: 3001(EngineExecuteQuery), Execution error: jev_choice criteria is not valid JSON: expected ident at line 1 column 2
+
+SELECT jev_choice('message', 'prompt', '{}');
+
+Error: 3001(EngineExecuteQuery), Execution error: jev_choice criteria must be a JSON object with 1 to 255 options; descriptions must be strings, objects, arrays, or null
+
+SELECT jev_score('message', 'prompt', '["only one level"]');
+
+Error: 3001(EngineExecuteQuery), Execution error: jev_score criteria must be a JSON array with 2 to 10 levels; descriptions must be strings, objects, or arrays
+
+-- Both additional modes require criteria.
+SELECT jev_choice('message', 'prompt');
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'jev_choice' function: coercion from Utf8, Utf8 to the signature Exact(Utf8View, Utf8View, Utf8View) failed. No function matches the given name and argument types 'jev_choice(Utf8, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	jev_choice(Utf8View, Utf8View, Utf8View)
+
+SELECT jev_score('message', 'prompt');
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'jev_score' function: coercion from Utf8, Utf8 to the signature Exact(Utf8View, Utf8View, Utf8View) failed. No function matches the given name and argument types 'jev_score(Utf8, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	jev_score(Utf8View, Utf8View, Utf8View)
 
