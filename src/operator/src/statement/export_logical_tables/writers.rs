@@ -90,7 +90,7 @@ impl ExportWriteBudget {
         let available = PAYLOAD_BYTES
             .saturating_sub(backing)
             .saturating_sub(overhead)
-            / 2;
+            / 4;
         let conversion = requested.min(available);
         ensure!(
             conversion > 0,
@@ -120,6 +120,11 @@ impl TableWriters {
             tasks: FuturesUnordered::new(),
             budget,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_tasks(&self) -> usize {
+        self.tasks.len()
     }
 
     pub(crate) fn table_id(&self) -> Option<u32> {

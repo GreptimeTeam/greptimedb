@@ -47,7 +47,7 @@ use crate::error::{self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::export_logical_tables::writers::ExportWriteBudget;
 use crate::statement::export_logical_tables::{
-    LogicalTableExportLimits, map_writer_error, rows_within_budget,
+    LogicalTableExportLimits, expand_export_batch, map_writer_error, rows_within_budget,
 };
 
 // The buffer size should be greater than 5MB (minimum multipart upload size).
@@ -242,9 +242,7 @@ pub(crate) async fn stream_to_managed_parquet(
     budget: &ExportWriteBudget,
     token: &CancellationToken,
 ) -> Result<usize> {
-    use common_recordbatch::{
-        RecordBatch, map_dictionary_to_values, map_dictionary_to_values_schema,
-    };
+    use common_recordbatch::{RecordBatch, map_dictionary_to_values_schema};
     let original = stream.schema();
     let (expanded_schema, expand) = map_dictionary_to_values_schema(original.clone());
     let (mapped_schema, json) = map_json_type_to_string_schema(expanded_schema.clone());
@@ -284,7 +282,7 @@ pub(crate) async fn stream_to_managed_parquet(
                 })
                 .await
                 .context(error::JoinTaskSnafu)??;
-                let reservation = retained.saturating_add(estimated.saturating_mul(2 * expansion));
+                let reservation = retained.saturating_add(estimated.saturating_mul(4 * expansion));
                 let permit = budget.reserve(reservation, token).await?;
                 let batch = batch.clone();
                 let (original, expanded_schema, output_schema) = (
@@ -298,8 +296,13 @@ pub(crate) async fn stream_to_managed_parquet(
                         batch.slice(offset, len),
                     );
                     if expand {
-                        batch = map_dictionary_to_values(batch, &original, &expanded_schema)
-                            .context(error::BuildRecordBatchSnafu)?;
+                        batch = RecordBatch::from_df_record_batch(
+                            expanded_schema.clone(),
+                            expand_export_batch(
+                                &batch.into_df_record_batch(),
+                                expanded_schema.arrow_schema().clone(),
+                            )?,
+                        );
                     }
                     if json {
                         batch = map_json_type_to_string(batch, &expanded_schema, &output_schema)

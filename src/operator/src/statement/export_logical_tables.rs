@@ -24,8 +24,9 @@ pub(crate) mod writers;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
-use arrow::array::{Array, AsArray, UInt32Array};
-use arrow::compute::cast;
+use arrow::array::{Array, ArrayRef, AsArray, ListArray, StructArray, UInt32Array};
+use arrow::buffer::OffsetBuffer;
+use arrow::compute::{cast, take};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
@@ -586,17 +587,11 @@ async fn expand_bounded_slice(
     })
     .await
     .context(error::JoinTaskSnafu)??;
-    let reservation = retained.saturating_add(estimated.saturating_mul(2));
+    let reservation = retained.saturating_add(estimated.saturating_mul(4));
     let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
         let slice = batch.slice(start, len);
-        let arrays = slice
-            .columns()
-            .iter()
-            .zip(schema.fields())
-            .map(|(array, field)| cast(array, field.data_type()).context(error::ComputeArrowSnafu))
-            .collect::<Result<Vec<_>>>()?;
-        let expanded = RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)?;
+        let expanded = expand_export_batch(&slice, schema)?;
         ensure!(
             expanded.get_array_memory_size() <= reservation,
             LogicalTableExportResourceSnafu {
@@ -613,6 +608,70 @@ async fn expand_bounded_slice(
     })
     .await
     .context(error::JoinTaskSnafu)?
+}
+
+/// Limits nested casts to selected children: Arrow's List cast otherwise expands
+/// the entire values array, even when the parent has been sliced.
+pub(crate) fn expand_export_batch(batch: &RecordBatch, schema: SchemaRef) -> Result<RecordBatch> {
+    let arrays = batch
+        .columns()
+        .iter()
+        .zip(schema.fields())
+        .map(|(array, field)| expand_export_array(array, field.data_type()))
+        .collect::<Result<Vec<_>>>()?;
+    RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)
+}
+
+fn expand_export_array(array: &ArrayRef, target: &DataType) -> Result<ArrayRef> {
+    if array.data_type() == target {
+        return Ok(array.clone());
+    }
+    match (array.data_type(), target) {
+        (DataType::Dictionary(_, _), _) => {
+            downcast_dictionary_array! {
+                array => {
+                    // Select dictionary entries before recursively converting nested values.
+                    let selected = take(array.values().as_ref(), array.keys(), None)
+                        .context(error::ComputeArrowSnafu)?;
+                    expand_export_array(&selected, target)
+                },
+                _ => error::UnexpectedSnafu { violated: "invalid dictionary array" }.fail(),
+            }
+        }
+        (DataType::List(_), DataType::List(field)) => {
+            let list = array.as_list::<i32>();
+            let offsets = list.value_offsets();
+            let start = offsets[0];
+            let end = offsets[list.len()];
+            let values = list.values().slice(start as usize, (end - start) as usize);
+            let values = expand_export_array(&values, field.data_type())?;
+            let offsets = OffsetBuffer::new(
+                offsets
+                    .iter()
+                    .map(|offset| offset - start)
+                    .collect::<Vec<_>>()
+                    .into(),
+            );
+            Ok(Arc::new(
+                ListArray::try_new(field.clone(), offsets, values, list.nulls().cloned())
+                    .context(error::ComputeArrowSnafu)?,
+            ))
+        }
+        (DataType::Struct(_), DataType::Struct(fields)) => {
+            let array = array.as_struct();
+            let columns = array
+                .columns()
+                .iter()
+                .zip(fields)
+                .map(|(array, field)| expand_export_array(array, field.data_type()))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(Arc::new(
+                StructArray::try_new(fields.clone(), columns, array.nulls().cloned())
+                    .context(error::ComputeArrowSnafu)?,
+            ))
+        }
+        _ => cast(array, target).context(error::ComputeArrowSnafu),
+    }
 }
 
 pub(crate) fn map_writer_error(
@@ -639,7 +698,7 @@ pub(crate) fn map_writer_error(
 // Count only selected logical values before dictionary expansion, including nested
 // histogram lists/structs. Offset and validity overhead is charged per value.
 fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
-    if array.is_null(row) {
+    if array.is_null(row) && !matches!(array.data_type(), DataType::Struct(_) | DataType::List(_)) {
         return Ok(32);
     }
     let bytes = match array.data_type() {

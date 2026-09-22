@@ -799,3 +799,82 @@ async fn groups_and_ordinary_files_share_writer_admission_and_drain() {
         }
     }
 }
+
+#[tokio::test]
+async fn nested_dictionary_conversion_limits_child_ranges_and_charges_null_parents() {
+    let values = Arc::new(DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0; 1024]),
+        Arc::new(StringArray::from(vec!["x".repeat(4096)])),
+    )) as ArrayRef;
+    let list = ListArray::new(
+        Arc::new(Field::new("item", values.data_type().clone(), true)),
+        OffsetBuffer::new(vec![0i32, 1023, 1024].into()),
+        values,
+        None,
+    );
+    let input = RecordBatch::try_from_iter([("list", Arc::new(list) as ArrayRef)]).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "list",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    )]));
+    let budget = ExportWriteBudget::new(1);
+    let (payload, rows) = expand_bounded_slice(
+        input,
+        schema,
+        1,
+        2,
+        8192,
+        &budget,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+    assert!(payload.batch.get_array_memory_size() < 16384);
+    let list = payload.batch.column(0).as_list::<i32>();
+    assert_eq!(list.value_offsets(), &[0, 1]);
+    assert_eq!(list.values().as_string::<i32>().value(0), "x".repeat(4096));
+    drop(payload);
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+
+    let values = Arc::new(DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0]),
+        Arc::new(StringArray::from(vec!["x".repeat(4096)])),
+    )) as ArrayRef;
+    let structure = StructArray::new(
+        vec![Arc::new(Field::new(
+            "child",
+            values.data_type().clone(),
+            true,
+        ))]
+        .into(),
+        vec![values],
+        Some(arrow::buffer::NullBuffer::from(vec![false])),
+    );
+    let input = RecordBatch::try_from_iter([("struct", Arc::new(structure) as ArrayRef)]).unwrap();
+    assert!(rows_within_budget(&input, 0, 1, 128).is_err());
+}
+
+#[tokio::test]
+async fn completed_table_workers_are_reaped_during_admission() {
+    for parallelism in [1, 4] {
+        let mut unit = unit();
+        let file = unit.logical_tables.get_mut(&1025).unwrap();
+        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+        let budget = ExportWriteBudget::new(parallelism);
+        let token = CancellationToken::new();
+        let mut writers = TableWriters::new(budget.clone());
+        for id in 0..64 {
+            file.output.path = format!("empty-{id}.parquet");
+            writers
+                .open(id, file, &store, export_limits(), &token)
+                .await
+                .unwrap();
+            assert!(writers.pending_tasks() <= parallelism + 1);
+        }
+        writers.drain(Ok(()), &token).await.unwrap();
+        assert_eq!(writers.pending_tasks(), 0);
+        assert_eq!(budget.available(), (parallelism, 64 * 1024 * 1024));
+    }
+}
