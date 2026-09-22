@@ -785,17 +785,16 @@ pub(crate) fn to_repartition_request(
 }
 
 fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
-    let type_hints = settings
-        .type_hints()
-        .iter()
+    let (type_hints, max_auto_expanded_paths) = settings.into_parts();
+    let type_hints = type_hints
+        .into_iter()
         .map(|hint| {
-            let (data_type, datatype_extension) =
-                ColumnDataTypeWrapper::try_from(hint.data_type.clone())
-                    .map(|w| w.to_parts())
-                    .context(ColumnDataTypeSnafu)?;
+            let (data_type, datatype_extension) = ColumnDataTypeWrapper::try_from(hint.data_type)
+                .map(|w| w.to_parts())
+                .context(ColumnDataTypeSnafu)?;
 
             Ok(PbJsonTypeHint {
-                path: hint.path.clone(),
+                path: hint.path,
                 data_type: data_type as i32,
                 datatype_extension,
             })
@@ -804,7 +803,7 @@ fn json_settings_to_proto(settings: JsonSettings) -> Result<PbJsonSettings> {
 
     Ok(PbJsonSettings {
         type_hints,
-        max_auto_expanded_paths: settings.max_auto_expanded_paths(),
+        max_auto_expanded_paths,
     })
 }
 
