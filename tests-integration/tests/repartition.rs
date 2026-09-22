@@ -160,6 +160,18 @@ async fn test_repartition_physical_metric_without_logical_table() {
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
 
+    let table_id = get_table_id(&cluster.metasrv, "physical_metric_without_logical").await;
+    let table_info = cluster
+        .metasrv
+        .table_metadata_manager()
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let column_ids_before_split = table_info.table_info.meta.column_ids.clone();
+    assert_eq!(column_ids_before_split, vec![0, 1, 2]);
+
     let sql = r#"
         ALTER TABLE `physical_metric_without_logical` SPLIT PARTITION (
           `host` < 'm'
@@ -169,6 +181,19 @@ async fn test_repartition_physical_metric_without_logical_table() {
         );
     "#;
     run_sql(instance, sql, query_ctx.clone()).await.unwrap();
+
+    let table_info = cluster
+        .metasrv
+        .table_metadata_manager()
+        .table_info_manager()
+        .get(table_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        table_info.table_info.meta.column_ids,
+        column_ids_before_split
+    );
 
     let result = run_sql(
         instance,
