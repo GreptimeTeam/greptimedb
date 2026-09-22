@@ -22,9 +22,9 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 use datatypes::error::time_index_not_widening_error;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
-use datatypes::extension::json::{Json2ExtensionType, json2_metadata_with_updated_settings};
+use datatypes::extension::json::json2_metadata_with_updated_settings;
 use datatypes::schema::{
-    ColumnSchema, FulltextOptions, Metadata, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
+    ColumnSchema, FulltextOptions, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
 };
 use derive_builder::Builder;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -1231,16 +1231,8 @@ impl TableMeta {
                 },
             )?;
 
-        validate_json2_metadata(col, &target_metadata).map_err(|err| {
-            error::InvalidAlterRequestSnafu {
-                table: table_name,
-                err,
-            }
-            .build()
-        })?;
-
         let mut cols = table_schema.column_schemas().to_vec();
-        cols[idx] = col.clone().with_metadata(target_metadata);
+        *cols[idx].mut_metadata() = target_metadata;
 
         let mut builder = SchemaBuilder::try_from_columns(cols)
             .with_context(|_| error::SchemaBuildSnafu {
@@ -1673,24 +1665,6 @@ fn unset_column_skipping_index_options(
     column_schema
         .unset_skipping_options()
         .context(error::UnsetSkippingOptionsSnafu { column_name })?;
-    Ok(())
-}
-
-fn validate_json2_metadata(
-    column_schema: &ColumnSchema,
-    metadata: &Metadata,
-) -> std::result::Result<(), String> {
-    column_schema
-        .clone()
-        .with_metadata(metadata.clone())
-        .extension_type::<Json2ExtensionType>()
-        .map_err(|err| err.to_string())?
-        .ok_or_else(|| {
-            format!(
-                "missing JSON2 extension metadata for column '{}'",
-                column_schema.name
-            )
-        })?;
     Ok(())
 }
 

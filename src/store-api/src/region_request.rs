@@ -40,7 +40,7 @@ use common_recordbatch::DfRecordBatch;
 use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::error::time_index_not_widening_error;
-use datatypes::extension::json::{Json2ExtensionType, json2_metadata_with_updated_settings};
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
@@ -985,10 +985,9 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
-            AlterKind::SetJsonSettings {
-                column_name,
-                settings,
-            } => Self::validate_set_json_settings(column_name, settings, metadata)?,
+            AlterKind::SetJsonSettings { column_name, .. } => {
+                Self::validate_set_json_settings(column_name, metadata)?
+            }
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
             AlterKind::SetIndexes { options } => {
@@ -1107,16 +1106,7 @@ impl AlterKind {
                     .ok()
                     .flatten()
                     .is_none_or(|extension| {
-                        let current = extension.metadata().json_settings();
-                        if current.max_auto_expanded_paths() != settings.max_auto_expanded_paths() {
-                            return true;
-                        }
-
-                        let mut current_hints = current.type_hints().iter().collect::<Vec<_>>();
-                        let mut target_hints = settings.type_hints().iter().collect::<Vec<_>>();
-                        current_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-                        target_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-                        current_hints != target_hints
+                        !extension.metadata().json_settings().equivalent(settings)
                     })
             }),
             AlterKind::SetRegionOptions { .. } => true,
@@ -1196,16 +1186,12 @@ impl AlterKind {
         Ok(())
     }
 
-    fn validate_set_json_settings(
-        col_name: &String,
-        settings: &JsonSettings,
-        metadata: &RegionMetadata,
-    ) -> Result<()> {
+    fn validate_set_json_settings(col_name: &String, metadata: &RegionMetadata) -> Result<()> {
         let region_id = metadata.region_id;
 
         let col = metadata
             .column_by_name(col_name)
-            .context(InvalidRegionRequestSnafu {
+            .with_context(|| InvalidRegionRequestSnafu {
                 region_id,
                 err: format!("column {} not found", col_name),
             })?;
@@ -1224,33 +1210,6 @@ impl AlterKind {
                 err: format!("column {} is not a JSON2 column", col_name),
             }
         );
-        col.column_schema
-            .clone()
-            .with_metadata(
-                json2_metadata_with_updated_settings(
-                    col.column_schema.metadata(),
-                    settings.clone(),
-                )
-                .map_err(|err| {
-                    InvalidRegionRequestSnafu {
-                        region_id,
-                        err: err.to_string(),
-                    }
-                    .build()
-                })?,
-            )
-            .extension_type::<Json2ExtensionType>()
-            .map_err(|err| {
-                InvalidRegionRequestSnafu {
-                    region_id,
-                    err: err.to_string(),
-                }
-                .build()
-            })?
-            .context(InvalidRegionRequestSnafu {
-                region_id,
-                err: format!("missing JSON2 extension metadata for column {}", col_name),
-            })?;
 
         Ok(())
     }

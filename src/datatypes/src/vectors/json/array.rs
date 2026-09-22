@@ -335,7 +335,7 @@ fn project_json_values(values: Vec<Value>, to_type: &DataType) -> Result<ArrayRe
     let concrete_type = ConcreteDataType::from_arrow_type(to_type);
     let mut builder = concrete_type.create_mutable_vector(values.len());
     for value in values {
-        let value = coerce_json_value_to_type(value, &concrete_type)?;
+        let value = coerce_json_value_to_type(value, &concrete_type);
         builder.try_push_value_ref(&value.as_value_ref())?;
     }
     Ok(builder.to_vector().to_arrow_array())

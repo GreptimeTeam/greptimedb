@@ -863,7 +863,7 @@ impl RegionMetadataBuilder {
                 .build()
             })?;
 
-        col_meta.column_schema = col_meta.column_schema.clone().with_metadata(new_metadata);
+        *col_meta.column_schema.mut_metadata() = new_metadata;
         Ok(())
     }
 

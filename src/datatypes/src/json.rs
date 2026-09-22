@@ -146,6 +146,30 @@ impl JsonSettings {
         (self.type_hints, self.max_auto_expanded_paths)
     }
 
+    /// Returns whether the settings are equivalent, ignoring type hint order.
+    pub fn equivalent(&self, other: &Self) -> bool {
+        let Self {
+            type_hints,
+            max_auto_expanded_paths,
+        } = self;
+        let Self {
+            type_hints: other_hints,
+            max_auto_expanded_paths: other_max_auto_expanded_paths,
+        } = other;
+
+        if max_auto_expanded_paths != other_max_auto_expanded_paths
+            || type_hints.len() != other_hints.len()
+        {
+            return false;
+        }
+
+        let mut hints = type_hints.iter().collect::<Vec<_>>();
+        let mut other_hints = other_hints.iter().collect::<Vec<_>>();
+        hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        other_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        hints == other_hints
+    }
+
     /// Decode an encoded StructValue back into a serde_json::Value.
     pub fn decode(&self, value: Value) -> Result<Json> {
         let mut context = JsonContext {
@@ -452,7 +476,7 @@ fn encode_json_value_with_hint(
         }
         .fail(),
         TypeHintMismatchPolicy::CoerceOrNull => {
-            let value = coerce_json_value_to_type(json, &hint.data_type)?;
+            let value = coerce_json_value_to_type(json, &hint.data_type);
             let value = Json::try_from(value).map_err(|error| {
                 error::InvalidJsonSnafu {
                     value: error.to_string(),
@@ -465,9 +489,10 @@ fn encode_json_value_with_hint(
 }
 
 /// Coerces a JSON value using the same semantics as JSON2 query projection.
-pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType) -> Result<Value> {
+/// Values that cannot be converted become null.
+pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType) -> Value {
     if value.is_null() {
-        return Ok(Value::Null);
+        return Value::Null;
     }
 
     if to_type.is_string() {
@@ -475,16 +500,16 @@ pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType)
             Json::String(value) => value,
             value => value.to_string(),
         };
-        return Ok(Value::String(value.into()));
+        return Value::String(value.into());
     }
 
     if matches!(to_type, ConcreteDataType::Binary(_)) {
-        return Ok(Value::Binary(encode_serde_json_as_jsonb(value).into()));
+        return Value::Binary(encode_serde_json_as_jsonb(value).into());
     }
 
     if let Some(struct_type) = to_type.as_struct() {
         let Json::Object(mut object) = value else {
-            return Ok(Value::Null);
+            return Value::Null;
         };
         let values = struct_type
             .fields()
@@ -493,23 +518,22 @@ pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType)
                 object
                     .remove(field.name())
                     .map(|value| coerce_json_value_to_type(value, field.data_type()))
-                    .transpose()
-                    .map(|value| value.unwrap_or(Value::Null))
+                    .unwrap_or(Value::Null)
             })
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(Value::Struct(StructValue::new(values, struct_type.clone())));
+            .collect::<Vec<_>>();
+        return Value::Struct(StructValue::new(values, struct_type.clone()));
     }
 
     if let Some(list_type) = to_type.as_list() {
         let Json::Array(values) = value else {
-            return Ok(Value::Null);
+            return Value::Null;
         };
         let item_type = list_type.item_type().clone();
         let values = values
             .into_iter()
             .map(|value| coerce_json_value_to_type(value, &item_type))
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(Value::List(ListValue::new(values, Arc::new(item_type))));
+            .collect::<Vec<_>>();
+        return Value::List(ListValue::new(values, Arc::new(item_type)));
     }
 
     let value = match value {
@@ -528,7 +552,7 @@ pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType)
         Json::String(value) => Value::String(value.into()),
         Json::Array(_) | Json::Object(_) | Json::Null => Value::Null,
     };
-    Ok(to_type.try_cast(value).unwrap_or(Value::Null))
+    to_type.try_cast(value).unwrap_or(Value::Null)
 }
 
 fn encode_json_array_with_context<'a>(
@@ -717,6 +741,50 @@ mod tests {
             .position(|field| field.name() == field_name)
             .expect("field exists");
         &struct_value.items()[index]
+    }
+
+    #[test]
+    fn test_json_settings_equivalent() -> Result<()> {
+        let hints = vec![
+            JsonTypeHint {
+                path: vec!["user".to_string(), "name".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: false,
+            },
+            JsonTypeHint {
+                path: vec!["count".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            },
+        ];
+        let settings = JsonSettings::try_new(hints.clone(), Some(10))?;
+        let mut reversed = hints.clone();
+        reversed.reverse();
+        let reordered = JsonSettings::try_new(reversed, Some(10))?;
+        assert_ne!(settings, reordered);
+        assert!(settings.equivalent(&reordered));
+        assert!(reordered.equivalent(&settings));
+        assert!(settings.equivalent(&settings));
+        assert_eq!(hints, settings.type_hints());
+        assert!(JsonSettings::default().equivalent(&JsonSettings::default()));
+
+        for limit in [None, Some(0), Some(11)] {
+            assert!(!settings.equivalent(&JsonSettings::try_new(hints.clone(), limit)?));
+        }
+        assert!(!settings.equivalent(&JsonSettings::try_new(vec![hints[0].clone()], Some(10))?));
+
+        let mut changed = hints.clone();
+        changed[0].path = vec!["user".to_string(), "id".to_string()];
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+
+        let mut changed = hints.clone();
+        changed[0].data_type = ConcreteDataType::int64_datatype();
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+
+        let mut changed = hints;
+        changed[0].inverted_index = true;
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+        Ok(())
     }
 
     #[test]
