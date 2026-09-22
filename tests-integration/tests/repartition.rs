@@ -45,15 +45,25 @@ macro_rules! repartition_tests {
         $(
             paste::item! {
                 mod [<integration_repartition_ $service:lower _test>] {
+                    // Every case below builds its own cluster and runs a full repartition plus
+                    // GC cycle, which takes around a minute on object-store backends. Keep one
+                    // case per test so a case stays well inside the nextest slow timeout and
+                    // cases run in parallel; do not fold several cases back into one test.
+
                     #[tokio::test(flavor = "multi_thread")]
-                    async fn [< test_repartition_mito >]() {
+                    async fn [< test_repartition_mito_flat >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             common_telemetry::init_default_ut_logging();
-                            // Cover both storage formats for repartition behavior.
-                            // for flat format
                             $crate::repartition::test_repartition_mito(store_type, true).await;
-                            // for primary key format
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_mito_primary_key >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_repartition_mito(store_type, false).await;
                         }
                     }
@@ -95,19 +105,41 @@ macro_rules! repartition_tests {
                     }
 
                     #[tokio::test(flavor = "multi_thread")]
-                    async fn [< test_repartition_metric >]() {
+                    async fn [< test_repartition_metric_flat_sparse >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
                             use store_api::codec::PrimaryKeyEncoding;
                             common_telemetry::init_default_ut_logging();
-                            // Exercise format + primary key encoding matrix for metric engine.
-                            // for flat format with sparse primary key encoding
                             $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Sparse).await;
-                            // for flat format with dense primary key encoding
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_metric_flat_dense >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            use store_api::codec::PrimaryKeyEncoding;
+                            common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_repartition_metric(store_type, true, PrimaryKeyEncoding::Dense).await;
-                            // for primary key format with sparse primary key encoding
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_metric_primary_key_sparse >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            use store_api::codec::PrimaryKeyEncoding;
+                            common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Sparse).await;
-                            // for primary key format with dense primary key encoding
+                        }
+                    }
+
+                    #[tokio::test(flavor = "multi_thread")]
+                    async fn [< test_repartition_metric_primary_key_dense >]() {
+                        let store_type = tests_integration::test_util::StorageType::$service;
+                        if store_type.test_on() {
+                            use store_api::codec::PrimaryKeyEncoding;
+                            common_telemetry::init_default_ut_logging();
                             $crate::repartition::test_repartition_metric(store_type, false, PrimaryKeyEncoding::Dense).await;
                         }
                     }
