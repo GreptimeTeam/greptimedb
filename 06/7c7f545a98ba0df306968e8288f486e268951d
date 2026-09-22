@@ -1,0 +1,257 @@
+src/common/batcher/src/worker_registry.rs
+  s_2432582dedaf5f::t_7bb32731126bcc 19,53-69,221-241,243-264
+  s_c8f343c7af25c4::t_f482768e55d08a 17-18,27,30,33,50,72,84-91,97-99,104,108,187,242
+  s_c8f343c7af25c4::t_8db970bc060476 80-83,121-141
+src/servers/src/batcher/logical_table.rs
+  s_cd17afc428d85a::t_4a647ff71263ed 314,316
+  s_c8f343c7af25c4::t_8ee806119d625e 146-147,149
+  s_abcb81dd1a0af3::t_d57b83b449b268 17,20,29,42,45,55-57,116,150-153,363,371-372,466-469,471-476
+  s_c8f343c7af25c4::t_d952b6b5019035 191-216,221,223,225,294,305,307
+  s_c8f343c7af25c4::t_774250b299a0ff 24,186-190
+src/datatypes/src/timestamp.rs
+  s_c8f343c7af25c4::t_2ea09224a4c292 16,182-194,197-199,232-273
+src/operator/src/bulk_insert.rs
+  s_c8f343c7af25c4::t_a3b89c7a40d82f 36,43
+  s_c8f343c7af25c4::t_8494489344441c 48-50
+src/operator/src/req_convert/insert.rs
+  s_c8f343c7af25c4::t_28a3ec80cc9ff6 21,33
+  s_5bcaf68390e7c4::t_5a2760646c0db0 25
+src/operator/src/req_convert/insert/timestamps.rs
+  s_c8f343c7af25c4::t_91cebee6e5601b 1-38
+Cargo.lock
+  s_c8f343c7af25c4::t_5526f603b78bdf 2326
+  s_c8f343c7af25c4::t_91426d07207299 5647
+  s_c8f343c7af25c4::t_d1453bc4a5a7e5 5704,14442
+src/common/batcher/Cargo.toml
+  s_c8f343c7af25c4::t_cc0df8dd713657 14
+src/frontend/src/server.rs
+  s_c8f343c7af25c4::t_f847249364d5f8 814-830
+  s_c8f343c7af25c4::t_b1a14c3be2b15b 671
+  s_5bcaf68390e7c4::t_dd1f8a2954fdd7 27,75,112-113,137-142,430-431,438-439,451,462-473,518-588,606,669-670,771-773,775-777,779,785,787,789-794
+src/frontend/src/service_config/prom_store.rs
+  s_c8f343c7af25c4::t_1169ca94ebf3f0 69,73,75-82,114-149
+  s_c8f343c7af25c4::t_30077e55edb8fd 18,21
+src/common/batcher/src/flush_policy/timing.rs
+  s_c8f343c7af25c4::t_bc903bb0517551 44-48,84-88,90-93
+  s_d1140b6a37d6d5::t_0d4717694cf152 29,33-35,51,89,96,136,152-153
+src/frontend/Cargo.toml
+  s_c8f343c7af25c4::t_010eabe52d67b7 32
+  s_5bcaf68390e7c4::t_a4e6fb0cc3ce67 101
+src/common/batcher/src/pending_worker.rs
+  s_d1140b6a37d6d5::t_c83f1fc9999aef 127
+src/common/batcher/src/flush_limiter.rs
+  s_d1140b6a37d6d5::t_3f264769d0df3d 26-29,48-53,58
+src/common/batcher/src/request_limiter.rs
+  s_d1140b6a37d6d5::t_7e47cda6b27149 29-32,64,66-67,73,91,106
+src/common/batcher/src/notifier.rs
+  s_d1140b6a37d6d5::t_ad91f070097f4e 39-41,44,95-97,111
+src/operator/src/batcher.rs
+  s_c8f343c7af25c4::t_ade92f6552fc22 1-41
+src/operator/src/lib.rs
+  s_c8f343c7af25c4::t_b5bbf0d50d7730 15
+src/api/src/helper.rs
+  s_c8f343c7af25c4::t_6844ea0e610f95 1036-1046,2099-2112
+src/mito2/src/request.rs
+  s_c8f343c7af25c4::t_9227b3a7cb2b7b 23
+src/operator/src/req_convert/insert/row_to_batch.rs
+  s_c8f343c7af25c4::t_e7b0eac3f0a668 17-22,37-40,42,119-128,153-195,502-590
+  s_abcb81dd1a0af3::t_e3d28a6d0ab0a5 26,149-150,350-408
+src/datatypes/src/extension/json.rs
+  s_abcb81dd1a0af3::t_f228e6a97e4ae0 18,22,31-51
+src/mito2/src/memtable/bulk/part.rs
+  s_abcb81dd1a0af3::t_7cf0a1916896be 42
+tests/compatibility/ci.toml
+  s_c8f343c7af25c4::t_79b76ae02fa4d4 9
+src/servers/Cargo.toml
+  s_c8f343c7af25c4::t_adaa4a0cbd5561 158,166
+src/servers/src/batcher.rs
+  s_c8f343c7af25c4::t_02d8a15714a89c 1-14,16-18,20-23
+src/servers/src/batcher/flow_notifier.rs
+  s_c8f343c7af25c4::t_581f9ab8f426e9 1-172
+src/servers/src/batcher/flow_sender.rs
+  s_c8f343c7af25c4::t_9800abbc388495 1-212
+src/servers/src/batcher/table.rs
+  s_c8f343c7af25c4::t_dc8cca251e2892 1-227,229,231-241,243-246,248-251,253-257,259-261,263-268,270,272-285,287-292,293,294-360,367-370,372-373,377-380,383-409,420-421,422,471-480,482-519,521-619,621-628,630-862
+  s_c8f343c7af25c4::t_b4616a9877a312 230,262,364-366,371,381,417-419,481
+  s_c8f343c7af25c4::t_8ac04aa5f2dc10 286,361-363,620
+src/servers/src/batcher/table/batch.rs
+  s_c8f343c7af25c4::t_42bbdf3e387efb 1-21,23-49,53-154
+  s_c8f343c7af25c4::t_ca081e0a39dfc4 22,50-52
+src/servers/src/batcher/table/flow_notifier.rs
+  s_c8f343c7af25c4::t_45f2f7cad6be87 1-167
+src/servers/src/batcher/table/metrics.rs
+  s_c8f343c7af25c4::t_7b14b8411ae652 1-64
+src/servers/src/batcher/table/pending_batch.rs
+  s_c8f343c7af25c4::t_18fc8ef6a28dfb 1-96
+src/servers/src/batcher/table/pending_worker.rs
+  s_c8f343c7af25c4::t_ae22e04f5e0a54 1-185
+src/servers/src/batcher/test_util.rs
+  s_c8f343c7af25c4::t_fb6097d7af7691 1-46
+src/servers/src/lib.rs
+  s_c8f343c7af25c4::t_01677756619444 25
+src/operator/src/error.rs
+  s_c8f343c7af25c4::t_bb73472c74ceeb 16,114-120,1079,1190
+config/frontend.example.toml
+  s_5bcaf68390e7c4::t_7f741e3470e78c 238-261
+  s_c8f343c7af25c4::t_dd02ead35549bb 60
+  s_abcb81dd1a0af3::t_2271dc1398c5c9 237
+  s_5bcaf68390e7c4::t_0467bc4123a2d2 59,61,234-236,262-279,311
+config/standalone.example.toml
+  s_5bcaf68390e7c4::t_b648acd91e1c2b 217-240
+  s_c8f343c7af25c4::t_fd65f51bda8a67 85
+  s_abcb81dd1a0af3::t_0a612cc3791fd4 216
+  s_5bcaf68390e7c4::t_a285e6e366ed58 84,86,213-215,241-258,290
+src/frontend/src/frontend.rs
+  s_5bcaf68390e7c4::t_c0713623c8ef24 38-39,219,282-286,289-292,294-299,308-311,313-314,325-326
+  s_c8f343c7af25c4::t_cb433999f79f20 261-264,266-271,273-281
+  s_c8f343c7af25c4::t_b6db6b328216c6 71,108,133,265,287,293,312
+  s_c8f343c7af25c4::t_77b35bf3414a1e 70,134,229-260,272,288,300-307
+src/frontend/src/instance.rs
+  s_5bcaf68390e7c4::t_a3a3937bb1302a 1903
+  s_c8f343c7af25c4::t_e7fd06d8d2379d 24,35,82,135
+src/frontend/src/instance/builder.rs
+  s_5bcaf68390e7c4::t_05d1b48997481f 27,35,53-54,222-227,229-239
+  s_c8f343c7af25c4::t_e6791add4f9ba3 261-262,264
+  s_5bcaf68390e7c4::t_d10816f7eb49ab 64,240-260,263,388
+src/frontend/src/instance/influxdb.rs
+  s_5bcaf68390e7c4::t_26d720080d8caf 211
+src/frontend/src/instance/opentsdb.rs
+  s_5bcaf68390e7c4::t_7abfa3fcec3f40 24,47,58-77,81,117
+src/frontend/src/service_config.rs
+  s_5bcaf68390e7c4::t_30c1f44fd340a2 20
+  s_5bcaf68390e7c4::t_dafa4c2b11bb96 29
+src/frontend/src/service_config/influxdb.rs
+  s_5bcaf68390e7c4::t_f42bc71fcc5f04 52
+src/frontend/src/service_config/pending_rows_batcher.rs
+  s_5bcaf68390e7c4::t_d9ad5f08493b9e 1-22,27-28,45-61,63-78,80-92,144-147,251-252,254-257,259-260,262-267,269,271-272,274-277,280-287,289-293,295-300,302-310,312-318
+  s_c8f343c7af25c4::t_373b6f939bc0fd 23-26,29-44,62,79,93-143,148-250,253,258,261,268,270,273,278-279,288,294,301,311
+src/operator/src/insert.rs
+  s_5bcaf68390e7c4::t_efbfb3111e579f 27,69,78,88-89,102,293,297-305,407-411,435-447,463-469,478-511,516,519,521,525-531,533-541,542-547,596-625,640-646,658-666,1927
+  s_5bcaf68390e7c4::t_68193ecf9c3f5f 470-477,2707-2741,2878-2930
+  s_c8f343c7af25c4::t_39d2f152589730 159-279,2437-2478,2480,2483,2485,2490-2497,2742-2877
+src/operator/src/req_convert/insert/stmt_to_region.rs
+  s_5bcaf68390e7c4::t_8bb3ea73775e30 67-101,191
+src/operator/src/req_convert/insert/table_to_region.rs
+  s_5bcaf68390e7c4::t_24e885bbd45179 15,40-47,52-55,57-62,64,90,94,96,101-112
+src/servers/src/http.rs
+  s_425c029c259ad0::t_7ed47877131caf 24,30,43,192-207,217,242-251,256-257,259-262,661,672,687-691,913,948,967,1126,1216-1219,1255-1258,1335-1338,1363-1366,1394-1397,1409-1417,1473-1481,1484,1498-1501,1508-1511,1528-1531,1705,2472-2487,2526-2626
+  s_c8f343c7af25c4::t_339a38d0c24a19 288-289
+  s_598820b5736fbc::t_f19fc48ac13956 218,239-241,252-255,258,662,673,680-686,914,949,968,1127-1129,2488-2525
+src/servers/src/http/opentsdb.rs
+  s_5bcaf68390e7c4::t_08eb3429003381 175-255
+src/servers/src/query_handler.rs
+  s_5bcaf68390e7c4::t_ad2494159bd9a4 97-103
+src/servers/tests/http/prom_store_test.rs
+  s_5bcaf68390e7c4::t_2b6cd254d25891 43,65,84-89,101,161-166,252-262,821-895
+src/session/src/context.rs
+  s_5bcaf68390e7c4::t_1b48d1d2befe0e 82-84,475-483,648,767,936-939,944-947,951-955
+  s_5bcaf68390e7c4::t_2ec1d591c5faa8 85-87,464-474,650,940-943,948-950
+src/standalone/src/options.rs
+  s_5bcaf68390e7c4::t_10c7f532e2d113 27-28,221-222,300-304,307-310,312-318,321-322,325-328,335-338,340-342,344
+  s_c8f343c7af25c4::t_0b68eb1fdcc6a5 278-281,283-289,291-299
+  s_c8f343c7af25c4::t_0a99213844e391 62,105,139,170,282,305,311,323,339,343
+  s_c8f343c7af25c4::t_105b52751383d0 61,140,223-277,290,306,319-320,324,329-334
+Cargo.toml
+  s_c8f343c7af25c4::t_2a291870c82fd8 263
+src/frontend/AGENTS.md
+  s_c8f343c7af25c4::t_f1bd9d6a12f2af 59-64
+  s_598820b5736fbc::t_8d9b3267804b7b 54-58
+src/standalone/Cargo.toml
+  s_c8f343c7af25c4::t_3ddcc1ecabbfcf 49
+config/config.md
+  s_c8f343c7af25c4::t_25b4c104ac1cf7 79-84,347-352
+  s_c8f343c7af25c4::t_aae4925f353786 37,78,85-91,293,346,353-359
+src/servers/src/batcher/logical_table/batch.rs
+  s_abcb81dd1a0af3::t_7cca7ee7ca074a 28-29,33,61,97,119,296,309,312,321,382,586-742
+src/servers/src/batcher/logical_table/batch_convert.rs
+  s_abcb81dd1a0af3::t_e301a7f5961bc9 293,296
+src/servers/src/batcher/logical_table/flow_notifier.rs
+  s_abcb81dd1a0af3::t_4629889ca274b1 1-326
+src/servers/src/batcher/logical_table/pending_worker.rs
+  s_abcb81dd1a0af3::t_e0b5a2aaffe782 32-33,105,294,305,506-507,598-657
+src/servers/src/batcher/logical_table/region_write.rs
+  s_abcb81dd1a0af3::t_84fec4ef6aa6d2 487-560
+src/servers/src/batcher/logical_table/tables.rs
+  s_abcb81dd1a0af3::t_91d4b698c6dadf 1-77,79-115,119-120,123-129,131-139,143-146,149-235,237-300,302-310,312-314,316-323,325-329,331-399,401-405,407-417,419-533,535-551
+  s_598820b5736fbc::t_21e8aaadbf39e1 78,116-118,121-122,130,140-142,147-148,236,301,311,315,324,330,400,406,418,534
+src/frontend/src/instance/logical_batcher.rs
+  s_5bcaf68390e7c4::t_81a91af1a2aa59 1-102
+tests-integration/src/standalone.rs
+  s_c8f343c7af25c4::t_3184270bff4b62 55,92,113,124-129,389-392
+tests-integration/src/otlp.rs
+  s_598820b5736fbc::t_5c0b87fa75eba2 506-714
+src/frontend/src/instance/otlp.rs
+  s_c8f343c7af25c4::t_19bfe021b73b2c 30,34,169-188,190-206,210,215-216
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "067c7f545a98ba0df306968e8288f486e268951d",
+  "prompts": {},
+  "sessions": {
+    "s_2432582dedaf5f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e51-436e-7e22-8f81-250159664969",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_425c029c259ad0": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a831-a1ad-7b62-96ed-c7393ceb8431",
+        "model": "gpt-5.6-terra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_598820b5736fbc": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0af32-906b-7902-aab3-3efdd5da92a7",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_5bcaf68390e7c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a09ee4-560d-7e31-838b-8d023b84ada5",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_abcb81dd1a0af3": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0a902-af21-7a91-91e8-dcfb869d9c59",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_c8f343c7af25c4": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08b53-a26f-77d0-b428-df57ebdefffd",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_cd17afc428d85a": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a08e5e-c225-7e83-b498-f3fe753a8217",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_d1140b6a37d6d5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a085df-416d-7100-9b16-05c8a5e7279d",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
