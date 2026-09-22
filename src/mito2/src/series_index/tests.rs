@@ -327,13 +327,18 @@ async fn test_reconcile_restores_and_reuses_indexes() {
         store.delete(path).await.unwrap();
     }
 
-    // Missing files must not be advertised as usable coverage after reopening.
+    // Reopening trusts catalog entries without checking the index files.
     let restored = load_version_control(store, region.region_id, purger)
         .await
         .current();
-    assert_eq!(first.range_indexes.len() - 1, restored.range_indexes.len());
-    assert!(restored.index_buckets.is_empty());
-    assert!(restored.series_indexes.is_empty());
+    assert_eq!(first.range_indexes, restored.range_indexes);
+    assert_eq!(first.index_buckets, restored.index_buckets);
+    assert_eq!(first.series_indexes.len(), restored.series_indexes.len());
+    assert_eq!(
+        first.series_indexes[&first_id].entry(),
+        restored.series_indexes[&first_id].entry()
+    );
+    assert_eq!(first.disk_usage(), restored.disk_usage());
 
     // Catalog changes are not reloaded, and missing index files are not repaired.
     for path in [

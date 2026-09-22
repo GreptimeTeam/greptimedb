@@ -195,30 +195,6 @@ pub(crate) async fn load_version_control(
     let series = load_catalog::<SeriesIndexCatalog>(store, &series_catalog_path(region_id))
         .await
         .unwrap_or_default();
-    let mut range = range;
-    let mut series = series;
-    let mut range_ids = Vec::new();
-    for entry in range.indexes {
-        if store
-            .exists(&range_index_path(region_id, entry.file_id))
-            .await
-            .unwrap_or(false)
-        {
-            range_ids.push(entry);
-        }
-    }
-    range.indexes = range_ids;
-    let mut entries = Vec::new();
-    for entry in series.indexes {
-        if store
-            .exists(&series_index_path(region_id, entry.index_uuid))
-            .await
-            .unwrap_or(false)
-        {
-            entries.push(entry);
-        }
-    }
-    series.indexes = entries;
     let version = SeriesIndexVersion::new(
         range
             .indexes
@@ -356,7 +332,8 @@ mod tests {
             .await
             .unwrap();
         let control = load_version_control(&store, region_id, &purger).await;
-        assert!(control.current().range_indexes.is_empty());
+        assert_eq!(1, control.current().range_indexes.len());
+        assert_eq!(1, control.current().range_indexes[&file_id].file_size);
         assert!(control.current().series_indexes.is_empty());
         let layer = MockLayerBuilder::default()
             .reader_factory(Arc::new(|_, _, _| Box::new(FailingCatalogReader)))
