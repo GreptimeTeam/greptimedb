@@ -274,6 +274,7 @@ impl Service for SecureFsBackend {
             path,
             args,
             file: None,
+            closing: false,
         })
     }
 
@@ -387,6 +388,7 @@ struct SecureFsWriter {
     path: PathBuf,
     args: OpWrite,
     file: Option<tokio::fs::File>,
+    closing: bool,
 }
 
 impl SecureFsWriter {
@@ -438,6 +440,7 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn close(&mut self) -> Result<Metadata> {
+        self.closing = true;
         let file = self.ensure_file().await?;
         file.flush().await.map_err(new_std_io_error)?;
         file.sync_all().await.map_err(new_std_io_error)?;
@@ -450,6 +453,23 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn abort(&mut self) -> Result<()> {
+        if self.args.if_not_exists() {
+            // A failed exclusive create owns no file. Once close starts, preserve
+            // potentially committed output for the caller's deliberate retry.
+            if let Some(mut file) = self.file.take() {
+                file.flush().await.map_err(new_std_io_error)?;
+                drop(file);
+                if !self.closing {
+                    let root = self.root.clone();
+                    let path = self.path.clone();
+                    common_runtime::spawn_blocking_global(move || root.dir.remove_file(path))
+                        .await
+                        .map_err(new_task_join_error)?
+                        .map_err(new_std_io_error)?;
+                }
+            }
+            return Ok(());
+        }
         Err(Error::new(
             ErrorKind::Unsupported,
             "filesystem writes cannot be aborted without atomic writes",
@@ -797,6 +817,26 @@ mod tests {
             .await
             .unwrap();
         assert!(!temp_dir.path().join("nested").exists());
+    }
+
+    #[tokio::test]
+    async fn test_conditional_abort_only_removes_owned_partial_file() {
+        let temp_dir = create_temp_dir("secure_fs_conditional_abort");
+        let operator = SecureFsRoot::open(temp_dir.path())
+            .unwrap()
+            .build_operator();
+        for started in [false, true] {
+            let mut writer = operator
+                .writer_with("partial")
+                .if_not_exists(true)
+                .await
+                .unwrap();
+            if started {
+                writer.write(Bytes::from_static(b"partial")).await.unwrap();
+            }
+            writer.abort().await.unwrap();
+            assert!(!operator.exists("partial").await.unwrap());
+        }
     }
 
     #[tokio::test]

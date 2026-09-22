@@ -29,6 +29,13 @@ use tokio_util::sync::CancellationToken;
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{self, Result};
 
+/// Destination creation policy; conditional failures never authorize path deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParquetCreationPolicy {
+    Overwrite,
+    IfNotExists,
+}
+
 /// Limits for one Parquet file. Flush thresholds are not hard memory caps.
 #[derive(Clone, Copy, Debug)]
 pub struct ParquetWriterLimits {
@@ -49,6 +56,7 @@ pub struct ParquetFileWriter {
     store: ObjectStore,
     path: String,
     limits: Option<ParquetWriterLimits>,
+    creation: ParquetCreationPolicy,
 }
 
 impl ParquetFileWriter {
@@ -60,6 +68,26 @@ impl ParquetFileWriter {
         path: &str,
         concurrency: usize,
         limits: Option<ParquetWriterLimits>,
+    ) -> Result<Self> {
+        Self::open_with_creation(
+            schema,
+            store,
+            path,
+            concurrency,
+            limits,
+            ParquetCreationPolicy::Overwrite,
+        )
+        .await
+    }
+
+    /// Open with a conditional policy only when the caller verified backend support.
+    pub async fn open_with_creation(
+        schema: SchemaRef,
+        store: ObjectStore,
+        path: &str,
+        concurrency: usize,
+        limits: Option<ParquetWriterLimits>,
+        creation: ParquetCreationPolicy,
     ) -> Result<Self> {
         let mut props = WriterProperties::builder()
             .set_compression(Compression::ZSTD(ZstdLevel::default()))
@@ -90,6 +118,7 @@ impl ParquetFileWriter {
             .writer_with(path)
             .concurrent(concurrency)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .if_not_exists(creation == ParquetCreationPolicy::IfNotExists)
             .await
             .context(error::WriteObjectSnafu { path })?;
         Ok(Self {
@@ -98,6 +127,7 @@ impl ParquetFileWriter {
             store,
             path: path.to_owned(),
             limits,
+            creation,
         })
     }
 
@@ -191,13 +221,14 @@ impl ParquetFileWriter {
         Ok(())
     }
 
-    /// Abort an exclusively owned file after all in-flight operations have completed.
-    /// If the backend cannot abort, deletion assumes this attempt owns the path.
+    /// Abort after all in-flight operations complete. Overwrite callers own the
+    /// path; conditional callers delegate cleanup exclusively to the backend.
     pub async fn abort(mut self) -> Result<()> {
         let result = self.sink.abort().await;
-        if result
-            .as_ref()
-            .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
+        if self.creation == ParquetCreationPolicy::Overwrite
+            && result
+                .as_ref()
+                .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
         {
             let store = self.store.clone();
             let path = self.path.clone();
@@ -286,6 +317,78 @@ mod tests {
     async fn read(store: &ObjectStore, path: &str) -> ParquetRecordBatchReaderBuilder<Bytes> {
         ParquetRecordBatchReaderBuilder::try_new(store.read(path).await.unwrap().to_bytes())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn conditional_abort_preserves_collisions_and_ambiguous_commits() {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory, oio};
+
+        struct AmbiguousCommit(oio::Writer);
+        impl oio::Write for AmbiguousCommit {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.0.write(bytes).await
+            }
+            async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+                self.0.close().await?;
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unexpected,
+                    "lost close reply",
+                ))
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unsupported,
+                    "cannot abort",
+                ))
+            }
+        }
+
+        for existing in [false, true] {
+            let directory = common_test_util::temp_dir::create_temp_dir("conditional_parquet");
+            let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+                .unwrap()
+                .build_operator();
+            let path = "conditional.parquet";
+            if existing {
+                store.write(path, "original").await.unwrap();
+            }
+            let factory: MockWriterFactory =
+                Arc::new(|_, _, writer| Box::new(AmbiguousCommit(writer)));
+            let store = store.layer(
+                MockLayerBuilder::default()
+                    .writer_factory(factory)
+                    .build()
+                    .unwrap(),
+            );
+            let mut writer = ParquetFileWriter::open_with_creation(
+                batch().schema(),
+                store.clone(),
+                path,
+                1,
+                None,
+                ParquetCreationPolicy::IfNotExists,
+            )
+            .await
+            .unwrap();
+            writer.write(batch(), None).await.unwrap();
+            assert!(writer.finish(None).await.is_err());
+            assert!(writer.abort().await.is_err());
+            if existing {
+                assert_eq!(
+                    store.read(path).await.unwrap().to_bytes(),
+                    Bytes::from_static(b"original")
+                );
+            } else {
+                assert_eq!(
+                    read(&store, path)
+                        .await
+                        .metadata()
+                        .file_metadata()
+                        .num_rows(),
+                    4
+                );
+            }
+        }
     }
 
     #[tokio::test]

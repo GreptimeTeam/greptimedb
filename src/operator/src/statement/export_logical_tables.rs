@@ -28,7 +28,9 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::downcast_dictionary_array;
 use arrow::record_batch::RecordBatch;
 use common_datasource::object_store::build_backend_for_write;
-use common_datasource::parquet_writer::{ParquetFileWriter, ParquetWriterLimits};
+use common_datasource::parquet_writer::{
+    ParquetCreationPolicy, ParquetFileWriter, ParquetWriterLimits,
+};
 use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
 use common_query::OutputData;
 use common_recordbatch::SendableRecordBatchStream;
@@ -493,21 +495,29 @@ impl ActiveWriter {
         limits: LogicalTableExportLimits,
     ) -> Result<Self> {
         let path = table.output.path.clone();
-        ensure!(
-            !store
-                .exists(&path)
-                .await
-                .context(error::ReadObjectSnafu { path: &path })?,
-            InvalidLogicalTableExportSnafu {
-                reason: format!("output already exists: {path}")
-            }
-        );
-        let writer = ParquetFileWriter::open(
+        let conditional = store.info().full_capability().write_with_if_not_exists;
+        if !conditional {
+            ensure!(
+                !store
+                    .exists(&path)
+                    .await
+                    .context(error::ReadObjectSnafu { path: &path })?,
+                InvalidLogicalTableExportSnafu {
+                    reason: format!("output already exists: {path}")
+                }
+            );
+        }
+        let writer = ParquetFileWriter::open_with_creation(
             table.schema.clone(),
             store.clone(),
             &path,
             1,
             Some(limits.writer),
+            if conditional {
+                ParquetCreationPolicy::IfNotExists
+            } else {
+                ParquetCreationPolicy::Overwrite
+            },
         )
         .await
         .map_err(|error| map_writer_error(error, &path))?;
