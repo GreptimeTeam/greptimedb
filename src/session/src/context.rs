@@ -33,6 +33,7 @@ use datafusion_common::config::ConfigOptions;
 use derive_builder::Builder;
 use sql::dialect::{Dialect, GenericDialect, GreptimeDbDialect, MySqlDialect, PostgreSqlDialect};
 
+use crate::hints::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY;
 pub use crate::hints::{
     LIVE_ANALYZE_METRICS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
@@ -444,6 +445,33 @@ impl QueryContext {
 
     pub fn extensions(&self) -> HashMap<String, String> {
         self.extensions.clone()
+    }
+
+    /// Returns the sorted context fields a cached logical plan is scoped to. A
+    /// new field that planning can observe belongs here, otherwise plans made
+    /// under different values of it collide.
+    pub fn plan_cache_scope(&self) -> Vec<(String, String)> {
+        // Allocated per request and read only during execution, so keeping them
+        // would give every request its own entry.
+        const EXECUTION_ONLY_EXTENSIONS: [&str; 2] = [
+            REMOTE_QUERY_ID_EXTENSION_KEY,
+            INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+        ];
+        let mut scope = self
+            .extensions
+            .iter()
+            .filter(|(key, _)| !EXECUTION_ONLY_EXTENSIONS.contains(&key.as_str()))
+            .map(|(key, value)| (format!("extension:{key}"), value.clone()))
+            .collect::<Vec<_>>();
+        scope.extend([
+            ("catalog".into(), self.current_catalog().into()),
+            ("schema".into(), self.current_schema()),
+            ("timezone".into(), self.timezone().to_string()),
+            ("user".into(), self.current_user().username().into()),
+            ("channel".into(), format!("{:?}", self.channel())),
+        ]);
+        scope.sort();
+        scope
     }
 
     /// Default to double quote and fallback to back quote

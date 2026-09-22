@@ -50,9 +50,6 @@ use promql::functions::{
     StdvarOverTime, SumOverTime,
 };
 use session::context::QueryContext;
-use session::hints::{
-    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
-};
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use table::metadata::TableInfoRef;
 use table::table::adapter::DfTableProviderAdapter;
@@ -65,19 +62,14 @@ use crate::optimizer::scan_hint::ScanHintRule;
 #[cfg(test)]
 mod tests;
 
-/// Per-entry structural caps. Together with the entry cap they bound the
-/// retained plan, its literals and its schemas.
+/// Admission limits; exceeding one skips caching, it never rejects the query.
+/// Nodes follow the query shape (measured 5 to 15), expressions and bytes grow
+/// with table width by about 4 expressions and 1.2KiB per tag column, so a wide
+/// table stops being cached at roughly 60 tag columns.
 const MAX_NODES: usize = 64;
 const MAX_EXPRESSIONS: usize = 256;
+/// Estimated structural bytes, not a heap limit: 512 entries measured ~18MiB.
 const MAX_BYTES: usize = 256 * 1024;
-
-/// Query context extensions that are allocated per request and are only read
-/// during execution. Every other extension takes part in the cache key, so a
-/// newly added planning-relevant extension separates entries by default.
-const EXECUTION_ONLY_EXTENSIONS: [&str; 2] = [
-    REMOTE_QUERY_ID_EXTENSION_KEY,
-    INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
-];
 
 /// The float range functions a template may contain. Admitted occurrences are
 /// replaced by these process-wide instances, so a template can never retain a
@@ -93,7 +85,7 @@ const EXECUTION_ONLY_EXTENSIONS: [&str; 2] = [
 /// counterparts are built with `scalar_udf_with_collector` and carry a
 /// per-request collector; they live in a separate `prom_native_histogram_*`
 /// name space, so matching on name and signature cannot confuse the two.
-static RANGE_FUNCTIONS: LazyLock<[Arc<ScalarUDF>; 18]> = LazyLock::new(|| {
+static RANGE_FUNCTIONS: LazyLock<HashMap<String, Arc<ScalarUDF>>> = LazyLock::new(|| {
     [
         Arc::new(Rate::scalar_udf()),
         Arc::new(Increase::scalar_udf()),
@@ -114,6 +106,9 @@ static RANGE_FUNCTIONS: LazyLock<[Arc<ScalarUDF>; 18]> = LazyLock::new(|| {
         Arc::new(StddevOverTime::scalar_udf()),
         Arc::new(StdvarOverTime::scalar_udf()),
     ]
+    .into_iter()
+    .map(|func| (func.name().to_string(), func))
+    .collect()
 });
 
 /// The only window function an admitted plan may contain.
@@ -123,14 +118,25 @@ static ROW_NUMBER: LazyLock<WindowUDF> = LazyLock::new(|| RowNumber::new().into(
 /// process-wide instances that the PromQL planner calls directly. Unlike the
 /// range functions these are kept as-is: there is no per-request variant to
 /// canonicalize away.
-static AGGREGATE_FUNCTIONS: LazyLock<[Arc<AggregateUDF>; 5]> =
-    LazyLock::new(|| [sum_udaf(), avg_udaf(), max_udaf(), min_udaf(), count_udaf()]);
+static AGGREGATE_FUNCTIONS: LazyLock<HashMap<String, Arc<AggregateUDF>>> = LazyLock::new(|| {
+    [sum_udaf(), avg_udaf(), max_udaf(), min_udaf(), count_udaf()]
+        .into_iter()
+        .map(|func| (func.name().to_string(), func))
+        .collect()
+});
 
 fn canonical_range_function(func: &ScalarUDF) -> Option<Arc<ScalarUDF>> {
     RANGE_FUNCTIONS
-        .iter()
-        .find(|allowed| allowed.name() == func.name() && allowed.signature() == func.signature())
+        .get(func.name())
+        .filter(|allowed| allowed.signature() == func.signature())
         .cloned()
+}
+
+fn is_allowed_aggregate_function(func: &Arc<AggregateUDF>) -> bool {
+    // The name only selects the candidate; admission rests on full equality.
+    AGGREGATE_FUNCTIONS
+        .get(func.name())
+        .is_some_and(|allowed| allowed == func)
 }
 
 /// Identity of the data the template was planned against.
@@ -200,6 +206,15 @@ impl PartialEq for Dependency {
 
 impl Eq for Dependency {}
 
+impl std::fmt::Display for Dependency {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Table(info) => write!(f, "table {}", info.ident.table_id),
+            Self::Region(metadata) => write!(f, "region {}", metadata.region_id),
+        }
+    }
+}
+
 impl Hash for Dependency {
     /// Hashes a subset of what equality compares, cheap enough to run on every
     /// lookup. It must not reach `region_id`: regions of one table share a
@@ -246,6 +261,8 @@ impl Hash for Key {
 /// A request that may reuse or fill a template.
 pub(crate) struct Candidate {
     key: Key,
+    /// Request evaluation start in Unix milliseconds, before selector offset
+    /// or lookback. Subtracted when normalizing and added back on cache hits.
     start: i64,
     source: Arc<dyn TableSource>,
 }
@@ -291,20 +308,7 @@ impl PromqlPlanCache {
             .collect::<Vec<_>>();
         options.sort();
 
-        let mut scope = ctx
-            .extensions()
-            .into_iter()
-            .filter(|(key, _)| !EXECUTION_ONLY_EXTENSIONS.contains(&key.as_str()))
-            .map(|(key, value)| (format!("extension:{key}"), value))
-            .collect::<Vec<_>>();
-        scope.extend([
-            ("catalog".into(), ctx.current_catalog().into()),
-            ("schema".into(), ctx.current_schema()),
-            ("timezone".into(), ctx.timezone().to_string()),
-            ("user".into(), ctx.current_user().username().into()),
-            ("channel".into(), format!("{:?}", ctx.channel())),
-        ]);
-        scope.sort();
+        let scope = ctx.plan_cache_scope();
 
         let size = options
             .iter()
@@ -333,15 +337,25 @@ impl PromqlPlanCache {
     /// Returns the template rebound to this request, if one is cached.
     pub(crate) async fn get(&self, candidate: &Candidate) -> Result<Option<LogicalPlan>> {
         let Some(template) = self.entries.get(&candidate.key).await else {
+            common_telemetry::debug!(
+                "PromQL plan cache miss on {}, evaluation start {}",
+                candidate.key.dependency,
+                candidate.start
+            );
             return Ok(None);
         };
-        rebind(
+        let plan = rebind(
             template.as_ref().clone(),
             candidate.start,
             &candidate.source,
             true,
-        )
-        .map(Some)
+        )?;
+        common_telemetry::debug!(
+            "PromQL plan cache hit on {}, evaluation start {}",
+            candidate.key.dependency,
+            candidate.start
+        );
+        Ok(Some(plan))
     }
 
     /// Stores the optimized plan as a template. Returns whether it was stored.
@@ -366,6 +380,11 @@ impl PromqlPlanCache {
         let Ok(template) = rebind(optimized.clone(), delta, &detached, false) else {
             return false;
         };
+        common_telemetry::debug!(
+            "Caching PromQL plan template for {}, evaluation start {}",
+            candidate.key.dependency,
+            candidate.start
+        );
         self.entries.insert(candidate.key, Arc::new(template)).await;
         // After the insert, so a cancelled request cannot leave the gauge high.
         PROMQL_PLAN_CACHE_ENTRIES.inc();
@@ -403,8 +422,9 @@ impl Shape {
     fn inspect(plan: &LogicalPlan) -> Option<Self> {
         let mut shape = Self::default();
         shape.visit(plan)?;
-        // A range selector always carries a normalizer; a plain instant
-        // selector carries none, while an instant selector with an offset does.
+        // Rebinding can only bind one evaluation origin over one source with one
+        // series split. A normalizer is mandatory for ranges and offset-only for
+        // instants, and the time literals are the selector's scan bounds.
         (shape.ranges + shape.instants == 1
             && (shape.normalizers == 1 || (shape.instants == 1 && shape.normalizers == 0))
             && shape.dividers == 1
@@ -495,6 +515,7 @@ impl Shape {
         match expr {
             Expr::Literal(value, metadata) => {
                 self.bytes += value.size();
+                // The size estimate above does not cover literal metadata.
                 if metadata.is_some() {
                     return None;
                 }
@@ -566,10 +587,7 @@ impl Shape {
             Expr::AggregateFunction(function) => {
                 // The PromQL planner builds these from DataFusion's process-wide
                 // instances, so a template that keeps one holds no request state.
-                if !AGGREGATE_FUNCTIONS
-                    .iter()
-                    .any(|allowed| &function.func == allowed)
-                {
+                if !is_allowed_aggregate_function(&function.func) {
                     return None;
                 }
             }

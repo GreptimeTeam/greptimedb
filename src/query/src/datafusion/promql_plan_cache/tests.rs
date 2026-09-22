@@ -448,10 +448,16 @@ async fn key_separates_metadata_session_and_query_context() {
         .target_partitions += 1;
     assert!(miss(&base, &changed_session, &QueryContext::arc()).await);
 
-    // The per-request remote query id must not separate entries, otherwise
-    // every region-server request would miss.
-    assert!(!miss(&base, &session, &QueryContext::arc()).await);
-    assert!(!miss(&base, &session, &QueryContext::arc()).await);
+    // Execution-only extensions must not separate entries.
+    for value in ["first-request", "second-request"] {
+        let mut ctx = QueryContext::arc().as_ref().clone();
+        ctx.set_extension(session::hints::REMOTE_QUERY_ID_EXTENSION_KEY, value);
+        ctx.set_extension(
+            session::hints::INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
+            value,
+        );
+        assert!(!miss(&base, &session, &ctx).await);
+    }
 }
 
 #[tokio::test]
@@ -798,7 +804,7 @@ async fn rebinding_replaces_range_functions_with_the_shared_instance() {
     assert_eq!(request.len(), 1);
     assert!(
         !RANGE_FUNCTIONS
-            .iter()
+            .values()
             .any(|shared| Arc::ptr_eq(shared, &request[0]))
     );
 
@@ -807,7 +813,7 @@ async fn rebinding_replaces_range_functions_with_the_shared_instance() {
     assert_eq!(rebound.len(), 1);
     assert!(
         RANGE_FUNCTIONS
-            .iter()
+            .values()
             .any(|shared| Arc::ptr_eq(shared, &rebound[0]))
     );
 }
