@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
+use common_runtime::Runtime;
 use common_telemetry::{debug, error, info, warn};
 use futures::{AsyncWriteExt, FutureExt, TryStreamExt};
 use moka::future::Cache;
@@ -627,12 +628,13 @@ impl FileCache {
         key: IndexKey,
         cache_metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
+        runtime: &Runtime,
     ) -> Option<SstMetaPreparation> {
         let file_path = self.inner.cache_file_path(key);
         let metadata = self
             .get_parquet_meta_data(key, cache_metrics, page_index_policy)
             .await?;
-        match prepare_sst_meta(&file_path, metadata, None, page_index_policy).await {
+        match prepare_sst_meta(&file_path, metadata, None, page_index_policy, runtime).await {
             Ok(metadata) => Some(metadata),
             Err(err) => {
                 CACHE_MISS
@@ -653,12 +655,13 @@ impl FileCache {
         key: IndexKey,
         cache_metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
+        runtime: &Runtime,
     ) -> Option<Arc<CachedSstMeta>> {
         let file_path = self.inner.cache_file_path(key);
         let metadata = self
             .get_parquet_meta_data(key, cache_metrics, page_index_policy)
             .await?;
-        match decode_sst_meta(&file_path, metadata, None, page_index_policy).await {
+        match decode_sst_meta(&file_path, metadata, None, page_index_policy, runtime).await {
             Ok(metadata) => Some(metadata),
             Err(err) => {
                 CACHE_MISS
