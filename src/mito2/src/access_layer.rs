@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::warn;
 use common_time::Timestamp;
 use futures::{Stream, TryStreamExt};
@@ -339,6 +340,7 @@ impl AccessLayer {
         write_opts: &WriteOptions,
         metrics: &mut Metrics,
     ) -> Result<SstInfoArray> {
+        let op_type = request.op_type;
         let region_id = request.metadata.region_id;
         let region_metadata = request.metadata.clone();
         let cache_manager = request.cache_manager.clone();
@@ -417,6 +419,10 @@ impl AccessLayer {
 
         // Put parquet metadata to cache manager.
         if !sst_info.is_empty() && cache_manager.sst_meta_cache_enabled() {
+            let runtime = match op_type {
+                OperationType::Compact => common_runtime::compact_runtime(),
+                OperationType::Flush => common_runtime::global_runtime(),
+            };
             for sst in &sst_info {
                 if let Some(parquet_metadata) = &sst.file_metadata {
                     let file_id = RegionFileId::new(region_id, sst.file_id);
@@ -436,7 +442,7 @@ impl AccessLayer {
                     // Compact cache preparation is best-effort. Run the entire operation in one
                     // detached blocking task so it neither blocks an async worker nor delays the
                     // SST write.
-                    common_runtime::spawn_blocking_global(move || {
+                    runtime.spawn_blocking(move || {
                         match prepare_sst_meta_sync(
                             &file_path,
                             Arc::unwrap_or_clone(parquet_metadata),

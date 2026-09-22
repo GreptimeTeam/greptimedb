@@ -823,7 +823,14 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load(cache_metrics).await?;
 
         let decoded = if self.cache_strategy.sst_meta_cache_enabled() {
-            let metadata = prepare_sst_meta(file_path, metadata, None, page_index_policy).await?;
+            let metadata = prepare_sst_meta(
+                file_path,
+                metadata,
+                None,
+                page_index_policy,
+                &self.cache_strategy.sst_meta_runtime(),
+            )
+            .await?;
             let decoded = metadata.decoded();
             match metadata {
                 SstMetaPreparation::Prepared(metadata) => {

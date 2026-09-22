@@ -344,12 +344,14 @@ impl Pruner {
             enable_predicate_prefilter,
         });
 
-        // Spawn worker tasks with their receivers
+        // Keep pruning and prefetching on the runtime of the originating workload.
         for (worker_id, rx) in receivers.into_iter().enumerate() {
-            let inner_clone = inner.clone();
-            common_runtime::spawn_query(async move {
-                Self::worker_loop(worker_id, rx, inner_clone).await;
-            });
+            let worker = Self::worker_loop(worker_id, rx, inner.clone());
+            if inner.stream_ctx.input.compaction {
+                common_runtime::spawn_compact(worker);
+            } else {
+                common_runtime::spawn_query(worker);
+            }
         }
 
         Self {

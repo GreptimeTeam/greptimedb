@@ -54,7 +54,7 @@ use crate::cache::{CacheManagerRef, CacheStrategy};
 use crate::config::VectorIndexConfig;
 use crate::config::{BloomFilterConfig, FulltextIndexConfig, InvertedIndexConfig};
 use crate::error::{
-    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, RegionClosedSnafu,
+    BuildIndexAsyncSnafu, DecodeSnafu, Error, InvalidRecordBatchSnafu, JoinSnafu, RegionClosedSnafu,
     RegionDroppedSnafu, RegionTruncatedSnafu, Result,
 };
 use crate::metrics::{
@@ -773,7 +773,21 @@ impl IndexBuildTask {
                 self.source.file_meta.file_id,
             ))
             .await;
-        match self.index_build(version_control).await {
+        let result = if self.reason == IndexBuildType::Compact {
+            let mut task = self.clone();
+            // Keep the scheduler slot occupied until the compact runtime finishes the build.
+            match common_runtime::spawn_compact(
+                async move { task.index_build(version_control).await },
+            )
+            .await
+            {
+                Ok(result) => result,
+                Err(err) => Err(err).context(JoinSnafu),
+            }
+        } else {
+            self.index_build(version_control).await
+        };
+        match result {
             Ok(outcome) => self.on_success(outcome).await,
             Err(e) => {
                 warn!(
