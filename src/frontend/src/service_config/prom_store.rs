@@ -54,7 +54,7 @@ fn default_max_concurrent_flushes() -> usize {
 }
 
 fn default_worker_channel_capacity() -> usize {
-    65526
+    65_536
 }
 
 fn default_max_inflight_requests() -> usize {

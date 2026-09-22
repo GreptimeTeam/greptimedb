@@ -21,6 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
+use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,6 +55,7 @@ pub use crate::batcher::logical_table::region_write::{
 pub use crate::batcher::logical_table::tables::{
     PendingRowsSchemaAlterer, PendingRowsSchemaAltererRef,
 };
+use crate::batcher::pending_rows_batch_sync_enabled;
 use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
@@ -61,24 +63,6 @@ use crate::metrics::{
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
-
-/// Whether wait for ingestion result before reply to client.
-const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
-
-/// Returns whether pending-row batch submissions wait for the flush result
-/// before replying to the client (synchronous mode), controlled by the
-/// `PENDING_ROWS_BATCH_SYNC` environment variable and defaulting to `true`.
-///
-/// Callers that reason about how long a remote write request may block (e.g.
-/// the frontend HTTP timeout fallback) must consult this instead of
-/// duplicating the env lookup.
-pub fn pending_rows_batch_sync_enabled() -> bool {
-    std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
-        .ok()
-        .as_deref()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(true)
-}
 
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
@@ -182,14 +166,31 @@ impl LogicalTablePendingRowsBatcher {
 
 impl LogicalTablePendingRowsBatcher {
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+        self.submit_with(requests, ctx, |_| ready(Ok(())))
+            .await
+            .map(|(rows, ())| rows)
+    }
+
+    /// Submits with request-level accounting after schema preparation and before
+    /// queue admission. Acknowledgement follows the global batching policy.
+    pub async fn submit_with<T, F>(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        after_prepare: impl FnOnce(RowInsertRequests) -> F,
+    ) -> Result<(u64, T)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
                 .start_timer();
-            self.build_and_align_table_batches(requests, &ctx).await?
+            self.build_and_align_table_batches(&requests, &ctx).await?
         };
+        let prepared = after_prepare(requests).await?;
         if total_rows == 0 {
-            return Ok(0);
+            return Ok((0, prepared));
         }
 
         // Flushes dispatch directly to datanodes, so admit once before enqueueing.
@@ -269,9 +270,9 @@ impl LogicalTablePendingRowsBatcher {
             };
             result
                 .context(error::SubmitBatchSnafu)
-                .map(|()| total_rows as u64)
+                .map(|()| (total_rows as u64, prepared))
         } else {
-            Ok(total_rows as u64)
+            Ok((total_rows as u64, prepared))
         }
     }
 }
