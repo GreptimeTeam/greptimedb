@@ -60,6 +60,38 @@ fn context<Q: AiQuestion>(function: AiFunction<Q>) -> SessionContext {
     ctx
 }
 
+#[test]
+fn test_ai_scalar_criteria_share_allocation_and_skip_null_rows() {
+    fn assert_shared_criteria<Q: AiQuestion>(criteria: &str) {
+        let function = AiFunction::<Q>::default();
+        for (texts, criteria) in [
+            (vec![None, Some("first"), Some("second")], criteria),
+            (vec![None, None], "not json"),
+            (vec![], "not json"),
+        ] {
+            let number_rows = texts.len();
+            let expected_requests = texts.iter().flatten().count();
+            let args = vec![
+                ColumnarValue::Array(Arc::new(StringViewArray::from(texts))),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some("prompt".to_string()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8View(Some(criteria.to_string()))),
+            ];
+            let requests = function.prepare_requests(&args, number_rows).unwrap();
+            assert_eq!(requests.len(), number_rows);
+            assert_eq!(requests.iter().flatten().count(), expected_requests);
+
+            // Regression: parsed constant criteria must not be duplicated for each row.
+            let mut criteria = requests.iter().flatten().map(|request| &request.criteria);
+            if let Some(first) = criteria.next() {
+                assert!(criteria.all(|other| Arc::ptr_eq(first, other)));
+            }
+        }
+    }
+
+    assert_shared_criteria::<Choice>(r#"{"billing":null,"technical":"errors"}"#);
+    assert_shared_criteria::<Score>(r#"["low","high"]"#);
+}
+
 #[tokio::test]
 async fn test_ai_match_sql_returns_and_filters_noul_probability() {
     let server = MockServer::start(Router::new().route(
@@ -307,6 +339,31 @@ async fn test_ai_choose_returns_and_filters_supplied_labels() {
         .await
         .unwrap();
     assert_batches_eq!(["+----+", "| id |", "+----+", "| 1  |", "+----+"], &batches);
+
+    let batches = ctx
+        .sql(
+            r#"SELECT id, ai_choose(message, 'Route the ticket',
+                '{"billing":null,"technical":{"examples":["crash"]}}') AS team
+            FROM (VALUES (1, 'refund'), (2, NULL), (3, 'refund')) AS events(id, message)
+            ORDER BY id"#,
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_batches_eq!(
+        [
+            "+----+---------+",
+            "| id | team    |",
+            "+----+---------+",
+            "| 1  | billing |",
+            "| 2  |         |",
+            "| 3  | billing |",
+            "+----+---------+"
+        ],
+        &batches
+    );
 }
 
 #[tokio::test]
@@ -378,6 +435,32 @@ async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
         ],
         &batches
     );
+
+    let batches = ctx
+        .sql(
+            r#"SELECT id, ai_score(message, 'Rate severity',
+                '["low",{"description":"medium"},["high"]]') AS severity
+            FROM (VALUES (1, 'low'), (2, 'fractional'), (3, 'high'), (4, NULL)) AS events(id, message)
+            ORDER BY id"#,
+        )
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_batches_eq!(
+        [
+            "+----+----------+",
+            "| id | severity |",
+            "+----+----------+",
+            "| 1  | 0.0      |",
+            "| 2  | 1.25     |",
+            "| 3  | 2.0      |",
+            "| 4  |          |",
+            "+----+----------+"
+        ],
+        &batches
+    );
 }
 
 #[tokio::test]
@@ -427,6 +510,19 @@ async fn test_ai_invalid_criteria_fail_before_requests() {
             ],
         ),
     ] {
+        let error = ctx
+            .sql(&format!(
+                "SELECT {name}(message, 'prompt', 'not json') FROM (VALUES (NULL), ('text')) AS input(message)"
+            ))
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains(&format!("{name} criteria")),
+            "{error}"
+        );
         for criteria in invalid {
             // A later invalid row must fail before even creating a client for the first row.
             let error = ctx.sql(&format!(

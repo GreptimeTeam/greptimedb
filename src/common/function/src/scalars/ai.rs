@@ -21,7 +21,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::{Array, ArrayRef, new_null_array};
+use arrow::array::{Array, StringViewArray, new_null_array};
 use arrow::datatypes::DataType;
 use async_trait::async_trait;
 use datafusion_common::cast::as_string_view_array;
@@ -57,7 +57,35 @@ struct AiFunction<Q> {
 struct AiRequest<'a, Q: AiQuestion> {
     text: &'a str,
     prompt: &'a str,
-    criteria: Q::Criteria,
+    criteria: Arc<Q::Criteria>,
+}
+
+/// Borrows string arguments without expanding constants to the batch size.
+enum StringArgument<'a> {
+    Scalar(Option<&'a str>),
+    Array(&'a StringViewArray),
+}
+
+impl<'a> StringArgument<'a> {
+    fn try_new(arg: &'a ColumnarValue) -> Result<Self> {
+        match arg {
+            ColumnarValue::Scalar(ScalarValue::Utf8View(value)) => {
+                Ok(Self::Scalar(value.as_deref()))
+            }
+            ColumnarValue::Array(array) => Ok(Self::Array(as_string_view_array(array)?)),
+            _ => exec_err!("AI functions expect Utf8View arguments"),
+        }
+    }
+
+    fn value(&self, row: usize) -> Option<&'a str> {
+        match self {
+            Self::Scalar(value) => *value,
+            Self::Array(array) => {
+                let array = *array;
+                array.is_valid(row).then(|| array.value(row))
+            }
+        }
+    }
 }
 
 impl<Q: AiQuestion> AiFunction<Q> {
@@ -71,7 +99,7 @@ impl<Q: AiQuestion> AiFunction<Q> {
     async fn evaluate(&self, client: &Client, request: AiRequest<'_, Q>) -> Result<ScalarValue> {
         let mut question = json!({ "type": Q::TYPE, "instructions": request.prompt });
         if Q::ARG_COUNT == 3 {
-            question["criteria"] = json!(request.criteria);
+            question["criteria"] = json!(request.criteria.as_ref());
         }
         let response: Value = client
             .post(&self.endpoint)
@@ -96,35 +124,47 @@ impl<Q: AiQuestion> AiFunction<Q> {
                 Q::TYPE
             );
         }
-        Q::parse_answer(answer, &request.criteria)
+        Q::parse_answer(answer, request.criteria.as_ref())
     }
 
     fn prepare_requests<'a>(
         &self,
-        arrays: &'a [ArrayRef],
+        args: &'a [ColumnarValue],
         number_rows: usize,
     ) -> Result<Vec<Option<AiRequest<'a, Q>>>> {
-        if arrays.len() != Q::ARG_COUNT {
+        if args.len() != Q::ARG_COUNT {
             return exec_err!("{} requires {} arguments", Q::NAME, Q::ARG_COUNT);
         }
-        let arrays = arrays
+        let args = args
             .iter()
-            .map(|array| as_string_view_array(array))
+            .map(StringArgument::try_new)
             .collect::<Result<Vec<_>>>()?;
+        let scalar_criteria = args[2..]
+            .iter()
+            .all(|arg| matches!(arg, StringArgument::Scalar(_)));
+        let mut shared_criteria: Option<Arc<Q::Criteria>> = None;
 
         // Validate all non-null rows before making any billable requests.
         (0..number_rows)
             .map(|row| {
-                let values: Option<Vec<_>> = arrays
-                    .iter()
-                    .map(|array| array.is_valid(row).then(|| array.value(row)))
-                    .collect();
+                let values: Option<Vec<_>> = args.iter().map(|arg| arg.value(row)).collect();
                 values
                     .map(|values| {
+                        // Initialize lazily so NULL rows never validate otherwise invalid criteria.
+                        let criteria = match &shared_criteria {
+                            Some(criteria) => Arc::clone(criteria),
+                            None => {
+                                let criteria = Arc::new(Q::parse_criteria(&values[2..])?);
+                                if scalar_criteria {
+                                    shared_criteria = Some(Arc::clone(&criteria));
+                                }
+                                criteria
+                            }
+                        };
                         Ok(AiRequest {
                             text: values[0],
                             prompt: values[1],
-                            criteria: Q::parse_criteria(&values[2..])?,
+                            criteria,
                         })
                     })
                     .transpose()
@@ -210,12 +250,7 @@ impl<Q: AiQuestion> ScalarUDFImpl for AiFunction<Q> {
 #[async_trait]
 impl<Q: AiQuestion> AsyncScalarUDFImpl for AiFunction<Q> {
     async fn invoke_async_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
-        let arrays = args
-            .args
-            .into_iter()
-            .map(|arg| arg.into_array(args.number_rows))
-            .collect::<Result<Vec<_>>>()?;
-        let rows = self.prepare_requests(&arrays, args.number_rows)?;
+        let rows = self.prepare_requests(&args.args, args.number_rows)?;
 
         if rows.iter().all(Option::is_none) {
             return Ok(ColumnarValue::Array(new_null_array(
