@@ -1,0 +1,158 @@
+CREATE TABLE counter_metric (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, device)
+);
+
+Affected Rows: 0
+
+CREATE TABLE gauge_metric (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, device)
+);
+
+Affected Rows: 0
+
+INSERT INTO counter_metric VALUES
+  ('host1', 'eth0', 0, 10), ('host1', 'eth1', 0, 20), ('host2', 'eth0', 0, 30);
+
+Affected Rows: 3
+
+INSERT INTO gauge_metric VALUES
+  ('host1', 'eth0', 0, 2), ('host1', 'eth1', 0, 4), ('host2', 'eth0', 0, 5);
+
+Affected Rows: 3
+
+-- Matching on the whole tag set keeps it.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric / gauge_metric;
+
++-------+--------+---------------------+-------------------------------------------------------------+
+| host  | device | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++-------+--------+---------------------+-------------------------------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                                         |
+| host1 | eth1   | 1970-01-01T00:00:00 | 5.0                                                         |
+| host2 | eth0   | 1970-01-01T00:00:00 | 6.0                                                         |
++-------+--------+---------------------+-------------------------------------------------------------+
+
+-- `on(...)` reduces the result to the matching labels.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) gauge_metric{device="eth0"};
+
++-------+---------------------+-------------------------------------------------------------+
+| host  | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++-------+---------------------+-------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 5.0                                                         |
+| host2 | 1970-01-01T00:00:00 | 6.0                                                         |
++-------+---------------------+-------------------------------------------------------------+
+
+-- `ignoring(...)` drops the ignored labels, here from operands that don't even share them.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / ignoring(device) gauge_metric{device="eth1"};
+
++-------+---------------------+-------------------------------------------------------------+
+| host  | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++-------+---------------------+-------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 2.5                                                         |
++-------+---------------------+-------------------------------------------------------------+
+
+-- `on()` matches everything against everything, so both sides must hold a single series.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{host="host1",device="eth0"} / on() gauge_metric{host="host1",device="eth0"};
+
++---------------------+-------------------------------------------------------------+
+| ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++---------------------+-------------------------------------------------------------+
+| 1970-01-01T00:00:00 | 5.0                                                         |
++---------------------+-------------------------------------------------------------+
+
+-- A filtering comparison keeps the left sample values and the derived labels.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > on(host) gauge_metric{device="eth0"};
+
++---------------------+----------------+-------+
+| ts                  | greptime_value | host  |
++---------------------+----------------+-------+
+| 1970-01-01T00:00:00 | 10.0           | host1 |
+| 1970-01-01T00:00:00 | 30.0           | host2 |
++---------------------+----------------+-------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} > bool on(host) gauge_metric{device="eth0"};
+
++-------+---------------------+-------------------------------------------------------------+
+| host  | ts                  | counter_metric.greptime_value > gauge_metric.greptime_value |
++-------+---------------------+-------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 1.0                                                         |
+| host2 | 1970-01-01T00:00:00 | 1.0                                                         |
++-------+---------------------+-------------------------------------------------------------+
+
+-- `host1` carries two devices on both sides: the match group repeats on the one side.
+TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+-- The one side is unique here, the many side is not, and no group modifier makes it explicit.
+TQL EVAL (0, 0, '5s') counter_metric / on(host) gauge_metric{device="eth0"};
+
+Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"}: many-to-one matching must be explicit (group_left/group_right)
+
+-- `group_left` takes the result labels from the many side.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric / on(host) group_left gauge_metric{device="eth0"};
+
++-------+--------+---------------------+-------------------------------------------------------------+
+| host  | device | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++-------+--------+---------------------+-------------------------------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                                         |
+| host1 | eth1   | 1970-01-01T00:00:00 | 10.0                                                        |
+| host2 | eth0   | 1970-01-01T00:00:00 | 6.0                                                         |
++-------+--------+---------------------+-------------------------------------------------------------+
+
+-- `group_right` swaps the sides.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) group_right gauge_metric;
+
++-------+--------+---------------------+-------------------------------------------------------------+
+| host  | device | ts                  | counter_metric.greptime_value / gauge_metric.greptime_value |
++-------+--------+---------------------+-------------------------------------------------------------+
+| host1 | eth0   | 1970-01-01T00:00:00 | 5.0                                                         |
+| host1 | eth1   | 1970-01-01T00:00:00 | 2.5                                                         |
+| host2 | eth0   | 1970-01-01T00:00:00 | 6.0                                                         |
++-------+--------+---------------------+-------------------------------------------------------------+
+
+-- `group_right` makes the left operand the one side, which `host1` breaks.
+TQL EVAL (0, 0, '5s') counter_metric / on(host) group_right gauge_metric{device="eth0"};
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the left hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+-- `group_left(device)` copies `device` from the one side, so both `host1` rows end up with the
+-- same labels.
+TQL EVAL (0, 0, '5s') counter_metric / on(host) group_left(device) gauge_metric{device="eth0"};
+
+Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1", device="eth0"}: grouping labels must ensure unique matches
+
+-- An included label the one side doesn't carry is dropped from the result.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) group_left(device) sum by(host)(gauge_metric);
+
++-------+---------------------+-------------------------------------------------------------------------------+
+| host  | ts                  | counter_metric.greptime_value / gauge_metric.sum(gauge_metric.greptime_value) |
++-------+---------------------+-------------------------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 1.6666666666666667                                                            |
+| host2 | 1970-01-01T00:00:00 | 6.0                                                                           |
++-------+---------------------+-------------------------------------------------------------------------------+
+
+DROP TABLE counter_metric;
+
+Affected Rows: 0
+
+DROP TABLE gauge_metric;
+
+Affected Rows: 0
+

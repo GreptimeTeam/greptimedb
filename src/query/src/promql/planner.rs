@@ -71,7 +71,7 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MaxOverTime, MinOverTime, MixedRange,
+    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
     NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
@@ -82,7 +82,8 @@ use promql::functions::{
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
     NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
-    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup,
+    quantile_udaf,
 };
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
 use promql_parser::parser::token::TokenType;
@@ -154,6 +155,8 @@ const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
 const OR_FLOAT_FIELD_PREFIX: &str = "__promql_or_float_";
 const OR_HISTOGRAM_FIELD_PREFIX: &str = "__promql_or_histogram_";
 const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
+/// Per-match-group row count the vector matching cardinality check is built on.
+const MATCH_GROUP_COUNT_COLUMN: &str = "__promql_match_group_count";
 
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
@@ -293,6 +296,24 @@ struct PlannedIslandLeaf {
     ctx: PromPlannerContext,
     alias: TableReference,
     display_table: String,
+}
+
+/// Result labels a vector-vector binary operation derives from its matching modifier, projected
+/// from the operand each label belongs to.
+#[derive(Debug)]
+struct BinaryResultLabels {
+    exprs: Vec<DfExpr>,
+    names: Vec<String>,
+    aggregation_field_labels: Vec<String>,
+}
+
+impl BinaryResultLabels {
+    fn apply(&self, ctx: &mut PromPlannerContext) {
+        ctx.tag_columns = self.names.clone();
+        ctx.aggregation_field_labels = self.aggregation_field_labels.clone();
+        // `__tsid` identifies an operand's series, not the reduced result label set.
+        ctx.use_tsid = false;
+    }
 }
 
 #[derive(Debug)]
@@ -1634,6 +1655,16 @@ impl PromPlanner {
                 // `vector()` uses EmptyMetric and keeps GreptimeDB's timestamp broadcast.
                 let has_empty_metric_operand = left_is_empty_metric || right_is_empty_metric;
 
+                let only_join_time_index = lhs.value_type() == ValueType::Scalar
+                    || rhs.value_type() == ValueType::Scalar
+                    || has_empty_metric_operand
+                    || ((left_context.tag_columns.is_empty()
+                        || right_context.tag_columns.is_empty())
+                        && !left_context
+                            .tag_columns
+                            .iter()
+                            .chain(&right_context.tag_columns)
+                            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL));
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
                     right_input,
@@ -1641,21 +1672,34 @@ impl PromPlanner {
                     right_table_ref.clone(),
                     left_time_index_column,
                     right_time_index_column,
-                    lhs.value_type() == ValueType::Scalar
-                        || rhs.value_type() == ValueType::Scalar
-                        || has_empty_metric_operand
-                        || ((left_context.tag_columns.is_empty()
-                            || right_context.tag_columns.is_empty())
-                            && !left_context
-                                .tag_columns
-                                .iter()
-                                .chain(&right_context.tag_columns)
-                                .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL)),
+                    only_join_time_index,
                     modifier,
                     &left_context,
                     &right_context,
                 )?;
                 let join_plan_schema = join_plan.schema().clone();
+                // The matching modifier derives the result labels instead of the operands keeping
+                // their own tag set. An operand that is broadcast rather than matched (a scalar,
+                // or a vector without tags) keeps the other side's labels as before.
+                let result_labels = if only_join_time_index {
+                    None
+                } else {
+                    Self::binary_result_labels(&left_context, &right_context, modifier)
+                        .map(|labels| {
+                            Self::binary_result_label_projection(
+                                &join_plan_schema,
+                                &left_table_ref,
+                                &right_table_ref,
+                                &left_context,
+                                &right_context,
+                                labels,
+                            )
+                        })
+                        .transpose()?
+                };
+                if let Some(labels) = &result_labels {
+                    labels.apply(&mut self.ctx);
+                }
                 let promql_annotations = self.promql_annotations.clone();
                 // These predicates always pass; they only evaluate otherwise-discarded pairs
                 // while collecting annotations.
@@ -1776,10 +1820,18 @@ impl PromPlanner {
                             ),
                         };
                     project_context.field_columns = project_field_columns;
-                    self.project_binary_join_side(filtered, project_table_ref, &project_context)
+                    self.project_binary_join_side(
+                        filtered,
+                        project_table_ref,
+                        &project_context,
+                        result_labels.as_ref(),
+                    )
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(join_plan, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column_with_labels(
+                        join_plan,
+                        result_labels.as_ref(),
+                        bin_expr_builder,
+                    )?;
                     let preserve_any_value = Self::field_columns_are_alternative_samples(
                         projected.schema(),
                         &self.ctx.field_columns,
@@ -1867,6 +1919,7 @@ impl PromPlanner {
         input: LogicalPlan,
         table_ref: &TableReference,
         context: &PromPlannerContext,
+        result_labels: Option<&BinaryResultLabels>,
     ) -> Result<LogicalPlan> {
         let schema = input.schema();
 
@@ -1891,20 +1944,27 @@ impl PromPlanner {
             project_exprs.push(DfExpr::Column(field_col));
         }
 
-        // Project tag columns from the chosen side.
-        for tag_column in &context.tag_columns {
-            let tag_col = schema
-                .qualified_field_with_name(Some(table_ref), tag_column)
-                .context(DataFusionPlanningSnafu)?
-                .into();
-            project_exprs.push(DfExpr::Column(tag_col));
+        // Project tag columns: the labels the matching modifier derived, or the chosen side's.
+        match result_labels {
+            Some(labels) => project_exprs.extend(labels.exprs.iter().cloned()),
+            None => {
+                for tag_column in &context.tag_columns {
+                    let tag_col = schema
+                        .qualified_field_with_name(Some(table_ref), tag_column)
+                        .context(DataFusionPlanningSnafu)?
+                        .into();
+                    project_exprs.push(DfExpr::Column(tag_col));
+                }
+            }
         }
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
-        if let Some(tsid_col) =
-            Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid)
-        {
+        if let Some(tsid_col) = Self::optional_tsid_projection(
+            schema,
+            Some(table_ref),
+            context.use_tsid && result_labels.is_none(),
+        ) {
             project_exprs.push(tsid_col);
         }
 
@@ -1919,6 +1979,9 @@ impl PromPlanner {
         self.ctx = context.clone();
         self.ctx.table_name = None;
         self.ctx.schema_name = None;
+        if let Some(labels) = result_labels {
+            labels.apply(&mut self.ctx);
+        }
 
         Ok(plan)
     }
@@ -5956,6 +6019,185 @@ impl PromPlanner {
         Ok((left_tag_columns, right_tag_columns, force_empty_join))
     }
 
+    /// Result labels of a vector-vector binary operation, following Prometheus `resultMetric`:
+    /// `on(...)` keeps only the matching labels, `ignoring(...)` drops them, and a group modifier
+    /// keeps the "many" side's labels plus the `group_x(...)` labels taken from the "one" side.
+    ///
+    /// The flag of each entry tells which operand the label is projected from. `None` means the
+    /// operation keeps a whole operand tag set, which the default projection already does.
+    fn binary_result_labels(
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> Option<Vec<(bool, String)>> {
+        let modifier = modifier.as_ref()?;
+        let (many_is_left, include) = match &modifier.card {
+            VectorMatchCardinality::OneToOne => (true, None),
+            VectorMatchCardinality::ManyToOne(labels) => (true, Some(labels)),
+            VectorMatchCardinality::OneToMany(labels) => (false, Some(labels)),
+            // Set operators keep their operands' labels and don't reach this path.
+            VectorMatchCardinality::ManyToMany => return None,
+        };
+
+        let Some(include) = include else {
+            let matching = modifier.matching.as_ref()?;
+            let reduced = |keep: bool, labels: &BTreeSet<&String>| {
+                left_context
+                    .tag_columns
+                    .iter()
+                    .filter(|tag| labels.contains(tag) == keep)
+                    .map(|tag| (true, tag.clone()))
+                    .collect()
+            };
+            return Some(match matching {
+                LabelModifier::Include(on) => reduced(true, &on.labels.iter().collect()),
+                LabelModifier::Exclude(ignoring) => {
+                    reduced(false, &ignoring.labels.iter().collect())
+                }
+            });
+        };
+
+        let (many_context, one_context) = if many_is_left {
+            (left_context, right_context)
+        } else {
+            (right_context, left_context)
+        };
+        let include = include.labels.iter().collect::<BTreeSet<_>>();
+        // An included label the "one" side doesn't carry is deleted from the result, so it is
+        // dropped from the "many" side as well.
+        let mut labels = many_context
+            .tag_columns
+            .iter()
+            .filter(|tag| !include.contains(tag))
+            .map(|tag| (many_is_left, tag.clone()))
+            .collect::<Vec<_>>();
+        labels.extend(
+            include
+                .into_iter()
+                .filter(|label| one_context.tag_columns.contains(label))
+                .map(|label| (!many_is_left, label.clone())),
+        );
+        Some(labels)
+    }
+
+    /// Resolve [`Self::binary_result_labels`] against the join output.
+    fn binary_result_label_projection(
+        schema: &DFSchemaRef,
+        left_table_ref: &TableReference,
+        right_table_ref: &TableReference,
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        labels: Vec<(bool, String)>,
+    ) -> Result<BinaryResultLabels> {
+        let mut exprs = Vec::with_capacity(labels.len());
+        let mut names = Vec::with_capacity(labels.len());
+        let mut aggregation_field_labels = Vec::new();
+        for (from_left, label) in labels {
+            let (table_ref, context) = if from_left {
+                (left_table_ref, left_context)
+            } else {
+                (right_table_ref, right_context)
+            };
+            let field = schema
+                .qualified_field_with_name(Some(table_ref), &label)
+                .context(DataFusionPlanningSnafu)?;
+            exprs.push(DfExpr::Column(field.into()));
+            if context.aggregation_field_labels.contains(&label) {
+                aggregation_field_labels.push(label.clone());
+            }
+            names.push(label);
+        }
+
+        Ok(BinaryResultLabels {
+            exprs,
+            names,
+            aggregation_field_labels,
+        })
+    }
+
+    /// Whether the result of a binary operation can hold two series with the same labels, which
+    /// only [`Self::binary_result_labels`] can introduce: one-to-one matching on a subset of the
+    /// tags, or a group modifier that overwrites a label of the "many" side.
+    fn binary_result_labels_may_repeat(
+        left_context: &PromPlannerContext,
+        right_context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+    ) -> bool {
+        let Some(modifier) = modifier else {
+            return false;
+        };
+        match &modifier.card {
+            VectorMatchCardinality::OneToOne => match &modifier.matching {
+                None => false,
+                Some(LabelModifier::Include(on)) => {
+                    let on = on.labels.iter().collect::<BTreeSet<_>>();
+                    !left_context.tag_columns.iter().all(|tag| on.contains(tag))
+                }
+                Some(LabelModifier::Exclude(ignoring)) => ignoring
+                    .labels
+                    .iter()
+                    .any(|label| left_context.tag_columns.contains(label)),
+            },
+            VectorMatchCardinality::ManyToOne(include) => include
+                .labels
+                .iter()
+                .any(|label| left_context.tag_columns.contains(label)),
+            VectorMatchCardinality::OneToMany(include) => include
+                .labels
+                .iter()
+                .any(|label| right_context.tag_columns.contains(label)),
+            VectorMatchCardinality::ManyToMany => false,
+        }
+    }
+
+    /// Wrap `plan` in a check that fails the query when a match group holds more than one row at
+    /// a timestamp. `group_exprs` are the label columns of the group, resolved against `plan`.
+    fn assert_unique_match_group(
+        plan: LogicalPlan,
+        group_exprs: Vec<DfExpr>,
+        group_labels: Vec<String>,
+        time_index_expr: DfExpr,
+        violation: MatchGroupViolation,
+    ) -> Result<LogicalPlan> {
+        let mut partition_by = group_exprs.clone();
+        partition_by.push(time_index_expr);
+        let count = DfExpr::WindowFunction(Box::new(WindowFunction {
+            fun: WindowFunctionDefinition::AggregateUDF(count_udaf()),
+            params: WindowFunctionParams {
+                args: vec![lit(1i64)],
+                partition_by,
+                order_by: vec![],
+                window_frame: WindowFrame::new(None),
+                null_treatment: None,
+                distinct: false,
+                filter: None,
+            },
+        }))
+        .alias(MATCH_GROUP_COUNT_COLUMN);
+
+        let output_exprs = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| DfExpr::Column(Column::new(qualifier.cloned(), field.name())))
+            .collect::<Vec<_>>();
+        let assert_expr = DfExpr::ScalarFunction(ScalarFunction {
+            func: Arc::new(UniqueMatchGroup::scalar_udf(group_labels, violation)),
+            args: std::iter::once(col(MATCH_GROUP_COUNT_COLUMN))
+                .chain(group_exprs)
+                .collect(),
+        });
+
+        LogicalPlanBuilder::from(plan)
+            .window(vec![count])
+            .context(DataFusionPlanningSnafu)?
+            .filter(assert_expr)
+            .context(DataFusionPlanningSnafu)?
+            .project(output_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
     fn binary_modifier_preserves_tsid_join_key(
         &self,
         left_context: &PromPlannerContext,
@@ -6023,7 +6265,7 @@ impl PromPlanner {
             && !force_empty_join
             && left_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()])
             && right_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]);
-        let (left, right) = if !only_join_time_index
+        let (left, right, left_matched_tags, right_matched_tags) = if !only_join_time_index
             && !use_tsid_join
             && Self::only_temporality_match_label_mismatches(left_context, right_context, modifier)
         {
@@ -6044,28 +6286,79 @@ impl PromPlanner {
                     false,
                     modifier,
                 )?;
-            (left, right)
+            (
+                left,
+                right,
+                aligned_left_context.tag_columns,
+                aligned_right_context.tag_columns,
+            )
         } else {
+            (
+                left,
+                right,
+                left_context.tag_columns.clone(),
+                right_context.tag_columns.clone(),
+            )
+        };
+
+        // A join key that covers the whole tag set of a side already makes that side's match
+        // groups unique, and so does a join on `__tsid`. Only the reduced keys need the check.
+        let checked_matching = !only_join_time_index
+            && !force_empty_join
+            && !use_tsid_join
+            && !matches!(
+                modifier.as_ref().map(|modifier| &modifier.card),
+                Some(VectorMatchCardinality::ManyToMany)
+            );
+        // The right operand is the "one" side of the matching, unless `group_right` swaps them.
+        let one_side_is_left = matches!(
+            modifier.as_ref().map(|modifier| &modifier.card),
+            Some(VectorMatchCardinality::OneToMany(_))
+        );
+        let (left, right) = if !checked_matching {
             (left, right)
+        } else if one_side_is_left {
+            (
+                Self::assert_unique_one_side(
+                    left,
+                    &left_tag_columns,
+                    &left_matched_tags,
+                    left_time_index_column.as_deref(),
+                    true,
+                )?,
+                right,
+            )
+        } else {
+            (
+                left,
+                Self::assert_unique_one_side(
+                    right,
+                    &right_tag_columns,
+                    &right_matched_tags,
+                    right_time_index_column.as_deref(),
+                    false,
+                )?,
+            )
         };
 
         // push time index column if it exists
-        if let (Some(left_time_index_column), Some(right_time_index_column)) =
-            (left_time_index_column, right_time_index_column)
-        {
+        if let (Some(left_time_index_column), Some(right_time_index_column)) = (
+            left_time_index_column.clone(),
+            right_time_index_column.clone(),
+        ) {
             left_tag_columns.insert(left_time_index_column);
             right_tag_columns.insert(right_time_index_column);
         }
 
         let right = LogicalPlanBuilder::from(right)
-            .alias(right_table_ref)
+            .alias(right_table_ref.clone())
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
 
         // Inner Join on time index column to concat two operator
-        LogicalPlanBuilder::from(left)
-            .alias(left_table_ref)
+        let join_plan = LogicalPlanBuilder::from(left)
+            .alias(left_table_ref.clone())
             .context(DataFusionPlanningSnafu)?
             .join_detailed(
                 right,
@@ -6085,7 +6378,90 @@ impl PromPlanner {
             )
             .context(DataFusionPlanningSnafu)?
             .build()
-            .context(DataFusionPlanningSnafu)
+            .context(DataFusionPlanningSnafu)?;
+
+        // The result labels no longer identify a series on their own: the "many" side can hold
+        // several series per result label set, which PromQL cannot represent.
+        let labels = checked_matching
+            .then(|| Self::binary_result_labels(left_context, right_context, modifier))
+            .flatten()
+            .filter(|_| {
+                Self::binary_result_labels_may_repeat(left_context, right_context, modifier)
+            });
+        let Some(labels) = labels else {
+            return Ok(join_plan);
+        };
+        let schema = join_plan.schema().clone();
+        let group_exprs = labels
+            .iter()
+            .map(|(from_left, label)| {
+                let table_ref = if *from_left {
+                    &left_table_ref
+                } else {
+                    &right_table_ref
+                };
+                schema
+                    .qualified_field_with_name(Some(table_ref), label)
+                    .map(|field| DfExpr::Column(field.into()))
+                    .context(DataFusionPlanningSnafu)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let time_index_expr = left_time_index_column
+            .as_deref()
+            .map(|column| {
+                schema
+                    .qualified_field_with_name(Some(&left_table_ref), column)
+                    .map(|field| DfExpr::Column(field.into()))
+                    .context(DataFusionPlanningSnafu)
+            })
+            .transpose()?
+            .with_context(|| UnexpectedPlanExprSnafu {
+                desc: "vector matching on a plan without a time index",
+            })?;
+        let violation = if matches!(
+            modifier.as_ref().map(|modifier| &modifier.card),
+            Some(VectorMatchCardinality::OneToOne)
+        ) {
+            MatchGroupViolation::ImplicitManyToOne
+        } else {
+            MatchGroupViolation::AmbiguousGroupLabels
+        };
+        Self::assert_unique_match_group(
+            join_plan,
+            group_exprs,
+            labels.into_iter().map(|(_, label)| label).collect(),
+            time_index_expr,
+            violation,
+        )
+    }
+
+    /// Guard the side of a vector matching that must hold one series per match group.
+    fn assert_unique_one_side(
+        plan: LogicalPlan,
+        join_keys: &BTreeSet<String>,
+        tag_columns: &[String],
+        time_index_column: Option<&str>,
+        one_side_is_left: bool,
+    ) -> Result<LogicalPlan> {
+        let Some(time_index_column) = time_index_column else {
+            return Ok(plan);
+        };
+        if tag_columns.iter().all(|tag| join_keys.contains(tag)) {
+            return Ok(plan);
+        }
+
+        let group_labels = join_keys.iter().cloned().collect::<Vec<_>>();
+        let group_exprs = group_labels
+            .iter()
+            .map(|label| DfExpr::Column(Column::from_name(label)))
+            .collect();
+        Self::assert_unique_match_group(
+            plan,
+            group_exprs,
+            group_labels,
+            DfExpr::Column(Column::from_name(time_index_column)),
+            MatchGroupViolation::DuplicateOnOneSide { one_side_is_left },
+        )
     }
 
     fn selected_binary_match_labels(
@@ -7121,6 +7497,20 @@ impl PromPlanner {
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
+        self.projection_for_each_field_column_with_labels(input, None, name_to_expr)
+    }
+
+    /// Like [`Self::projection_for_each_field_column`], but projects `result_labels` instead of
+    /// the context tag columns when a binary operation derived its own result label set.
+    fn projection_for_each_field_column_with_labels<F>(
+        &mut self,
+        input: LogicalPlan,
+        result_labels: Option<&BinaryResultLabels>,
+        name_to_expr: F,
+    ) -> Result<LogicalPlan>
+    where
+        F: FnMut(&String) -> Result<DfExpr>,
+    {
         // Keep the generated float/histogram lane names while an element-wise operation
         // preserves both sample types, so downstream operators still recognize the pair.
         let preserve_field_names =
@@ -7128,22 +7518,27 @@ impl PromPlanner {
         let table_ref = self.ctx.table_name.clone().map(TableReference::bare);
         // Derived labels can be unqualified even when the context still names the source table.
         let input_schema = input.schema().clone();
-        let non_field_columns_iter = self
-            .ctx
-            .tag_columns
-            .iter()
-            .chain(self.ctx.time_index_column.iter())
-            .map(|col| {
-                input_schema
-                    .qualified_field_with_name(table_ref.as_ref(), col)
-                    .or_else(|_| input_schema.qualified_field_with_unqualified_name(col))
-                    .map(|field| DfExpr::Column(field.into()))
-                    .context(DataFusionPlanningSnafu)
-            });
-        let tsid_iter =
-            Self::optional_tsid_projection(input.schema(), table_ref.as_ref(), self.ctx.use_tsid)
-                .into_iter()
-                .map(Ok);
+        let lookup = |col: &String| {
+            input_schema
+                .qualified_field_with_name(table_ref.as_ref(), col)
+                .or_else(|_| input_schema.qualified_field_with_unqualified_name(col))
+                .map(|field| DfExpr::Column(field.into()))
+                .context(DataFusionPlanningSnafu)
+        };
+        let tag_columns_iter = match result_labels {
+            Some(labels) => labels.exprs.iter().cloned().map(Ok).collect::<Vec<_>>(),
+            None => self.ctx.tag_columns.iter().map(lookup).collect::<Vec<_>>(),
+        };
+        let non_field_columns_iter = tag_columns_iter
+            .into_iter()
+            .chain(self.ctx.time_index_column.iter().map(lookup));
+        let tsid_iter = Self::optional_tsid_projection(
+            input.schema(),
+            table_ref.as_ref(),
+            self.ctx.use_tsid && result_labels.is_none(),
+        )
+        .into_iter()
+        .map(Ok);
 
         // build computation exprs
         let result_field_columns = self
@@ -11848,20 +12243,26 @@ mod test {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let expected = "Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
-            \n  Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
-            \n    SubqueryAlias: http_server_requests_seconds_sum\
-            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
-            \n        PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
-            \n          Sort: http_server_requests_seconds_sum.uri ASC NULLS FIRST, http_server_requests_seconds_sum.kubernetes_namespace ASC NULLS FIRST, http_server_requests_seconds_sum.kubernetes_pod_name ASC NULLS FIRST, http_server_requests_seconds_sum.greptime_timestamp ASC NULLS FIRST\
-            \n            Filter: http_server_requests_seconds_sum.uri = Utf8(\"/accounts/login\") AND http_server_requests_seconds_sum.greptime_timestamp >= TimestampMillisecond(-999, None) AND http_server_requests_seconds_sum.greptime_timestamp <= TimestampMillisecond(100000000, None)\
-            \n              TableScan: http_server_requests_seconds_sum\
-            \n    SubqueryAlias: http_server_requests_seconds_count\
-            \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
-            \n        PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
-            \n          Sort: http_server_requests_seconds_count.uri ASC NULLS FIRST, http_server_requests_seconds_count.kubernetes_namespace ASC NULLS FIRST, http_server_requests_seconds_count.kubernetes_pod_name ASC NULLS FIRST, http_server_requests_seconds_count.greptime_timestamp ASC NULLS FIRST\
-            \n            Filter: http_server_requests_seconds_count.uri = Utf8(\"/accounts/login\") AND http_server_requests_seconds_count.greptime_timestamp >= TimestampMillisecond(-999, None) AND http_server_requests_seconds_count.greptime_timestamp <= TimestampMillisecond(100000000, None)\
-            \n              TableScan: http_server_requests_seconds_count";
+        let expected = "Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
+            \n  Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.kubernetes_namespace, http_server_requests_seconds_sum.kubernetes_pod_name, http_server_requests_seconds_sum.greptime_timestamp, http_server_requests_seconds_sum.greptime_value, http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
+            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_sum.uri)\
+            \n      WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
+            \n        Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
+            \n          SubqueryAlias: http_server_requests_seconds_sum\
+            \n            PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
+            \n              PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
+            \n                Sort: http_server_requests_seconds_sum.uri ASC NULLS FIRST, http_server_requests_seconds_sum.kubernetes_namespace ASC NULLS FIRST, http_server_requests_seconds_sum.kubernetes_pod_name ASC NULLS FIRST, http_server_requests_seconds_sum.greptime_timestamp ASC NULLS FIRST\
+            \n                  Filter: http_server_requests_seconds_sum.uri = Utf8(\"/accounts/login\") AND http_server_requests_seconds_sum.greptime_timestamp >= TimestampMillisecond(-999, None) AND http_server_requests_seconds_sum.greptime_timestamp <= TimestampMillisecond(100000000, None)\
+            \n                    TableScan: http_server_requests_seconds_sum\
+            \n          SubqueryAlias: http_server_requests_seconds_count\
+            \n            Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
+            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_count.uri)\
+            \n                WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_count.uri, http_server_requests_seconds_count.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
+            \n                  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
+            \n                    PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
+            \n                      Sort: http_server_requests_seconds_count.uri ASC NULLS FIRST, http_server_requests_seconds_count.kubernetes_namespace ASC NULLS FIRST, http_server_requests_seconds_count.kubernetes_pod_name ASC NULLS FIRST, http_server_requests_seconds_count.greptime_timestamp ASC NULLS FIRST\
+            \n                        Filter: http_server_requests_seconds_count.uri = Utf8(\"/accounts/login\") AND http_server_requests_seconds_count.greptime_timestamp >= TimestampMillisecond(-999, None) AND http_server_requests_seconds_count.greptime_timestamp <= TimestampMillisecond(100000000, None)\
+            \n                          TableScan: http_server_requests_seconds_count";
         assert_eq!(plan.to_string(), expected);
     }
 

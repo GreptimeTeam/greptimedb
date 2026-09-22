@@ -56,9 +56,9 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// equality, so a matcher on a matching label already holds for every surviving pair. Copying it
 /// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
 /// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
-/// matching label, so it does not affect a one-to-one cardinality check such as #9209.
-/// Grouped matching is conservatively restricted to a provably unique one-side operand until
-/// its cardinality checks are implemented (#9208).
+/// matching label: a propagated matcher removes whole groups, so the cardinality check still
+/// sees every group that takes part in the matching.
+/// Grouped matching is conservatively restricted to a provably unique one-side operand.
 ///
 /// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
 /// as well constrain a value field, which the parsed expression does not distinguish from a
