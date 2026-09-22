@@ -324,8 +324,12 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Invalid WAL entry for region {}, {}", region_id, reason))]
-    InvalidWalEntry {
+    #[snafu(display(
+        "Object store WAL region mismatch, supplied region: {}, {}",
+        region_id,
+        reason
+    ))]
+    MismatchedWalRegion {
         region_id: RegionId,
         reason: String,
         #[snafu(implicit)]
@@ -447,7 +451,7 @@ impl ErrorExt for Error {
             | OverrideCompactedEntry { .. }
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
-            | InvalidWalEntry { .. }
+            | MismatchedWalRegion { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }

@@ -34,8 +34,8 @@ use store_api::storage::RegionId;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{
-    CorruptedWalObjectSnafu, Error, InvalidProviderSnafu, InvalidWalEntrySnafu,
-    InvalidWalObjectSnafu, InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu,
+    CorruptedWalObjectSnafu, Error, InvalidProviderSnafu, InvalidWalObjectSnafu,
+    InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu, MismatchedWalRegionSnafu,
     ObjectStoreWalSnafu, Result, UnsupportedObjectStoreWalOperationSnafu,
 };
 use crate::object_store_wal::catalog::ObjectCatalog;
@@ -162,7 +162,7 @@ impl ObjectStoreLogStore {
         let provider_region = self.region_of(provider)?;
         ensure!(
             provider_region == region_id,
-            InvalidWalEntrySnafu {
+            MismatchedWalRegionSnafu {
                 region_id,
                 reason: format!("provider belongs to region {provider_region}"),
             }
@@ -1591,7 +1591,7 @@ mod tests {
         ];
         for error in errors {
             assert!(
-                matches!(&error, Error::InvalidWalEntry { region_id, reason, .. }
+                matches!(&error, Error::MismatchedWalRegion { region_id, reason, .. }
                 if *region_id == region(1) && reason == &format!("provider belongs to region {}", region(2)))
             );
             assert_eq!(
