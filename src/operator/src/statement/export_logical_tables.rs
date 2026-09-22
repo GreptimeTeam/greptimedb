@@ -19,6 +19,8 @@
 //! exclusively by the export attempt. Completion and cleanup of closed files
 //! belong to the caller's chunk protocol, not individual file completion.
 
+pub(crate) mod writers;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
@@ -54,6 +56,7 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{self, InvalidLogicalTableExportSnafu, LogicalTableExportResourceSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::DatabaseExportFile;
+use crate::statement::export_logical_tables::writers::{ExportWriteBudget, Payload, TableWriters};
 
 /// Export preprocessing and per-file limits. Query memory and spill remain
 /// governed by the query engine.
@@ -103,7 +106,7 @@ pub struct LogicalTableExport {
     logical_tables: BTreeMap<TableId, LogicalTableProjection>,
 }
 
-struct LogicalTableProjection {
+pub(crate) struct LogicalTableProjection {
     output: DatabaseExportFile,
     schema: SchemaRef,
     projection: Vec<usize>,
@@ -309,6 +312,31 @@ impl StatementExecutor {
         cancellation: &CancellationToken,
         query_ctx: QueryContextRef,
     ) -> Result<LogicalTableExportSummary> {
+        self.export_logical_tables_managed(
+            unit,
+            directory,
+            connection,
+            time_range,
+            limits,
+            &cancellation.child_token(),
+            query_ctx,
+            ExportWriteBudget::new(1),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn export_logical_tables_managed(
+        &self,
+        unit: &LogicalTableExport,
+        directory: &str,
+        connection: &HashMap<String, String>,
+        time_range: Option<&TimestampRange>,
+        limits: LogicalTableExportLimits,
+        cancellation: &CancellationToken,
+        query_ctx: QueryContextRef,
+        budget: Arc<ExportWriteBudget>,
+    ) -> Result<LogicalTableExportSummary> {
         limits.validate()?;
         let (store, stream) = tokio::select! {
             biased;
@@ -327,10 +355,11 @@ impl StatementExecutor {
                 Ok((store, stream))
             } => result?,
         };
-        export_stream(unit, stream, &store, limits, cancellation).await
+        export_stream_managed(unit, stream, &store, limits, cancellation, budget).await
     }
 }
 
+#[cfg(test)]
 async fn export_stream(
     unit: &LogicalTableExport,
     stream: SendableRecordBatchStream,
@@ -338,19 +367,42 @@ async fn export_stream(
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
 ) -> Result<LogicalTableExportSummary> {
-    let mut active = None;
-    let result = write_tables(unit, stream, store, limits, cancellation, &mut active).await;
-    if result.is_err()
-        && let Some(writer) = active
-        && let Err(cleanup_error) = writer
-            .writer
-            .abort()
-            .await
-            .map_err(|error| map_writer_error(error, &writer.path))
-    {
-        common_telemetry::warn!(cleanup_error; "Failed to clean up incomplete Metric export file");
-    }
-    result
+    export_stream_managed(
+        unit,
+        stream,
+        store,
+        limits,
+        &cancellation.child_token(),
+        ExportWriteBudget::new(1),
+    )
+    .await
+}
+
+async fn export_stream_managed(
+    unit: &LogicalTableExport,
+    stream: SendableRecordBatchStream,
+    store: &ObjectStore,
+    limits: LogicalTableExportLimits,
+    cancellation: &CancellationToken,
+    budget: Arc<ExportWriteBudget>,
+) -> Result<LogicalTableExportSummary> {
+    let mut writers = TableWriters::new(budget.clone());
+    let result = write_tables(
+        unit,
+        stream,
+        store,
+        limits,
+        cancellation,
+        &mut writers,
+        &budget,
+    )
+    .await;
+    let (summary, result) = match result {
+        Ok(summary) => (summary, Ok(())),
+        Err(error) => (LogicalTableExportSummary::default(), Err(error)),
+    };
+    writers.drain(result, cancellation).await?;
+    Ok(summary)
 }
 
 fn check_cancelled(cancellation: &CancellationToken) -> Result<()> {
@@ -367,7 +419,8 @@ async fn write_tables(
     store: &ObjectStore,
     limits: LogicalTableExportLimits,
     cancellation: &CancellationToken,
-    active: &mut Option<ActiveWriter>,
+    writers: &mut TableWriters,
+    budget: &ExportWriteBudget,
 ) -> Result<LogicalTableExportSummary> {
     let id_index =
         stream
@@ -425,22 +478,19 @@ async fn write_tables(
             while end < batch.num_rows() && ids.value(end) == id {
                 end += 1;
             }
-            if active.as_ref().is_some_and(|writer| writer.table_id != id) {
-                finish_active(active, cancellation).await?;
+            if writers.table_id().is_some_and(|last| last != id) {
+                writers.close_input();
             }
             check_cancelled(cancellation)?;
             if let Some(file) = unit.logical_tables.get(&id) {
-                if active.is_none() {
-                    *active = Some(ActiveWriter::open(id, file, store, limits).await?);
+                if writers.table_id().is_none() {
+                    writers.open(id, file, store, limits, cancellation).await?;
                     written.insert(id);
                     summary.files += 1;
                 }
                 let projected = batch
                     .project(&file.projection)
                     .context(error::ProjectSchemaSnafu)?;
-                let writer = active.as_mut().context(error::UnexpectedSnafu {
-                    violated: "missing logical writer",
-                })?;
                 let mut offset = start;
                 while offset < end {
                     let (expanded, consumed) = expand_bounded_slice(
@@ -449,15 +499,12 @@ async fn write_tables(
                         offset,
                         end,
                         limits.conversion_bytes,
+                        budget,
+                        cancellation,
                     )
                     .await?;
                     check_cancelled(cancellation)?;
-                    // Do not drop an in-flight file operation before cleanup.
-                    writer
-                        .writer
-                        .write(expanded, Some(cancellation))
-                        .await
-                        .map_err(|error| map_writer_error(error, &writer.path))?;
+                    writers.send(expanded, cancellation).await?;
                     check_cancelled(cancellation)?;
                     offset += consumed;
                     summary.rows += consumed;
@@ -468,12 +515,12 @@ async fn write_tables(
             start = end;
         }
     }
-    finish_active(active, cancellation).await?;
+    writers.close_input();
     for (&id, file) in &unit.logical_tables {
         if !written.contains(&id) {
             check_cancelled(cancellation)?;
-            *active = Some(ActiveWriter::open(id, file, store, limits).await?);
-            finish_active(active, cancellation).await?;
+            writers.open(id, file, store, limits, cancellation).await?;
+            writers.close_input();
             summary.files += 1;
         }
     }
@@ -482,20 +529,18 @@ async fn write_tables(
 }
 
 struct ActiveWriter {
-    table_id: u32,
     path: String,
     writer: ParquetFileWriter,
 }
 
 impl ActiveWriter {
     async fn open(
-        id: u32,
         table: &LogicalTableProjection,
         store: &ObjectStore,
         limits: LogicalTableExportLimits,
     ) -> Result<Self> {
         let path = table.output.path.clone();
-        let conditional = store.info().full_capability().write_with_if_not_exists;
+        let conditional = store.info().capability().write_with_if_not_exists;
         if !conditional {
             ensure!(
                 !store
@@ -521,28 +566,8 @@ impl ActiveWriter {
         )
         .await
         .map_err(|error| map_writer_error(error, &path))?;
-        Ok(Self {
-            table_id: id,
-            path,
-            writer,
-        })
+        Ok(Self { path, writer })
     }
-}
-
-async fn finish_active(
-    active: &mut Option<ActiveWriter>,
-    cancellation: &CancellationToken,
-) -> Result<()> {
-    if let Some(writer) = active.as_mut() {
-        writer
-            .writer
-            .finish(Some(cancellation))
-            .await
-            .map_err(|error| map_writer_error(error, &writer.path))?;
-        check_cancelled(cancellation)?;
-        *active = None;
-    }
-    Ok(())
 }
 
 async fn expand_bounded_slice(
@@ -550,10 +575,20 @@ async fn expand_bounded_slice(
     schema: SchemaRef,
     start: usize,
     end: usize,
-    budget: usize,
-) -> Result<(RecordBatch, usize)> {
+    requested: usize,
+    budget: &ExportWriteBudget,
+    cancellation: &CancellationToken,
+) -> Result<(Payload, usize)> {
+    let (conversion, retained) = ExportWriteBudget::conversion_budget(&batch, requested)?;
+    let input = batch.clone();
+    let (len, estimated) = common_runtime::spawn_blocking_global(move || {
+        rows_within_budget(&input, start, end, conversion)
+    })
+    .await
+    .context(error::JoinTaskSnafu)??;
+    let reservation = retained.saturating_add(estimated.saturating_mul(2));
+    let permit = budget.reserve(reservation, cancellation).await?;
     common_runtime::spawn_blocking_global(move || {
-        let len = rows_within_budget(&batch, start, end, budget)?;
         let slice = batch.slice(start, len);
         let arrays = slice
             .columns()
@@ -562,13 +597,28 @@ async fn expand_bounded_slice(
             .map(|(array, field)| cast(array, field.data_type()).context(error::ComputeArrowSnafu))
             .collect::<Result<Vec<_>>>()?;
         let expanded = RecordBatch::try_new(schema, arrays).context(error::ComputeArrowSnafu)?;
-        Ok((expanded, len))
+        ensure!(
+            expanded.get_array_memory_size() <= reservation,
+            LogicalTableExportResourceSnafu {
+                reason: "converted backing buffers exceed reservation"
+            }
+        );
+        Ok((
+            Payload {
+                batch: expanded,
+                permit,
+            },
+            len,
+        ))
     })
     .await
     .context(error::JoinTaskSnafu)?
 }
 
-fn map_writer_error(source: common_datasource::error::Error, path: &str) -> error::Error {
+pub(crate) fn map_writer_error(
+    source: common_datasource::error::Error,
+    path: &str,
+) -> error::Error {
     match source {
         common_datasource::error::Error::ParquetWriteCancelled {} => {
             error::LogicalTableExportCancelledSnafu.build()
@@ -639,12 +689,12 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
     Ok(bytes.saturating_add(16))
 }
 
-fn rows_within_budget(
+pub(crate) fn rows_within_budget(
     batch: &RecordBatch,
     start: usize,
     end: usize,
     budget: usize,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let mut bytes = 0usize;
     let mut row = start;
     while row < end {
@@ -663,7 +713,7 @@ fn rows_within_budget(
             reason: "one expanded logical row exceeds conversion byte budget"
         }
     );
-    Ok(row - start)
+    Ok((row - start, bytes))
 }
 
 #[cfg(test)]

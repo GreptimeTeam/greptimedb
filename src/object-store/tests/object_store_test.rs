@@ -290,7 +290,7 @@ async fn test_s3_backend() -> Result<()> {
             .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
             .region(&env::var("GT_S3_REGION")?)
             .bucket(&bucket);
-        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT") {
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL") {
             builder = builder.endpoint(&endpoint);
         }
 

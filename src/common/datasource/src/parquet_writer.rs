@@ -186,9 +186,12 @@ impl ParquetFileWriter {
     }
 
     async fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if !bytes.is_empty() {
+        let bytes = Bytes::from(bytes);
+        let chunk = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        // Slices retain the complete encoded allocation until its last submission.
+        for offset in (0..bytes.len()).step_by(chunk) {
             self.sink
-                .write(bytes)
+                .write(bytes.slice(offset..(offset + chunk).min(bytes.len())))
                 .await
                 .context(error::WriteObjectSnafu { path: &self.path })?;
         }
@@ -328,7 +331,9 @@ mod tests {
             async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
                 self.0.write(bytes).await
             }
-            async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            async fn close(
+                &mut self,
+            ) -> object_store::Result<object_store::layers::mock::Metadata> {
                 self.0.close().await?;
                 Err(object_store::Error::new(
                     object_store::ErrorKind::Unexpected,
@@ -389,6 +394,74 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn large_footer_flush_uses_bounded_submissions_in_one_parquet_stream() {
+        use std::sync::Mutex;
+
+        use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+        struct ObservedWriter(oio::Writer, Arc<Mutex<Vec<usize>>>);
+        impl oio::Write for ObservedWriter {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.1.lock().unwrap().push(bytes.len());
+                self.0.write(bytes).await
+            }
+            async fn close(&mut self) -> object_store::Result<Metadata> {
+                self.0.close().await
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                self.0.abort().await
+            }
+        }
+        let directory = common_test_util::temp_dir::create_temp_dir("bounded_parquet");
+        let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+            .unwrap()
+            .build_operator();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let factory: MockWriterFactory = Arc::new({
+            let sizes = sizes.clone();
+            move |_, _, writer| Box::new(ObservedWriter(writer, sizes.clone()))
+        });
+        let store = store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+        let mut state = 17u64;
+        let values = (0..600_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as i64
+            })
+            .collect::<Vec<_>>();
+        let array = Arc::new(Int64Array::from(values)) as arrow::array::ArrayRef;
+        let batch = RecordBatch::try_from_iter([("a", array.clone()), ("b", array)]).unwrap();
+        let mut writer =
+            ParquetFileWriter::open(batch.schema(), store.clone(), "large.parquet", 1, None)
+                .await
+                .unwrap();
+        // No storage-layer chunking: observe the application's actual submissions.
+        writer.sink = store.writer("large.parquet").await.unwrap();
+        writer.write(batch.clone(), None).await.unwrap();
+        writer.finish(None).await.unwrap();
+        let sizes = sizes.lock().unwrap().clone();
+        let limit = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        assert!(sizes.iter().sum::<usize>() > limit);
+        assert!(sizes.iter().all(|size| *size <= limit), "{sizes:?}");
+        let actual = read(&store, "large.parquet")
+            .await
+            .build()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            arrow::compute::concat_batches(&batch.schema(), &actual).unwrap(),
+            batch
+        );
     }
 
     #[tokio::test]
