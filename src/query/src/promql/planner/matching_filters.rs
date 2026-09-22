@@ -52,26 +52,23 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// Copies label matchers from one operand of `binary` to the other, so both scans discard
 /// non-joining series instead of the join.
 ///
-/// One-to-one arithmetic operands are inner-joined on their matching labels with plain column
+/// Arithmetic operands are inner-joined on their matching labels with plain column
 /// equality, so a matcher on a matching label already holds for every surviving pair. Copying it
 /// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
 /// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
-/// matching label, so it does not affect a cardinality check such as #9209.
+/// matching label, so it does not affect a one-to-one cardinality check such as #9209.
+/// Grouped matching is conservatively restricted to a provably unique one-side operand until
+/// its cardinality checks are implemented (#9208).
 ///
 /// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
 /// as well constrain a value field, which the parsed expression does not distinguish from a
-/// label. For an aggregated operand they are its grouping labels, which is what makes filtering
-/// its input equivalent to filtering its output.
+/// label. Matchers can cross an aggregate only on labels that partition its input.
+/// `left_field_labels` and `right_field_labels` exclude value fields promoted to grouping
+/// labels: filtering them before sample selection could replace the latest sample with an
+/// older one (#9242).
 ///
-/// A value field is not a series identity though: its value may vary between the samples of one
-/// series, so a matcher on it must not be lowered below sample selection (`PromInstantManipulate`,
-/// `PromSeriesDivide`), where discarding a sample promotes an older one out of the lookback window
-/// and fabricates a match. An aggregated operand's tag columns are its grouping labels rather than
-/// the tags of its input, so those labels may name value fields; a matcher therefore only crosses
-/// an aggregation when it names one of the grouping labels that aggregation partitions by, and
-/// `left_field_labels`/`right_field_labels` rule out the grouping labels the planner found to be
-/// value fields of the aggregated operand's input
-/// (`PromPlannerContext::aggregation_field_labels`).
+/// Whether a matcher reaches a scan is decided per receiving operand ([`preserves_filter`]), so
+/// propagation is one-way when only one of the two can take the filter.
 pub(super) fn propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
@@ -108,34 +105,15 @@ fn try_propagate(
     ) {
         return Err("operator is not arithmetic");
     }
-    if let Some(modifier) = &binary.modifier {
-        if !matches!(modifier.card, VectorMatchCardinality::OneToOne) {
-            return Err("matching is not one-to-one");
-        }
-        if modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some() {
-            return Err("operand carries a fill modifier");
-        }
+    if let Some(modifier) = &binary.modifier
+        && (modifier.fill_values.lhs.is_some() || modifier.fill_values.rhs.is_some())
+    {
+        return Err("operand carries a fill modifier");
     }
     let matching = binary
         .modifier
         .as_ref()
         .and_then(|modifier| modifier.matching.as_ref());
-
-    // The grouping labels of every aggregation the operands cross, collected before `rewritten`
-    // takes the mutable borrows that rule out borrowing `binary` again.
-    let left_grouped = modifier_label_names(&binary.lhs);
-    let left_ignored = modifier_excluded_label_names(&binary.lhs);
-    let right_grouped = modifier_label_names(&binary.rhs);
-    let right_ignored = modifier_excluded_label_names(&binary.rhs);
-
-    let mut rewritten = binary.clone();
-    let (left, left_restricted) =
-        targeted_selector(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
-    let (right, right_restricted) =
-        targeted_selector(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
-    if !left.or_matchers.is_empty() || !right.or_matchers.is_empty() {
-        return Err("selector has an or matcher group");
-    }
 
     let is_matching_label = |name: &String| {
         // PromQL reserves the `__` prefix; none of those names is a join key.
@@ -150,9 +128,32 @@ fn try_propagate(
                 Some(LabelModifier::Include(on)) => on.labels.contains(name),
                 Some(LabelModifier::Exclude(ignoring)) => !ignoring.labels.contains(name),
             }
-            && (!left_restricted || crosses_aggregation(name, &left_grouped, &left_ignored))
-            && (!right_restricted || crosses_aggregation(name, &right_grouped, &right_ignored))
     };
+    if let Some(modifier) = &binary.modifier {
+        let unique_on_matching_labels = |expr: &Expr, tags: &[String]| {
+            has_unique_aggregate_output(expr) && tags.iter().all(&is_matching_label)
+        };
+        let supported_cardinality = match &modifier.card {
+            VectorMatchCardinality::OneToOne => true,
+            VectorMatchCardinality::ManyToOne(_) => {
+                unique_on_matching_labels(&binary.rhs, right_tags)
+            }
+            VectorMatchCardinality::OneToMany(_) => {
+                unique_on_matching_labels(&binary.lhs, left_tags)
+            }
+            VectorMatchCardinality::ManyToMany => false,
+        };
+        if !supported_cardinality {
+            return Err("one-side uniqueness is not proven");
+        }
+    }
+    let mut rewritten = binary.clone();
+    let left = selector_matchers(&mut rewritten.lhs).ok_or("left operand is not a selector")?;
+    let right = selector_matchers(&mut rewritten.rhs).ok_or("right operand is not a selector")?;
+    if !left.or_matchers.is_empty() || !right.or_matchers.is_empty() {
+        return Err("selector has an or matcher group");
+    }
+
     let constraints = left
         .matchers
         .iter()
@@ -163,8 +164,11 @@ fn try_propagate(
 
     let mut changed = false;
     for matcher in constraints {
-        for target in [&mut left.matchers, &mut right.matchers] {
-            if !target.contains(&matcher) {
+        for (target, operand) in [
+            (&mut left.matchers, &binary.lhs),
+            (&mut right.matchers, &binary.rhs),
+        ] {
+            if !target.contains(&matcher) && preserves_filter(operand, &matcher.name) {
                 target.push(matcher.clone());
                 changed = true;
             }
@@ -184,9 +188,7 @@ fn matches_every_value(matcher: &Matcher) -> bool {
 /// by a grouping label drops exactly the matching output series and leaves the remaining
 /// aggregated values untouched.
 ///
-/// `topk` and `bottomk` rank across a group and carry the input labels through, so filtering
-/// before them changes the candidate set. `count_values` adds an output label that does not exist
-/// in its input.
+/// Ranking aggregates instead retain input labels. `count_values` synthesizes a label.
 fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     matches!(
         aggregate.op.id(),
@@ -202,70 +204,96 @@ fn partitions_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     )
 }
 
-/// Returns the matchers of the vector selector an operand scans, together with whether the
-/// operand is restricted to the grouping labels an aggregation on its path partitions by, or
-/// `None` when the operand's output labels are not proven to be that selector's labels.
-fn targeted_selector(expr: &mut Expr) -> Option<(&mut Matchers, bool)> {
+/// Ranking operators supported by the planner; limitk and limit_ratio are not implemented.
+fn ranks_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
+    matches!(aggregate.op.id(), token::T_TOPK | token::T_BOTTOMK)
+}
+
+/// Whether a partitioning aggregate proves the operand emits at most one series per combination
+/// of its output labels; ranking narrows its input, so it inherits the proof. Uniqueness per
+/// *match signature* additionally requires every output label to be a matching label, which the
+/// caller checks.
+fn has_unique_aggregate_output(expr: &Expr) -> bool {
     match expr {
-        Expr::VectorSelector(selector) => Some((&mut selector.matchers, false)),
-        Expr::Paren(paren) => targeted_selector(&mut paren.expr),
-        Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => {
-            let (matchers, _) = targeted_selector(&mut aggregate.expr)?;
-            Some((matchers, aggregate.modifier.is_some()))
+        Expr::Paren(paren) => has_unique_aggregate_output(&paren.expr),
+        Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => true,
+        Expr::Aggregate(aggregate) if ranks_by_grouping_labels(aggregate) => {
+            has_unique_aggregate_output(&aggregate.expr)
         }
+        _ => false,
+    }
+}
+
+fn vector_operand_is_lhs(binary: &BinaryExpr) -> Option<bool> {
+    if !matches!(
+        binary.op.id(),
+        token::T_ADD | token::T_SUB | token::T_MUL | token::T_DIV | token::T_MOD | token::T_POW
+    ) || binary.modifier.is_some()
+    {
+        return None;
+    }
+    if matches!(binary.lhs.as_ref(), Expr::NumberLiteral(_)) {
+        Some(false)
+    } else if matches!(binary.rhs.as_ref(), Expr::NumberLiteral(_)) {
+        Some(true)
+    } else {
+        None
+    }
+}
+
+/// Whether adding a matcher on `label` to the scan [`selector_matchers`] finds leaves the
+/// operand's output equal to the subset of its unfiltered output that satisfies the matcher.
+/// A filter may cross an aggregate only when it removes whole groups: in particular, a label
+/// retained by topk is not necessarily one of its partitioning labels.
+fn preserves_filter(expr: &Expr, label: &str) -> bool {
+    match expr {
+        Expr::VectorSelector(_) => true,
+        Expr::Paren(paren) => preserves_filter(&paren.expr, label),
+        Expr::Aggregate(aggregate) => {
+            let partition_label = match &aggregate.modifier {
+                Some(LabelModifier::Include(labels)) => labels.labels.iter().any(|x| x == label),
+                Some(LabelModifier::Exclude(labels)) => labels.labels.iter().all(|x| x != label),
+                None => false,
+            };
+            partition_label && preserves_filter(&aggregate.expr, label)
+        }
+        Expr::Binary(binary) => match vector_operand_is_lhs(binary) {
+            Some(true) => preserves_filter(&binary.lhs, label),
+            Some(false) => preserves_filter(&binary.rhs, label),
+            None => false,
+        },
+        // A rollup emits at most one output series per input series and carries its labels.
+        Expr::Call(call) if LABEL_PRESERVING_RANGE_FUNCTIONS.contains(&call.func.name) => true,
+        _ => false,
+    }
+}
+
+/// Finds the scanned selector through label-preserving operations. Aggregate partitioning
+/// is checked separately for each propagated label.
+fn selector_matchers(expr: &mut Expr) -> Option<&mut Matchers> {
+    match expr {
+        Expr::VectorSelector(selector) => Some(&mut selector.matchers),
+        Expr::Paren(paren) => selector_matchers(&mut paren.expr),
+        Expr::Aggregate(aggregate)
+            if partitions_by_grouping_labels(aggregate) || ranks_by_grouping_labels(aggregate) =>
+        {
+            selector_matchers(&mut aggregate.expr)
+        }
+        Expr::Binary(binary) => match vector_operand_is_lhs(binary) {
+            Some(true) => selector_matchers(&mut binary.lhs),
+            Some(false) => selector_matchers(&mut binary.rhs),
+            None => None,
+        },
         Expr::Call(call) if LABEL_PRESERVING_RANGE_FUNCTIONS.contains(&call.func.name) => {
             // Every other argument is a scalar, so position does not matter.
             let matrix = single_matrix_argument(&call.args.args)?;
             match call.args.args[matrix].as_mut() {
-                Expr::MatrixSelector(selector) => Some((&mut selector.vs.matchers, false)),
+                Expr::MatrixSelector(selector) => Some(&mut selector.vs.matchers),
                 _ => None,
             }
         }
         // Label rewriting and subqueries need separate proofs.
         _ => None,
-    }
-}
-
-/// Collects the labels every partitioning aggregation on [`targeted_selector`]' path to the
-/// scanned selector groups by (`by(...)`, the `LabelModifier::Include` of an aggregation).
-fn modifier_label_names(expr: &Expr) -> Vec<&String> {
-    let mut grouped = Vec::new();
-    collect_modifier_label_names(expr, true, &mut grouped);
-    grouped
-}
-
-/// Collects the labels every partitioning aggregation on [`targeted_selector`]' path to the
-/// scanned selector excludes from its grouping labels (`without(...)`, the
-/// `LabelModifier::Exclude` of an aggregation).
-fn modifier_excluded_label_names(expr: &Expr) -> Vec<&String> {
-    let mut ignored = Vec::new();
-    collect_modifier_label_names(expr, false, &mut ignored);
-    ignored
-}
-
-fn collect_modifier_label_names<'a>(expr: &'a Expr, included: bool, out: &mut Vec<&'a String>) {
-    match expr {
-        Expr::Paren(paren) => collect_modifier_label_names(&paren.expr, included, out),
-        Expr::Aggregate(aggregate) if partitions_by_grouping_labels(aggregate) => {
-            match aggregate.modifier.as_ref() {
-                Some(LabelModifier::Include(labels)) if included => out.extend(&labels.labels),
-                Some(LabelModifier::Exclude(labels)) if !included => out.extend(&labels.labels),
-                _ => (),
-            }
-            collect_modifier_label_names(&aggregate.expr, included, out);
-        }
-        _ => (),
-    }
-}
-
-/// Whether an operand an aggregation partitions by `grouped` labels (with `without(...)`, by
-/// every label but `ignored`) still carries `name` as an output label, so that a matcher on
-/// `name` reaches it on both sides of that aggregation.
-fn crosses_aggregation(name: &String, grouped: &[&String], ignored: &[&String]) -> bool {
-    if grouped.is_empty() {
-        !ignored.contains(&name)
-    } else {
-        grouped.contains(&name)
     }
 }
 
@@ -322,7 +350,7 @@ mod tests {
     #[track_caller]
     fn assert_rewrite(query: &str, expected: &str) {
         assert_eq!(rewrite(query).unwrap(), parse(expected).unwrap(), "{query}");
-        // The rewrite adds every constraint to both sides, so re-running it is a no-op.
+        // Re-running the rewrite must be a no-op, including one-way propagation.
         assert!(rewrite(expected).is_none(), "{expected}");
     }
 
@@ -491,11 +519,87 @@ mod tests {
     }
 
     #[test]
+    fn propagates_through_scalar_arithmetic_and_ranking() {
+        assert_rewrite(
+            r#"topk(1, a{host="x"}) / on(host) b"#,
+            r#"topk(1, a{host="x"}) / on(host) b{host="x"}"#,
+        );
+        assert_rewrite(
+            r#"a / on(host) bottomk(1, b{host="x"})"#,
+            r#"a{host="x"} / on(host) bottomk(1, b{host="x"})"#,
+        );
+        assert_rewrite(
+            r#"(8 * rate(a{host="x"}[5m])) / on(host) topk by(host)(1, b)"#,
+            r#"(8 * rate(a{host="x"}[5m])) / on(host) topk by(host)(1, b{host="x"})"#,
+        );
+        assert_rewrite(
+            r#"bottomk without(zone)(2, a / 8) / on(host) b{host="x"}"#,
+            r#"bottomk without(zone)(2, a{host="x"} / 8) / on(host) b{host="x"}"#,
+        );
+    }
+
+    #[test]
+    fn propagates_grouped_matching_only_with_a_unique_one_side() {
+        let cases = [
+            (
+                r#"(8 * rate(a{host="x"}[5m])) / on(host) group_left topk by(host)(1, max by(host)(b))"#,
+                r#"(8 * rate(a{host="x"}[5m])) / on(host) group_left topk by(host)(1, max by(host)(b{host="x"}))"#,
+                vec!["host", "zone"],
+                vec!["host"],
+            ),
+            (
+                r#"sum by(host)(a) / on(host) group_right b{host!="x"}"#,
+                r#"sum by(host)(a{host!="x"}) / on(host) group_right b{host!="x"}"#,
+                vec!["host"],
+                vec!["host", "zone"],
+            ),
+            (
+                r#"a{host=""} / on(host) group_left max by(host)(b)"#,
+                r#"a{host=""} / on(host) group_left max by(host)(b{host=""})"#,
+                vec!["host", "zone"],
+                vec!["host"],
+            ),
+        ];
+        for (query, expected, left_tags, right_tags) in cases {
+            assert_eq!(
+                rewrite_with(query, &left_tags, &right_tags).unwrap(),
+                parse(expected).unwrap(),
+                "{query}"
+            );
+            assert!(rewrite_with(expected, &left_tags, &right_tags).is_none());
+        }
+    }
+
+    #[test]
+    fn preserves_ranking_candidates_and_unproven_cardinality() {
+        for query in [
+            r#"a{host="x"} / on(host) group_left max by(host,zone)(b)"#,
+            r#"a{host="x"} / on(host) group_left topk by(host)(1, b)"#,
+            r#"a{host="x"} / on(host) group_left topk(1, max by(host)(b))"#,
+            r#"topk by(zone)(1, a) / on(host) b{host="x"}"#,
+            r#"topk by(host)(1, topk(1, a)) / on(host) b{host="x"}"#,
+            r#"topk by(host)(1, sum by(zone)(a)) / on(host) b{host="x"}"#,
+            r#"(a + vector(8)) / on(host) b{host="x"}"#,
+        ] {
+            assert!(rewrite(query).is_none(), "{query}");
+        }
+        // Even with a unique one-side aggregate, global topk must see every host.
+        assert!(
+            rewrite_with(
+                r#"a{host="x"} / on(host) group_left topk(1, max by(host)(b))"#,
+                &["host", "zone"],
+                &["host"]
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn leaves_unproven_semantics_unchanged() {
         for query in [
             r#"a or on(host) b{host="x"}"#,
             r#"a / on(host) group_left b{host="x"}"#,
-            r#"sum by(host)(a) / on(host) group_right b{host="x"}"#,
+            r#"sum by(host,zone)(a) / on(host) group_right b{host="x"}"#,
             r#"label_replace(a,"host","x","zone",".*") / on(host) b{host="x"}"#,
             r#"a > on(host) b{host="x"}"#,
             r#"a / on(host) absent_over_time(b{host="x"}[5m])"#,
