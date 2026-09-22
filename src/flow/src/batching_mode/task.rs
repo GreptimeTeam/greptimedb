@@ -539,16 +539,75 @@ impl BatchingTask {
         Arc::new(query_ctx.fork())
     }
 
+    /// Returns the retention lower bound aligned to this task's time window.
+    pub fn recovery_retention_lower_bound(&self) -> Result<Option<Timestamp>, Error> {
+        let Some(expire_after) = self.config.expire_after else {
+            return Ok(None);
+        };
+        let expire_after = u64::try_from(expire_after).map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} has negative expire_after {expire_after}",
+                    self.config.flow_id
+                ),
+            }
+            .build()
+        })?;
+        let now = Timestamp::new_second(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|err| {
+                    UnexpectedSnafu {
+                        reason: format!("Failed to read recovery wall clock: {err}"),
+                    }
+                    .build()
+                })?
+                .as_secs() as i64,
+        );
+        let lower = now
+            .sub_duration(Duration::from_secs(expire_after))
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        self.config
+            .time_window_expr
+            .as_ref()
+            .context(UnexpectedSnafu {
+                reason: "Recovery expiry requires a time-window expression".to_string(),
+            })?
+            .eval(lower)?
+            .0
+            .context(UnexpectedSnafu {
+                reason: "Recovery expiry time-window expression returned no lower bound"
+                    .to_string(),
+            })
+            .map(Some)
+    }
+
     /// Discovers the source time windows touched by the exact sequence range `(C, H]`.
     ///
-    /// Terminal proof must cover ALL regions in `C`; subset proofs and pruning are rejected.
-    /// The caller owns the execution guard. This method is read-only: it executes a
-    /// timestamp projection of the aggregate input and leaves task state untouched.
+    /// This compatibility wrapper captures the retention bound before discovery.
     pub async fn capture_recovery_windows(
         &self,
         engine: &QueryEngineRef,
         frontend_client: &FrontendClient,
         lower: &BTreeMap<u64, u64>,
+    ) -> Result<(BTreeMap<u64, u64>, Vec<(Timestamp, Timestamp)>), Error> {
+        let retention_lower = self.recovery_retention_lower_bound()?;
+        self.capture_recovery_windows_since(engine, frontend_client, lower, retention_lower)
+            .await
+    }
+
+    /// Discovers windows under `lower` using a caller-frozen retention bound.
+    ///
+    /// The caller owns the execution guard and freezes this bound with its recovery scope.
+    /// This read-only method leaves task state untouched. Terminal proof must cover every
+    /// region in `lower`; subset or pruned proofs are rejected.
+    pub async fn capture_recovery_windows_since(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+        lower: &BTreeMap<u64, u64>,
+        retention_lower: Option<Timestamp>,
     ) -> Result<(BTreeMap<u64, u64>, Vec<(Timestamp, Timestamp)>), Error> {
         if lower.is_empty() {
             return UnexpectedSnafu {
@@ -600,37 +659,9 @@ impl BatchingTask {
                     self.config.flow_id
                 ),
             })?;
-        let input = if let Some(expire_after) = self.config.expire_after {
-            let expire_after = u64::try_from(expire_after).map_err(|_| {
-                UnexpectedSnafu {
-                    reason: format!(
-                        "Flow {} has negative expire_after {expire_after}",
-                        self.config.flow_id
-                    ),
-                }
-                .build()
-            })?;
-            let now = Timestamp::new_second(
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|err| {
-                        UnexpectedSnafu {
-                            reason: format!("Failed to read recovery wall clock: {err}"),
-                        }
-                        .build()
-                    })?
-                    .as_secs() as i64,
-            );
-            let lower = now
-                .sub_duration(Duration::from_secs(expire_after))
-                .map_err(BoxedError::new)
-                .context(ExternalSnafu)?;
-            let lower = time_window_expr.eval(lower)?.0.context(UnexpectedSnafu {
-                reason: "Recovery expiry time-window expression returned no lower bound"
-                    .to_string(),
-            })?;
+        let input = if let Some(retention_lower) = retention_lower {
             let mut add_filter = AddFilterRewriter::new(
-                col(&time_window_expr.column_name).gt_eq(lit(to_df_literal(lower)?)),
+                col(&time_window_expr.column_name).gt_eq(lit(to_df_literal(retention_lower)?)),
             );
             input
                 .rewrite(&mut add_filter)
