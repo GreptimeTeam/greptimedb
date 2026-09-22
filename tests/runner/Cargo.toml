@@ -13,7 +13,6 @@ clap.workspace = true
 client.workspace = true
 common-error.workspace = true
 common-query.workspace = true
-common-recordbatch.workspace = true
 common-time.workspace = true
 datatypes = { workspace = true }
 flate2 = "1.0"

@@ -52,8 +52,6 @@ venv/
 tests-fuzz/artifacts/
 tests-fuzz/corpus/
 
-# cargo-udeps reports
-udeps-report.json
 
 # Nix
 .direnv

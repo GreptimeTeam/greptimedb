@@ -45,7 +45,3 @@ substrait.workspace = true
 tokio.workspace = true
 tokio-stream = { workspace = true, features = ["net"] }
 tonic.workspace = true
-
-[dev-dependencies]
-common-grpc-expr.workspace = true
-tracing = "0.1"

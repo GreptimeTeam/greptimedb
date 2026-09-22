@@ -188,3 +188,12 @@ path = "utils/kafka_wal_helper.rs"
 test = false
 bench = false
 doc = false
+
+[package.metadata.cargo-shear]
+# `common-error` is required by `common-macro`'s `stack_trace_debug`: the
+# generated code references `::common_error` paths, so it must stay a direct
+# dependency.
+# `k8s-openapi` is a feature-pinning dependency: it enables the `v1_30`
+# version feature required by the transitive `kube` -> `k8s-openapi` chain,
+# but is never referenced by name in source code.
+ignored = ["common-error", "k8s-openapi"]

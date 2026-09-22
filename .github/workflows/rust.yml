@@ -24,7 +24,7 @@ on:
 name: Rust CI
 
 env:
-  CARGO_UDEPS_VERSION: "0.1.61"
+  CARGO_SHEAR_VERSION: "1.13.4"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -84,20 +84,11 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: arduino/setup-protoc@v3
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Rust Cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "check-udeps"
-          cache-all-crates: "true"
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Install cargo-udeps
+      - name: Install cargo-shear
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-udeps@${{ env.CARGO_UDEPS_VERSION }}
+          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
           fallback: none
       - name: Check unused dependencies
         run: make check-udeps
