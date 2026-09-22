@@ -100,8 +100,8 @@ use table::TableRef;
 use table::dist_table::DistTable;
 use table::metadata::{self, TableId, TableInfo, TableMeta, TableType};
 use table::requests::{
-    AlterKind, AlterTableRequest, AnnotationContext, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT,
-    INGEST_ROWS_RATE_LIMIT_KEY, TableOptions, validate_and_normalize_annotation_options,
+    AlterKind, AlterTableRequest, COMMENT_KEY, DDL_TIMEOUT, DDL_WAIT, INGEST_ROWS_RATE_LIMIT_KEY,
+    TableOptions, validate_and_normalize_annotation_options,
 };
 use table::table_name::TableName;
 use table::table_reference::TableReference;
