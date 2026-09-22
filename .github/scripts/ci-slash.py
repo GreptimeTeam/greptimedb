@@ -29,7 +29,7 @@ OPTIONS = {
     'fuzz chaos': ('integration.yml', 'chaos', 'chaos fuzz'),
     'fuzz all': ('integration.yml', 'all', 'all fuzz'),
 }
-HELP = '''Available draft-PR CI commands:\n\n- `/ci` or `/ci rust` — Rust CI\n- `/ci integration` — integration CI without fuzz\n- `/ci checks` or `/ci docs`\n- `/ci fuzz standalone|distributed|chaos`\n- `/ci fuzz all` — all fuzz suites (admin only)\n\nCommands require repository admin permission and a same-repository open draft PR. CI is pinned to the current head SHA; comment again after a push.'''
+HELP = '''Available draft-PR CI commands:\n\n- `/ci` — standard CI\n- `/ci rust` — Rust CI\n- `/ci integration` — integration CI without fuzz\n- `/ci checks` or `/ci docs`\n- `/ci fuzz standalone|distributed|chaos`\n- `/ci fuzz all` — all fuzz suites (admin only)\n\nCommands require the PR author or repository write/maintain/admin permission and a same-repository open draft PR. `/ci fuzz all` requires admin permission. CI is pinned to the current head SHA; comment again after a push.'''
 
 def api(path):
     req=urllib.request.Request(os.environ['GITHUB_API_URL']+path, headers={'Authorization':'Bearer '+os.environ['GITHUB_TOKEN'],'Accept':'application/vnd.github+json'})
@@ -60,8 +60,14 @@ def main():
     head_ref=head.get('ref','')
     if head_sha != os.environ.get('DISPATCH_HEAD_SHA') or not re.fullmatch('[0-9a-f]{40}',head_sha) or not head_ref: return reject(number,'PR head changed; comment again.')
     actor=comment.get('user',{}).get('login','')
-    permission=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/collaborators/'+actor+'/permission').get('permission')
-    if permission!='admin': return reject(number,'repository admin permission is required.')
+    if not actor: return reject(number,'comment author is missing.')
+    is_author=actor==pr.get('user',{}).get('login')
+    if arg=='fuzz all' or not is_author:
+        permission=api('/repos/'+os.environ['GITHUB_REPOSITORY']+'/collaborators/'+actor+'/permission').get('permission')
+        if arg=='fuzz all':
+            if permission!='admin': return reject(number,'repository admin permission is required for `/ci fuzz all`.')
+        elif permission not in ('write','maintain','admin'):
+            return reject(number,'PR author or repository write permission is required.')
     workflow, profile, label=OPTIONS[arg]
     out(skip='false',pr_number=number,head_sha=head_sha,head_ref=head_ref,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for `{head_sha}`.')
     return 0

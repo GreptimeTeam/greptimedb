@@ -49,9 +49,12 @@ jobs:
               -f ref="${HEAD_REF}" -f "inputs[expected_head_sha]=${HEAD_SHA}" "${inputs[@]}"
           done
       - name: Reply with command result
-        if: ${{ steps.admit.outputs.reply != '' }}
+        if: ${{ steps.admit.outputs.reply != '' && steps.admit.outputs.pr_number != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPLY: ${{ steps.admit.outputs.reply }}
           PR_NUMBER: ${{ steps.admit.outputs.pr_number }}
-        run: printf '%s\n' "${REPLY}" | gh pr comment "${PR_NUMBER}" --body-file -
+        # Use the issue-comment endpoint with the existing issues: write permission.
+        run: |
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f "body=${REPLY}"

@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import importlib.util
+import json
 import os
 import tempfile
+import subprocess
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -25,6 +28,9 @@ spec = importlib.util.spec_from_file_location("ci_slash", SCRIPT)
 assert spec and spec.loader
 ci = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ci)
+
+
+OPTIONS_TO_TEST = ["/ci", "/ci rust", "/ci fuzz chaos", "/ci fuzz all"]
 
 
 class CiSlashTest(unittest.TestCase):
@@ -79,6 +85,53 @@ class CiSlashTest(unittest.TestCase):
         ])
         self.assertIn("skip=true", output)
         self.assertIn("PR head changed; comment again.", output)
+
+    def test_permission_matrix(self):
+        for command in OPTIONS_TO_TEST:
+            for author in (True, False):
+                for permission in ("admin", "maintain", "write", "triage", "read", "none", None):
+                    with self.subTest(command=command, author=author, permission=permission):
+                        Path(self.output.name).write_text("")
+                        responses = [
+                            {"body": command, "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "actor"}},
+                            {"state": "open", "draft": True, "user": {"login": "actor" if author else "other"}, "head": {"sha": "a" * 40, "ref": "fix/draft-ci", "repo": {"full_name": "GreptimeTeam/greptimedb"}}},
+                        ]
+                        if command == "/ci fuzz all" or not author:
+                            responses.append({"permission": permission})
+                        output = self.run_main(responses)
+                        allowed = permission == "admin" if command == "/ci fuzz all" else author or permission in ("admin", "maintain", "write")
+                        self.assertIn("skip=false" if allowed else "skip=true", output)
+
+    def test_reply_uses_issue_comment_endpoint(self):
+        workflow = SCRIPT.parents[1] / "workflows" / "ci-slash.yml"
+        step = workflow.read_text().split("      - name: Reply with command result\n", 1)[1]
+        command = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        reply = "Denied: `example`\nSecond line with $variables and 'quotes'"
+        with tempfile.TemporaryDirectory() as directory:
+            gh = Path(directory) / "gh"
+            gh.write_text("#!/usr/bin/env python3\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+            gh.chmod(0o755)
+            env = {**os.environ, "PATH": directory + os.pathsep + os.environ["PATH"], "GITHUB_REPOSITORY": "GreptimeTeam/greptimedb", "PR_NUMBER": "42", "REPLY": reply}
+            result = subprocess.run(["bash", "-eu", "-c", command], env=env, check=True, capture_output=True, text=True)
+        self.assertEqual(json.loads(result.stdout), ["api", "--method", "POST", "/repos/GreptimeTeam/greptimedb/issues/42/comments", "-f", "body=" + reply])
+
+    def test_author_cannot_bypass_pr_guards(self):
+        for change, reason in [
+            ({"state": "closed"}, "PR must be open and draft"),
+            ({"draft": False}, "PR must be open and draft"),
+            ({"head": {"repo": {"full_name": "actor/greptimedb"}}}, "fork PRs are not admitted"),
+            ({"head": {"sha": "b" * 40, "ref": "fix/draft-ci", "repo": {"full_name": "GreptimeTeam/greptimedb"}}}, "PR head changed"),
+        ]:
+            with self.subTest(change=change):
+                Path(self.output.name).write_text("")
+                pr = {"state": "open", "draft": True, "user": {"login": "actor"}, "head": {"sha": "a" * 40, "ref": "fix/draft-ci", "repo": {"full_name": "GreptimeTeam/greptimedb"}}}
+                pr.update(change)
+                output = self.run_main([
+                    {"body": "/ci rust", "issue_url": "https://api.github.test/repos/GreptimeTeam/greptimedb/issues/42", "user": {"login": "actor"}},
+                    pr,
+                ])
+                self.assertIn("skip=true", output)
+                self.assertIn(reason, output)
 
 
 if __name__ == "__main__":
