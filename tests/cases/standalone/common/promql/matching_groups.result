@@ -143,7 +143,10 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk 
 +------+----+-------------------------------------------------------------------------------------------------------+
 +------+----+-------------------------------------------------------------------------------------------------------+
 
--- Preserve the current behavior for an unproven one-side with duplicate labels.
+-- Both one-sides carry two series per `host`. Prometheus rejects this with "many-to-many
+-- matching not allowed: matching labels must be unique on one side"; GreptimeDB has no
+-- cardinality check (#9209) and returns the cross product. The rewrite leaves these operands
+-- alone, so the recorded output is the unchanged baseline.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left matching_groups_right;
 

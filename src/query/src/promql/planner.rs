@@ -13516,6 +13516,30 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     }
 
     #[tokio::test]
+    async fn binary_matching_label_filter_reaches_scalar_ranking_and_grouped_operands() {
+        for query in [
+            r#"(8 * metric_a{host="foo"}) / on(host) metric_b"#,
+            r#"topk(1, metric_a{host="foo"}) / on(host, device) metric_b"#,
+            r#"(8 * metric_a{host="foo"}) / on(host) group_left topk by(host)(1, max by(host)(metric_b))"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(
+                plan.matches(r#"host = Utf8("foo")"#).count(),
+                2,
+                "{query}\n{plan}"
+            );
+        }
+        // A global ranking one-side must see every host, so the matcher stays put.
+        let query = r#"metric_a{host="foo"} / on(host) group_left topk(1, max by(host)(metric_b))"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(
+            plan.matches(r#"host = Utf8("foo")"#).count(),
+            1,
+            "{query}\n{plan}"
+        );
+    }
+
+    #[tokio::test]
     async fn binary_matching_label_filter_skips_selecting_aggregations() {
         // `topk` ranks its input, so filtering before it changes the candidate set.
         let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
