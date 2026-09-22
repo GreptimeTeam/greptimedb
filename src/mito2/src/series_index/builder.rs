@@ -21,7 +21,6 @@ use common_telemetry::warn;
 use futures::TryStreamExt;
 use object_store::ObjectStore;
 use snafu::{OptionExt, ensure};
-use store_api::storage::FileId;
 
 use crate::error::{Result, UnexpectedSnafu};
 use crate::read::BoxedRecordBatchStream;
@@ -34,7 +33,7 @@ use crate::region::MitoRegionRef;
 use crate::region::version::VersionRef;
 use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
-    IndexFileMetadata, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
+    RangeIndexEntry, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
 };
 use crate::series_index::purger::{IndexFileType, file_operation};
 use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
@@ -67,9 +66,8 @@ pub(crate) async fn build_range_index(
     region: &MitoRegionRef,
     version: &VersionRef,
     file: FileHandle,
-) -> Result<Option<(FileId, IndexFileMetadata)>> {
+) -> Result<Option<RangeIndexEntry>> {
     let file_id = file.file_id().file_id();
-    let min_timestamp = file.meta_ref().time_range.0;
     let Some((context, mut selection)) = reader_input(region, file).await? else {
         return Ok(None);
     };
@@ -118,13 +116,10 @@ pub(crate) async fn build_range_index(
     }
     let metrics = writer.finish().await?;
     file_operation(IndexFileType::Range, "build", "success");
-    Ok(Some((
+    Ok(Some(RangeIndexEntry {
         file_id,
-        IndexFileMetadata {
-            file_size: metrics.output_bytes,
-            min_timestamp,
-        },
-    )))
+        file_size: metrics.output_bytes,
+    }))
 }
 
 /// Builds only the series index. Callers build needed range indexes separately.
@@ -134,7 +129,7 @@ pub(crate) async fn build_series_index(
     version: &VersionRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
-) -> Result<IndexFileMetadata> {
+) -> Result<SeriesIndexEntry> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
     let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
     let schema = mapper.input_arrow_schema(false);
@@ -206,17 +201,11 @@ pub(crate) async fn build_series_index(
         return Err(error);
     }
     let metrics = writer.finish().await?;
-    let metadata = IndexFileMetadata {
-        file_size: metrics.output_bytes,
-        min_timestamp: bucket
-            .files
-            .iter()
-            .map(|file| file.time_range().0)
-            .min()
-            .unwrap_or(entry.bucket_start),
-    };
     file_operation(IndexFileType::Series, "build", "success");
-    Ok(metadata)
+    Ok(SeriesIndexEntry {
+        file_size: metrics.output_bytes,
+        ..entry.clone()
+    })
 }
 
 #[cfg(test)]
@@ -285,10 +274,19 @@ mod tests {
         let mut range_bytes = HashMap::new();
         if build_ranges {
             for file in files {
-                let (id, _) = build_range_index(&store, &region, &version, file.clone())
+                let completed = build_range_index(&store, &region, &version, file.clone())
                     .await
                     .unwrap()
                     .unwrap();
+                let id = completed.file_id;
+                assert_eq!(
+                    completed.file_size,
+                    store
+                        .stat(&range_index_path(region.region_id, id))
+                        .await
+                        .unwrap()
+                        .content_length()
+                );
                 range_bytes.insert(
                     id,
                     store
@@ -341,8 +339,7 @@ mod tests {
                 &store,
                 &series_catalog_path(region.region_id),
                 &SeriesIndexCatalog {
-                    file_metadata: HashMap::from([(entry.index_uuid, metadata)]),
-                    indexes: vec![entry.clone()],
+                    indexes: vec![metadata],
                 },
             )
             .await

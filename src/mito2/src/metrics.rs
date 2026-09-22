@@ -318,17 +318,13 @@ lazy_static! {
 
 // Index metrics.
 lazy_static! {
-    /// Installed series and range index bytes across all local index stores.
+    /// Approximate published index bytes in open regions, refreshed by maintenance.
     pub static ref SERIES_INDEX_DISK_BYTES: IntGauge = register_int_gauge!(
-        "greptime_mito_series_index_disk_bytes", "installed series and range index bytes"
+        "greptime_mito_series_index_disk_bytes", "estimated series and range index bytes in open regions"
     ).unwrap();
-    /// Index builds deferred by the disk budget.
+    /// Maintenance passes deferred by the estimated disk usage.
     pub static ref SERIES_INDEX_CAPACITY_DEFERRED: IntCounter = register_int_counter!(
         "greptime_mito_series_index_capacity_deferred_total", "series-index capacity deferrals"
-    ).unwrap();
-    /// Index files retired to reclaim local capacity.
-    pub static ref SERIES_INDEX_EVICTED: IntCounter = register_int_counter!(
-        "greptime_mito_series_index_evicted_total", "series-index capacity evictions"
     ).unwrap();
     // Index metrics.
     /// Outcomes of series-index reconciliation passes.

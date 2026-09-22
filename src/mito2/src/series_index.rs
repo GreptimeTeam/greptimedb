@@ -19,9 +19,8 @@
 mod bucket;
 mod builder;
 mod catalog;
-pub(crate) mod maintenance;
+mod maintenance;
 mod purger;
-mod recovery;
 mod searcher;
 mod task;
 #[cfg(test)]
@@ -39,18 +38,16 @@ use store_api::metric_engine_consts::{
 };
 
 use crate::error::Result;
-pub(crate) use crate::series_index::catalog::series_index_path;
 #[cfg(test)]
-pub(crate) use crate::series_index::catalog::{IndexFileMetadata, SeriesIndexEntry};
-pub(crate) use crate::series_index::maintenance::SeriesIndexMaintenance;
-#[cfg(test)]
-pub(crate) use crate::series_index::purger::IndexFileType;
+pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
+pub(crate) use crate::series_index::catalog::{
+    delete_catalogs, load_version_control, series_index_path,
+};
+pub(crate) use crate::series_index::purger::IndexFilePurger;
 #[cfg(test)]
 pub(crate) use crate::series_index::purger::series_index_channel;
 pub use crate::series_index::searcher::SeriesIndexSearcher;
 pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
-#[cfg(test)]
-pub(crate) use crate::series_index::version::IndexFileHandle;
 pub(crate) use crate::series_index::version::{
     SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
 };

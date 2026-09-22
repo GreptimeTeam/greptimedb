@@ -56,7 +56,7 @@ async fn prepare_region_with_timestamps(
     prepare_region_with_id(env, timestamps, RegionId::new(1, 1)).await
 }
 
-async fn prepare_region_with_id(
+pub(super) async fn prepare_region_with_id(
     env: &mut TestEnv,
     timestamps: &[i64],
     region_id: RegionId,
@@ -138,7 +138,6 @@ struct IndexTest {
     region: MitoRegionRef,
     store: ObjectStore,
     purger: super::purger::IndexFilePurger,
-    maintenance: Arc<super::maintenance::SeriesIndexMaintenance>,
 }
 
 impl IndexTest {
@@ -154,10 +153,6 @@ impl IndexTest {
             Self {
                 region,
                 store,
-                maintenance: Arc::new(super::maintenance::SeriesIndexMaintenance::new(
-                    common_base::readable_size::ReadableSize::mb(1),
-                    purger.clone(),
-                )),
                 purger,
             },
             receiver,
@@ -182,7 +177,7 @@ impl IndexTest {
             self.region.clone(),
             Duration::from_secs(100),
             0,
-            self.maintenance.clone(),
+            self.purger.clone(),
             enable_range_index,
         )
         .await
@@ -411,9 +406,9 @@ async fn test_reconcile_range_only_build_and_removal() {
     engine.stop().await.unwrap();
 }
 
-struct FailingSeriesWriter {
-    inner: oio::Writer,
-    fail: bool,
+pub(super) struct FailingSeriesWriter {
+    pub(super) inner: oio::Writer,
+    pub(super) fail: bool,
 }
 
 #[rstest::rstest]
@@ -660,7 +655,6 @@ async fn test_reconcile_cleans_up_after_region_drop() {
     let stats = test.reconcile(store.clone().layer(layer)).await.unwrap();
 
     assert_eq!((0, 0), (stats.built_range, stats.built_series));
-    assert_eq!(0, test.maintenance.state.lock().await.used);
     for path in [
         range_catalog_path(region.region_id),
         series_catalog_path(region.region_id),
@@ -674,10 +668,10 @@ async fn test_reconcile_cleans_up_after_region_drop() {
     while let Ok(request) = receiver.try_recv() {
         retired.push(request);
     }
-    assert_eq!(2, retired.len());
+    assert_eq!(1, retired.len());
     let paths = retired
         .iter()
-        .map(|request| request.path())
+        .map(|request| series_index_path(request.file_id.region_id(), request.file_id.file_id()))
         .collect::<Vec<_>>();
     for request in retired {
         test.purger.purge(request);
@@ -736,30 +730,16 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         let (bucket, entry) = &plan.builds[0];
         let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let (id, metadata) = build_range_index(store, &region, &version, file.clone())
+            let entry = build_range_index(store, &region, &version, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
-            ranges.insert(
-                id,
-                super::version::IndexFileHandle::new(
-                    region.region_id,
-                    id,
-                    super::purger::IndexFileType::Range,
-                    metadata,
-                    purger.clone(),
-                ),
-            );
+            ranges.insert(entry.file_id, entry);
         }
-        let metadata = build_series_index(store, &region, &version, bucket, entry)
+        let completed = build_series_index(store, &region, &version, bucket, entry)
             .await
             .unwrap();
-        let handle = super::SeriesIndexFileHandle::with_metadata(
-            region.region_id,
-            entry.clone(),
-            metadata,
-            purger.clone(),
-        );
+        let handle = super::SeriesIndexFileHandle::new(region.region_id, completed, purger.clone());
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control
@@ -798,16 +778,31 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
             "expected {failure} failure, got {result:?}; attempted series paths: {:?}",
             attempted.lock().unwrap()
         );
-        assert_eq!(
-            region.series_index_version().disk_usage(),
-            test.maintenance.state.lock().await.used
-        );
-        for (path, metadata) in test.maintenance.state.lock().await.candidates() {
+        let snapshot = region.series_index_version();
+        for entry in snapshot.range_indexes.values() {
             assert_eq!(
-                metadata.file_size,
-                store.stat(&path).await.unwrap().content_length()
+                entry.file_size,
+                store
+                    .stat(&range_index_path(region.region_id, entry.file_id))
+                    .await
+                    .unwrap()
+                    .content_length()
             );
         }
+        for handle in snapshot.series_indexes.values() {
+            assert_eq!(
+                handle.entry().file_size,
+                store
+                    .stat(&series_index_path(
+                        region.region_id,
+                        handle.entry().index_uuid
+                    ))
+                    .await
+                    .unwrap()
+                    .content_length()
+            );
+        }
+        drop(snapshot);
         let published_paths = region
             .series_index_version()
             .series_indexes
@@ -829,28 +824,19 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         let mut retired = HashSet::new();
         let mut requests = Vec::new();
         while let Ok(request) = receiver.try_recv() {
-            let path = request.path();
+            let path = series_index_path(request.file_id.region_id(), request.file_id.file_id());
             assert!(store.exists(&path).await.unwrap());
-            if request.kind == super::purger::IndexFileType::Series {
-                assert!(retired.insert(path));
-            }
+            assert!(retired.insert(path));
             requests.push(request);
         }
         assert_eq!(unpublished, retired);
-        let retired_paths = requests
-            .iter()
-            .map(|request| request.path())
-            .collect::<Vec<_>>();
+        let (drain_purger, drain_receiver) = series_index_channel(store.clone());
         for request in requests {
-            test.purger.purge(request);
+            drain_purger.purge(request);
         }
-        let purge = common_runtime::spawn_compact(test.purger.run(receiver));
-        wait_for(|| {
-            retired_paths
-                .iter()
-                .all(|path| !test.purger.is_retired(path))
-        })
-        .await;
+        let drain = drain_purger.run(drain_receiver);
+        drop(drain_purger);
+        drain.await;
         let attempted_paths = attempted.lock().unwrap().clone();
         for path in attempted_paths {
             assert_eq!(
@@ -887,8 +873,7 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         for path in published_paths {
             assert!(store.exists(&path).await.unwrap());
         }
-        drop(test);
-        purge.await.unwrap();
+        assert!(receiver.try_recv().is_err());
         engine.stop().await.unwrap();
     }
 }
@@ -928,10 +913,9 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
         regions,
         state.clone(),
         Duration::from_secs(100),
-        Arc::new(super::maintenance::SeriesIndexMaintenance::new(
-            common_base::readable_size::ReadableSize::mb(1),
-            purger,
-        )),
+        purger,
+        Arc::default(),
+        u64::MAX,
         Duration::from_secs(3600),
         clock.clone(),
         enable_range_index,
@@ -960,6 +944,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let store = ObjectStore::new(Memory::default()).unwrap();
     let region_id = RegionId::new(1, 1);
     let entry = SeriesIndexEntry {
+        file_size: 0,
         index_uuid: FileId::random(),
         bucket_start: Timestamp::new_second(0),
         bucket_end: Timestamp::new_second(100),
@@ -982,7 +967,6 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         &store,
         &series_catalog_path(region_id),
         &SeriesIndexCatalog {
-            file_metadata: Default::default(),
             indexes: vec![entry.clone()],
         },
     )
@@ -1007,10 +991,9 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         Arc::new(RegionMap::default()),
         state,
         Duration::from_secs(100),
-        Arc::new(super::maintenance::SeriesIndexMaintenance::new(
-            common_base::readable_size::ReadableSize::mb(1),
-            purger,
-        )),
+        purger,
+        Arc::default(),
+        u64::MAX,
         Duration::from_secs(3600),
         Arc::new(StdTimeProvider),
         true,
@@ -1032,213 +1015,4 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     })
     .await
     .unwrap();
-}
-
-/// Real Parquet output under a small shared quota: eviction must respect readers,
-/// prevent older regions displacing newer data, and preserve useful coverage on restart.
-#[tokio::test]
-async fn test_quota_eviction_handles_and_restart() {
-    use common_base::readable_size::ReadableSize;
-    use futures::TryStreamExt;
-
-    use super::maintenance::SeriesIndexMaintenance;
-
-    let mut old_env = TestEnv::with_prefix("index-quota-old").await;
-    let mut new_env = TestEnv::with_prefix("index-quota-new").await;
-    let (old_engine, old_region) =
-        prepare_region_with_id(&mut old_env, &[1000, 2000, 3000, 4000], RegionId::new(1, 1)).await;
-    let (new_engine, new_region) = prepare_region_with_id(
-        &mut new_env,
-        &[201000, 202000, 203000, 204000],
-        RegionId::new(2, 1),
-    )
-    .await;
-    let root = common_test_util::temp_dir::create_temp_dir("series-index-quota");
-    let store = crate::access_layer::new_fs_cache_store(root.path().to_str().unwrap())
-        .await
-        .unwrap();
-    let mut config = MitoConfig {
-        experimental_series_index_max_size: ReadableSize::kb(64),
-        ..Default::default()
-    };
-    let initial = SeriesIndexMaintenance::open(&store, config.experimental_series_index_max_size)
-        .await
-        .unwrap();
-    let initial_test = IndexTest {
-        region: old_region.clone(),
-        store: store.clone(),
-        purger: initial.purger.clone(),
-        maintenance: initial.clone(),
-    };
-    initial_test.reconcile(store.clone()).await.unwrap();
-    let used = initial.state.lock().await.used;
-    assert!(!old_region.series_index_version().series_indexes.is_empty());
-    config.experimental_series_index_max_size = ReadableSize(used + 1024);
-    initial.state.lock().await.capacity = used + 1024;
-    let maintenance = initial;
-    let purger = maintenance.purger.clone();
-    drop(initial_test);
-    let old = IndexTest {
-        region: old_region.clone(),
-        store: store.clone(),
-        purger: purger.clone(),
-        maintenance: maintenance.clone(),
-    };
-    let new = IndexTest {
-        region: new_region.clone(),
-        store: store.clone(),
-        purger: purger.clone(),
-        maintenance: maintenance.clone(),
-    };
-    let pinned = old_region.series_index_version();
-    let old_paths = pinned
-        .series_indexes
-        .keys()
-        .map(|id| series_index_path(old_region.region_id, *id))
-        .chain(
-            pinned
-                .range_indexes
-                .keys()
-                .map(|id| range_index_path(old_region.region_id, *id)),
-        )
-        .collect::<Vec<_>>();
-    new.reconcile(store.clone()).await.unwrap();
-    assert!(!new_region.series_index_version().series_indexes.is_empty());
-    for path in &old_paths {
-        assert!(store.exists(path).await.unwrap());
-    }
-    assert!(index_disk_bytes(&store).await > maintenance.state.lock().await.capacity);
-    let searcher = super::SeriesIndexSearcher::try_new(
-        old_region.metadata(),
-        store.clone(),
-        pinned.series_indexes.values().next().unwrap().clone(),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let rows = searcher
-        .search()
-        .unwrap()
-        .try_collect::<Vec<_>>()
-        .await
-        .unwrap();
-    assert_eq!(1, rows.iter().map(Vec::len).sum::<usize>());
-    // A searcher can outlive the snapshot from which it obtained its file handle.
-    drop(pinned);
-    assert!(
-        !searcher
-            .search()
-            .unwrap()
-            .try_collect::<Vec<_>>()
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    drop(searcher);
-    new.reconcile(store.clone()).await.unwrap();
-    let newest = new_region
-        .series_index_version()
-        .series_indexes
-        .keys()
-        .copied()
-        .collect::<HashSet<_>>();
-    assert!(!newest.is_empty());
-    let old_builds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let observed = old_builds.clone();
-    let layer = MockLayerBuilder::default()
-        .writer_factory(Arc::new(move |path, _, inner| {
-            if path.ends_with(".parquet") {
-                observed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
-            inner
-        }))
-        .build()
-        .unwrap();
-    let old_store = store.clone().layer(layer);
-    for _ in 0..3 {
-        let (old_result, new_result) = tokio::join!(
-            old.reconcile(old_store.clone()),
-            new.reconcile(store.clone())
-        );
-        old_result.unwrap();
-        new_result.unwrap();
-        assert_eq!(
-            newest,
-            new_region
-                .series_index_version()
-                .series_indexes
-                .keys()
-                .copied()
-                .collect()
-        );
-        assert!(
-            maintenance.state.lock().await.used
-                <= config.experimental_series_index_max_size.as_bytes()
-        );
-        assert_eq!(
-            maintenance.state.lock().await.used,
-            old_region.series_index_version().disk_usage()
-                + new_region.series_index_version().disk_usage()
-        );
-    }
-
-    assert_eq!(
-        0,
-        old_builds.load(std::sync::atomic::Ordering::Relaxed),
-        "average estimates skip cold buckets before writing"
-    );
-
-    // Restart with a smaller limit and retain the newest files by minimum timestamp.
-    let previous_usage = maintenance.state.lock().await.used;
-    drop(old);
-    drop(new);
-    drop(purger);
-    drop(maintenance);
-    config.experimental_series_index_max_size = ReadableSize((previous_usage / 2).max(1024));
-    let restarted = SeriesIndexMaintenance::open(&store, config.experimental_series_index_max_size)
-        .await
-        .unwrap();
-    assert!(
-        restarted.state.lock().await.used <= config.experimental_series_index_max_size.as_bytes()
-    );
-    assert!(restarted.state.lock().await.used < previous_usage);
-    let before_open = restarted.state.lock().await.used;
-    let restored = restarted.open_region(&store, new_region.region_id).await;
-    let reopened = restarted.open_region(&store, new_region.region_id).await;
-    assert!(Arc::ptr_eq(&restored, &reopened));
-    assert_eq!(
-        before_open,
-        restarted.state.lock().await.used,
-        "reopen must not double count"
-    );
-    assert_eq!(
-        restored.current().disk_usage(),
-        restarted.state.lock().await.used
-    );
-    // A restored controller remains the source of truth before a worker opens its region.
-    let pinned = restored.current();
-    let mut state = restarted.state.lock().await;
-    let (path, metadata) = state.candidates().into_iter().next().unwrap();
-    let previous = state.used;
-    super::maintenance::evict_index(&store, &mut state, &path)
-        .await
-        .unwrap();
-    assert_eq!(previous - metadata.file_size, state.used);
-    assert_eq!(restored.current().disk_usage(), state.used);
-    assert!(store.exists(&path).await.unwrap());
-    drop(state);
-    drop(pinned);
-    old_engine.stop().await.unwrap();
-    new_engine.stop().await.unwrap();
-}
-
-async fn index_disk_bytes(store: &ObjectStore) -> u64 {
-    let mut bytes = 0;
-    for entry in store.list_with("").recursive(true).await.unwrap() {
-        if !entry.metadata().is_dir() {
-            bytes += store.stat(entry.path()).await.unwrap().content_length();
-        }
-    }
-    bytes
 }

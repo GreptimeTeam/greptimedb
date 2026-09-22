@@ -35,7 +35,7 @@ mod handle_write;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use common_base::Plugins;
@@ -79,7 +79,7 @@ use crate::request::{
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
-use crate::series_index::{SeriesIndexMaintenance, SeriesIndexTaskState, spawn_series_index_tasks};
+use crate::series_index::{IndexFilePurger, SeriesIndexTaskState, spawn_series_index_tasks};
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
@@ -196,13 +196,7 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_maintenance = match &series_index_store {
-            Some(store) => Some(
-                SeriesIndexMaintenance::open(store, config.experimental_series_index_max_size)
-                    .await?,
-            ),
-            None => None,
-        };
+        let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -256,7 +250,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
-                    series_index_maintenance: series_index_maintenance.clone(),
+                    series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -416,13 +410,7 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_maintenance = match &series_index_store {
-            Some(store) => Some(
-                SeriesIndexMaintenance::open(store, config.experimental_series_index_max_size)
-                    .await?,
-            ),
-            None => None,
-        };
+        let series_index_disk_usage = Arc::new(AtomicU64::new(0));
         let flush_job_pool = Arc::new(LocalScheduler::new(config.max_background_flushes));
         let compact_job_pool = Arc::new(LocalScheduler::new(config.max_background_compactions));
         let flush_semaphore = Arc::new(Semaphore::new(config.max_background_flushes));
@@ -477,7 +465,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
-                    series_index_maintenance: series_index_maintenance.clone(),
+                    series_index_disk_usage: series_index_disk_usage.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -586,7 +574,7 @@ struct WorkerStarter<S> {
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
     series_index_store: Option<ObjectStore>,
-    series_index_maintenance: Option<Arc<SeriesIndexMaintenance>>,
+    series_index_disk_usage: Arc<AtomicU64>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -619,19 +607,22 @@ impl<S: LogStore> WorkerStarter<S> {
             .series_index_store
             .as_ref()
             .map(|_| Arc::new(SeriesIndexTaskState::new()));
+        let series_index_purger = self.series_index_store.clone().map(IndexFilePurger::start);
         let series_index_handle = self
             .series_index_store
             .clone()
             .zip(series_index_task_state.clone())
-            .zip(self.series_index_maintenance.clone())
-            .map(|((store, state), maintenance)| {
+            .zip(series_index_purger.clone())
+            .map(|((store, state), purger)| {
                 spawn_series_index_tasks(
                     self.id,
                     store,
                     regions.clone(),
                     state,
                     self.config.experimental_series_index_bucket_width,
-                    maintenance,
+                    purger,
+                    self.series_index_disk_usage.clone(),
+                    self.config.experimental_series_index_max_size.as_bytes(),
                     self.config.experimental_series_index_maintenance_interval,
                     self.time_provider.clone(),
                     self.config.experimental_enable_range_index,
@@ -663,7 +654,7 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             series_index_task_state: series_index_task_state.clone(),
             series_index_store: self.series_index_store,
-            series_index_maintenance: self.series_index_maintenance.clone(),
+            series_index_purger,
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -965,7 +956,7 @@ struct RegionWorkerLoop<S> {
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
     /// Local store for series and range indexes managed by reconciliation.
     series_index_store: Option<ObjectStore>,
-    series_index_maintenance: Option<Arc<SeriesIndexMaintenance>>,
+    series_index_purger: Option<IndexFilePurger>,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.

@@ -92,9 +92,9 @@ pub struct MitoConfig {
     /// Under development; do not enable. Whether to enable series indexes (default false).
     /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
     pub experimental_enable_series_index: bool,
-    /// Maximum installed series and range index bytes, shared across regions (default: 5 GiB).
-    /// Reconciliation evicts files with the oldest minimum timestamps first. Temporary output,
-    /// catalogs, and retired files retained by readers are excluded.
+    /// Approximate series and range index size limit in open regions (default: 5 GiB).
+    /// Workers share a periodically refreshed estimate and skip maintenance when full.
+    /// In-flight reconciliation can exceed the limit; closed-region files are not counted.
     pub experimental_series_index_max_size: ReadableSize,
     /// Whether to build and query range indexes when series indexes are enabled (default false).
     /// Obsolete range-index metadata and files are still cleaned up when disabled.

@@ -1340,6 +1340,7 @@ async fn check_two_phase_series_scan(
         let store = region.series_index_store.clone().unwrap();
         let sequence = region.flushed_sequence();
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
@@ -1412,19 +1413,12 @@ async fn check_two_phase_series_scan(
             .unwrap();
             writer.write(0, &batch).await.unwrap();
             writer.finish().await.unwrap();
-            let (purger, _receiver) = series_index_channel(store.clone());
             index_version.range_indexes.insert(
                 file_id,
-                crate::series_index::IndexFileHandle::new(
-                    region_id,
+                crate::series_index::RangeIndexEntry {
                     file_id,
-                    crate::series_index::IndexFileType::Range,
-                    crate::series_index::IndexFileMetadata {
-                        file_size: 0,
-                        min_timestamp: common_time::Timestamp::new_second(0),
-                    },
-                    purger,
-                ),
+                    file_size: 0,
+                },
             );
         }
         region

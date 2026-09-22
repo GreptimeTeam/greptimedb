@@ -126,10 +126,8 @@ where
             .await?;
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
-        if let (Some(store), Some(maintenance)) =
-            (&self.series_index_store, &self.series_index_maintenance)
-        {
-            maintenance.drop_region(store, region_id).await;
+        if let Some(store) = &self.series_index_store {
+            crate::series_index::delete_catalogs(store, region_id).await;
         }
         region.version_control.mark_dropped();
         region.series_index_version_control.mark_dropped();
