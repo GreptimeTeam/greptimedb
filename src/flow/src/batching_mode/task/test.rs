@@ -17,6 +17,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -28,7 +29,7 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{
@@ -819,6 +820,47 @@ fn register_auto_created_aggregate_sink(query_engine: &QueryEngineRef, table_nam
     memory_catalog.register_table_sync(request).unwrap();
 }
 
+async fn configure_source_ttl(query_engine: &QueryEngineRef, ttl: Option<TimeToLive>) {
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let source = catalog_manager
+        .table(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+            "numbers_with_ts",
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut info = (*source.table_info()).clone();
+    info.meta.options.ttl = ttl;
+    let source = Arc::new(Table::new(
+        Arc::new(info),
+        FilterPushDownType::Unsupported,
+        source.data_source(),
+    ));
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .deregister_table_sync(DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+        })
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "numbers_with_ts".to_string(),
+            table_id: source.table_info().table_id(),
+            table: source,
+        })
+        .unwrap();
+}
+
 async fn configure_source_capability(
     query_engine: &QueryEngineRef,
     engine: &str,
@@ -873,6 +915,127 @@ async fn configure_source_capability(
             table: source,
         })
         .unwrap();
+}
+
+#[tokio::test]
+async fn test_validate_recovery_retention_explicit_source_ttls() {
+    struct Case {
+        name: &'static str,
+        ttl: Option<TimeToLive>,
+        expire_after: Option<i64>,
+        retention_age: Option<Duration>,
+        window_age: Option<Duration>,
+        should_pass: bool,
+    }
+
+    let cases = [
+        Case {
+            name: "finite TTL exceeding expire_after is admissible",
+            ttl: Some(TimeToLive::Duration(Duration::from_secs(2 * 60 * 60))),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(10 * 60)),
+            window_age: None,
+            should_pass: true,
+        },
+        Case {
+            name: "TTL equal to expire_after is rejected",
+            ttl: Some(TimeToLive::Duration(Duration::from_secs(60 * 60))),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(10 * 60)),
+            window_age: None,
+            should_pass: false,
+        },
+        Case {
+            name: "TTL shorter than expire_after is rejected",
+            ttl: Some(TimeToLive::Duration(Duration::from_secs(59 * 60))),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(10 * 60)),
+            window_age: None,
+            should_pass: false,
+        },
+        Case {
+            name: "aligned window older than TTL is rejected",
+            ttl: Some(TimeToLive::Duration(Duration::from_secs(2 * 60 * 60))),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(10 * 60)),
+            window_age: Some(Duration::from_secs(3 * 60 * 60)),
+            should_pass: false,
+        },
+        Case {
+            name: "old retention cutoff is rejected even without windows",
+            ttl: Some(TimeToLive::Duration(Duration::from_secs(2 * 60 * 60))),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(3 * 60 * 60)),
+            window_age: None,
+            should_pass: false,
+        },
+        Case {
+            name: "explicit forever is admissible",
+            ttl: Some(TimeToLive::Forever),
+            expire_after: None,
+            retention_age: None,
+            window_age: None,
+            should_pass: true,
+        },
+        Case {
+            name: "instant TTL is rejected",
+            ttl: Some(TimeToLive::Instant),
+            expire_after: Some(60 * 60),
+            retention_age: Some(Duration::from_secs(10 * 60)),
+            window_age: None,
+            should_pass: false,
+        },
+    ];
+
+    for case in cases {
+        let TestTaskParts {
+            mut task,
+            query_engine,
+            ..
+        } = new_test_task_engine_and_plan_with_query(
+            "SELECT number, ts FROM numbers_with_ts",
+            "sink",
+        )
+        .await;
+        Arc::get_mut(&mut task.config).unwrap().expire_after = case.expire_after;
+        configure_source_ttl(&query_engine, case.ttl).await;
+
+        let now = Timestamp::current_millis();
+        let retention_lower = case.retention_age.map(|age| now.sub_duration(age).unwrap());
+        let windows = case
+            .window_age
+            .map(|age| {
+                let start = now.sub_duration(age).unwrap();
+                vec![(start, now)]
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            task.validate_recovery_retention(retention_lower, &windows)
+                .await
+                .is_ok(),
+            case.should_pass,
+            "{}",
+            case.name
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_validate_recovery_retention_rejects_unknown_inherited_ttl() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_test_task_engine_and_plan_with_query("SELECT number, ts FROM numbers_with_ts", "sink")
+        .await;
+    Arc::get_mut(&mut task.config).unwrap().expire_after = Some(60 * 60);
+    configure_source_ttl(&query_engine, None).await;
+
+    assert!(
+        task.validate_recovery_retention(Some(Timestamp::current_millis()), &[],)
+            .await
+            .is_err()
+    );
 }
 
 fn dirty_marker() -> DirtyTimeWindows {
