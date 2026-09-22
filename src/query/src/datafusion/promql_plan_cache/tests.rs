@@ -40,6 +40,7 @@ use promql::functions::{
 use promql_parser::parser;
 use promql_parser::parser::EvalStmt;
 use session::context::{QueryContext, QueryContextBuilder};
+use store_api::storage::RegionId;
 use table::Table;
 use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMetaBuilder};
 use table::table::adapter::DfTableProviderAdapter;
@@ -47,7 +48,7 @@ use table::test_util::MemTable as GreptimeMemTable;
 
 use super::*;
 use crate::QueryEngineContext;
-use crate::optimizer::test_util::mock_table_provider;
+use crate::optimizer::test_util::{mock_table_provider, mock_table_provider_with_tsid};
 use crate::options::QueryOptions;
 use crate::promql::planner::PromPlanner;
 use crate::query_engine::QueryEngineState;
@@ -909,48 +910,107 @@ async fn an_abandoned_request_leaves_nothing_behind() {
     assert_eq!(cache.entry_count().await, 0);
 }
 
-/// A datanode holding several regions of one table receives the same pushed
-/// down plan for each of them: the region enters only through the table source,
-/// which the key does not hold. So plan, options and scope are all identical
-/// and the region metadata is the only thing telling the keys apart. Hashing
-/// just the discriminant would put every one of those regions in a single
-/// bucket, turning each lookup into a run of full plan comparisons.
+/// The region a plan's scan reads through.
+fn scanned_region(source: &Arc<dyn TableSource>) -> RegionId {
+    let source: &dyn std::any::Any = source.as_ref();
+    let provider: &dyn std::any::Any = source
+        .downcast_ref::<DefaultTableSource>()
+        .unwrap()
+        .table_provider
+        .as_ref();
+    provider
+        .downcast_ref::<DummyTableProvider>()
+        .unwrap()
+        .region_metadata()
+        .region_id
+}
+
+/// A datanode holds many regions of one table and receives a byte-identical
+/// pushed-down plan for each: the region enters only through the table source,
+/// which the key does not hold. They share one template, and the region a hit
+/// reads through is the one `rebind` installs from this request's provider.
 #[tokio::test]
-async fn regions_of_one_table_do_not_share_a_hash_bucket() {
+async fn regions_of_one_table_share_a_template() {
     let state = engine_state(false);
     let session = state.session_state();
     let cache = PromqlPlanCache::new(8);
 
-    let key_of = |region: u32| {
-        let provider = Arc::new(mock_table_provider(store_api::storage::RegionId::new(
-            1, region,
-        )));
-        let plan = region_instant_plan(provider, EVAL_START_MS, EVAL_START_MS);
-        cache
+    let provider_of = |region: u32| Arc::new(mock_table_provider(RegionId::new(1, region)));
+    let candidate_of = |provider: Arc<DummyTableProvider>, start: i64| {
+        let plan = region_instant_plan(provider, start, start);
+        let candidate = cache
             .candidate(&plan, &session, &QueryContext::arc())
-            .expect("region plan must be admitted")
-            .key
-    };
-    let hash_of = |key: &Key| {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        std::hash::Hasher::finish(&hasher)
+            .expect("region plan must be admitted");
+        (plan, candidate)
     };
 
-    let first = key_of(1);
-    let second = key_of(2);
-    // The premise: everything except the metadata really is identical.
-    assert_eq!(
-        first.plan.display_indent_schema().to_string(),
-        second.plan.display_indent_schema().to_string()
+    let (warm_plan, warm) = candidate_of(provider_of(1), EVAL_START_MS);
+    assert!(cache.get(&warm).await.unwrap().is_none());
+    let warm_key = warm.key.clone();
+    assert!(
+        cache
+            .insert(warm, &session.optimize(&warm_plan).unwrap())
+            .await
     );
-    assert_eq!(first.options, second.options);
-    assert_eq!(first.scope, second.scope);
 
-    assert!(first != second);
-    assert_ne!(hash_of(&first), hash_of(&second));
-    // The same region twice must still agree, or nothing would ever hit.
-    assert_eq!(hash_of(&first), hash_of(&key_of(1)));
+    // A different region of the same table, at a different evaluation time.
+    let other = provider_of(2);
+    let start = EVAL_START_MS + 30_000;
+    let (plan, candidate) = candidate_of(other.clone(), start);
+    assert!(warm_key == candidate.key);
+    let mut warm_hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut other_hasher = std::collections::hash_map::DefaultHasher::new();
+    warm_key.hash(&mut warm_hasher);
+    candidate.key.hash(&mut other_hasher);
+    assert_eq!(
+        std::hash::Hasher::finish(&warm_hasher),
+        std::hash::Hasher::finish(&other_hasher),
+        "equal keys must hash equal or the shared entry is unreachable"
+    );
+
+    let cached = cache.get(&candidate).await.unwrap().expect("miss");
+    let expected = session.optimize(&plan).unwrap();
+    assert_eq!(
+        cached.display_indent_schema().to_string(),
+        expected.display_indent_schema().to_string()
+    );
+    // The hit must read through region 2, not the region the template was
+    // built from.
+    let sources = scan_sources(&cached);
+    assert_eq!(sources.len(), 1);
+    assert_eq!(scanned_region(&sources[0]), RegionId::new(1, 2));
+    assert_eq!(scan_requests(&cached), scan_requests(&expected));
+
+    // The cache holds one entry for both regions.
+    assert_eq!(cache.entry_count().await, 1);
+}
+
+/// The boundary of that sharing: a region whose columns differ, as during an
+/// ALTER that has reached one region and not the other, must not reuse it.
+#[tokio::test]
+async fn a_region_with_a_different_schema_does_not_share() {
+    let state = engine_state(false);
+    let session = state.session_state();
+    let cache = PromqlPlanCache::new(8);
+
+    let plain = Arc::new(mock_table_provider(RegionId::new(1, 1)));
+    let plan = region_instant_plan(plain, EVAL_START_MS, EVAL_START_MS);
+    let candidate = cache
+        .candidate(&plan, &session, &QueryContext::arc())
+        .unwrap();
+    assert!(
+        cache
+            .insert(candidate, &session.optimize(&plan).unwrap())
+            .await
+    );
+
+    // Same table id, an extra column.
+    let altered = Arc::new(mock_table_provider_with_tsid(RegionId::new(1, 2)));
+    let altered_plan = region_instant_plan(altered, EVAL_START_MS, EVAL_START_MS);
+    let altered_candidate = cache
+        .candidate(&altered_plan, &session, &QueryContext::arc())
+        .unwrap();
+    assert!(cache.get(&altered_candidate).await.unwrap().is_none());
 }
 
 /// Region-server plans read through a [`DummyTableProvider`], and the scan

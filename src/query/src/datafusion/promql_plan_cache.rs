@@ -53,7 +53,7 @@ use session::context::QueryContext;
 use session::hints::{
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY, REMOTE_QUERY_ID_EXTENSION_KEY,
 };
-use store_api::metadata::RegionMetadataRef;
+use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use table::metadata::TableInfoRef;
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -160,13 +160,39 @@ impl Dependency {
     }
 }
 
+/// Whether two regions plan the same.
+///
+/// Planning reads exactly three things out of the region metadata, and all
+/// three come from `column_metadatas`: the Arrow schema, which is derived from
+/// it, the semantic type behind `DummyTableProvider::schema`, and the one
+/// behind its `supports_filters_pushdown`. `primary_key` and
+/// `primary_key_encoding` are read on the scan path rather than the planning
+/// path, but they describe the same table shape and cost nothing to compare,
+/// so they are included.
+///
+/// `region_id`, `partition_expr` and its version are deliberately excluded. A
+/// datanode holds many regions of one table; they receive a byte-identical
+/// pushed-down plan and plan it identically, and the region a hit actually
+/// reads through comes from the request's own table source, which `rebind`
+/// installs. Sharing one template across them keeps the entry count
+/// proportional to the number of query shapes rather than to the number of
+/// regions, which is what the `size` option has to be dimensioned for.
+fn regions_plan_alike(left: &RegionMetadata, right: &RegionMetadata) -> bool {
+    left.schema_version == right.schema_version
+        && left.primary_key_encoding == right.primary_key_encoding
+        && left.primary_key == right.primary_key
+        && left.column_metadatas == right.column_metadatas
+}
+
 impl PartialEq for Dependency {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             // Repeated requests normally observe the same metadata instance;
             // the deep comparison is the fallback, not the common path.
             (Self::Table(left), Self::Table(right)) => Arc::ptr_eq(left, right) || left == right,
-            (Self::Region(left), Self::Region(right)) => Arc::ptr_eq(left, right) || left == right,
+            (Self::Region(left), Self::Region(right)) => {
+                Arc::ptr_eq(left, right) || regions_plan_alike(left, right)
+            }
             _ => false,
         }
     }
@@ -175,11 +201,10 @@ impl PartialEq for Dependency {
 impl Eq for Dependency {}
 
 impl Hash for Dependency {
-    /// Hashes the identity that equality already compares, and nothing else.
-    /// A deep traversal of the metadata on every lookup would cost more than it
-    /// saves, but hashing only the discriminant would put every region of a
-    /// table in one bucket: their plans are byte-identical, since the region
-    /// only enters through the table source, which the key does not hold.
+    /// Hashes a subset of what equality compares, cheap enough to run on every
+    /// lookup. It must not reach `region_id`: regions of one table share a
+    /// template, so hashing their identity would put each of them in its own
+    /// bucket and none of them would ever find the shared entry.
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
@@ -188,8 +213,9 @@ impl Hash for Dependency {
                 info.ident.version.hash(state);
             }
             Self::Region(metadata) => {
-                metadata.region_id.hash(state);
                 metadata.schema_version.hash(state);
+                metadata.primary_key.hash(state);
+                metadata.column_metadatas.len().hash(state);
             }
         }
     }
