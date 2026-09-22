@@ -13,9 +13,10 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use catalog::memory::MemoryCatalogManager;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
@@ -27,18 +28,21 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_time::Timestamp;
 use datatypes::data_type::ConcreteDataType as CDT;
-use datatypes::schema::ColumnSchema;
+use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{
     TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
 };
 use pretty_assertions::assert_eq;
+use prost::Message;
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
     FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use substrait::substrait_proto_df::proto::Plan;
 use table::Table;
 use table::metadata::FilterPushDownType;
 use table::test_util::MemTable;
@@ -1018,6 +1022,306 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
     }
 }
 
+struct RecoveryCaptureHandler {
+    output: std::sync::Mutex<Option<Output>>,
+    lower: String,
+    expire_after: Option<i64>,
+    expiry_lower: std::sync::Mutex<Option<Timestamp>>,
+}
+
+struct RecoveryMetricsStream {
+    schema: Arc<Schema>,
+    batches: Vec<RecordBatch>,
+    metrics: Option<RecordBatchMetrics>,
+    fail: bool,
+}
+
+impl futures::Stream for RecoveryMetricsStream {
+    type Item = common_recordbatch::error::Result<RecordBatch>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.fail {
+            self.fail = false;
+            return Poll::Ready(Some(Err(common_recordbatch::error::Error::External {
+                source: BoxedError::new(MockError::new(StatusCode::Unexpected)),
+                location: snafu::Location::new(file!(), line!(), column!()),
+            })));
+        }
+        Poll::Ready(self.batches.pop().map(Ok))
+    }
+}
+
+impl common_recordbatch::RecordBatchStream for RecoveryMetricsStream {
+    fn name(&self) -> &str {
+        "RecoveryMetricsStream"
+    }
+
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+
+    fn output_ordering(&self) -> Option<&[common_recordbatch::OrderOption]> {
+        None
+    }
+
+    fn metrics(&self) -> Option<RecordBatchMetrics> {
+        self.batches
+            .is_empty()
+            .then(|| self.metrics.clone())
+            .flatten()
+    }
+}
+
+fn field_selection(expr: &substrait::substrait_proto_df::proto::Expression) -> Option<i32> {
+    use substrait::substrait_proto_df::proto::expression::RexType;
+    use substrait::substrait_proto_df::proto::expression::field_reference::ReferenceType;
+    use substrait::substrait_proto_df::proto::expression::reference_segment::ReferenceType as Segment;
+
+    let RexType::Selection(field) = expr.rex_type.as_ref()? else {
+        return None;
+    };
+    let ReferenceType::DirectReference(reference) = field.reference_type.as_ref()? else {
+        return None;
+    };
+    let Segment::StructField(field) = reference.reference_type.as_ref()? else {
+        return None;
+    };
+    Some(field.field)
+}
+
+fn timestamp_literal(expr: &substrait::substrait_proto_df::proto::Expression) -> Option<Timestamp> {
+    use substrait::substrait_proto_df::proto::expression::RexType;
+    use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
+
+    let RexType::Literal(literal) = expr.rex_type.as_ref()? else {
+        return None;
+    };
+    let LiteralType::PrecisionTimestamp(timestamp) = literal.literal_type.as_ref()? else {
+        return None;
+    };
+    match timestamp.precision {
+        0 => Some(Timestamp::new_second(timestamp.value)),
+        3 => Some(Timestamp::new_millisecond(timestamp.value)),
+        6 => Some(Timestamp::new_microsecond(timestamp.value)),
+        9 => Some(Timestamp::new_nanosecond(timestamp.value)),
+        _ => None,
+    }
+}
+
+fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Option<Timestamp> {
+    use substrait::substrait_proto_df::proto::plan_rel::RelType as PlanRelType;
+    use substrait::substrait_proto_df::proto::rel::RelType;
+
+    let function_names = plan
+        .extensions
+        .iter()
+        .filter_map(|extension| match extension.mapping_type.as_ref()? {
+            substrait::substrait_proto_df::proto::extensions::simple_extension_declaration::MappingType::ExtensionFunction(function) => {
+                Some((function.function_anchor, function.name.as_str()))
+            }
+            _ => None,
+        })
+        .collect::<HashMap<_, _>>();
+    let [root] = plan.relations.as_slice() else {
+        panic!("recovery capture must encode exactly one relation");
+    };
+    let Some(PlanRelType::Root(root)) = root.rel_type.as_ref() else {
+        panic!("recovery capture must encode a root relation");
+    };
+    assert_eq!(root.names, ["ts"]);
+    let Some(RelType::Project(project)) = root.input.as_ref().and_then(|rel| rel.rel_type.as_ref())
+    else {
+        panic!("recovery capture must project the raw timestamp");
+    };
+    assert_eq!(project.expressions.len(), 1);
+    assert_eq!(field_selection(&project.expressions[0]), Some(1));
+
+    fn visit(
+        rel: &substrait::substrait_proto_df::proto::Rel,
+        function_names: &HashMap<u32, &str>,
+        scans: &mut Vec<Vec<String>>,
+        has_number_filter: &mut bool,
+        expiry_lower: &mut Option<Timestamp>,
+    ) {
+        use substrait::substrait_proto_df::proto::expression::RexType;
+        use substrait::substrait_proto_df::proto::expression::literal::LiteralType;
+        use substrait::substrait_proto_df::proto::function_argument::ArgType;
+        use substrait::substrait_proto_df::proto::read_rel::ReadType;
+        use substrait::substrait_proto_df::proto::rel::RelType;
+
+        match rel.rel_type.as_ref().expect("recovery relation type") {
+            RelType::Aggregate(_) | RelType::Write(_) | RelType::Ddl(_) | RelType::Update(_) => {
+                panic!("recovery capture must not aggregate or write")
+            }
+            RelType::Read(read) => match read.read_type.as_ref() {
+                Some(ReadType::NamedTable(table)) => scans.push(table.names.clone()),
+                _ => panic!("recovery capture must read a named source table"),
+            },
+            RelType::Filter(filter) => {
+                let condition = filter
+                    .condition
+                    .as_ref()
+                    .expect("recovery filter condition");
+                let RexType::ScalarFunction(function) = condition
+                    .rex_type
+                    .as_ref()
+                    .expect("recovery filter expression")
+                else {
+                    panic!("recovery filter must be a scalar function");
+                };
+                let args = function
+                    .arguments
+                    .iter()
+                    .map(|arg| match arg.arg_type.as_ref() {
+                        Some(ArgType::Value(expr)) => expr,
+                        _ => panic!("recovery filter must use value arguments"),
+                    })
+                    .collect::<Vec<_>>();
+                match function_names.get(&function.function_reference) {
+                    Some(&"equal")
+                        if args.len() == 2
+                            && field_selection(args[0]) == Some(0)
+                            && matches!(
+                                args[1].rex_type.as_ref(),
+                                Some(RexType::Literal(literal))
+                                    if matches!(literal.literal_type, Some(LiteralType::I64(42)))
+                            ) =>
+                    {
+                        *has_number_filter = true
+                    }
+                    Some(&"gte") if args.len() == 2 && field_selection(args[0]) == Some(1) => {
+                        *expiry_lower = timestamp_literal(args[1]);
+                    }
+                    _ => panic!("unexpected recovery filter"),
+                }
+                visit(
+                    filter.input.as_ref().expect("recovery filter input"),
+                    function_names,
+                    scans,
+                    has_number_filter,
+                    expiry_lower,
+                );
+            }
+            RelType::Project(project) => visit(
+                project.input.as_ref().expect("recovery project input"),
+                function_names,
+                scans,
+                has_number_filter,
+                expiry_lower,
+            ),
+            _ => panic!("unexpected recovery relation"),
+        }
+    }
+
+    let mut scans = Vec::new();
+    let mut has_number_filter = false;
+    let mut expiry_lower = None;
+    visit(
+        project.input.as_ref().expect("recovery projection input"),
+        &function_names,
+        &mut scans,
+        &mut has_number_filter,
+        &mut expiry_lower,
+    );
+    assert_eq!(scans, vec![vec!["numbers_with_ts".to_string()]]);
+    assert!(has_number_filter, "recovery capture lost WHERE number = 42");
+    assert_eq!(expiry_lower.is_some(), expire_after.is_some());
+    expiry_lower
+}
+
+#[async_trait::async_trait]
+impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
+    for RecoveryCaptureHandler
+{
+    async fn do_query(
+        &self,
+        query: api::v1::greptime_request::Request,
+        ctx: QueryContextRef,
+    ) -> std::result::Result<Output, BoxedError> {
+        assert_eq!(ctx.extension(FLOW_INCREMENTAL_MODE), Some("sequence_range"));
+        assert_eq!(
+            ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some(self.lower.as_str())
+        );
+        assert_eq!(
+            ctx.extension(query::options::FLOW_RETURN_REGION_SEQ),
+            Some("true")
+        );
+        let api::v1::greptime_request::Request::Query(request) = query else {
+            panic!("recovery capture must issue a query request");
+        };
+        let Some(api::v1::query_request::Query::LogicalPlan(plan)) = request.query else {
+            panic!("recovery capture must issue a logical plan read");
+        };
+        let plan = Plan::decode(plan.as_slice()).unwrap();
+        *self.expiry_lower.lock().unwrap() =
+            assert_recovery_timestamp_plan(&plan, self.expire_after);
+        Ok(self.output.lock().unwrap().take().unwrap())
+    }
+}
+
+fn recovery_timestamp_schema() -> Arc<Schema> {
+    Arc::new(Schema::new(vec![
+        ColumnSchema::new("ts", CDT::timestamp_millisecond_datatype(), true).with_time_index(true),
+    ]))
+}
+
+fn recovery_stream_output(
+    batches: Vec<RecordBatch>,
+    watermarks: Option<Vec<(u64, Option<u64>)>>,
+    fail: bool,
+) -> Output {
+    Output::new_with_stream(Box::pin(RecoveryMetricsStream {
+        schema: recovery_timestamp_schema(),
+        batches,
+        metrics: watermarks.map(|watermarks| RecordBatchMetrics {
+            region_watermarks: watermarks
+                .into_iter()
+                .map(|(region_id, watermark)| RegionWatermarkEntry {
+                    region_id,
+                    watermark,
+                })
+                .collect(),
+            ..Default::default()
+        }),
+        fail,
+    }))
+}
+
+fn recovery_timestamp_batch(values: Vec<Option<i64>>) -> RecordBatch {
+    RecordBatch::new(
+        recovery_timestamp_schema(),
+        vec![Arc::new(TimestampMillisecondVector::from(values)) as VectorRef],
+    )
+    .unwrap()
+}
+
+fn seed_recovery_state(
+    task: &BatchingTask,
+    lower: &BTreeMap<u64, u64>,
+) -> (BTreeMap<u64, u64>, String) {
+    let mut state = task.state.write().unwrap();
+    state.advance_checkpoints(lower.iter().map(|(region, seq)| (*region, *seq)).collect());
+    state.dirty_time_windows.add_window(
+        Timestamp::new_millisecond(20_000),
+        Some(Timestamp::new_millisecond(25_000)),
+    );
+    (
+        state.checkpoints().clone(),
+        format!("{:?}", state.dirty_time_windows),
+    )
+}
+
+fn assert_recovery_state_unchanged(
+    task: &BatchingTask,
+    checkpoints: &BTreeMap<u64, u64>,
+    dirty: &str,
+) {
+    let state = task.state.read().unwrap();
+    assert_eq!(state.checkpoints(), checkpoints);
+    assert_eq!(format!("{:?}", state.dirty_time_windows), dirty);
+}
+
 struct CaptureScheduledNowHandler {
     expected_extension: String,
     captured_sql: Arc<std::sync::Mutex<Option<String>>>,
@@ -1368,6 +1672,290 @@ fn output_with_region_watermarks(
     }));
     result.metrics.mark_ready();
     result
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_where_and_expiry() {
+    let TestTaskParts {
+        mut task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(src.number) AS output_value, date_bin(INTERVAL '5 second', src.ts) AS output_window FROM numbers_with_ts AS src WHERE src.number = 42 GROUP BY output_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    let expire_after = 5;
+    Arc::get_mut(&mut task.config)
+        .expect("test task config should be uniquely owned")
+        .expire_after = Some(expire_after);
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![],
+            Some(vec![(1, Some(10))]),
+            false,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: Some(expire_after),
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let frontend = FrontendClient::from_grpc_handler(
+        Arc::downgrade(
+            &(handler.clone()
+                as Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError>),
+        ),
+        QueryOptions::default(),
+    );
+    let (before_checkpoints, before_dirty) = seed_recovery_state(&task, &lower);
+    let before = Timestamp::new_second(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
+    );
+
+    let (high, windows) = task
+        .capture_recovery_windows(&query_engine, &frontend, &lower)
+        .await
+        .unwrap();
+    let after = Timestamp::new_second(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
+    );
+
+    assert_eq!(high, lower);
+    assert!(windows.is_empty());
+    let expiry_lower = handler.expiry_lower.lock().unwrap().unwrap();
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    // The helper and samples may straddle a window boundary.
+    let aligned_expiry = |now: Timestamp| {
+        time_window_expr
+            .eval(
+                now.sub_duration(Duration::from_secs(expire_after as u64))
+                    .unwrap(),
+            )
+            .unwrap()
+            .0
+            .unwrap()
+    };
+    assert!(aligned_expiry(before) <= expiry_lower && expiry_lower <= aligned_expiry(after));
+    assert_eq!(
+        time_window_expr.eval(expiry_lower).unwrap().0,
+        Some(expiry_lower)
+    );
+    assert_recovery_state_unchanged(&task, &before_checkpoints, &before_dirty);
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_terminal_proof_cases_leave_state_unchanged() {
+    struct Case {
+        name: &'static str,
+        lower: BTreeMap<u64, u64>,
+        watermarks: Option<Vec<(u64, Option<u64>)>>,
+        succeeds: bool,
+    }
+
+    let cases = vec![
+        Case {
+            name: "empty_stream_complete_proof_h_equals_c",
+            lower: BTreeMap::from([(1, 10)]),
+            watermarks: Some(vec![(1, Some(10))]),
+            succeeds: true,
+        },
+        Case {
+            name: "missing_metrics",
+            lower: BTreeMap::from([(1, 10)]),
+            watermarks: None,
+            succeeds: false,
+        },
+        Case {
+            name: "missing_c_region",
+            lower: BTreeMap::from([(1, 10), (2, 20)]),
+            watermarks: Some(vec![(1, Some(10))]),
+            succeeds: false,
+        },
+        Case {
+            name: "unknown_none_watermark",
+            lower: BTreeMap::from([(1, 10), (2, 20)]),
+            watermarks: Some(vec![(1, Some(10)), (2, None)]),
+            succeeds: false,
+        },
+        Case {
+            name: "unexpected_region",
+            lower: BTreeMap::from([(1, 10)]),
+            watermarks: Some(vec![(1, Some(10)), (2, Some(20))]),
+            succeeds: false,
+        },
+        Case {
+            name: "regressing_h",
+            lower: BTreeMap::from([(1, 10)]),
+            watermarks: Some(vec![(1, Some(9))]),
+            succeeds: false,
+        },
+    ];
+
+    for case in cases {
+        let TestTaskParts {
+            task, query_engine, ..
+        } = new_time_window_test_task_with_query(
+            "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+        )
+        .await;
+        configure_source_capability(&query_engine, "mito", true).await;
+        let handler = Arc::new(RecoveryCaptureHandler {
+            output: std::sync::Mutex::new(Some(recovery_stream_output(
+                vec![],
+                case.watermarks,
+                false,
+            ))),
+            lower: serde_json::to_string(&case.lower).unwrap(),
+            expire_after: None,
+            expiry_lower: std::sync::Mutex::new(None),
+        });
+        let handler_dyn: Arc<
+            dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+        > = handler.clone();
+        let frontend = FrontendClient::from_grpc_handler(
+            Arc::downgrade(&handler_dyn),
+            QueryOptions::default(),
+        );
+        let (before_checkpoints, before_dirty) = seed_recovery_state(&task, &case.lower);
+
+        let result = task
+            .capture_recovery_windows(&query_engine, &frontend, &case.lower)
+            .await;
+        assert_eq!(result.is_ok(), case.succeeds, "{}: {result:?}", case.name);
+        if case.succeeds {
+            assert_eq!(
+                result.unwrap(),
+                (case.lower.clone(), vec![]),
+                "{}",
+                case.name
+            );
+        }
+        assert_recovery_state_unchanged(&task, &before_checkpoints, &before_dirty);
+    }
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_streams_sorted_unique_windows() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![
+                recovery_timestamp_batch(vec![Some(10_000), Some(-1), Some(1_000)]),
+                recovery_timestamp_batch(vec![Some(11_000), Some(1_000), Some(-5_000)]),
+            ],
+            Some(vec![(1, Some(10))]),
+            false,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+
+    let (_, windows) = task
+        .capture_recovery_windows(&query_engine, &frontend, &lower)
+        .await
+        .unwrap();
+    assert_eq!(
+        windows,
+        vec![
+            (
+                Timestamp::new_millisecond(-5_000),
+                Timestamp::new_millisecond(0)
+            ),
+            (
+                Timestamp::new_millisecond(0),
+                Timestamp::new_millisecond(5_000)
+            ),
+            (
+                Timestamp::new_millisecond(10_000),
+                Timestamp::new_millisecond(15_000)
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_rejects_stream_error() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![],
+            Some(vec![(1, Some(10))]),
+            true,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+
+    assert!(
+        task.capture_recovery_windows(&query_engine, &frontend, &lower)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_rejects_null_timestamp() {
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![recovery_timestamp_batch(vec![None])],
+            Some(vec![(1, Some(10))]),
+            false,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+
+    assert!(
+        task.capture_recovery_windows(&query_engine, &frontend, &lower)
+            .await
+            .is_err()
+    );
 }
 
 #[test]
