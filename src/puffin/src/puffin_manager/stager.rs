@@ -43,13 +43,13 @@ pub type DirWriterProviderRef = Box<dyn DirWriterProvider + Send>;
 ///
 /// `Stager` will provide a `BoxWriter` that the caller of `get_blob`
 /// can use to write the blob into the staging area.
-pub trait InitBlobFn = FnOnce(BoxWriter) -> WriteResult;
+pub type InitBlobFn<'a> = dyn FnOnce(BoxWriter) -> WriteResult + Send + Sync + 'a;
 
 /// Function that initializes a directory.
 ///
 /// `Stager` will provide a `DirWriterProvider` that the caller of `get_dir`
 /// can use to write files inside the directory into the staging area.
-pub trait InitDirFn = FnOnce(DirWriterProviderRef) -> WriteResult;
+pub type InitDirFn<'a> = dyn FnOnce(DirWriterProviderRef) -> WriteResult + Send + Sync + 'a;
 
 /// `Stager` manages the staging area for the puffin files.
 #[async_trait]
@@ -67,7 +67,7 @@ pub trait Stager: Send + Sync {
         &self,
         handle: &Self::FileHandle,
         key: &str,
-        init_factory: Box<dyn InitBlobFn + Send + Sync + 'a>,
+        init_factory: Box<InitBlobFn<'a>>,
     ) -> Result<Self::Blob>;
 
     /// Retrieves a directory, initializing it if necessary using the provided `init_fn`.
@@ -79,7 +79,7 @@ pub trait Stager: Send + Sync {
         &self,
         handle: &Self::FileHandle,
         key: &str,
-        init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
+        init_fn: Box<InitDirFn<'a>>,
     ) -> Result<(Self::Dir, DirMetrics)>;
 
     /// Stores a directory in the staging area.

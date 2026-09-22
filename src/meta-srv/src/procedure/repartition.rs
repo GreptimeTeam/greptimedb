@@ -107,7 +107,7 @@ pub struct PersistentContext {
 }
 
 fn default_timeout() -> Duration {
-    Duration::from_mins(2)
+    Duration::from_secs(2 * 60)
 }
 
 impl PersistentContext {

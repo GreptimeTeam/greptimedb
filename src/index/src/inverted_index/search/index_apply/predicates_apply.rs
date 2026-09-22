@@ -127,9 +127,10 @@ impl PredicatesIndexApplier {
         let mut fst_appliers = Vec::with_capacity(predicates.len());
 
         // InList predicates are applied first to benefit from higher selectivity.
-        let in_list_index = predicates
-            .iter_mut()
-            .partition_in_place(|(_, ps)| ps.iter().any(|p| matches!(p, Predicate::InList(_))));
+        let in_list_index =
+            crate::inverted_index::search::partition_in_place(&mut predicates, |(_, ps)| {
+                ps.iter().any(|p| matches!(p, Predicate::InList(_)))
+            });
         let mut iter = predicates.into_iter();
         for _ in 0..in_list_index {
             let (column_name, predicates) = iter.next().unwrap();

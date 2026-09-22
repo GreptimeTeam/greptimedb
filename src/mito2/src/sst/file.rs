@@ -298,20 +298,33 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Formats a debug field with a custom closure, as a stable replacement for
+/// the unstable `DebugStruct::field_with`.
+struct DebugFmt<F: Fn(&mut Formatter<'_>) -> fmt::Result>(F);
+
+impl<F: Fn(&mut Formatter<'_>) -> fmt::Result> std::fmt::Debug for DebugFmt<F> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        (self.0)(f)
+    }
+}
+
 impl Debug for FileMeta {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         let mut debug_struct = f.debug_struct("FileMeta");
         debug_struct
             .field("region_id", &self.region_id)
-            .field_with("file_id", |f| write!(f, "{} ", self.file_id))
-            .field_with("time_range", |f| {
-                write!(
-                    f,
-                    "({}, {}) ",
-                    self.time_range.0.to_iso8601_string(),
-                    self.time_range.1.to_iso8601_string()
-                )
-            })
+            .field("file_id", &DebugFmt(|f| write!(f, "{} ", self.file_id)))
+            .field(
+                "time_range",
+                &DebugFmt(|f| {
+                    write!(
+                        f,
+                        "({}, {}) ",
+                        self.time_range.0.to_iso8601_string(),
+                        self.time_range.1.to_iso8601_string()
+                    )
+                }),
+            )
             .field("level", &self.level)
             .field("file_size", &ReadableSize(self.file_size))
             .field(
@@ -327,14 +340,17 @@ impl Debug for FileMeta {
         debug_struct
             .field("num_rows", &self.num_rows)
             .field("num_row_groups", &self.num_row_groups)
-            .field_with("sequence", |f| match self.sequence {
-                None => {
-                    write!(f, "None")
-                }
-                Some(seq) => {
-                    write!(f, "{}", seq)
-                }
-            })
+            .field(
+                "sequence",
+                &DebugFmt(|f| match self.sequence {
+                    None => {
+                        write!(f, "None")
+                    }
+                    Some(seq) => {
+                        write!(f, "{}", seq)
+                    }
+                }),
+            )
             .field("partition_expr", &self.partition_expr)
             .field("num_series", &self.num_series);
         if self.primary_key_min.is_some() || self.primary_key_max.is_some() {

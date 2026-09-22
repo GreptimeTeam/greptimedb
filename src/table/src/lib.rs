@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(try_blocks)]
-
 pub mod dist_table;
 pub mod error;
 pub mod metadata;

@@ -56,7 +56,7 @@ impl TableSuffixTemplate {
                 let v = val.get(key.as_str())?;
                 match v {
                     VrlValue::Integer(v) => Some(v.to_string()),
-                    VrlValue::Bytes(v) => Some(String::from_utf8_lossy_owned(v.to_vec())),
+                    VrlValue::Bytes(v) => Some(String::from_utf8_lossy(v).into_owned()),
                     _ => None,
                 }
             })
