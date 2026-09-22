@@ -121,6 +121,7 @@ impl Requester {
             .map(|partition| {
                 RegionRequestBody::BuildIndex(BuildIndexRequest {
                     region_id: partition.id.into(),
+                    options: request.options.clone(),
                 })
             })
             .collect();

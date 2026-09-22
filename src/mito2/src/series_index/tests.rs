@@ -52,7 +52,15 @@ async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
-    let engine = env.create_engine(MitoConfig::default()).await;
+    prepare_region_with_config(env, timestamps, MitoConfig::default()).await
+}
+
+async fn prepare_region_with_config(
+    env: &mut TestEnv,
+    timestamps: &[i64],
+    config: MitoConfig,
+) -> (MitoEngine, MitoRegionRef) {
+    let engine = env.create_engine(config).await;
     let metadata = Arc::new(sst_region_metadata_with_encoding(
         PrimaryKeyEncoding::Sparse,
     ));
@@ -939,4 +947,111 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     })
     .await
     .unwrap();
+}
+
+#[rstest::rstest]
+#[case(true)]
+#[case(false)]
+#[tokio::test]
+async fn test_build_series_index_region_request(#[case] enabled: bool) {
+    use api::v1::region::build_index_request;
+    use store_api::region_request::RegionBuildIndexRequest;
+
+    let mut env = TestEnv::with_prefix("series-manual-request").await;
+    let config = MitoConfig {
+        experimental_enable_series_index: enabled,
+        experimental_series_index_maintenance_interval: Duration::from_secs(3600),
+        ..Default::default()
+    };
+    let (engine, region) = prepare_region_with_config(&mut env, &[1000, 2000], config).await;
+    for _ in 0..2 {
+        let result = engine
+            .handle_request(
+                region.region_id,
+                RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                    options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+                }),
+            )
+            .await;
+        if enabled {
+            assert_eq!(0, result.unwrap().affected_rows);
+            assert!(!region.series_index_version().series_indexes.is_empty());
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("series index is disabled")
+            );
+        }
+    }
+    engine.stop().await.unwrap();
+}
+
+#[rstest::rstest]
+#[case::build(false)]
+#[case::catalog(true)]
+#[tokio::test]
+async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: bool) {
+    let mut env = TestEnv::with_prefix("series-manual-failure").await;
+    let (engine, region) = prepare_region(&mut env).await;
+    let catalog = series_catalog_path(region.region_id);
+    let fail_once = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let fail = fail_once.clone();
+    let layer = MockLayerBuilder::default()
+        .writer_factory(Arc::new(move |path, _, inner| {
+            let target = if catalog_failure {
+                path == catalog
+            } else {
+                path.contains("/series/")
+            };
+            Box::new(FailingSeriesWriter {
+                inner,
+                fail: target && fail.load(std::sync::atomic::Ordering::Relaxed),
+            })
+        }))
+        .build()
+        .unwrap();
+    let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
+    let (purger, purge_receiver) = series_index_channel(store.clone());
+    let (state, receiver) = super::task::SeriesIndexTaskState::new(0);
+    let state = Arc::new(state);
+    let regions = Arc::new(RegionMap::default());
+    regions.insert_region(region.clone());
+    let task = super::task::spawn_series_index_tasks(
+        0,
+        store,
+        regions,
+        state.clone(),
+        receiver,
+        Duration::from_secs(100),
+        purger,
+        purge_receiver,
+        Duration::from_secs(3600),
+        Arc::new(StdTimeProvider),
+        false,
+    );
+    assert!(
+        state
+            .reconcile(region.clone())
+            .unwrap()
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(region.series_index_version().series_indexes.is_empty());
+    fail_once.store(false, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(
+        1,
+        state
+            .reconcile(region)
+            .unwrap()
+            .await
+            .unwrap()
+            .unwrap()
+            .built_series
+    );
+    state.stop();
+    task.await.unwrap();
+    engine.stop().await.unwrap();
 }

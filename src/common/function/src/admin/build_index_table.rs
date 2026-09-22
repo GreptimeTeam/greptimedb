@@ -64,6 +64,7 @@ pub(crate) async fn build_index(
     let affected_rows = table_mutation_handler
         .build_index(
             BuildIndexTableRequest {
+                options: None,
                 catalog_name,
                 schema_name,
                 table_name,

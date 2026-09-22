@@ -197,7 +197,7 @@ impl SeriesIndexTask {
             self.state.is_running(),
             WorkerStoppedSnafu { id: self.worker_id }
         );
-        let current = self.regions.writable_region(region.region_id)?;
+        let current = self.regions.writable_non_staging_region(region.region_id)?;
         ensure!(
             Arc::ptr_eq(&current, region),
             InvalidRequestSnafu {
