@@ -1,0 +1,51 @@
+ADMIN BUILD_SERIES_INDEX();
+
+Error: 1004(InvalidArguments), Expected 1 args, but actual 0
+
+ADMIN BUILD_SERIES_INDEX(1);
+
+Error: 1004(InvalidArguments), Failed to build admin function args: failed to cast 1
+
+ADMIN BUILD_SERIES_INDEX('missing_series_table');
+
+Error: 1002(Unexpected), Failed to execute admin function build_series_index: Execution error: Table not found: greptime.public.missing_series_table
+
+CREATE TABLE ordinary_series_target (ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+ADMIN BUILD_SERIES_INDEX('ordinary_series_target');
+
+Error: 1002(Unexpected), Failed to execute admin function build_series_index: Execution error: Not supported: building series indexes requires a physical metric table
+
+DROP TABLE ordinary_series_target;
+
+Affected Rows: 0
+
+CREATE TABLE series_physical_target (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric
+WITH (physical_metric_table = 'true');
+
+Affected Rows: 0
+
+-- SQLNESS REPLACE (region\s\d+\(\d+\,\s\d+\)) region
+ADMIN BUILD_SERIES_INDEX('series_physical_target');
+
+Error: 1002(Unexpected), Failed to execute admin function build_series_index: Execution error: Invalid request to region, reason: series index is disabled; enable experimental_enable_series_index
+
+CREATE TABLE series_logical_target (ts TIMESTAMP TIME INDEX, val DOUBLE) ENGINE = metric
+WITH (on_physical_table = 'series_physical_target');
+
+Affected Rows: 0
+
+ADMIN BUILD_SERIES_INDEX('series_logical_target');
+
+Error: 1002(Unexpected), Failed to execute admin function build_series_index: Execution error: Not supported: building series indexes requires a physical metric table
+
+DROP TABLE series_logical_target;
+
+Affected Rows: 0
+
+DROP TABLE series_physical_target;
+
+Affected Rows: 0
+
