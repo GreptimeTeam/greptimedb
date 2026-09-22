@@ -114,7 +114,9 @@ pub struct QueryOptions {
     /// Set to 0 to disable template reuse. Only the plan shape is cached; every
     /// request rebinds its own evaluation range, time filters and table source.
     /// A template measures around 30KiB, so the default holds roughly 18MiB.
-    /// One PromQL query needs about three templates on a single node.
+    /// One PromQL query needs about three templates on a single node. Regions of
+    /// one table share a template, so this budget is spent on query shapes
+    /// rather than on regions.
     pub experimental_promql_plan_cache_size: usize,
 }
 
