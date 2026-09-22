@@ -298,17 +298,17 @@ mod tests {
         let options: FrontendOptions = toml::from_str(
             r#"
 [pending_rows_batcher]
-worker_channel_capacity = 65526
+worker_channel_capacity = 12345
 [pending_rows_batcher.logical_table]
-worker_channel_capacity = 65526
+worker_channel_capacity = 12345
 [prom_store]
-worker_channel_capacity = 65526
+worker_channel_capacity = 12345
 "#,
         )
         .unwrap();
         assert_eq!(
             options.pending_rows_batcher.table.worker_channel_capacity,
-            65_526
+            12_345
         );
         assert_eq!(
             options
@@ -316,9 +316,9 @@ worker_channel_capacity = 65526
                 .logical_table
                 .unwrap()
                 .worker_channel_capacity,
-            65_526
+            12_345
         );
-        assert_eq!(options.prom_store.worker_channel_capacity, 65_526);
+        assert_eq!(options.prom_store.worker_channel_capacity, 12_345);
     }
 
     #[test]
