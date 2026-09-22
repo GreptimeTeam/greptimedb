@@ -157,6 +157,48 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
+  test-windows-filesystem:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    name: Test Windows filesystem
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTFLAGS: "-D warnings -C linker=lld-link"
+      RUST_BACKTRACE: 1
+      RUST_MIN_STACK: 8388608 # 8MB
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-windows-filesystem"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Cargo Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Run filesystem regression tests
+        # Keep this focused and omit dashboard, which requires WSL on Windows.
+        run: >-
+          cargo nextest run --locked --lib
+          -p object-store -p common-datasource -p cli
+          -E 'package(=object-store) | package(=common-datasource) | (package(=cli) & test(metadata::snapshot::tests::))'
+
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     name: Check for conflict
