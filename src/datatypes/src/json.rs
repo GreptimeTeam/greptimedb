@@ -402,37 +402,45 @@ fn encode_json_value_with_hint(
         return Ok(JsonValue::null());
     }
 
-    if hint.data_type.is_string()
-        && let Json::String(value) = json
-    {
-        return Ok(value.into());
-    }
-
-    let encoded = match (&hint.data_type, &json) {
+    let json = match (&hint.data_type, json) {
+        (ConcreteDataType::String(_), Json::String(value)) => {
+            return Ok(value.into());
+        }
         (
             ConcreteDataType::Int8(_)
             | ConcreteDataType::Int16(_)
             | ConcreteDataType::Int32(_)
             | ConcreteDataType::Int64(_),
-            Json::Number(v),
-        ) => v.as_i64().map(Into::into),
+            Json::Number(value),
+        ) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
+        }
         (
             ConcreteDataType::UInt8(_)
             | ConcreteDataType::UInt16(_)
             | ConcreteDataType::UInt32(_)
             | ConcreteDataType::UInt64(_),
-            Json::Number(v),
-        ) => v.as_u64().map(Into::into),
-        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), Json::Number(v)) => {
-            v.as_f64().map(Into::into)
+            Json::Number(value),
+        ) => {
+            if let Some(value) = value.as_u64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
         }
-        (ConcreteDataType::Boolean(_), Json::Bool(v)) => Some((*v).into()),
-        _ => None,
+        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), Json::Number(value)) => {
+            if let Some(value) = value.as_f64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
+        }
+        (ConcreteDataType::Boolean(_), Json::Bool(value)) => {
+            return Ok(value.into());
+        }
+        (_, json) => json,
     };
-
-    if let Some(encoded) = encoded {
-        return Ok(encoded);
-    }
 
     match policy {
         TypeHintMismatchPolicy::Reject => error::InvalidJsonSnafu {
