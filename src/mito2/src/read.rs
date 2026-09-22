@@ -788,7 +788,7 @@ impl Batch {
 
     /// Prepares a shared full-key cache when all Dense PK columns are needed.
     /// Explicitly supplied decoded/defaulted values take precedence.
-    pub(crate) fn decode_dense_pk(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
+    pub(crate) fn ensure_dense_pk_decoded(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
         if self.pk_values.is_none() {
             // A fallible iterator has no nonzero lower size hint. Reserve the
             // known field count instead of growing its collected Vec per key.
@@ -1363,14 +1363,14 @@ mod tests {
 
         // Schema compatibility may supply already decoded/defaulted values.
         batch.set_pk_values(CompositeValues::Dense(vec![(7, Value::from("default"))]));
-        batch.decode_dense_pk(&codec).unwrap();
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
         assert_eq!(
             batch.pk_col_value(&codec, 0, 7).unwrap(),
             Some(&Value::from("default"))
         );
         assert!(batch.pk_col_value(&codec, 1, 3).unwrap().is_none());
         batch.remove_pk_values();
-        batch.decode_dense_pk(&codec).unwrap();
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
         assert_eq!(
             batch.pk_col_value(&codec, 1, 3).unwrap(),
             Some(&Value::Int64(8))

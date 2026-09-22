@@ -327,7 +327,7 @@ impl Indexer {
     /// Called before any creator consumes the batch, so the full decode is shared.
     fn prepare_primary_key(&self, batch: &mut Batch) -> Result<()> {
         if let Some(codec) = &self.dense_pk_decoder {
-            batch.decode_dense_pk(codec)?;
+            batch.ensure_dense_pk_decoded(codec)?;
         }
         Ok(())
     }
