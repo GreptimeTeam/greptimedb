@@ -18,13 +18,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
+use catalog::kvbackend::KvBackendCatalogManager;
 use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
+use common_meta::key::schema_name::SchemaNameKey;
 use common_query::OutputData;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
@@ -581,6 +583,129 @@ impl BatchingTask {
                     .to_string(),
             })
             .map(Some)
+    }
+
+    /// Verifies that recovery can still read all source data required by its retained scope.
+    pub async fn validate_recovery_retention(
+        &self,
+        retention_lower: Option<Timestamp>,
+        windows: &[(Timestamp, Timestamp)],
+    ) -> Result<(), Error> {
+        for name in &self.config.source_table_names {
+            let table = self
+                .config
+                .catalog_manager
+                .table(&name[0], &name[1], &name[2], None)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .context(UnexpectedSnafu {
+                    reason: format!(
+                        "Flow {} source table {} is unavailable for recovery retention validation",
+                        self.config.flow_id,
+                        name.join(".")
+                    ),
+                })?;
+            let ttl = if let Some(ttl) = table.table_info().meta.options.ttl {
+                ttl
+            } else {
+                let manager = self
+                    .config
+                    .catalog_manager
+                    .as_any()
+                    .downcast_ref::<KvBackendCatalogManager>()
+                    .context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} cannot resolve inherited TTL for source table {} during recovery",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                manager
+                    .table_metadata_manager_ref()
+                    .schema_manager()
+                    .get(SchemaNameKey::new(&name[0], &name[1]))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+                    .context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} schema {}.{} is unavailable for recovery retention validation",
+                            self.config.flow_id, name[0], name[1]
+                        ),
+                    })?
+                    .ttl
+                    .map(Into::into)
+                    .unwrap_or(TimeToLive::Forever)
+            };
+
+            match ttl {
+                TimeToLive::Forever => {}
+                TimeToLive::Instant => {
+                    return UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has instant TTL and cannot be recovered",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    }
+                    .fail();
+                }
+                TimeToLive::Duration(ttl) => {
+                    let expire_after = self.config.expire_after.context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has TTL {ttl:?}, but recovery has no expire_after",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                    let expire_after = u64::try_from(expire_after).map_err(|_| {
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} has negative expire_after {expire_after} during recovery retention validation",
+                                self.config.flow_id
+                            ),
+                        }
+                        .build()
+                    })?;
+                    if ttl <= Duration::from_secs(expire_after) {
+                        return UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} source table {} TTL {ttl:?} must exceed expire_after {expire_after}s for recovery",
+                                self.config.flow_id,
+                                name.join(".")
+                            ),
+                        }
+                        .fail();
+                    }
+                    let mut oldest = retention_lower.context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has finite TTL {ttl:?}, but recovery has no retained lower bound",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                    for (start, _) in windows {
+                        oldest = oldest.min(*start);
+                    }
+                    let cutoff = Timestamp::current_millis()
+                        .sub_duration(ttl)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    if oldest <= cutoff {
+                        return UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} recovery requires source table {} data from {oldest:?}, older than TTL {ttl:?} cutoff {cutoff:?}",
+                                self.config.flow_id,
+                                name.join(".")
+                            ),
+                        }
+                        .fail();
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Discovers the source time windows touched by the exact sequence range `(C, H]`.
