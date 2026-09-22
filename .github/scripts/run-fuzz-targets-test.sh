@@ -117,6 +117,20 @@ EOF
   set -e
 }
 
+test_rustup_toolchain_env_is_honored() {
+  new_fixture
+  export RUSTUP_TOOLCHAIN=nightly-2026-03-21
+  run_fixture $'fuzz_create_table' true true "fuzz_create_table"
+  unset RUSTUP_TOOLCHAIN
+
+  assert_eq 1 "${fixture_status}" "pinned toolchain run status"
+  grep -q -- '+nightly-2026-03-21 fuzz run fuzz_create_table' "${fixture}/cargo.log" || \
+    fail "pinned toolchain missing from cargo invocation"
+  grep -q 'cargo +nightly-2026-03-21 fuzz run fuzz_create_table' "${fixture}/artifacts/summary.md" || \
+    fail "pinned toolchain missing from reproduce command"
+  cleanup_fixture
+}
+
 test_successful_targets_run_in_order() {
   new_fixture
   run_fixture $'fuzz_create_table\nfuzz_insert' false true ""
@@ -367,5 +381,6 @@ test_collector_keeps_target_scopes_separate
 test_cluster_collector_honors_target_scope_and_namespace
 test_setup_failure_writes_artifact_contract
 test_setup_failure_keeps_manifest_when_collection_fails
+test_rustup_toolchain_env_is_honored
 
 printf 'All fuzz orchestration script tests passed.\n'

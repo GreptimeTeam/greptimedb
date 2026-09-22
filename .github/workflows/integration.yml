@@ -488,6 +488,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
         with:
@@ -546,6 +547,7 @@ jobs:
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_FUZZ_BINARY_PATH: ./bin/greptime
           GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance/
@@ -829,6 +831,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_KAFKA_WAL_HELPER_URL: http://127.0.0.1:8080
           GT_KAFKA_ADDR: kafka.kafka-cluster.svc.cluster.local:9092
@@ -1003,6 +1006,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
           targets: ${{ matrix.group.targets }}
