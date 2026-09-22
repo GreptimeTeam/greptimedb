@@ -42,11 +42,11 @@ name: Docs CI
 
 jobs:
   verify_dispatch_head:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
     name: Verify dispatched head
     runs-on: ubuntu-latest
     steps:
       - name: Verify the admitted head
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
         env:
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
         run: |
@@ -54,7 +54,7 @@ jobs:
           test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
 
   typos:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     needs: verify_dispatch_head
     name: Spell Check with Typos
     runs-on: ubuntu-latest
@@ -65,7 +65,7 @@ jobs:
       - uses: crate-ci/typos@v1.50.2
 
   license-header-check:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     needs: verify_dispatch_head
     runs-on: ubuntu-latest
     name: Check License Header
@@ -76,7 +76,7 @@ jobs:
       - uses: korandoru/hawkeye@v5
 
   required-checks:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
     needs: verify_dispatch_head
     name: ${{ matrix.check }}
     runs-on: ubuntu-slim

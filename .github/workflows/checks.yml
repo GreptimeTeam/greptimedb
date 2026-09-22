@@ -36,11 +36,11 @@ concurrency:
 
 jobs:
   verify_dispatch_head:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
     name: Verify dispatched head
     runs-on: ubuntu-latest
     steps:
       - name: Verify the admitted head
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
         env:
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
         run: |
@@ -48,7 +48,7 @@ jobs:
           test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
 
   check-typos-and-docs:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     name: Check typos and docs
     runs-on: ubuntu-latest
@@ -64,7 +64,7 @@ jobs:
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   license-header-check:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     runs-on: ubuntu-latest
     name: Check License Header
@@ -81,7 +81,7 @@ jobs:
           config: licenserc-enterprise.toml
 
   github-script-tests:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     name: GitHub Script Tests
     runs-on: ubuntu-latest
@@ -119,7 +119,7 @@ jobs:
           python3 tests/perf/test_agent_observability_summary.py
 
   check:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     name: Check
     runs-on: ${{ matrix.os }}
@@ -149,7 +149,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets --all-features
 
   toml:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     name: Toml Check
     runs-on: ubuntu-latest

@@ -42,11 +42,11 @@ concurrency:
 
 jobs:
   verify_dispatch_head:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
     name: Verify dispatched head
     runs-on: ubuntu-latest
     steps:
       - name: Verify the admitted head
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
         env:
           EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
         run: |
@@ -54,7 +54,7 @@ jobs:
           test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
 
   build:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
     needs: verify_dispatch_head
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
@@ -274,7 +274,7 @@ jobs:
       artifact-name: bins
 
   compat-updater-check:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
     needs: verify_dispatch_head
     name: Check compat version updater
     runs-on: ubuntu-latest
@@ -332,7 +332,7 @@ jobs:
           retention-days: 3
 
   prepare-fuzz-targets:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command)) && (github.event_name == 'pull_request' || inputs.fuzz_profile != 'none') }}
     needs: verify_dispatch_head
     name: Prepare Fuzz Targets
     runs-on: ubuntu-latest
@@ -584,7 +584,7 @@ jobs:
           artifact-name: fuzz-unstable-standalone
 
   build-greptime-ci:
-    if: ${{ always() && (needs.verify_dispatch_head.result == 'success' || needs.verify_dispatch_head.result == 'skipped') && github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || (github.event_name == 'workflow_dispatch' && inputs.ci_command && inputs.fuzz_profile != 'none')) }}
     needs: verify_dispatch_head
     name: Build GreptimeDB binary (profile-CI)
     runs-on: ${{ matrix.os }}
