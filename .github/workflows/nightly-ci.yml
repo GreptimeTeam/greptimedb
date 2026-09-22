@@ -40,7 +40,7 @@ jobs:
       - name: Running tests
         run: >-
           cargo nextest run -F dashboard --no-fail-fast --retries 0
-          -E 'package(object-store) | test(parquet_writer::) | test(export_logical_tables::) | test(copy_table_to::) | test(data::export_v2::) | test(data::snapshot_storage::)'
+          -E 'package(object-store) | test(parquet_writer::) | test(export_logical_tables::) | test(export_database::) | test(copy_table_to::) | test(data::export_v2::) | test(data::snapshot_storage::)'
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
