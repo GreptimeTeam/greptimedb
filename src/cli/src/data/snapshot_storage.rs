@@ -799,12 +799,13 @@ mod tests {
     use std::sync::Arc;
 
     use object_store::ObjectStore;
-    use object_store::layers::mock::{self, MockLayerBuilder, OpDelete, oio};
+    use object_store::layers::mock::MockLayerBuilder;
     use object_store::services::Fs;
     use tempfile::tempdir;
     use url::Url;
 
     use super::*;
+    use crate::data::export_v2::error::Error;
     use crate::data::export_v2::manifest::{DataFormat, TimeRange};
     use crate::data::export_v2::schema::SchemaDefinition;
 
@@ -1144,26 +1145,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_prepare_export_chunk_reports_delete_failure() {
-        struct FailingDeleter;
-
-        impl oio::Delete for FailingDeleter {
-            async fn delete(&mut self, _path: &str, _args: OpDelete) -> mock::Result<()> {
-                Err(mock::Error::new(
-                    ErrorKind::PermissionDenied,
-                    "injected delete failure",
-                ))
-            }
-
-            async fn close(&mut self) -> mock::Result<()> {
-                Ok(())
-            }
-        }
-
         let dir = tempdir().unwrap();
         let mut storage = make_storage_with_rooted_fs(dir.path());
         storage.object_store = storage.object_store.layer(
             MockLayerBuilder::default()
-                .deleter_factory(Arc::new(|_| Box::new(FailingDeleter)))
+                // OpenDAL's unit deleter returns Unsupported for every deletion.
+                .deleter_factory(Arc::new(|_| Box::new(())))
                 .build()
                 .unwrap(),
         );
@@ -1175,17 +1162,17 @@ mod tests {
             .prepare_export_chunk(&["public".into()], 2, true)
             .await
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("delete unfinished chunk file data/public/2/a.parquet")
+        let Error::StorageOperation {
+            operation, error, ..
+        } = error
+        else {
+            panic!("expected storage operation error, got {error:?}");
+        };
+        assert_eq!(
+            operation,
+            "delete unfinished chunk file data/public/2/a.parquet"
         );
-        assert!(
-            std::error::Error::source(&error)
-                .unwrap()
-                .to_string()
-                .contains("injected delete failure")
-        );
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert_eq!(
             storage.read_text("data/public/2/a.parquet").await.unwrap(),
             "keep"
