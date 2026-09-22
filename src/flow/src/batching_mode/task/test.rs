@@ -1386,7 +1386,14 @@ fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Opt
         &mut has_number_filter,
         &mut expiry_lower,
     );
-    assert_eq!(scans, vec![vec!["numbers_with_ts".to_string()]]);
+    assert_eq!(
+        scans,
+        vec![vec![
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "numbers_with_ts".to_string(),
+        ]]
+    );
     assert!(has_number_filter, "recovery capture lost WHERE number = 42");
     assert_eq!(expiry_lower.is_some(), expire_after.is_some());
     expiry_lower
