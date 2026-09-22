@@ -348,7 +348,7 @@ mod tests {
                                 }
                                 .fail();
                             }
-                            // Ordinary COPY continues its I/O even when Metric jobs cancel.
+                            // Already-started ordinary I/O drains after cancellation.
                             token.cancelled().await;
                             started.send(10).unwrap();
                             finish_io.acquire().await.unwrap().forget();
