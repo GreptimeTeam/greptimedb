@@ -19,10 +19,10 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use arrow::array::BooleanArray;
+use arrow::array::Float64Array;
 use arrow::datatypes::DataType;
 use async_trait::async_trait;
-use datafusion_common::cast::{as_float64_array, as_string_view_array};
+use datafusion_common::cast::as_string_view_array;
 use datafusion_common::utils::take_function_args;
 use datafusion_common::{Result, exec_datafusion_err, exec_err, not_impl_err};
 use datafusion_expr::async_udf::{AsyncScalarUDF, AsyncScalarUDFImpl};
@@ -34,8 +34,8 @@ use serde_json::{Value, json};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::function_registry::FunctionRegistry;
 
-/// Experimental natural-language predicate: `jev(text, statement, threshold)`.
-/// Each non-null row is a Noul question; its probability is compared with `>=`.
+/// Experimental natural-language matching: `jev(text, prompt) -> Float64`.
+/// Returns the Noul probability in `[0, 1]`, or SQL NULL if either argument is NULL.
 #[derive(PartialEq, Eq, Hash)]
 pub(crate) struct JevFunction {
     signature: Signature,
@@ -53,14 +53,14 @@ impl JevFunction {
         });
     }
 
-    async fn evaluate(&self, client: &Client, text: &str, statement: &str) -> Result<f64> {
+    async fn evaluate(&self, client: &Client, text: &str, prompt: &str) -> Result<f64> {
         let response: Value = client
             .post(&self.endpoint)
             .json(&json!({
                 "model": self.model,
                 "state": text,
                 "questions": {
-                    "matches": { "type": "noul", "instructions": statement }
+                    "matches": { "type": "noul", "instructions": prompt }
                 }
             }))
             .send()
@@ -112,7 +112,7 @@ impl Default for JevFunction {
         Self {
             // External model evaluations must not be constant-folded during planning.
             signature: Signature::exact(
-                vec![DataType::Utf8View, DataType::Utf8View, DataType::Float64],
+                vec![DataType::Utf8View, DataType::Utf8View],
                 Volatility::Volatile,
             ),
             enabled: std::env::var("GREPTIMEDB_EXPERIMENTAL_JEV").as_deref() == Ok("true"),
@@ -145,7 +145,7 @@ impl ScalarUDFImpl for JevFunction {
     }
 
     fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
-        Ok(DataType::Boolean)
+        Ok(DataType::Float64)
     }
 
     fn invoke_with_args(&self, _args: ScalarFunctionArgs) -> Result<ColumnarValue> {
@@ -161,25 +161,17 @@ impl AsyncScalarUDFImpl for JevFunction {
             .into_iter()
             .map(|arg| arg.into_array(args.number_rows))
             .collect::<Result<Vec<_>>>()?;
-        let [texts, statements, thresholds] = take_function_args(self.name(), arrays)?;
+        let [texts, prompts] = take_function_args(self.name(), arrays)?;
         let texts = as_string_view_array(&texts)?;
-        let statements = as_string_view_array(&statements)?;
-        let thresholds = as_float64_array(&thresholds)?;
+        let prompts = as_string_view_array(&prompts)?;
         let rows: Vec<_> = texts
             .iter()
-            .zip(statements.iter())
-            .zip(thresholds.iter())
-            .map(|((text, statement), threshold)| Some((text?, statement?, threshold?)))
+            .zip(prompts.iter())
+            .map(|(text, prompt)| Some((text?, prompt?)))
             .collect();
 
-        // Validate the whole batch before making any billable requests.
-        for (_, _, threshold) in rows.iter().flatten() {
-            if !(0.0..=1.0).contains(threshold) {
-                return exec_err!("jev threshold must be finite and in [0, 1]");
-            }
-        }
         if rows.iter().all(Option::is_none) {
-            return Ok(ColumnarValue::Array(Arc::new(BooleanArray::new_null(
+            return Ok(ColumnarValue::Array(Arc::new(Float64Array::new_null(
                 args.number_rows,
             ))));
         }
@@ -192,10 +184,7 @@ impl AsyncScalarUDFImpl for JevFunction {
                 let client = &client;
                 async move {
                     match row {
-                        Some((text, statement, threshold)) => self
-                            .evaluate(client, text, statement)
-                            .await
-                            .map(|p| Some(p >= threshold)),
+                        Some((text, prompt)) => self.evaluate(client, text, prompt).await.map(Some),
                         None => Ok(None),
                     }
                 }
@@ -203,7 +192,10 @@ impl AsyncScalarUDFImpl for JevFunction {
             .collect();
         // This limit is per expression/batch invocation, not per query or process.
         // Concurrent partitions and queries can each have their own in-flight requests.
-        let matches: Vec<Option<bool>> = stream::iter(requests).buffered(8).try_collect().await?;
-        Ok(ColumnarValue::Array(Arc::new(BooleanArray::from(matches))))
+        let probabilities: Vec<Option<f64>> =
+            stream::iter(requests).buffered(8).try_collect().await?;
+        Ok(ColumnarValue::Array(Arc::new(Float64Array::from(
+            probabilities,
+        ))))
     }
 }

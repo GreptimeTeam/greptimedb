@@ -1,8 +1,9 @@
-# Natural-language filtering with Jev (experimental MVP)
+# Natural-language matching with Jev (experimental MVP)
 
-`jev(text, statement, threshold)` returns whether Jev judges the statement true
-for the text with probability **greater than or equal to** the threshold.
-It is an asynchronous SQL scalar function usable in `WHERE` and `SELECT`.
+`jev(text, prompt)` returns a `Float64` matching probability in **[0, 1]**:
+how likely Jev judges the prompt's statement to be true for the text.
+It is an asynchronous SQL scalar function usable in `SELECT`, comparisons in
+`WHERE`, and `ORDER BY`.
 
 ## Start GreptimeDB
 
@@ -46,22 +47,38 @@ WHERE occurred_at >= '2026-09-19T00:00:00Z'
   AND service = 'payments'
   AND jev(
     (message),
-    'The event reports that a payment still failed after retries.',
-    0.8
-  )
+    'The event reports that a payment still failed after retries.'
+  ) >= 0.8
 ORDER BY occurred_at;
 ```
 
-The first two arguments are strings and the third is a number in `[0, 1]`.
+To return the scores and rank matching events:
+
+```sql
+SELECT occurred_at, message,
+       jev(message, 'The event reports that a payment still failed after retries.') AS score
+FROM events
+WHERE occurred_at >= '2026-09-19T00:00:00Z'
+  AND occurred_at <  '2026-09-20T00:00:00Z'
+  AND service = 'payments'
+ORDER BY score DESC NULLS LAST;
+```
+
+Both arguments are strings; larger scores indicate a stronger match.
 `(message)` is an ordinary parenthesized string expression. For several columns,
 combine them explicitly, for example `concat(service, ': ', message)`.
 Any null argument produces SQL `NULL`, which `WHERE` excludes, without an API call.
 
+The former `jev(text, statement, threshold) -> Boolean` signature is replaced by
+this two-argument function. Migrate `WHERE jev(text, statement, 0.8)` to
+`WHERE jev(text, statement) >= 0.8` to preserve the inclusive threshold behavior.
+
 ## MVP behavior
 
-- Each non-null row makes one HTTP request: the text is `state`, and the statement
-  is a `noul` question's `instructions`. The returned `noul` probability is compared
-  with the threshold locally; this is not the separate Choice/Score confidence.
+- Each non-null row makes one HTTP request: the text is `state`, and the prompt
+  is a `noul` question's `instructions`. The returned `noul` probability is the
+  function's result; this is not the separate Choice/Score confidence. Responses
+  outside `[0, 1]` fail the query rather than being clamped.
 - Up to eight requests run concurrently per expression/batch invocation, not per
   query or process. Concurrent partitions and queries can exceed eight requests
   in total. Each request has a 30-second timeout. Errors (including rate limits

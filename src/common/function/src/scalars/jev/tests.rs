@@ -61,7 +61,7 @@ fn context(function: JevFunction) -> SessionContext {
 }
 
 #[tokio::test]
-async fn test_jev_sql_filters_using_noul_probability() {
+async fn test_jev_sql_returns_and_filters_noul_probability() {
     let server = MockServer::start(Router::new().route(
         "/v1/systemone",
         post(
@@ -69,7 +69,7 @@ async fn test_jev_sql_filters_using_noul_probability() {
                 assert_eq!(headers["authorization"], "Bearer test-key");
                 assert_eq!(request["model"], "test-model");
                 assert_eq!(request["questions"]["matches"]["type"], "noul");
-                // The SQL statement is passed through verbatim, not rewritten as a prompt.
+                // The prompt is passed through verbatim.
                 assert_eq!(
                     request["questions"]["matches"]["instructions"],
                     "payment failed"
@@ -82,6 +82,8 @@ async fn test_jev_sql_filters_using_noul_probability() {
                     }
                     "boundary" => 0.8,
                     "recovered" => 0.1,
+                    "impossible" => 0.0,
+                    "certain" => 1.0,
                     unexpected => panic!("unexpected state: {unexpected}"),
                 };
                 Json(json!({"answers": {"matches": {"type": "noul", "noul": probability}}}))
@@ -90,24 +92,10 @@ async fn test_jev_sql_filters_using_noul_probability() {
     ))
     .await;
     let ctx = context(server.function());
-    let events = "(VALUES (1, 'failed'), (2, 'boundary'), (3, 'recovered'), (4, NULL)) AS events(id, message)";
+    let events = "(VALUES (1, 'failed'), (2, 'boundary'), (3, 'recovered'), (4, NULL), (5, 'impossible'), (6, 'certain')) AS events(id, message)";
     let batches = ctx
         .sql(&format!(
-            "SELECT id FROM {events} WHERE jev((message), 'payment failed', 0.8) ORDER BY id"
-        ))
-        .await
-        .unwrap()
-        .collect()
-        .await
-        .unwrap();
-    assert_batches_eq!(
-        ["+----+", "| id |", "+----+", "| 1  |", "| 2  |", "+----+"],
-        &batches
-    );
-
-    let batches = ctx
-        .sql(&format!(
-            "SELECT id, jev(message, 'payment failed', 0.8) AS matched FROM {events} ORDER BY id"
+            "SELECT id FROM {events} WHERE jev((message), 'payment failed') >= 0.8 ORDER BY id"
         ))
         .await
         .unwrap()
@@ -116,57 +104,66 @@ async fn test_jev_sql_filters_using_noul_probability() {
         .unwrap();
     assert_batches_eq!(
         [
-            "+----+---------+",
-            "| id | matched |",
-            "+----+---------+",
-            "| 1  | true    |",
-            "| 2  | true    |",
-            "| 3  | false   |",
-            "| 4  |         |",
-            "+----+---------+"
+            "+----+", "| id |", "+----+", "| 1  |", "| 2  |", "| 6  |", "+----+"
+        ],
+        &batches
+    );
+
+    let batches = ctx
+        .sql(&format!(
+            "SELECT id, jev(message, 'payment failed') AS score FROM {events} ORDER BY score DESC NULLS LAST"
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(batches[0].schema().field(1).data_type(), &DataType::Float64);
+    assert_batches_eq!(
+        [
+            "+----+-------+",
+            "| id | score |",
+            "+----+-------+",
+            "| 6  | 1.0   |",
+            "| 1  | 0.95  |",
+            "| 2  | 0.8   |",
+            "| 3  | 0.1   |",
+            "| 5  | 0.0   |",
+            "| 4  |       |",
+            "+----+-------+"
         ],
         &batches
     );
 }
 
 #[tokio::test]
-async fn test_jev_nulls_and_invalid_thresholds_need_no_api_key() {
+async fn test_jev_nulls_need_no_api_key() {
     let ctx = context(JevFunction {
         enabled: true,
         api_key: None,
         ..Default::default()
     });
     let batches = ctx
-        .sql("SELECT jev(NULL, 'condition', 0.8) AS a, jev('text', NULL, 0.8) AS b, jev('text', 'condition', NULL) AS c")
-        .await.unwrap().collect().await.unwrap();
+        .sql("SELECT jev(NULL, 'condition') AS a, jev('text', NULL) AS b")
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_eq!(batches[0].schema().field(0).data_type(), &DataType::Float64);
     assert_batches_eq!(
         [
-            "+---+---+---+",
-            "| a | b | c |",
-            "+---+---+---+",
-            "|   |   |   |",
-            "+---+---+---+"
+            "+---+---+",
+            "| a | b |",
+            "+---+---+",
+            "|   |   |",
+            "+---+---+"
         ],
         &batches
     );
 
-    for threshold in ["-0.1", "1.1", "'NaN'::DOUBLE", "'Infinity'::DOUBLE"] {
-        let error = ctx
-            .sql(&format!("SELECT jev('text', 'condition', {threshold})"))
-            .await
-            .unwrap()
-            .collect()
-            .await
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("jev threshold must be finite and in [0, 1]"),
-            "{error}"
-        );
-    }
     let error = ctx
-        .sql("SELECT jev('text', 'condition', 0.8)")
+        .sql("SELECT jev('text', 'condition')")
         .await
         .unwrap()
         .collect()
@@ -180,7 +177,7 @@ async fn test_jev_nulls_and_invalid_thresholds_need_no_api_key() {
         ..Default::default()
     });
     let error = ctx
-        .sql("SELECT jev('text', 'condition', 0.8)")
+        .sql("SELECT jev('text', 'condition')")
         .await
         .unwrap()
         .collect()
@@ -211,6 +208,11 @@ async fn test_jev_bad_api_responses_fail_the_query() {
         ),
         (
             StatusCode::OK,
+            r#"{"answers":{"matches":{"type":"noul","noul":-0.1}}}"#,
+            "jev response must contain",
+        ),
+        (
+            StatusCode::OK,
             r#"{"answers":{"matches":{"type":"score","noul":0.9}}}"#,
             "jev response must contain",
         ),
@@ -221,7 +223,7 @@ async fn test_jev_bad_api_responses_fail_the_query() {
         .await;
         let ctx = context(server.function());
         let error = ctx
-            .sql("SELECT jev('text', 'condition', 0.8)")
+            .sql("SELECT jev('text', 'condition')")
             .await
             .unwrap()
             .collect()
@@ -243,7 +245,7 @@ async fn test_jev_live() {
             (2, 'Payment succeeded on the second retry; the payment is complete.'),
             (3, 'User logged in successfully.')
          ) AS events(id, message)
-         WHERE jev(message, 'The event reports that a payment still failed after retries.', 0.8)
+         WHERE jev(message, 'The event reports that a payment still failed after retries.') >= 0.8
          ORDER BY id",
     ).await.unwrap().collect().await.unwrap();
     assert_batches_eq!(["+----+", "| id |", "+----+", "| 1  |", "+----+"], &batches);

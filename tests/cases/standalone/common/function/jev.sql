@@ -1,9 +1,9 @@
 -- No credentials or external service needed: NULL propagates without an API call.
-SELECT jev(NULL, 'The event reports a failed payment.', 0.8) AS matched;
+SELECT jev(NULL, 'The event reports a failed payment.') AS score;
 
-SELECT jev('message', NULL, 0.8) AS matched;
+SELECT jev('message', NULL) AS score;
 
-SELECT jev('message', 'The event reports a failed payment.', NULL) AS matched;
+SELECT arrow_typeof(jev(NULL, 'condition')) AS score_type;
 
 -- Validate SQL registration, coercion, and asynchronous filtering on a real table.
 CREATE TABLE jev_events (
@@ -21,12 +21,10 @@ SELECT occurred_at, service, message FROM jev_events
 WHERE occurred_at >= '2026-09-19T00:00:00Z'
   AND occurred_at < '2026-09-20T00:00:00Z'
   AND service = 'payments'
-  AND jev((message), 'The event reports that a payment still failed after retries.', 0.8)
+  AND jev((message), 'The event reports that a payment still failed after retries.') >= 0.8
 ORDER BY occurred_at;
 
 DROP TABLE jev_events;
 
--- Invalid thresholds fail locally before any HTTP request.
-SELECT jev('message', 'condition', -0.1);
-
-SELECT jev('message', 'condition', 1.1);
+-- The former three-argument Boolean signature is no longer accepted.
+SELECT jev('message', 'condition', 0.8);
