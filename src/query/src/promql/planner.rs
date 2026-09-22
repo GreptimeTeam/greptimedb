@@ -221,10 +221,15 @@ struct PromPlannerContext {
     /// Metric table names resolved by the caller for a non-equality `__name__` matcher.
     ///
     /// The caller (protocol layer) discovers, filters and authorizes these tables before
-    /// planning; the planner only scans them. The list is query scoped and is consumed (`take()`)
-    /// by the first selector that needs it, so it never applies to a second selector of the same
-    /// query.
+    /// planning; the planner only scans them. The list is consumed by the first selector that
+    /// needs it, so it never applies to a separate selector of the same query.
     metric_names: Option<Vec<String>>,
+    /// Authorized metric names consumed for the selector currently being planned.
+    ///
+    /// Matching-filter propagation can re-plan that selector after another operand is planned.
+    /// Retain its candidates so the re-plan never falls back to catalog enumeration and widens
+    /// authorization.
+    selector_metric_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -421,6 +426,7 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
+        self.selector_metric_names = None;
         // `metric_names` is query scoped, not selector scoped: a query may plan a selector with
         // an equality matcher before the selector that consumes the resolved metric tables.
     }
@@ -717,6 +723,7 @@ impl PromPlanner {
                 for label in &labels.labels {
                     let _ = all_tags.remove(label);
                 }
+                let _ = all_tags.remove(METRIC_NAME);
                 all_tags
             }
         };
@@ -930,7 +937,7 @@ impl PromPlanner {
 
         if self.all_field_columns_are_native_histograms(input.schema()) {
             let promql_annotations = self.promql_annotations.clone();
-            let input = self.projection_for_each_field_column(input, |col| {
+            let input = self.projection_for_each_field_column(input, false, |col| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramDrop::float_null_udf(
                         format!(
@@ -1034,7 +1041,7 @@ impl PromPlanner {
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
         let input_schema = input.schema().clone();
-        self.projection_for_each_field_column(input, |col| {
+        self.projection_for_each_field_column(input, false, |col| {
             if Self::field_column_is_native_histogram(&input_schema, col) {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramNeg::scalar_udf()),
@@ -1332,9 +1339,11 @@ impl PromPlanner {
         self.ctx = base_ctx.clone();
 
         let schema = input.schema();
+        self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
         let non_field_exprs = base_ctx
             .tag_columns
             .iter()
+            .filter(|column| column.as_str() != METRIC_NAME)
             .chain(base_ctx.time_index_column.iter())
             .map(|column| {
                 schema
@@ -1498,8 +1507,11 @@ impl PromPlanner {
                 if is_comparison_op && !should_return_bool {
                     self.filter_on_field_column(input, bin_expr_builder)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(input, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        input,
+                        !is_comparison_op,
+                        bin_expr_builder,
+                    )?;
                     self.filter_binary_projection(
                         projected,
                         has_native_histogram,
@@ -1565,8 +1577,11 @@ impl PromPlanner {
                 if is_comparison_op && !should_return_bool {
                     self.filter_on_field_column(input, bin_expr_builder)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(input, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        input,
+                        !is_comparison_op,
+                        bin_expr_builder,
+                    )?;
                     self.filter_binary_projection(
                         projected,
                         has_native_histogram,
@@ -1608,6 +1623,9 @@ impl PromPlanner {
                     // re-planned context keeps the matchers the operand was written with.
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
                         let selectors = std::mem::take(&mut left_context.selector_matcher);
+                        // Replanning a selector must retain exactly the candidates authorized
+                        // for its original scan; catalog enumeration could include denied tables.
+                        self.ctx.metric_names = left_context.selector_metric_names.clone();
                         left_input = self
                             .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
                             .await?;
@@ -1616,6 +1634,8 @@ impl PromPlanner {
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
                         let selectors = std::mem::take(&mut right_context.selector_matcher);
+                        // See the left-hand re-plan above.
+                        self.ctx.metric_names = right_context.selector_metric_names.clone();
                         right_input = self
                             .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
                             .await?;
@@ -1852,8 +1872,11 @@ impl PromPlanner {
                     project_context.field_columns = project_field_columns;
                     self.project_binary_join_side(filtered, project_table_ref, &project_context)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(join_plan, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        join_plan,
+                        !is_comparison_op,
+                        bin_expr_builder,
+                    )?;
                     let preserve_any_value = Self::field_columns_are_alternative_samples(
                         projected.schema(),
                         &self.ctx.field_columns,
@@ -2748,7 +2771,14 @@ impl PromPlanner {
     /// planning, where a selector without a statically resolvable table is checked as unresolved.
     async fn candidate_metric_names(&mut self, name_matchers: &[Matcher]) -> Result<Vec<String>> {
         if let Some(metric_names) = self.ctx.metric_names.take() {
-            return Ok(metric_names);
+            // Preserve the authorized set on this selector only. A matching-filter re-plan
+            // restores it explicitly, while a separate selector still falls back to its own
+            // catalog discovery as before.
+            self.ctx.selector_metric_names = Some(metric_names.clone());
+            return Ok(metric_names
+                .into_iter()
+                .filter(|name| name_matchers.iter().all(|matcher| matcher.is_match(name)))
+                .collect());
         }
 
         let query_ctx = self.table_provider.query_ctx().clone();
@@ -2826,6 +2856,7 @@ impl PromPlanner {
                 .tag_columns
                 .iter()
                 .chain(self.ctx.field_columns.iter())
+                .chain(self.ctx.time_index_column.iter())
                 .any(|column| column == METRIC_NAME),
             UnsupportedMetricUnionSnafu {
                 reason: format!("table {metric_name} already has a {METRIC_NAME} column"),
@@ -3244,9 +3275,11 @@ impl PromPlanner {
                     .map(|f| f.name())
                     .collect::<BTreeSet<_>>();
 
-                // Exclude metric engine internal columns (not PromQL labels) from the implicit
-                // "without" label set.
-                all_fields.retain(|col| !is_metric_engine_internal_column(col.as_str()));
+                // Exclude metric engine internal columns and the metric name from the implicit
+                // "without" label set. PromQL always removes the metric name for `without`.
+                all_fields.retain(|col| {
+                    !is_metric_engine_internal_column(col.as_str()) && col.as_str() != METRIC_NAME
+                });
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
@@ -6518,8 +6551,16 @@ impl PromPlanner {
                         let _ = left_tag_columns.remove(label);
                         let _ = right_tag_columns.remove(label);
                     }
+                    // `ignoring` keeps PromQL's default of not matching on the metric name.
+                    let _ = left_tag_columns.remove(METRIC_NAME);
+                    let _ = right_tag_columns.remove(METRIC_NAME);
                 }
             }
+        } else if !use_tsid_join && !only_join_time_index {
+            // The metric name is not a default vector-matching label. An explicit
+            // `on(__name__)` is handled by the Include branch above.
+            let _ = left_tag_columns.remove(METRIC_NAME);
+            let _ = right_tag_columns.remove(METRIC_NAME);
         }
 
         let force_empty_join =
@@ -7681,11 +7722,16 @@ impl PromPlanner {
     fn projection_for_each_field_column<F>(
         &mut self,
         input: LogicalPlan,
+        drop_metric_name: bool,
         name_to_expr: F,
     ) -> Result<LogicalPlan>
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
+        if drop_metric_name {
+            self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
+        }
+
         // Keep the generated float/histogram lane names while an element-wise operation
         // preserves both sample types, so downstream operators still recognize the pair.
         let preserve_field_names =
@@ -15189,6 +15235,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             timestamps,
             fields,
             ArrowTimeUnit::Millisecond,
+            "timestamp",
         )
     }
 
@@ -15201,6 +15248,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         timestamps: &[i64],
         fields: &[UnionField],
         unit: ArrowTimeUnit,
+        time_index_name: &str,
     ) -> table::TableRef {
         let mut columns = tags
             .iter()
@@ -15215,7 +15263,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         let time_index_index = columns.len();
         columns.push(
             ColumnSchema::new(
-                "timestamp".to_string(),
+                time_index_name.to_string(),
                 ConcreteDataType::from_arrow_time_unit(&unit),
                 false,
             )
@@ -15347,6 +15395,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                     &[1_000],
                     &[float_field(greptime_value(), &[1.0])],
                     ArrowTimeUnit::Millisecond,
+                    "timestamp",
                 ),
                 union_metric_table_with_time_unit(
                     "m_ns",
@@ -15355,6 +15404,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                     &[1_000_000_000],
                     &[float_field(greptime_value(), &[2.0])],
                     ArrowTimeUnit::Nanosecond,
+                    "timestamp",
                 ),
             ],
         )
@@ -15628,7 +15678,17 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         .await;
         assert_eq!(float_values(&batches), vec![2.0]);
 
-        // The metric name stays an addressable label.
+        // The metric name stays an addressable label for explicit `by` modifiers.
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"sum by(__name__) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![1.0, 2.0]);
+
         let batches = execute_union_query(
             build_union_metric_table_provider(),
             &["m_alpha", "m_beta"],
@@ -15932,8 +15992,8 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
 
     #[tokio::test]
     async fn metric_name_union_consumes_candidates_once() {
-        // The candidates belong to the selector that triggered discovery: a second selector in
-        // the same query must not silently reuse them.
+        // Candidates are consumed by the selector that triggered discovery. A distinct selector
+        // in the same query must not silently reuse them.
         let eval_stmt = build_eval_stmt(r#"{__name__=~"me_.*"} or {__name__=~"me_.*"}"#);
         let mut planner = PromPlanner {
             table_provider: build_union_engine_table_provider(),
@@ -15947,14 +16007,192 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             .await
             .unwrap();
         let plan_str = plan.display_indent_schema().to_string();
-
-        // The first selector uses the resolved candidate, the second enumerates on its own: two
-        // branches per selector, and never the resolved candidate twice.
         assert_eq!(
             plan_str.matches("TableScan: union_phy").count(),
             3,
             "{plan_str}"
         );
         assert_eq!(plan_str.matches("UInt32(3101)").count(), 2, "{plan_str}");
+    }
+
+    fn build_metric_name_label_test_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_one",
+                    3_010,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_two",
+                    3_011,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+                union_metric_table(
+                    "http_requests_get",
+                    3_012,
+                    &[("method", Some("GET")), ("path", Some("/metrics"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "http_requests_post",
+                    3_013,
+                    &[("method", Some("POST")), ("path", Some("/metrics"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_replanned_selector_keeps_authorized_candidates() {
+        // Filter propagation re-plans the left selector with `job="api"`. The protocol would
+        // have authorized only `me_api`; the re-plan must not enumerate `me_host` from catalog.
+        let plan = plan_union_query(
+            build_union_engine_table_provider(),
+            &["me_api"],
+            r#"sum by(job) ({__name__=~"me_.*"}) / on(job) me_api{job="api"}"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("UInt32(3101)"), "{plan_str}");
+        assert!(!plan_str.contains("UInt32(3102)"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_default_join_ignores_metric_name() {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let schema = scan(&source(
+            "regex_selector",
+            false,
+            1,
+            vec![("host", Some("a")), (METRIC_NAME, Some("cpu_user"))],
+            DirectOrValue::Float64(1.0),
+        ))
+        .schema()
+        .clone();
+
+        // A regex selector materializes `__name__`, while an exact-name selector does not.
+        // Both still default-match on `host` only.
+        let regex_context = direct_or_context("regex_selector", &["host", METRIC_NAME], "v");
+        let exact_context = direct_or_context("exact_selector", &["host"], "v");
+        for right_context in [exact_context, regex_context.clone()] {
+            let (left_keys, right_keys, force_empty_join) = planner
+                .binary_join_key_columns(
+                    &schema,
+                    &schema,
+                    &regex_context,
+                    &right_context,
+                    false,
+                    &None,
+                )
+                .unwrap();
+            assert_eq!(left_keys, BTreeSet::from(["host".to_string()]));
+            assert_eq!(right_keys, BTreeSet::from(["host".to_string()]));
+            assert!(!force_empty_join);
+        }
+
+        // `ignoring(...)` also keeps metric-name exclusion implicit.
+        let modifier = or_modifier(r#"lhs / ignoring(host) rhs"#);
+        let (left_keys, right_keys, force_empty_join) = planner
+            .binary_join_key_columns(
+                &schema,
+                &schema,
+                &regex_context,
+                &regex_context,
+                false,
+                &modifier,
+            )
+            .unwrap();
+        assert!(left_keys.is_empty());
+        assert!(right_keys.is_empty());
+        assert!(!force_empty_join);
+
+        // Explicit `on(__name__)` remains an opt-in join key.
+        let modifier = or_modifier(r#"lhs / on(__name__) rhs"#);
+        let (left_keys, right_keys, force_empty_join) = planner
+            .binary_join_key_columns(
+                &schema,
+                &schema,
+                &regex_context,
+                &regex_context,
+                false,
+                &modifier,
+            )
+            .unwrap();
+        assert_eq!(left_keys, BTreeSet::from([METRIC_NAME.to_string()]));
+        assert_eq!(right_keys, BTreeSet::from([METRIC_NAME.to_string()]));
+        assert!(!force_empty_join);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_without_drops_metric_name() {
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"sum without(host) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_arithmetic_drops_metric_name() {
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["http_requests_get", "http_requests_post"],
+            r#"count by(__name__) ({__name__=~"http_requests_.*"} * 2)"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_rejects_metric_name_time_index() {
+        let table_provider = register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![union_metric_table_with_time_unit(
+                "m_time_name",
+                3_014,
+                &[("host", Some("a"))],
+                &[1_000],
+                &[float_field(greptime_value(), &[1.0])],
+                ArrowTimeUnit::Millisecond,
+                METRIC_NAME,
+            )],
+        );
+
+        let err = plan_union_query(table_provider, &["m_time_name"], r#"{__name__=~"m_.*"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(err.to_string().contains(METRIC_NAME), "{err}");
     }
 }
