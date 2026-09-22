@@ -76,5 +76,6 @@ uuid.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 serde.workspace = true
 tempfile.workspace = true

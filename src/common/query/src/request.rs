@@ -15,20 +15,26 @@
 mod base64_serde;
 mod initial_remote_dyn_filter_reg;
 
+use std::cell::Cell;
 use std::sync::Arc;
 
 use api::v1::region::RegionRequestHeader;
 use datafusion::execution::TaskContext;
 use datafusion::physical_expr::expressions::{Column, InListExpr, lit};
-use datafusion::physical_plan::PhysicalExpr;
 use datafusion::physical_plan::joins::HashTableLookupExpr;
+use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
 use datafusion_common::{DataFusionError, Result as DataFusionResult};
 use datafusion_expr::LogicalPlan;
-use datafusion_proto::physical_plan::DefaultPhysicalExtensionCodec;
 use datafusion_proto::physical_plan::from_proto::parse_physical_expr;
-use datafusion_proto::physical_plan::to_proto::serialize_physical_expr;
-use datafusion_proto::protobuf::PhysicalExprNode;
+use datafusion_proto::physical_plan::to_proto::{
+    serialize_physical_expr, serialize_physical_expr_with_converter,
+};
+use datafusion_proto::physical_plan::{
+    DefaultPhysicalExtensionCodec, DefaultPhysicalProtoConverter, PhysicalExtensionCodec,
+    PhysicalPlanDecodeContext, PhysicalProtoConverterExtension,
+};
+use datafusion_proto::protobuf::{PhysicalExprNode, PhysicalPlanNode};
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use snafu::ensure;
@@ -120,6 +126,69 @@ fn encode_physical_expr_to_bytes(expr: &Arc<dyn PhysicalExpr>) -> DataFusionResu
     Ok(bytes)
 }
 
+struct BoundedPhysicalExprEncoder {
+    max_payload_bytes: usize,
+    encoded_bytes: Cell<usize>,
+}
+
+impl PhysicalProtoConverterExtension for BoundedPhysicalExprEncoder {
+    fn proto_to_execution_plan(
+        &self,
+        proto: &PhysicalPlanNode,
+        ctx: &PhysicalPlanDecodeContext<'_>,
+    ) -> DataFusionResult<Arc<dyn ExecutionPlan>> {
+        DefaultPhysicalProtoConverter {}.proto_to_execution_plan(proto, ctx)
+    }
+
+    fn execution_plan_to_proto(
+        &self,
+        plan: &Arc<dyn ExecutionPlan>,
+        codec: &dyn PhysicalExtensionCodec,
+    ) -> DataFusionResult<PhysicalPlanNode> {
+        DefaultPhysicalProtoConverter {}.execution_plan_to_proto(plan, codec)
+    }
+
+    fn proto_to_physical_expr(
+        &self,
+        proto: &PhysicalExprNode,
+        input_schema: &datafusion::arrow::datatypes::Schema,
+        ctx: &PhysicalPlanDecodeContext<'_>,
+    ) -> DataFusionResult<Arc<dyn PhysicalExpr>> {
+        DefaultPhysicalProtoConverter {}.proto_to_physical_expr(proto, input_schema, ctx)
+    }
+
+    fn physical_expr_to_proto(
+        &self,
+        expr: &Arc<dyn PhysicalExpr>,
+        codec: &dyn PhysicalExtensionCodec,
+    ) -> DataFusionResult<PhysicalExprNode> {
+        let before_children = self.encoded_bytes.get();
+        let proto = serialize_physical_expr_with_converter(expr, codec, self)?;
+        // Replace the children's contribution with the whole subtree, including protobuf framing.
+        // Checking each child stops large IN lists before materializing all their Arrow IPC literals.
+        let encoded_bytes = before_children.saturating_add(proto.encoded_len());
+        self.encoded_bytes.set(encoded_bytes);
+        validate_payload_size(encoded_bytes, self.max_payload_bytes)
+            .map_err(DataFusionError::from)?;
+        Ok(proto)
+    }
+}
+
+fn encode_bounded_physical_expr_to_bytes(
+    expr: &Arc<dyn PhysicalExpr>,
+    max_payload_bytes: usize,
+) -> Result<Vec<u8>, CommonQueryError> {
+    let codec = DefaultPhysicalExtensionCodec {};
+    let encoder = BoundedPhysicalExprEncoder {
+        max_payload_bytes,
+        encoded_bytes: Cell::new(0),
+    };
+    let proto = encoder.physical_expr_to_proto(expr, &codec);
+    // Preserve the size error so the caller can retry with bounds only.
+    validate_payload_size(encoder.encoded_bytes.get(), max_payload_bytes)?;
+    Ok(proto.map_err(CommonQueryError::from)?.encode_to_vec())
+}
+
 fn encode_remote_dyn_filter_expr(
     expr: &Arc<dyn PhysicalExpr>,
     max_payload_bytes: usize,
@@ -127,9 +196,7 @@ fn encode_remote_dyn_filter_expr(
 ) -> Result<Vec<u8>, CommonQueryError> {
     let expr = portable_remote_dyn_filter_expr(Arc::clone(expr), bounds_only)
         .map_err(CommonQueryError::from)?;
-    let bytes = encode_physical_expr_to_bytes(&expr).map_err(CommonQueryError::from)?;
-    validate_payload_size(bytes.len(), max_payload_bytes)?;
-    Ok(bytes)
+    encode_bounded_physical_expr_to_bytes(&expr, max_payload_bytes)
 }
 
 fn portable_remote_dyn_filter_expr(
@@ -520,6 +587,62 @@ mod tests {
         assert!(decoded_display.contains("device_id"));
         assert!(decoded_display.contains(">="));
         assert!(decoded_display.contains("<="));
+    }
+
+    #[test]
+    fn bounded_encoding_preserves_bytes_and_exact_limit() {
+        let schema = Schema::new(vec![Field::new("device_id", DataType::Int32, false)]);
+        let device_id = Arc::new(Column::new("device_id", 0)) as Arc<dyn PhysicalExpr>;
+        let in_list = Arc::new(
+            InListExpr::try_new(
+                Arc::clone(&device_id),
+                (0..64).map(lit).collect(),
+                false,
+                &schema,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        let lower_bound = Arc::new(BinaryExpr::new(device_id, Operator::GtEq, lit(10i32)))
+            as Arc<dyn PhysicalExpr>;
+        let expr =
+            Arc::new(BinaryExpr::new(lower_bound, Operator::And, in_list)) as Arc<dyn PhysicalExpr>;
+        let expected = serialize_physical_expr(&expr, &DefaultPhysicalExtensionCodec {})
+            .unwrap()
+            .encode_to_vec();
+
+        assert_eq!(
+            encode_bounded_physical_expr_to_bytes(&expr, expected.len()).unwrap(),
+            expected
+        );
+        assert!(matches!(
+            encode_bounded_physical_expr_to_bytes(&expr, expected.len() - 1),
+            Err(CommonQueryError::DynFilterPayloadTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn bounded_encoding_stops_before_later_children() {
+        let schema = Schema::new(vec![Field::new("host", DataType::Utf8, false)]);
+        let expr = Arc::new(
+            InListExpr::try_new(
+                Arc::new(Column::new("host", 0)),
+                (0..8).map(|i| lit(i.to_string().repeat(1024))).collect(),
+                false,
+                &schema,
+            )
+            .unwrap(),
+        ) as Arc<dyn PhysicalExpr>;
+        let full_size = encode_physical_expr_to_bytes(&expr).unwrap().len();
+        assert!(full_size > 8192);
+
+        let error = encode_bounded_physical_expr_to_bytes(&expr, 2048).unwrap_err();
+        let CommonQueryError::DynFilterPayloadTooLarge {
+            payload_size_bytes, ..
+        } = error
+        else {
+            panic!("expected payload size error, got {error:?}");
+        };
+        assert!((2048..4096).contains(&payload_size_bytes));
     }
 
     #[test]

@@ -34,6 +34,8 @@ use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::ip::IpFunctions;
+#[cfg(feature = "ai_functions")]
+use crate::scalars::jev::JevFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
@@ -226,6 +228,8 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     // Full text search function
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
+    #[cfg(feature = "ai_functions")]
+    JevFunction::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
@@ -377,6 +381,14 @@ mod tests {
     #[test]
     fn test_uddsketch_rank_registered() {
         assert!(FUNCTION_REGISTRY.get_function("uddsketch_rank").is_some());
+    }
+
+    #[test]
+    fn test_jev_registration_matches_feature() {
+        assert_eq!(
+            FUNCTION_REGISTRY.get_function("jev").is_some(),
+            cfg!(feature = "ai_functions")
+        );
     }
 
     #[test]
