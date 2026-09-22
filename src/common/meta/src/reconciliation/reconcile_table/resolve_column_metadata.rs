@@ -93,7 +93,7 @@ impl State for ResolveColumnMetadata {
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
             let column_metadatas =
-                reorder_tag_columns(&column_metadatas, &self.region_metadata[0].primary_key);
+                reorder_tag_columns(&column_metadatas, &self.region_metadata[0].primary_key)?;
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             info!(
