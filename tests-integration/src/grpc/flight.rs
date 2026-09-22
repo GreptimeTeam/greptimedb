@@ -634,26 +634,33 @@ mod test {
             .sql("CREATE TABLE foo (ts TIMESTAMP TIME INDEX, a INT NOT NULL, PRIMARY KEY (a))")
             .await
             .unwrap();
-        let schema = create_record_batches(1)[0].schema.arrow_schema().clone();
+        let batch = create_record_batches(1).remove(0).into_df_record_batch();
+        let schema = batch.schema();
         let mut messages = vec![encode_put_schema(schema.as_ref())];
         messages.extend(FlightEncoder::default().encode(FlightMessage::RecordBatch(
             common_recordbatch::DfRecordBatch::new_empty(schema),
         )));
+        messages.extend(FlightEncoder::default().encode(FlightMessage::RecordBatch(batch)));
         // A request hint cannot override the server-side setting.
         let hint = if disabled_by_config { "true" } else { "false" };
-        let responses = client
+        let mut responses = client
             .do_put_with_hints(
                 tokio_stream::iter(messages).boxed(),
                 &[("auto_create_table", hint)],
             )
             .await
-            .unwrap()
-            .collect::<Vec<_>>()
-            .await;
-        assert_eq!(responses.len(), 2);
-        for response in responses {
-            assert_eq!(response.unwrap().affected_rows(), 0);
+            .unwrap();
+        // The handshake and empty batch succeed, but the non-empty write must fail.
+        for _ in 0..2 {
+            assert_eq!(responses.next().await.unwrap().unwrap().affected_rows(), 0);
         }
+        let Some(Err(err)) = responses.next().await else {
+            panic!("expected the bulk write with an unknown column to fail");
+        };
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        let message = err.to_string();
+        assert!(message.contains("Column 'B' not found"), "{message}");
+        assert!(responses.next().await.is_none());
         query_and_expect(
             db.frontend().as_ref(),
             "SELECT column_name FROM information_schema.columns WHERE table_name = 'foo' ORDER BY column_name",
@@ -664,6 +671,23 @@ mod test {
 | a           |
 | ts          |
 +-------------+",
+        )
+        .await;
+        query_and_expect(
+            db.frontend().as_ref(),
+            "SELECT count(*) AS n FROM foo",
+            "\
++---+
+| n |
++---+
+| 0 |
++---+",
+        )
+        .await;
+        test_put_record_batches_with_hints(
+            &client,
+            create_record_batches_without_nullable_column(1),
+            &[("auto_create_table", hint)],
         )
         .await;
         server.shutdown().await.unwrap();
