@@ -92,6 +92,9 @@ pub enum Error {
     #[snafu(display("Database export cancelled"))]
     DatabaseExportCancelled {},
 
+    #[snafu(display("Packed import cancelled"))]
+    PackedImportCancelled {},
+
     #[snafu(display("Invalid logical table export: {reason}"))]
     InvalidLogicalTableExport { reason: String },
 
@@ -1105,7 +1108,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             Error::InvalidDatabaseExport { .. } => StatusCode::InvalidArguments,
-            Error::DatabaseExportCancelled { .. } => StatusCode::Cancelled,
+            Error::DatabaseExportCancelled { .. } | Error::PackedImportCancelled { .. } => {
+                StatusCode::Cancelled
+            }
             Error::InvalidLogicalTableExport { .. } => StatusCode::InvalidArguments,
             Error::LogicalTableExportResource { .. } => StatusCode::Suspended,
             Error::LogicalTableExportCancelled { .. } => StatusCode::Cancelled,

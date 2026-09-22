@@ -504,7 +504,7 @@ impl ExportCreate {
                 let mut manifest = self.storage.read_manifest().await?;
 
                 // Check version compatibility
-                if manifest.version != MANIFEST_VERSION {
+                if manifest.version != MANIFEST_VERSION || manifest.data_layout.is_some() {
                     return ManifestVersionMismatchSnafu {
                         expected: MANIFEST_VERSION,
                         found: manifest.version,
@@ -1008,7 +1008,9 @@ fn directory_word(count: usize) -> &'static str {
 }
 
 fn snapshot_status(manifest: &Manifest) -> &'static str {
-    if manifest.schema_only {
+    if manifest.validate_layout().is_err() {
+        "unsupported"
+    } else if manifest.schema_only {
         "schema-only"
     } else if manifest.is_complete() {
         "complete"
@@ -1131,11 +1133,17 @@ async fn verify_snapshot(storage: &OpenDalStorage) -> Result<VerifyReport> {
         problems: Vec::new(),
     };
 
-    if report.manifest.version != MANIFEST_VERSION {
-        report.push_error(format!(
-            "Manifest version mismatch: expected {}, found {}",
-            MANIFEST_VERSION, report.manifest.version
-        ));
+    if let Err(reason) = report.manifest.validate_layout() {
+        report.push_error(reason);
+    } else if report.manifest.is_packed()
+        && let Err(error) = crate::data::import_v2::packed::validate_snapshot(
+            storage,
+            &report.manifest,
+            &report.manifest.schemas,
+        )
+        .await
+    {
+        report.push_error(error.to_string());
     }
 
     if !report.schema_index_exists {
@@ -1432,7 +1440,7 @@ fn safe_manifest_data_file_path(path: &str) -> Option<&str> {
 fn print_verify_report(snapshot: &str, report: &VerifyReport) {
     println!("Verifying snapshot: {}", report.manifest.snapshot_id);
     println!("  Location:     {}", snapshot);
-    if report.manifest.version == MANIFEST_VERSION {
+    if report.manifest.validate_layout().is_ok() {
         println!("  Manifest:     OK (version {})", report.manifest.version);
     } else {
         println!(

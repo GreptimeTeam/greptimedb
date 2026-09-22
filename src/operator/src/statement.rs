@@ -25,6 +25,7 @@ mod describe;
 mod dml;
 pub mod export_database;
 pub mod export_logical_tables;
+pub mod import_packed;
 mod kill;
 pub mod semantic_graph;
 mod set;

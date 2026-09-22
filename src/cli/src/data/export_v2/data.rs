@@ -191,13 +191,19 @@ pub(crate) async fn execute_copy_database_from(
     schema: &str,
     source: &CopySource,
     format: DataFormat,
+    packed: bool,
 ) -> Result<()> {
     let sql = format!(
-        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'){};"#,
+        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'{}){};"#,
         escape_sql_identifier(catalog),
         escape_sql_identifier(schema),
         escape_sql_literal(&source.location),
         format,
+        if packed {
+            ", metric_data_layout='packed'"
+        } else {
+            ""
+        },
         source.connection
     );
     let safe_sql = source.mask_sql(&sql);

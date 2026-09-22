@@ -59,6 +59,18 @@ pub(crate) fn parse_parallelism_from_option_map(options: &HashMap<String, String
         .max(1)
 }
 
+/// Rejects import-only layouts before either database export path creates output.
+pub(crate) fn validate_database_export_layout(options: &HashMap<String, String>) -> Result<()> {
+    if let Some(layout) = options.get("metric_data_layout") {
+        return error::InvalidCopyParameterSnafu {
+            key: "metric_data_layout",
+            value: layout,
+        }
+        .fail();
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_database_directory(location: &str) -> Result<()> {
     ensure!(
         is_directory_location(location),
