@@ -211,6 +211,8 @@ enable = true
 default_merge_mode = "last_non_null"
 
 ## Ordinary-table batching for opted-in HTTP ingestion protocols.
+## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
+## queue admission without waiting for storage; later failures cannot be returned to the client.
 ## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
 ## OTLP logs, traces and ordinary metrics use this batcher.
 [pending_rows_batcher]

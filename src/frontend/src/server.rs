@@ -24,7 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
-use servers::batcher::logical_table::pending_rows_batch_sync_enabled;
+use servers::batcher::pending_rows_batch_sync_enabled;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::flight::FlightCraftRef;
@@ -449,9 +449,8 @@ fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) ->
     let mut http = opts.http.clone();
     let prom_store = effective_prom_store_options(opts);
     let shared = opts.table_batcher_options();
-    // Ordinary-table batching always waits for its flush, independently of the
-    // dedicated Prom batcher's asynchronous acknowledgement mode.
-    let common_enabled = shared.pending_rows_batching_enabled()
+    let common_enabled = batch_sync
+        && shared.pending_rows_batching_enabled()
         && shared.protocols.iter().any(|protocol| {
             *protocol != BatchingProtocol::Prom
                 || (prom_store.enable && !prom_store.with_metric_engine)
@@ -460,7 +459,8 @@ fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) ->
     let prom_interval = (prom_store.pending_rows_batching_enabled() && batch_sync)
         .then_some(prom_store.pending_rows_flush_interval);
     let logical = opts.logical_batcher_options();
-    let otlp_interval = (opts.otlp.enable
+    let otlp_interval = (batch_sync
+        && opts.otlp.enable
         && opts.prom_store.with_metric_engine
         && logical.protocols.contains(&BatchingProtocol::Otlp)
         && logical.pending_rows_batching_enabled())
@@ -561,12 +561,16 @@ mod tests {
             ..Default::default()
         });
         assert!(!effective_prom_store_options(&opts).pending_rows_batching_enabled());
-        // OTLP waits for storage even when Prom acknowledges asynchronously,
-        // and does not depend on enabling the Prom HTTP endpoint.
+        // Both logical protocols follow the global acknowledgement policy,
+        // independently of enabling the Prom HTTP endpoint.
         opts.prom_store.enable = false;
         assert_eq!(
-            effective_http_options_with_sync(&opts, false).timeout,
+            effective_http_options_with_sync(&opts, true).timeout,
             Duration::from_secs(6)
+        );
+        assert_eq!(
+            effective_http_options_with_sync(&opts, false).timeout,
+            opts.http.timeout
         );
         opts.prom_store.with_metric_engine = false;
         assert_eq!(
@@ -640,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_http_timeout_covers_synchronous_batchers() {
-        // Shared ordinary writes remain synchronous even when Prom is asynchronous.
+        // Only synchronous batchers extend the HTTP timeout.
         for (
             protocols,
             metric_engine,
@@ -650,10 +654,10 @@ mod tests {
             timeout_secs,
             expected_secs,
         ) in [
-            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, true, 5, 2, 1, 6),
-            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Influxdb], true, true, 5, 8, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, true, 8, 5, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 0, 0),

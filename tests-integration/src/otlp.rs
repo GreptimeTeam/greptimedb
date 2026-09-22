@@ -514,12 +514,13 @@ WITH(
             ExponentialHistogram, ExponentialHistogramDataPoint, exponential_histogram_data_point,
         };
         use prost::Message;
+        use servers::batcher::pending_rows_batch_sync_enabled;
         use servers::http::BatchingProtocol;
         use servers::http::test_helpers::TestClient;
         use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
         // Fixed workload, only the batcher opt-in changes. Compare stored rows,
-        // schema evolution and immediate post-response visibility.
+        // schema evolution and visibility under the configured acknowledgement policy.
         let mut results = Vec::new();
         for enabled in [false, true] {
             let standalone = GreptimeDbStandaloneBuilder::new(&format!("otlp_logical_{enabled}"))
@@ -578,16 +579,33 @@ WITH(
             if enabled {
                 assert_eq!(
                     submissions.get_sample_count() - before,
-                    2,
-                    "must exercise synchronous bulk submission"
+                    if pending_rows_batch_sync_enabled() {
+                        2
+                    } else {
+                        0
+                    },
+                    "logical submissions must follow the global acknowledgement policy"
                 );
             }
             let sql = "SELECT greptime_timestamp, greptime_value, stream, extra FROM batch_alignment_total ORDER BY greptime_timestamp";
-            let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
-            let OutputData::Stream(stream) = output.data else {
-                panic!("expected stream")
-            };
-            let batches = RecordBatches::try_collect(stream).await.unwrap();
+            let batches = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                    let OutputData::Stream(stream) = output.data else {
+                        panic!("expected stream")
+                    };
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    if !enabled
+                        || pending_rows_batch_sync_enabled()
+                        || batches.iter().map(|batch| batch.num_rows()).sum::<usize>() == 2
+                    {
+                        break batches;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
             assert_eq!(
                 batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
                 2

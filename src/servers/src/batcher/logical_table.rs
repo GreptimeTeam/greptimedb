@@ -55,6 +55,7 @@ pub use crate::batcher::logical_table::region_write::{
 pub use crate::batcher::logical_table::tables::{
     PendingRowsSchemaAlterer, PendingRowsSchemaAltererRef,
 };
+use crate::batcher::pending_rows_batch_sync_enabled;
 use crate::error;
 use crate::error::{Error, Result};
 use crate::metrics::{
@@ -62,24 +63,6 @@ use crate::metrics::{
 };
 
 const PHYSICAL_TABLE_KEY: &str = "physical_table";
-
-/// Whether wait for ingestion result before reply to client.
-const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
-
-/// Returns whether pending-row batch submissions wait for the flush result
-/// before replying to the client (synchronous mode), controlled by the
-/// `PENDING_ROWS_BATCH_SYNC` environment variable and defaulting to `true`.
-///
-/// Callers that reason about how long a remote write request may block (e.g.
-/// the frontend HTTP timeout fallback) must consult this instead of
-/// duplicating the env lookup.
-pub fn pending_rows_batch_sync_enabled() -> bool {
-    std::env::var(PENDING_ROWS_BATCH_SYNC_ENV)
-        .ok()
-        .as_deref()
-        .and_then(|v| v.parse::<bool>().ok())
-        .unwrap_or(true)
-}
 
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
@@ -183,32 +166,17 @@ impl LogicalTablePendingRowsBatcher {
 
 impl LogicalTablePendingRowsBatcher {
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
-        self.submit_inner(requests, ctx, self.pending_rows_batch_sync, |_| {
-            ready(Ok(()))
-        })
-        .await
-        .map(|(rows, ())| rows)
+        self.submit_with(requests, ctx, |_| ready(Ok(())))
+            .await
+            .map(|(rows, ())| rows)
     }
 
-    /// Waits for storage regardless of the Prom acknowledgement mode. The hook
-    /// runs after schema preparation, before admission, for request-level accounting.
-    pub async fn submit_sync<T, F>(
+    /// Submits with request-level accounting after schema preparation and before
+    /// queue admission. Acknowledgement follows the global batching policy.
+    pub async fn submit_with<T, F>(
         &self,
         requests: RowInsertRequests,
         ctx: QueryContextRef,
-        after_prepare: impl FnOnce(RowInsertRequests) -> F,
-    ) -> Result<(u64, T)>
-    where
-        F: Future<Output = Result<T>> + Send,
-    {
-        self.submit_inner(requests, ctx, true, after_prepare).await
-    }
-
-    async fn submit_inner<T, F>(
-        &self,
-        requests: RowInsertRequests,
-        ctx: QueryContextRef,
-        wait: bool,
         after_prepare: impl FnOnce(RowInsertRequests) -> F,
     ) -> Result<(u64, T)>
     where
@@ -291,7 +259,7 @@ impl LogicalTablePendingRowsBatcher {
             }
         }
 
-        if wait {
+        if self.pending_rows_batch_sync {
             let result = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["submit_wait_flush_result"])

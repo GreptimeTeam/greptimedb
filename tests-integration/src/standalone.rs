@@ -121,6 +121,7 @@ impl GreptimeDbStandaloneBuilder {
         self
     }
 
+    /// Configures logical-table batching for integration tests.
     #[must_use]
     pub fn with_logical_batcher(mut self, options: BatcherOptions) -> Self {
         self.logical_batcher = Some(options);

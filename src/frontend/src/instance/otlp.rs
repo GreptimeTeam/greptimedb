@@ -189,7 +189,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         // OTLP tables have one sample field in both the legacy and physical paths.
         let output = if let Some(batcher) = batcher {
             let (rows, cost) = batcher
-                .submit_sync(requests, ctx.clone(), |mut requests| {
+                .submit_with(requests, ctx.clone(), |mut requests| {
                     let ctx = ctx.clone();
                     async move {
                         Inserter::meter_row_inserts(&mut requests, &ctx)
@@ -216,9 +216,9 @@ impl OpenTelemetryProtocolHandler for Instance {
         };
         outcome.write_cost = output.meta.cost;
 
-        // Derived enrichment, written after the metric data is committed:
-        // failing here would make the client retry data the server already
-        // accepted, so every failure degrades to a warning instead.
+        // Derived enrichment follows the accepted metric submission, which may
+        // still be queued in asynchronous mode. Failures remain warning-only
+        // to avoid retrying metric data the server already accepted.
         if let Some(resource_info) = resource_info {
             let written = match self.check_row_insert_permission(
                 &resource_info,
