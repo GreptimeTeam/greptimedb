@@ -21,6 +21,7 @@ mod import_packed;
 mod influxdb;
 mod jaeger;
 mod log_handler;
+mod logical_batcher;
 mod logs;
 mod opentsdb;
 mod otlp;
@@ -31,7 +32,7 @@ mod region_query;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic};
+use std::sync::{Arc, OnceLock, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -78,6 +79,7 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
     OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
@@ -130,6 +132,7 @@ pub struct Instance {
     query_engine: QueryEngineRef,
     plugins: Plugins,
     inserter: InserterRef,
+    logical_batcher: Arc<OnceLock<Option<Arc<LogicalTablePendingRowsBatcher>>>>,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,

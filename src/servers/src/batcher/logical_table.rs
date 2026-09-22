@@ -21,6 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
+use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -182,14 +183,46 @@ impl LogicalTablePendingRowsBatcher {
 
 impl LogicalTablePendingRowsBatcher {
     pub async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+        self.submit_inner(requests, ctx, self.pending_rows_batch_sync, |_| {
+            ready(Ok(()))
+        })
+        .await
+        .map(|(rows, ())| rows)
+    }
+
+    /// Waits for storage regardless of the Prom acknowledgement mode. The hook
+    /// runs after schema preparation, before admission, for request-level accounting.
+    pub async fn submit_sync<T, F>(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        after_prepare: impl FnOnce(RowInsertRequests) -> F,
+    ) -> Result<(u64, T)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
+        self.submit_inner(requests, ctx, true, after_prepare).await
+    }
+
+    async fn submit_inner<T, F>(
+        &self,
+        requests: RowInsertRequests,
+        ctx: QueryContextRef,
+        wait: bool,
+        after_prepare: impl FnOnce(RowInsertRequests) -> F,
+    ) -> Result<(u64, T)>
+    where
+        F: Future<Output = Result<T>> + Send,
+    {
         let (table_batches, total_rows) = {
             let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                 .with_label_values(&["submit_build_and_align"])
                 .start_timer();
-            self.build_and_align_table_batches(requests, &ctx).await?
+            self.build_and_align_table_batches(&requests, &ctx).await?
         };
+        let prepared = after_prepare(requests).await?;
         if total_rows == 0 {
-            return Ok(0);
+            return Ok((0, prepared));
         }
 
         // Flushes dispatch directly to datanodes, so admit once before enqueueing.
@@ -258,7 +291,7 @@ impl LogicalTablePendingRowsBatcher {
             }
         }
 
-        if self.pending_rows_batch_sync {
+        if wait {
             let result = {
                 let _timer = PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
                     .with_label_values(&["submit_wait_flush_result"])
@@ -269,9 +302,9 @@ impl LogicalTablePendingRowsBatcher {
             };
             result
                 .context(error::SubmitBatchSnafu)
-                .map(|()| total_rows as u64)
+                .map(|()| (total_rows as u64, prepared))
         } else {
-            Ok(total_rows as u64)
+            Ok((total_rows as u64, prepared))
         }
     }
 }
