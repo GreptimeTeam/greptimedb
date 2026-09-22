@@ -1,0 +1,31 @@
+.github/workflows/rust.yml
+  s_65f202b19898b5::t_61ded2548e3ba3 160-201
+src/cli/src/metadata/snapshot.rs
+  s_65f202b19898b5::t_0dcaa8308f4d68 15-16,21,275-277,279-303,305,307,336-370,372-467,469-470,477-481,483-487
+src/common/datasource/src/file_format/csv.rs
+  s_65f202b19898b5::t_bb8ece926e8180 652,658,710,716,724,763,769,795,801
+src/common/datasource/src/file_format/json.rs
+  s_65f202b19898b5::t_b0cba90370c659 318,324,376,382,390
+src/common/datasource/src/file_format/tests.rs
+  s_65f202b19898b5::t_7f02a9227f2cdb 69-70,74,110-111,113,151-152,156,191,193-194
+src/common/datasource/src/test_util.rs
+  s_65f202b19898b5::t_30bdd1eb93fd37 59-60,97-101,122,124,132,141,147,172,174,187,196
+src/common/datasource/src/tests.rs
+  s_65f202b19898b5::t_adc9a2e1b82ffc 21-23,27,31,36-39,43,47
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "9ed4c008ffc0e0f00b5ad09296ac66adbbcd6ff8",
+  "prompts": {},
+  "sessions": {
+    "s_65f202b19898b5": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c91c-23ea-7370-8b94-2d4baa0d085b",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
