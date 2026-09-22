@@ -728,7 +728,6 @@ impl HttpServerBuilder {
         pipeline_handler: Option<PipelineHandlerRef>,
         prom_store_with_metric_engine: bool,
         prom_validation_mode: PromValidationMode,
-        experimental_enable_prometheus_native_histogram: bool,
         pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     ) -> Self {
         let state = PromStoreState {
@@ -736,7 +735,6 @@ impl HttpServerBuilder {
             pipeline_handler,
             prom_store_with_metric_engine,
             prom_validation_mode,
-            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         };
 
@@ -763,16 +761,11 @@ impl HttpServerBuilder {
         self,
         handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
     ) -> Self {
         Self {
             router: self.router.nest(
                 &format!("/{HTTP_API_VERSION}/otlp"),
-                HttpServer::route_otlp(
-                    handler,
-                    with_metric_engine,
-                    experimental_enable_exponential_histogram,
-                ),
+                HttpServer::route_otlp(handler, with_metric_engine),
             ),
             ..self
         }
@@ -1500,7 +1493,6 @@ impl HttpServer {
     fn route_otlp<S>(
         otlp_handler: OpenTelemetryProtocolHandlerRef,
         with_metric_engine: bool,
-        experimental_enable_exponential_histogram: bool,
     ) -> Router<S> {
         Router::new()
             .route("/v1/metrics", routing::post(otlp::metrics))
@@ -1516,7 +1508,6 @@ impl HttpServer {
             ))
             .with_state(OtlpState {
                 with_metric_engine,
-                experimental_enable_exponential_histogram,
                 handler: otlp_handler,
             })
     }

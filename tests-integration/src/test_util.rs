@@ -701,7 +701,7 @@ pub async fn setup_test_http_app_with_frontend_and_slow_query_threshold(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(instance.fe_instance().clone(), true, false)
+        .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_greptime_config_options(instance.opts.to_toml().unwrap())
         .build();
@@ -721,18 +721,6 @@ pub async fn setup_test_http_app_with_frontend_and_user_provider(
         user_provider,
         None,
         None,
-        false,
-    )
-    .await
-}
-
-pub async fn setup_test_http_app_with_otlp_exponential_histogram(
-    store_type: StorageType,
-    name: &str,
-    enabled: bool,
-) -> (Router, TestGuard) {
-    setup_test_http_app_with_frontend_and_custom_options(
-        store_type, name, None, None, None, enabled,
     )
     .await
 }
@@ -743,7 +731,6 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
     user_provider: Option<UserProviderRef>,
     http_opts: Option<HttpOptions>,
     memory_limiter: Option<ServerMemoryLimiter>,
-    experimental_enable_exponential_histogram: bool,
 ) -> (Router, TestGuard) {
     let plugins = Plugins::new();
     if let Some(user_provider) = user_provider.clone() {
@@ -765,11 +752,7 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
         .with_influxdb_handler(instance.fe_instance().clone())
-        .with_otlp_handler(
-            instance.fe_instance().clone(),
-            true,
-            experimental_enable_exponential_histogram,
-        )
+        .with_otlp_handler(instance.fe_instance().clone(), true)
         .with_prometheus_handler(instance.fe_instance().clone())
         .with_jaeger_handler(instance.fe_instance().clone())
         .with_dashboard_handler(instance.fe_instance().clone())
@@ -801,14 +784,7 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, false).await
-}
-
-pub async fn setup_test_prom_app_with_frontend_native_histogram(
-    store_type: StorageType,
-    name: &str,
-) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false, true).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, false).await
 }
 
 /// Like [`setup_test_prom_app_with_frontend`] but enables the pending-rows batcher,
@@ -818,14 +794,13 @@ pub async fn setup_test_prom_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, true, false).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, true).await
 }
 
 async fn setup_test_prom_app_with_frontend_inner(
     store_type: StorageType,
     name: &str,
     enable_batcher: bool,
-    experimental_enable_prometheus_native_histogram: bool,
 ) -> (Router, TestGuard) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -874,13 +849,9 @@ async fn setup_test_prom_app_with_frontend_inner(
     let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
-    let http_server = build_test_prom_server(
-        instance.fe_instance().clone(),
-        enable_batcher,
-        experimental_enable_prometheus_native_histogram,
-    )
-    .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
-    .build();
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), enable_batcher)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
     let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
 }
@@ -889,7 +860,6 @@ async fn setup_test_prom_app_with_frontend_inner(
 pub fn build_test_prom_server(
     frontend_ref: Arc<Instance>,
     enable_batcher: bool,
-    experimental_enable_prometheus_native_histogram: bool,
 ) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -924,7 +894,6 @@ pub fn build_test_prom_server(
             Some(frontend_ref.clone()),
             true,
             PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram,
             pending_rows_batcher,
         )
         .with_prometheus_handler(frontend_ref)
