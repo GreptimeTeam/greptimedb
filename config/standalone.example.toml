@@ -234,7 +234,7 @@ max_batch_rows = 100000
 ## Maximum concurrent flushes shared by the frontend batcher.
 max_concurrent_flushes = 256
 ## Maximum queued submissions per table worker.
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 ## Maximum admitted original requests awaiting completion.
 max_inflight_requests = 3000
 ## Maximum number of queued table Flow notifications.
@@ -255,7 +255,7 @@ max_batch_rows = 100000
 ## Maximum concurrent flushes shared by Prom and OTLP metrics.
 max_concurrent_flushes = 256
 ## Maximum queued submissions per physical-table worker.
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 ## Maximum admitted original requests awaiting completion.
 max_inflight_requests = 3000
 ## Maximum number of queued logical-table Flow notifications.

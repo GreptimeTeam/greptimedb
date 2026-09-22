@@ -83,7 +83,7 @@ impl Default for BatcherOptions {
             pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: 100_000,
             max_concurrent_flushes: 256,
-            worker_channel_capacity: 65526,
+            worker_channel_capacity: 65_536,
             max_inflight_requests: 3000,
             flow_notification_queue_capacity: NonZeroUsize::new(1024).unwrap_or(NonZeroUsize::MIN),
         }
@@ -280,7 +280,7 @@ mod tests {
         assert!(!options.pending_rows_batching_enabled());
         assert_eq!(options.max_batch_rows, 100_000);
         assert_eq!(options.max_concurrent_flushes, 256);
-        assert_eq!(options.worker_channel_capacity, 65526);
+        assert_eq!(options.worker_channel_capacity, 65_536);
         assert_eq!(options.max_inflight_requests, 3000);
         let serialized = toml::to_string(&options).unwrap();
         assert_eq!(

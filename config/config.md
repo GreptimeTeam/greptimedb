@@ -79,14 +79,14 @@
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
-| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
 | `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
-| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per physical-table worker. |
+| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per physical-table worker. |
 | `pending_rows_batcher.logical_table.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.logical_table.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued logical-table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |
@@ -347,14 +347,14 @@
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
-| `pending_rows_batcher.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per table worker. |
+| `pending_rows_batcher.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per table worker. |
 | `pending_rows_batcher.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued table Flow notifications. |
 | `pending_rows_batcher.logical_table` | -- | -- | Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.<br/>Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.<br/>Enable independently with protocols and a nonzero flush interval.<br/>Omitted fields use independent defaults, not parent settings.<br/>Empty protocols or a zero interval disables logical batching without fallback.<br/>Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching. |
 | `pending_rows_batcher.logical_table.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.logical_table.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.logical_table.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by Prom and OTLP metrics. |
-| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65526` | Maximum queued submissions per physical-table worker. |
+| `pending_rows_batcher.logical_table.worker_channel_capacity` | Integer | `65536` | Maximum queued submissions per physical-table worker. |
 | `pending_rows_batcher.logical_table.max_inflight_requests` | Integer | `3000` | Maximum admitted original requests awaiting completion. |
 | `pending_rows_batcher.logical_table.flow_notification_queue_capacity` | Integer | `1024` | Maximum number of queued logical-table Flow notifications. |
 | `jaeger` | -- | -- | Jaeger protocol options. |

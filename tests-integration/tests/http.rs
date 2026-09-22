@@ -2432,7 +2432,7 @@ protocols = []
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 max_inflight_requests = 3000
 flow_notification_queue_capacity = 1024
 
@@ -2453,7 +2453,7 @@ experimental_enable_prometheus_native_histogram = false
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 max_inflight_requests = 3000
 flow_notification_queue_capacity = 1024
 
