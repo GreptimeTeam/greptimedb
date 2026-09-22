@@ -146,6 +146,35 @@ Use `json_to_string(rating)` to display the full object, or
 The array positions correspond to the supplied criteria, which provide the level
 descriptions.
 
+## Reusing an evaluation
+
+AI functions are marked volatile to prevent HTTP calls during planning. Identical
+calls written separately in `SELECT` and `WHERE` are evaluated separately. If the
+filter evaluates N non-null rows and M rows pass to the projection, this can cost
+N + M requests, reaching 2N when all rows pass.
+
+To return a result and filter by it, compute it once in a subquery and reference
+its alias in the outer query:
+
+```sql
+SELECT occurred_at, message, score
+FROM (
+    SELECT occurred_at, message,
+           ai_match(message, 'The event reports that a payment still failed after retries.') AS score
+    FROM events
+    WHERE occurred_at >= '2026-09-19T00:00:00Z'
+      AND occurred_at <  '2026-09-20T00:00:00Z'
+      AND service = 'payments'
+) AS scored
+WHERE score >= 0.8
+ORDER BY score DESC;
+```
+
+This also applies to `ai_choose` and `ai_score`. Extract multiple JSON fields from
+the aliased `ai_score` result, as in the rating example above, rather than calling
+the model again for each field. Filter pushdown preserves the volatile projection
+instead of duplicating it into the outer predicate.
+
 ## MVP behavior
 
 - Each non-null row makes one HTTP request per function invocation: the text is
