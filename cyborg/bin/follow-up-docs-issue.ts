@@ -65,19 +65,21 @@ async function main() {
                 core.info("PR closed without merging; no docs issue needed.")
                 return
             }
-            // Re-read the live PR state instead of trusting the event payload's
-            // label snapshot: a concurrent edit run may not have applied the
-            // docs-required label yet when the PR is merged.
+            // The docs-required label is the single source of truth. Coordinate
+            // with pending checkbox-driven label updates before deciding: an edit
+            // run may still be applying or removing the label, and the event
+            // payload's label snapshot may be stale.
             const client = obtainClient("GITHUB_TOKEN")
             const { data: pr } = await client.rest.pulls.get({ owner, repo, pull_number: number })
-            const hasDocsLabel = pr.labels.some((label) => label.name === labelDocsRequired)
-            const checkboxChecked = pr.body?.includes(needFollowUpDocs) ?? false
-            if (!hasDocsLabel && !checkboxChecked) {
-                core.info(`Neither label ${labelDocsRequired} nor the docs checkbox is present; no docs issue needed.`)
+            await waitForPendingLabelUpdates(client, owner, repo, pr.head.sha)
+            const { data: freshPr } = await client.rest.pulls.get({ owner, repo, pull_number: number })
+            const hasDocsLabel = freshPr.labels.some((label) => label.name === labelDocsRequired)
+            if (!hasDocsLabel) {
+                core.info(`Label ${labelDocsRequired} not present; no docs issue needed.`)
                 return
             }
             const docsClient = obtainClient("DOCS_REPO_TOKEN")
-            await createDocsIssue(docsClient, pr.title, pr.html_url, actor)
+            await createDocsIssue(docsClient, freshPr.title, freshPr.html_url, actor)
             break
         }
         default:
@@ -139,6 +141,28 @@ async function createDocsIssue(docsClient: ReturnType<typeof obtainClient>, titl
     }).then((res) => {
         core.info(`Created issue ${res.data}`)
     })
+}
+
+// Waits until no other runs of this workflow are pending for the PR head SHA,
+// so that any checkbox-driven label update has been applied before the caller
+// reads the labels. Bounded by a deadline; on timeout it proceeds with whatever
+// the current label state is.
+async function waitForPendingLabelUpdates(client: ReturnType<typeof obtainClient>, owner: string, repo: string, headSha: string) {
+    const deadlineMs = 5 * 60 * 1000
+    const pollIntervalMs = 5000
+    const deadline = Date.now() + deadlineMs
+    while (Date.now() < deadline) {
+        const { data } = await client.rest.actions.listWorkflowRuns({
+            owner, repo, workflow_id: "docbot.yml", head_sha: headSha, per_page: 20,
+        })
+        const pending = data.workflow_runs.filter((run) => run.id !== context.runId && run.status !== "completed")
+        if (pending.length === 0) {
+            return
+        }
+        core.info(`Waiting for ${pending.length} pending docbot run(s) to finish label updates...`)
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+    }
+    core.warning("Timed out waiting for pending docbot runs; proceeding with the current label state.")
 }
 
 function checkPullRequestOpenedEvent(event: PullRequestOpenedEvent): boolean {
