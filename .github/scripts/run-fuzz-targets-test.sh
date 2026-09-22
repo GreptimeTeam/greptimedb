@@ -31,7 +31,7 @@ new_fixture() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\t%s\t%s\n' "${GT_FUZZ_DUMP_DIR}" "$*" "${MOCK_CARGO_MARKER:-}" >>"${MOCK_CARGO_LOG}"
-target="$3"
+target="$4"
 case " ${MOCK_FAIL_TARGETS:-} " in
   *" ${target} "*) exit 17 ;;
 esac
@@ -125,7 +125,7 @@ test_successful_targets_run_in_order() {
   assert_eq 2 "$(wc -l <"${fixture}/cargo.log" | tr -d ' ')" "cargo invocation count"
   assert_eq \
     $'fuzz_create_table\nfuzz_insert' \
-    "$(awk -F '\t' '{print $2}' "${fixture}/cargo.log" | sed -E 's/^fuzz run ([^ ]+).*/\1/')" \
+    "$(awk -F '\t' '{print $2}' "${fixture}/cargo.log" | sed -E 's/^\+nightly fuzz run ([^ ]+).*/\1/')" \
     "target order"
   grep -q -- '--features=unstable' "${fixture}/cargo.log" || fail "unstable feature missing"
   grep -q -- '-max_total_time=120' "${fixture}/cargo.log" || fail "fuzz time missing"
@@ -175,7 +175,7 @@ test_fail_fast_stops_after_first_failure() {
     fail "skipped target annotation missing"
   grep -q '### Reproduce failed targets' "${fixture}/artifacts/summary.md" || \
     fail "reproduction section missing"
-  grep -q 'cargo fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
+  grep -q 'cargo +nightly fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
     fail "reproduction command missing"
   cleanup_fixture
 }
