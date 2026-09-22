@@ -24,9 +24,9 @@ use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use common_time::Timezone;
 use datafusion::arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
-use datafusion::arrow::datatypes::DataType;
+use datafusion::arrow::datatypes::{DataType, TimeUnit};
 use datafusion::arrow::record_batch::RecordBatch;
-use datafusion::prelude::{col, lit};
+use datafusion::prelude::{cast, col, lit};
 use datafusion_common::tree_node::TreeNodeRecursion;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::expr_fn::SimpleScalarUDF;
@@ -193,6 +193,45 @@ fn engine_state(distributed: bool) -> QueryEngineState {
         Plugins::default(),
         QueryOptions::default(),
     )
+}
+
+/// A catalog the SQL planner can resolve `metric` through, for the hybrid
+/// SQL/TQL plans that reach the cache alongside pure PromQL ones.
+fn state_with_metric() -> Arc<QueryEngineState> {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    register(&catalog, 1024, "metric", 1.0, 0);
+    Arc::new(QueryEngineState::new(
+        catalog,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        Plugins::default(),
+        QueryOptions::default(),
+    ))
+}
+
+/// Plans `SELECT * FROM (TQL EVAL ...)` with an optional `WHERE`, through the
+/// SQL planner rather than [`PromPlanner`], so the plan carries whatever the
+/// hybrid CTE path produces.
+async fn hybrid_plan(
+    state: &Arc<QueryEngineState>,
+    start: i64,
+    filter: Option<&str>,
+) -> LogicalPlan {
+    let engine = crate::datafusion::DatafusionQueryEngine::new(state.clone(), Plugins::default());
+    let sql = format!(
+        "WITH q AS (TQL EVAL ({start}, {end}, '30s') metric) SELECT * FROM q{where_clause}",
+        end = start + 60,
+        where_clause = filter.map(|f| format!(" WHERE {f}")).unwrap_or_default(),
+    );
+    let stmt = crate::parser::QueryLanguageParser::parse_sql(&sql, &QueryContext::arc()).unwrap();
+    crate::query_engine::QueryEngine::planner(&engine)
+        .plan(&stmt, QueryContext::arc())
+        .await
+        .unwrap_or_else(|e| panic!("failed to plan {sql}: {e}"))
 }
 
 /// Collects the plan's output, ordered deterministically so the comparison does
@@ -470,8 +509,10 @@ async fn capacity_bounds_the_number_of_retained_templates() {
     }
     let retained = cache.entry_count().await;
     assert!(retained <= 2);
-    // Six inserts into a two-entry cache: without the eviction listener the
-    // gauge would report every template ever stored.
+    // Every query inserts into a two-entry cache: without the eviction listener
+    // the gauge would report every template ever stored. It is process wide, so
+    // this reads a delta; nextest gives each test its own process, which is what
+    // keeps the delta this test's own.
     assert_eq!(
         crate::metrics::PROMQL_PLAN_CACHE_ENTRIES.get() - before,
         retained as i64
@@ -542,6 +583,87 @@ async fn unsupported_shapes_keep_the_uncached_path() {
             plan.display_indent()
         );
     }
+}
+
+/// Analysis and optimization can fold a string, a cast or an arithmetic
+/// expression in a time-index comparison into a timestamp literal, which
+/// `rebind` then shifts like a selector bound. The key is built before both, so
+/// such a plan must not be admitted.
+#[tokio::test]
+async fn a_time_bound_the_key_cannot_cover_keeps_the_uncached_path() {
+    let state = engine_state(false);
+    let session = state.session_state();
+    let cache = PromqlPlanCache::new(4);
+    let raw = PromPlanner::stmt_to_plan(provider(1.0, 0).await, &eval_stmt("metric", 0), &state)
+        .await
+        .unwrap();
+    let under_filter = |predicate| {
+        LogicalPlanBuilder::from(raw.clone())
+            .filter(predicate)
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+
+    let literal_bound = under_filter(col("timestamp").eq(lit(ScalarValue::TimestampMillisecond(
+        Some(EVAL_START_MS),
+        None,
+    ))));
+    assert!(
+        cache
+            .candidate(&literal_bound, &session, &QueryContext::arc())
+            .is_some()
+    );
+
+    let folded_bound = under_filter(col("timestamp").eq(cast(
+        lit("2025-03-27 12:00:00"),
+        DataType::Timestamp(TimeUnit::Millisecond, None),
+    )));
+    assert!(
+        cache
+            .candidate(&folded_bound, &session, &QueryContext::arc())
+            .is_none(),
+        "admitted a bound the key does not carry: {}",
+        folded_bound.display_indent()
+    );
+}
+
+/// A TQL CTE under a SQL filter is a cacheable shape, so a fixed time in that
+/// filter must key its own entry: it does not move with the evaluation window,
+/// while the normalization that builds the key does.
+#[tokio::test]
+async fn a_fixed_time_filter_keys_its_own_entry() {
+    let state = state_with_metric();
+    let session = state.session_state();
+    let cache = PromqlPlanCache::new(4);
+    let start = EVAL_START_MS / 1000;
+    let filter = format!("\"timestamp\" = {EVAL_START_MS}");
+
+    let warm = async |plan: &LogicalPlan| {
+        let candidate = cache
+            .candidate(plan, &session, &QueryContext::arc())
+            .unwrap_or_else(|| panic!("rejected {}", plan.display_indent()));
+        assert!(cache.get(&candidate).await.unwrap().is_none());
+        assert!(
+            cache
+                .insert(candidate, &session.optimize(plan).unwrap())
+                .await
+        );
+    };
+    let hits = async |plan: &LogicalPlan| {
+        let candidate = cache
+            .candidate(plan, &session, &QueryContext::arc())
+            .unwrap_or_else(|| panic!("rejected {}", plan.display_indent()));
+        cache.get(&candidate).await.unwrap().is_some()
+    };
+
+    // Without the filter the two windows share one template, which is what
+    // makes the miss below the filter's doing rather than an unsupported shape.
+    warm(&hybrid_plan(&state, start, None).await).await;
+    assert!(hits(&hybrid_plan(&state, start + 30, None).await).await);
+
+    warm(&hybrid_plan(&state, start, Some(&filter)).await).await;
+    assert!(!hits(&hybrid_plan(&state, start + 30, Some(&filter)).await).await);
 }
 
 /// The native-histogram range functions carry a per-request annotation
@@ -841,11 +963,19 @@ fn collect_range_functions(plan: &LogicalPlan, found: &mut Vec<Arc<ScalarUDF>>) 
 #[tokio::test]
 async fn the_query_engine_reuses_templates_when_enabled() {
     let query = "sum by (tag_0) (rate(metric[1h]))";
-    let outcome = |name: &str| {
+    // The counters are process wide, so they are read as deltas; nextest gives
+    // each test its own process, which is what keeps the deltas this test's own.
+    let counter = |name: &str| {
         crate::metrics::PROMQL_PLAN_CACHE
             .with_label_values(&[name])
             .get()
     };
+    let (miss, insert, hit, uncacheable) = (
+        counter("miss"),
+        counter("insert"),
+        counter("hit"),
+        counter("uncacheable"),
+    );
 
     let mut cached = Vec::new();
     let mut uncached = Vec::new();
@@ -889,10 +1019,10 @@ async fn the_query_engine_reuses_templates_when_enabled() {
     assert_eq!(cached, uncached);
     // The three cached requests are one miss (and insert) plus two hits; the
     // three uncached ones touch nothing.
-    assert_eq!(outcome("miss"), 1);
-    assert_eq!(outcome("insert"), 1);
-    assert_eq!(outcome("hit"), 2);
-    assert_eq!(outcome("uncacheable"), 0);
+    assert_eq!(counter("miss") - miss, 1);
+    assert_eq!(counter("insert") - insert, 1);
+    assert_eq!(counter("hit") - hit, 2);
+    assert_eq!(counter("uncacheable") - uncacheable, 0);
 }
 
 /// Admission alone must not publish anything, so a request that fails or is

@@ -556,6 +556,16 @@ impl Shape {
                 let is_time = |expr: &Expr| matches!(expr, Expr::Column(column) if Some(&column.name) == self.time_column.as_ref());
                 let left_is_bound = filter && comparison && is_time(&binary.right);
                 let right_is_bound = filter && comparison && is_time(&binary.left);
+                // The key is built before analysis and optimization, which can
+                // fold a string, a cast or an arithmetic expression here into a
+                // timestamp literal. `rebind` shifts every millisecond literal
+                // it finds, so a bound the key never saw would move with the
+                // request and silently change what the query asks for.
+                if (left_is_bound && !is_bindable_timestamp(&binary.left))
+                    || (right_is_bound && !is_bindable_timestamp(&binary.right))
+                {
+                    return None;
+                }
                 self.expression(&binary.left, filter, left_is_bound)?;
                 self.expression(&binary.right, filter, right_is_bound)?;
                 return (self.bytes <= MAX_BYTES).then_some(());
@@ -610,6 +620,15 @@ impl Shape {
         .ok()?;
         (admitted && self.bytes <= MAX_BYTES).then_some(())
     }
+}
+
+/// Whether a time-index comparison already holds the literal `rebind` shifts,
+/// rather than something that only becomes one later in planning.
+fn is_bindable_timestamp(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Literal(ScalarValue::TimestampMillisecond(Some(_), None), None)
+    )
 }
 
 /// Whether a window frame bound is independent of the request's evaluation
