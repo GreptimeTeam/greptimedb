@@ -30,6 +30,7 @@ use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlownodeOptions;
 use frontend::frontend::FrontendOptions;
+use frontend::service_config::PendingRowsBatcherOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
@@ -206,6 +207,10 @@ fn test_load_frontend_example_config() {
     );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -389,6 +394,10 @@ fn test_load_standalone_example_config() {
     );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,

@@ -263,7 +263,10 @@ flow_notification_queue_capacity = 1024
 
 ## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
 ## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
-## These controls are independent and do not inherit the parent settings.
+## Enable independently with protocols and a nonzero flush interval.
+## Omitted fields use independent defaults, not parent settings.
+## Empty protocols or a zero interval disables logical batching without fallback.
+## Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching.
 [pending_rows_batcher.logical_table]
 # protocols = ["prom", "otlp"]
 ## Flush interval measured from the first pending submission. Zero disables batching.
