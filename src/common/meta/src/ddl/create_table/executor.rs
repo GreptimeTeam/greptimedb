@@ -182,7 +182,19 @@ impl CreateTableExecutor {
         region_wal_options: RegionWalOptions,
     ) -> Result<()> {
         if !column_metadatas.is_empty() {
-            update_table_info_column_ids(&mut table_info, column_metadatas);
+            // Region metadata can include engine-internal columns that are not visible in
+            // the table schema. Only visible columns belong in the table's column IDs.
+            let visible_column_metadatas = column_metadatas
+                .iter()
+                .filter(|column| {
+                    table_info
+                        .meta
+                        .schema
+                        .contains_column(&column.column_schema.name)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            update_table_info_column_ids(&mut table_info, &visible_column_metadatas);
         }
         let detecting_regions =
             convert_region_routes_to_detecting_regions(&table_route.region_routes);
