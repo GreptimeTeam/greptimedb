@@ -49,8 +49,20 @@ SELECT arrow_typeof(ai_choose(NULL, 'prompt', '{"billing":null}')) AS choice_typ
 +-------------+------------+
 | choice_type | score_type |
 +-------------+------------+
-| Utf8        | Float64    |
+| Utf8        | BinaryView |
 +-------------+------------+
+
+SELECT json_to_string(rating) AS rating,
+       json_get_float(rating, 'score') AS score,
+       json_get_float(rating, 'confidence') AS confidence,
+       json_get_float(rating, 'probabilities[2]') AS high_probability
+FROM (SELECT ai_score(NULL, 'prompt', '["low","medium","high"]') AS rating) AS rated;
+
++--------+-------+------------+------------------+
+| rating | score | confidence | high_probability |
++--------+-------+------------+------------------+
+|        |       |            |                  |
++--------+-------+------------+------------------+
 
 -- Validate SQL registration, coercion, and asynchronous filtering on a real table.
 CREATE TABLE ai_events (
@@ -82,16 +94,16 @@ ORDER BY occurred_at;
 
 SELECT occurred_at,
        ai_choose(message, 'Route the ticket', '{"billing":"Payments","technical":"Errors"}') AS team,
-       ai_score(message, 'Rate severity', '["low","medium","high"]') AS severity
+       ai_score(message, 'Rate severity', '["low","medium","high"]') AS rating
 FROM ai_events
 ORDER BY occurred_at;
 
-+---------------------+------+----------+
-| occurred_at         | team | severity |
-+---------------------+------+----------+
-| 2026-09-19T01:00:00 |      |          |
-| 2026-09-19T02:00:00 |      |          |
-+---------------------+------+----------+
++---------------------+------+--------+
+| occurred_at         | team | rating |
++---------------------+------+--------+
+| 2026-09-19T01:00:00 |      |        |
+| 2026-09-19T02:00:00 |      |        |
++---------------------+------+--------+
 
 DROP TABLE ai_events;
 

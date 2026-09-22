@@ -313,7 +313,8 @@ impl AiQuestion for Noul {
     }
 
     fn parse_answer(answer: &Value, _criteria: &()) -> Result<ScalarValue> {
-        numeric_answer(Self::NAME, &answer["noul"], 1.0)
+        numeric_answer(Self::NAME, &answer["noul"], "noul", 1.0)
+            .map(|probability| ScalarValue::Float64(Some(probability)))
     }
 }
 
@@ -369,7 +370,7 @@ impl AiQuestion for Score {
     const ARG_COUNT: usize = 3;
 
     fn return_type() -> DataType {
-        DataType::Float64
+        DataType::BinaryView
     }
 
     fn parse_criteria(args: &[&str]) -> Result<Self::Criteria> {
@@ -388,8 +389,52 @@ impl AiQuestion for Score {
     }
 
     fn parse_answer(answer: &Value, criteria: &Self::Criteria) -> Result<ScalarValue> {
-        numeric_answer(Self::NAME, &answer["score"], (criteria.len() - 1) as f64)
+        let score = numeric_answer(
+            Self::NAME,
+            &answer["score"],
+            "score",
+            (criteria.len() - 1) as f64,
+        )?;
+        let confidence = numeric_answer(Self::NAME, &answer["confidence"], "confidence", 1.0)?;
+        let probabilities = score_probabilities(&answer["probabilities"], criteria.len())?;
+        let object = jsonb::Object::from([
+            ("score".to_string(), jsonb::Value::from(score)),
+            ("confidence".to_string(), jsonb::Value::from(confidence)),
+            (
+                "probabilities".to_string(),
+                jsonb::Value::Array(probabilities.into_iter().map(jsonb::Value::from).collect()),
+            ),
+        ]);
+        Ok(ScalarValue::BinaryView(Some(
+            jsonb::Value::Object(object).to_vec(),
+        )))
     }
+}
+
+fn score_probabilities(distribution: &Value, level_count: usize) -> Result<Vec<f64>> {
+    if distribution
+        .as_object()
+        .is_none_or(|probabilities| probabilities.len() != level_count)
+    {
+        return exec_err!(
+            "ai_score response must contain probabilities for all {level_count} levels"
+        );
+    }
+    let probabilities = (0..level_count)
+        .map(|level| {
+            numeric_answer(
+                Score::NAME,
+                &distribution[level.to_string()],
+                "probability",
+                1.0,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Allow small rounding differences without renormalizing the provider's distribution.
+    if (probabilities.iter().sum::<f64>() - 1.0).abs() > 1e-6 {
+        return exec_err!("ai_score response probabilities must sum to 1 within 1e-6");
+    }
+    Ok(probabilities)
 }
 
 fn is_description(description: &Value) -> bool {
@@ -399,12 +444,11 @@ fn is_description(description: &Value) -> bool {
     )
 }
 
-fn numeric_answer(name: &str, answer: &Value, max: f64) -> Result<ScalarValue> {
-    let score = answer
+fn numeric_answer(name: &str, answer: &Value, field: &str, max: f64) -> Result<f64> {
+    answer
         .as_f64()
         .filter(|score| (0.0..=max).contains(score))
         .ok_or_else(|| {
-            exec_datafusion_err!("{name} response must contain a finite value in [0, {max}]")
-        })?;
-    Ok(ScalarValue::Float64(Some(score)))
+            exec_datafusion_err!("{name} response must contain a finite {field} in [0, {max}]")
+        })
 }

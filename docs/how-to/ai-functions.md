@@ -7,9 +7,10 @@ classification, and rating. The current backend is TypeSafe's Jev model:
 | --- | --- | --- |
 | `ai_match(text, prompt)` | Noul | `Float64` probability in **[0, 1]** that the prompt's statement is true |
 | `ai_choose(text, prompt, criteria)` | Choice | `String` containing the selected option's name |
-| `ai_score(text, prompt, criteria)` | Score | `Float64` rating in **[0, N − 1]**, where N is the number of levels |
+| `ai_score(text, prompt, criteria)` | Score | JSONB object containing `score`, `confidence`, and a `probabilities` array |
 
-All are usable in `SELECT`, comparisons in `WHERE`, and `ORDER BY`.
+Use scalar results or extracted JSON fields in `SELECT`, comparisons in `WHERE`,
+and `ORDER BY`.
 All arguments are SQL strings. Any SQL NULL argument produces SQL `NULL`
 without validating that row's criteria or calling the API.
 
@@ -99,22 +100,51 @@ WHERE occurred_at >= '2026-09-19T00:00:00Z'
 
 `criteria` is a JSON array of **2 to 10 ordered level descriptions**, from low
 to high. Descriptions can be strings, objects, or arrays. Level numbers start
-at zero. The returned score is the probability-weighted level number, so it can
-fall between levels. For three levels, the range is `[0, 2]`; a score such as
-`1.25` is a rating, not a probability or confidence value.
+at zero. The function returns a JSONB object from one model evaluation:
+
+```json
+{
+  "score": 1.05,
+  "confidence": 0.92,
+  "probabilities": [0.0, 0.95, 0.05]
+}
+```
+
+- `score` is the provider's probability-weighted mean of the level numbers, in
+  `[0, N − 1]` for N levels. It may fall between levels.
+- `confidence` is the provider's confidence in `[0, 1]`, reflecting how concentrated
+  the distribution is. It is not a guarantee that the answer is correct.
+- `probabilities[i]` is the probability of `criteria[i]`, with exactly N entries in
+  level order. These are individual level probabilities, not cumulative probabilities.
+
+Different distributions can have the same score. `[0, 1, 0]` and `[0.5, 0, 0.5]`
+both have score `1`: the first concentrates on the middle level, while the second
+is split between the extremes. Inspect confidence and the distribution before
+treating a mean score as a definite severity level.
+
+For example, compute the rating once, extract numeric fields, and rank only rows
+meeting a chosen confidence threshold:
 
 ```sql
 SELECT occurred_at, message,
-       ai_score(message, 'How severe is this event?',
-                 '["No impact to functionality","Degraded service with a workaround","Blocking issue with no workaround"]') AS severity
-FROM events
-WHERE occurred_at >= '2026-09-19T00:00:00Z'
-  AND occurred_at <  '2026-09-20T00:00:00Z'
+       json_get_float(rating, 'score') AS severity,
+       json_get_float(rating, 'confidence') AS confidence
+FROM (
+    SELECT occurred_at, message,
+           ai_score(message, 'How severe is this event?',
+                    '["No impact to functionality","Degraded service with a workaround","Blocking issue with no workaround"]') AS rating
+    FROM events
+    WHERE occurred_at >= '2026-09-19T00:00:00Z'
+      AND occurred_at <  '2026-09-20T00:00:00Z'
+) AS rated
+WHERE json_get_float(rating, 'confidence') >= 0.8
 ORDER BY severity DESC NULLS LAST;
 ```
 
-These scalar functions return only the selected option or rating, not the API's
-additional confidence, probability distribution, or legend fields.
+Use `json_to_string(rating)` to display the full object, or
+`json_get_float(rating, 'probabilities[2]')` to read the probability of level 2.
+The array positions correspond to the supplied criteria, which provide the level
+descriptions.
 
 ## MVP behavior
 
@@ -126,7 +156,11 @@ additional confidence, probability distribution, or legend fields.
   level counts fail the query locally.
 - Answers must have the requested question type. Noul probabilities outside
   `[0, 1]`, Choice labels not in the criteria, and Score values outside `[0, N − 1]`
-  fail the query rather than being clamped or replaced with NULL.
+  fail the query rather than being clamped or replaced with NULL. Score responses
+  must also contain a numeric confidence in `[0, 1]` and probabilities for every
+  level. Each probability must be numeric and in `[0, 1]`; their sum must be within
+  `1e-6` of 1. Provider values are preserved without renormalizing the distribution
+  or recomputing the score.
 - Up to eight requests run concurrently per expression/batch invocation, not per
   query or process. Concurrent partitions and queries can exceed eight requests
   in total. Each request has a 30-second timeout. Errors (including rate limits

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -57,6 +59,8 @@ impl Drop for MockServer {
 fn context<Q: AiQuestion>(function: AiFunction<Q>) -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
     ctx.register_udf(AsyncScalarUDF::new(Arc::new(function)).into_scalar_udf());
+    let json_get_float = FUNCTION_REGISTRY.get_function("json_get_float").unwrap();
+    ctx.register_udf(json_get_float.provide(FunctionContext::default()));
     ctx
 }
 
@@ -374,25 +378,28 @@ async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
             let question = &request["questions"]["matches"];
             assert_eq!(question["type"], "score");
             assert_eq!(question["instructions"], "Rate severity");
-            let score = match request["state"].as_str().unwrap() {
+            let (score, probabilities) = match request["state"].as_str().unwrap() {
                 "low" => {
                     assert_eq!(question["criteria"], json!(["low", {"description": "medium"}, ["high"]]));
                     tokio::time::sleep(Duration::from_millis(20)).await;
-                    0.0
+                    (0.0, json!({"0":1.0,"1":0.0,"2":0.0}))
                 }
-                "fractional" => 1.25,
-                "high" => 2.0,
+                "fractional" => (1.25, json!({"2":0.25,"0":0.0,"1":0.75})),
+                "high" => (2.0, json!({"0":0.0,"1":0.0,"2":1.0})),
                 "binary" => {
                     assert_eq!(question["criteria"], json!(["low", "high"]));
-                    1.0
+                    (1.0, json!({"0":0.0,"1":1.0}))
                 }
                 "ten levels" => {
                     assert_eq!(question["criteria"].as_array().unwrap().len(), 10);
-                    9.0
+                    let probabilities: Map<String, Value> = (0..10)
+                        .map(|level| (level.to_string(), json!(if level == 9 { 1.0 } else { 0.0 })))
+                        .collect();
+                    (9.0, Value::Object(probabilities))
                 }
                 unexpected => panic!("unexpected state: {unexpected}"),
             };
-            Json(json!({"answers": {"matches": {"type": "score", "score": score, "confidence": 0.4}}}))
+            Json(json!({"answers": {"matches": {"type": "score", "score": score, "confidence": 0.4, "probabilities": probabilities}}}))
         }),
     ))
     .await;
@@ -400,7 +407,7 @@ async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
     let batches = ctx
         .sql(
             r#"
-        SELECT id, ai_score(message, 'Rate severity', criteria) AS severity
+        SELECT id, json_get_float(ai_score(message, 'Rate severity', criteria), 'score') AS severity
         FROM (VALUES
             (1, 'low', '["low", {"description":"medium"}, ["high"]]'),
             (2, 'fractional', '["low", "medium", "high"]'),
@@ -438,8 +445,8 @@ async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
 
     let batches = ctx
         .sql(
-            r#"SELECT id, ai_score(message, 'Rate severity',
-                '["low",{"description":"medium"},["high"]]') AS severity
+            r#"SELECT id, json_get_float(ai_score(message, 'Rate severity',
+                '["low",{"description":"medium"},["high"]]'), 'score') AS severity
             FROM (VALUES (1, 'low'), (2, 'fractional'), (3, 'high'), (4, NULL)) AS events(id, message)
             ORDER BY id"#,
         )
@@ -461,6 +468,141 @@ async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
         ],
         &batches
     );
+}
+
+#[tokio::test]
+async fn test_ai_score_preserves_uncertainty_in_one_evaluation() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let request_calls = calls.clone();
+    let server = MockServer::start(Router::new().route(
+        "/v1/systemone",
+        post(move |Json(request): Json<Value>| {
+            request_calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                let (confidence, probabilities) = match request["state"].as_str().unwrap() {
+                    "medium" => (1.0, json!({"2":0.0,"0":0.0,"1":1.0})),
+                    "split" => (0.25, json!({"2":0.5,"0":0.5,"1":0.0})),
+                    unexpected => panic!("unexpected state: {unexpected}"),
+                };
+                Json(json!({"answers":{"matches":{
+                    "type":"score", "score":1.0, "confidence":confidence,
+                    "probabilities":probabilities
+                }}}))
+            }
+        }),
+    ))
+    .await;
+    let ctx = context(server.function::<Score>());
+    let rated = r#"(SELECT id, ai_score(message, 'Rate severity', '["low","medium","high"]') AS rating
+        FROM (VALUES (1, 'medium'), (2, 'split'), (3, NULL)) AS events(id, message)) AS rated"#;
+    let batches = ctx
+        .sql(&format!(
+            "SELECT id, json_get_float(rating, 'score') AS score,
+                json_get_float(rating, 'confidence') AS confidence,
+                json_get_float(rating, 'probabilities[0]') AS p0,
+                json_get_float(rating, 'probabilities[1]') AS p1,
+                json_get_float(rating, 'probabilities[2]') AS p2
+             FROM {rated} ORDER BY id"
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_batches_eq!(
+        [
+            "+----+-------+------------+-----+-----+-----+",
+            "| id | score | confidence | p0  | p1  | p2  |",
+            "+----+-------+------------+-----+-----+-----+",
+            "| 1  | 1.0   | 1.0        | 0.0 | 1.0 | 0.0 |",
+            "| 2  | 1.0   | 0.25       | 0.5 | 0.0 | 0.5 |",
+            "| 3  |       |            |     |     |     |",
+            "+----+-------+------------+-----+-----+-----+"
+        ],
+        &batches
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+
+    let batches = ctx
+        .sql(&format!(
+            "SELECT id FROM {rated} WHERE json_get_float(rating, 'confidence') >= 0.8
+             ORDER BY json_get_float(rating, 'score') DESC"
+        ))
+        .await
+        .unwrap()
+        .collect()
+        .await
+        .unwrap();
+    assert_batches_eq!(["+----+", "| id |", "+----+", "| 1  |", "+----+"], &batches);
+    assert_eq!(calls.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+fn test_ai_score_preserves_provider_precision() {
+    let answer = json!({
+        "score":1.6, "confidence":0.92,
+        "probabilities":{"2":0.6999995,"0":0.1,"1":0.2}
+    });
+    let criteria = vec![json!("low"), json!("medium"), json!("high")];
+    let ScalarValue::BinaryView(Some(bytes)) = Score::parse_answer(&answer, &criteria).unwrap()
+    else {
+        panic!("expected a JSONB object");
+    };
+    let object: Value =
+        serde_json::from_str(&jsonb::from_slice(&bytes).unwrap().to_string()).unwrap();
+    assert_eq!(object.as_object().unwrap().len(), 3);
+    assert_eq!(object["score"].as_f64(), Some(1.6));
+    assert_eq!(object["confidence"].as_f64(), Some(0.92));
+    let probabilities: Vec<f64> = object["probabilities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|probability| probability.as_f64().unwrap())
+        .collect();
+    assert_eq!(probabilities, vec![0.1, 0.2, 0.6999995]);
+}
+
+#[tokio::test]
+async fn test_ai_score_rejects_invalid_uncertainty() {
+    for (field, value) in [
+        ("confidence", Value::Null),
+        ("confidence", json!(-0.1)),
+        ("confidence", json!(1.1)),
+        ("confidence", json!("0.9")),
+        ("probabilities", Value::Null),
+        ("probabilities", json!([0.0, 1.0, 0.0])),
+        ("probabilities", json!({"0":1.0})),
+        ("probabilities", json!({"0":0.5,"2":0.5,"3":0.0})),
+        ("probabilities", json!({"0":0.0,"1":1.0,"2":0.0,"3":0.0})),
+        ("probabilities", json!({"0":-0.1,"1":0.6,"2":0.5})),
+        ("probabilities", json!({"0":0.0,"1":1.1,"2":0.0})),
+        ("probabilities", json!({"0":0.0,"1":0.95,"2":"0.05"})),
+        ("probabilities", json!({"0":0.0,"1":0.0,"2":0.0})),
+        ("probabilities", json!({"0":0.5,"1":0.5,"2":0.5})),
+    ] {
+        let mut answer = json!({
+            "type":"score", "score":1.0, "confidence":0.9,
+            "probabilities":{"0":0.0,"1":1.0,"2":0.0}
+        });
+        answer[field] = value;
+        let server = MockServer::start(Router::new().route(
+            "/v1/systemone",
+            post(move || {
+                let answer = answer.clone();
+                async move { Json(json!({"answers":{"matches":answer}})) }
+            }),
+        ))
+        .await;
+        let ctx = context(server.function::<Score>());
+        let error = ctx
+            .sql(r#"SELECT ai_score('text', 'prompt', '["low","medium","high"]')"#)
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("ai_score response"), "{error}");
+    }
 }
 
 #[tokio::test]

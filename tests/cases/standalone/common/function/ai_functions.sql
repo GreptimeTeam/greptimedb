@@ -16,6 +16,12 @@ SELECT ai_score(NULL, 'Rate severity', '["low","high"]') AS null_text,
 SELECT arrow_typeof(ai_choose(NULL, 'prompt', '{"billing":null}')) AS choice_type,
        arrow_typeof(ai_score(NULL, 'prompt', '["low","high"]')) AS score_type;
 
+SELECT json_to_string(rating) AS rating,
+       json_get_float(rating, 'score') AS score,
+       json_get_float(rating, 'confidence') AS confidence,
+       json_get_float(rating, 'probabilities[2]') AS high_probability
+FROM (SELECT ai_score(NULL, 'prompt', '["low","medium","high"]') AS rating) AS rated;
+
 -- Validate SQL registration, coercion, and asynchronous filtering on a real table.
 CREATE TABLE ai_events (
     occurred_at TIMESTAMP TIME INDEX,
@@ -37,7 +43,7 @@ ORDER BY occurred_at;
 
 SELECT occurred_at,
        ai_choose(message, 'Route the ticket', '{"billing":"Payments","technical":"Errors"}') AS team,
-       ai_score(message, 'Rate severity', '["low","medium","high"]') AS severity
+       ai_score(message, 'Rate severity', '["low","medium","high"]') AS rating
 FROM ai_events
 ORDER BY occurred_at;
 
