@@ -10,8 +10,9 @@ workspace = true
 [features]
 testing = []
 enterprise = []
-default = ["geo"]
+default = ["geo", "ai_functions"]
 geo = ["geohash", "h3o", "s2", "wkt", "geo-types", "dep:geo"]
+ai_functions = ["dep:futures", "dep:reqwest"]
 
 [dependencies]
 ahash.workspace = true
@@ -43,6 +44,7 @@ datafusion-pg-catalog.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
 derive_more.workspace = true
+futures = { workspace = true, optional = true }
 geo = { version = "0.29", optional = true }
 geo-types = { version = "0.7", optional = true }
 geohash = { version = "0.13", optional = true }
@@ -57,6 +59,7 @@ num = "0.4"
 num-traits = "0.2"
 paste.workspace = true
 regex.workspace = true
+reqwest = { workspace = true, optional = true }
 s2 = { version = "0.0.12", optional = true }
 serde.workspace = true
 serde_json.workspace = true
@@ -71,6 +74,7 @@ wkt = { version = "0.11", optional = true }
 
 [dev-dependencies]
 approx = "0.5"
+axum.workspace = true
 criterion.workspace = true
 futures.workspace = true
 pretty_assertions.workspace = true
@@ -80,3 +84,7 @@ tokio.workspace = true
 [[bench]]
 name = "uddsketch"
 harness = false
+
+[package.metadata.cargo-udeps.ignore]
+# Used only by the feature-gated Jev HTTP tests.
+development = ["axum"]
