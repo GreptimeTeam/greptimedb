@@ -562,6 +562,80 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
 
 struct FailedAbortWriter(object_store::layers::mock::oio::Writer);
 
+#[tokio::test]
+async fn metric_fallback_and_ordinary_preserve_ambiguous_commits() {
+    use object_store::layers::CapabilityOverrideLayer;
+    use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+
+    use crate::statement::copy_table_to::stream_to_managed_parquet;
+
+    struct AmbiguousCommit(oio::Writer);
+    impl oio::Write for AmbiguousCommit {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            self.0.write(bytes).await
+        }
+        async fn close(&mut self) -> object_store::Result<Metadata> {
+            self.0.close().await?;
+            Err(object_store::Error::new(
+                object_store::ErrorKind::Unexpected,
+                "lost close reply",
+            ))
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            Err(object_store::Error::new(
+                object_store::ErrorKind::Unsupported,
+                "cannot abort",
+            ))
+        }
+    }
+    let factory: MockWriterFactory = Arc::new(|_, args, inner| {
+        assert!(!args.if_not_exists());
+        Box::new(AmbiguousCommit(inner))
+    });
+    let store = ObjectStore::new(object_store::services::Memory::default())
+        .unwrap()
+        .layer(CapabilityOverrideLayer::new(|mut capability| {
+            capability.write_with_if_not_exists = false;
+            capability
+        }))
+        .layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+    assert!(!store.info().capability().write_with_if_not_exists);
+    let rows = || stream(vec![batch(vec![Some(1025)], vec![Some("a")])]);
+    assert!(
+        export_stream(
+            &unit(),
+            rows(),
+            &store,
+            export_limits(),
+            &CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    let budget = ExportWriteBudget::new(1);
+    assert!(
+        stream_to_managed_parquet(
+            rows(),
+            store.clone(),
+            "ordinary.parquet",
+            &budget,
+            &CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    for path in ["cpu.v1.parquet", "ordinary.parquet"] {
+        let (_, batches) = read(&store, path).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    }
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+}
+
 impl object_store::layers::mock::oio::Write for FailedAbortWriter {
     async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
         self.0.write(bytes).await

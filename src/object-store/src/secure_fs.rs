@@ -453,11 +453,14 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn abort(&mut self) -> Result<()> {
+        // Tokio writes may finish in the blocking pool after write_all returns.
+        if let Some(file) = self.file.as_mut() {
+            file.flush().await.map_err(new_std_io_error)?;
+        }
         if self.args.if_not_exists() {
             // A failed exclusive create owns no file. Once close starts, preserve
             // potentially committed output for the caller's deliberate retry.
-            if let Some(mut file) = self.file.take() {
-                file.flush().await.map_err(new_std_io_error)?;
+            if let Some(file) = self.file.take() {
                 drop(file);
                 if !self.closing {
                     let root = self.root.clone();
@@ -839,17 +842,50 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_writer_abort_is_unsupported_without_atomic_write() {
-        let temp_dir = create_temp_dir("secure_fs_writer_abort");
-        let operator = SecureFsRoot::open(temp_dir.path())
+    #[test]
+    fn test_writer_abort_drains_before_reporting_unsupported() {
+        use std::path::PathBuf;
+
+        use opendal::Buffer;
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+
+        use super::SecureFsWriter;
+
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
             .unwrap()
-            .build_operator();
-        let mut writer = operator.writer("partial").await.unwrap();
-        writer.write(Bytes::from_static(b"partial")).await.unwrap();
-
-        let error = writer.abort().await.unwrap_err();
-
-        assert_eq!(ErrorKind::Unsupported, error.kind());
+            .block_on(async {
+                let temp_dir = create_temp_dir("secure_fs_writer_abort");
+                let mut writer = SecureFsWriter {
+                    root: SecureFsRoot::open(temp_dir.path()).unwrap(),
+                    path: PathBuf::from("partial"),
+                    args: OpWrite::default(),
+                    file: None,
+                    closing: false,
+                };
+                writer.ensure_file().await.unwrap();
+                let (started, ready) = tokio::sync::oneshot::channel();
+                let (release, blocked) = std::sync::mpsc::channel();
+                let blocking = tokio::task::spawn_blocking(move || {
+                    started.send(()).unwrap();
+                    blocked.recv().unwrap();
+                });
+                ready.await.unwrap();
+                writer.write(Buffer::from("partial")).await.unwrap();
+                let abort = writer.abort();
+                tokio::pin!(abort);
+                let pending = futures::poll!(&mut abort).is_pending();
+                release.send(()).unwrap();
+                assert!(pending);
+                assert_eq!(ErrorKind::Unsupported, abort.await.unwrap_err().kind());
+                blocking.await.unwrap();
+                assert_eq!(
+                    std::fs::read(temp_dir.path().join("partial")).unwrap(),
+                    b"partial"
+                );
+            });
     }
 }

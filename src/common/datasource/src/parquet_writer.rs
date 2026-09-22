@@ -57,6 +57,7 @@ pub struct ParquetFileWriter {
     path: String,
     limits: Option<ParquetWriterLimits>,
     creation: ParquetCreationPolicy,
+    close_started: bool,
 }
 
 impl ParquetFileWriter {
@@ -128,6 +129,7 @@ impl ParquetFileWriter {
             path: path.to_owned(),
             limits,
             creation,
+            close_started: false,
         })
     }
 
@@ -216,6 +218,7 @@ impl ParquetFileWriter {
         .context(error::JoinHandleSnafu)??;
         self.write_bytes(bytes).await?;
         check_cancelled(cancellation)?;
+        self.close_started = true;
         self.sink
             .close()
             .await
@@ -224,11 +227,12 @@ impl ParquetFileWriter {
         Ok(())
     }
 
-    /// Abort after all in-flight operations complete. Overwrite callers own the
-    /// path; conditional callers delegate cleanup exclusively to the backend.
+    /// Abort after all in-flight operations complete. Preserve ambiguous commits;
+    /// conditional callers delegate cleanup exclusively to the backend.
     pub async fn abort(mut self) -> Result<()> {
         let result = self.sink.abort().await;
         if self.creation == ParquetCreationPolicy::Overwrite
+            && !self.close_started
             && result
                 .as_ref()
                 .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
@@ -323,7 +327,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conditional_abort_preserves_collisions_and_ambiguous_commits() {
+    async fn abort_preserves_collisions_and_ambiguous_commits() {
         use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory, oio};
 
         struct AmbiguousCommit(oio::Writer);
@@ -348,7 +352,11 @@ mod tests {
             }
         }
 
-        for existing in [false, true] {
+        for (creation, existing) in [
+            (ParquetCreationPolicy::Overwrite, false),
+            (ParquetCreationPolicy::IfNotExists, false),
+            (ParquetCreationPolicy::IfNotExists, true),
+        ] {
             let directory = common_test_util::temp_dir::create_temp_dir("conditional_parquet");
             let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
                 .unwrap()
@@ -371,7 +379,7 @@ mod tests {
                 path,
                 1,
                 None,
-                ParquetCreationPolicy::IfNotExists,
+                creation,
             )
             .await
             .unwrap();
