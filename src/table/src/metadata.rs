@@ -22,6 +22,7 @@ use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
 use datatypes::error::time_index_not_widening_error;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
+use datatypes::extension::json::json2_metadata_with_updated_settings;
 use datatypes::schema::{
     ColumnSchema, FulltextOptions, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
 };
@@ -41,9 +42,9 @@ use crate::error::{self, Result};
 use crate::requests::{
     AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
     ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, REPARTITION_PARTITION_NUM_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption, has_stable_string_form,
-    parse_entity_columns, parse_entity_option_key, validate_and_normalize_annotation,
-    validate_annotation_keys,
+    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, TableOptions, UnsetIndexOption,
+    has_stable_string_form, parse_entity_columns, parse_entity_option_key,
+    validate_and_normalize_annotation, validate_annotation_keys,
 };
 use crate::table_reference::TableReference;
 
@@ -332,6 +333,7 @@ impl TableMeta {
             AlterKind::ModifyColumnTypes { columns } => {
                 self.modify_column_types(table_name, columns)
             }
+            AlterKind::SetJsonSettings { request } => self.set_json_settings(table_name, request),
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
@@ -1187,6 +1189,77 @@ impl TableMeta {
         Ok(meta_builder)
     }
 
+    fn set_json_settings(
+        &self,
+        table_name: &str,
+        req: &SetJsonSettingsRequest,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let idx = table_schema
+            .column_index_by_name(&req.column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name: &req.column_name,
+                table_name,
+            })?;
+        let col = &table_schema.column_schemas()[idx];
+
+        ensure!(
+            !self.primary_key_indices.contains(&idx) && table_schema.timestamp_index() != Some(idx),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!(
+                    "Not allowed to change JSON settings for key or timestamp column '{}'",
+                    col.name
+                ),
+            }
+        );
+        ensure!(
+            col.data_type.is_json2(),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!("column '{}' is not a JSON2 column", col.name),
+            }
+        );
+
+        let target_metadata =
+            json2_metadata_with_updated_settings(col.metadata(), req.settings.clone()).map_err(
+                |err| {
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: err.to_string(),
+                    }
+                    .build()
+                },
+            )?;
+
+        let mut cols = table_schema.column_schemas().to_vec();
+        *cols[idx].mut_metadata() = target_metadata;
+
+        let mut builder = SchemaBuilder::try_from_columns(cols)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change JSON settings for column {}",
+                req.column_name
+            ),
+        })?;
+
+        let mut meta_builder = self.new_meta_builder();
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
     /// Split requests into different groups using column location info.
     fn split_requests_by_column_location<'a>(
         &self,
@@ -1603,9 +1676,12 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
     use datatypes::schema::{
         ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
     };
+    use datatypes::types::JsonType;
 
     use super::*;
     use crate::Error;
@@ -1698,6 +1774,90 @@ mod tests {
             .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_set_json_settings() {
+        let schema = Arc::new(
+            SchemaBuilder::try_from_columns(vec![
+                ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                json2_column_schema_v1("payload", JsonSettings::new_v2()),
+            ])
+            .unwrap()
+            .version(123)
+            .build()
+            .unwrap(),
+        );
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetJsonSettings {
+            request: SetJsonSettingsRequest {
+                column_name: "payload".to_string(),
+                settings: JsonSettings::try_new(vec![], Some(10)).unwrap(),
+            },
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let payload = new_meta.schema.column_schema_by_name("payload").unwrap();
+        let json_metadata: JsonMetadata =
+            serde_json::from_str(payload.metadata().get("ARROW:extension:metadata").unwrap())
+                .unwrap();
+        assert!(json_metadata.is_version_2());
+        assert_eq!(
+            Some(10),
+            json_metadata.json_settings().max_auto_expanded_paths()
+        );
+        assert_eq!(124, new_meta.schema.version());
+        assert_eq!(meta.primary_key_indices, new_meta.primary_key_indices);
+    }
+
+    fn json2_column_schema_v1(name: &str, settings: JsonSettings) -> ColumnSchema {
+        let mut column_schema =
+            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
+        column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(
+            JsonMetadata::new_v1(settings),
+        )));
+        column_schema
+    }
+
+    #[test]
+    fn test_set_json_settings_rejects_non_json2_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let alter_kind = AlterKind::SetJsonSettings {
+            request: SetJsonSettingsRequest {
+                column_name: "col2".to_string(),
+                settings: JsonSettings::new_v2(),
+            },
+        };
+
+        let err = match meta.builder_with_alter_kind("my_table", &alter_kind) {
+            Ok(_) => panic!("expected modifying JSON settings on a non-JSON2 column to fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("is not a JSON2 column"));
     }
 
     #[test]

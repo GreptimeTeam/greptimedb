@@ -22,7 +22,7 @@ use datatypes::arrow::array::{ArrayRef, new_null_array};
 use datatypes::arrow::datatypes::{DataType, Field, FieldRef, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JsonMetadata, is_json2_extension_type};
-use datatypes::json::JsonSettings;
+use datatypes::json::{JsonSettings, TypeHintMismatchPolicy};
 use datatypes::vectors::json::array::JsonArray;
 use datatypes::vectors::json::json2_physical_data_type;
 use futures::Stream;
@@ -251,10 +251,11 @@ fn rewrite_array(
     settings: &RewriteSettings,
 ) -> Result<ArrayRef> {
     JsonArray::from(source_array)
-        .rewrite_to_v2(
+        .rewrite_to_v2_with_type_hint_mismatch_policy(
             source_field,
             &settings.logical_settings,
             &settings.target_layout,
+            TypeHintMismatchPolicy::CoerceOrNull,
         )
         .context(DataTypeMismatchSnafu)
 }
@@ -330,7 +331,9 @@ mod tests {
         Array, ArrayRef, BinaryArray, Int64Array, StringArray, StringViewArray, StructArray,
     };
     use datatypes::arrow::datatypes::{DataType, Field, Fields, Schema};
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonTypeHint;
+    use datatypes::prelude::ConcreteDataType;
     use datatypes::types::parse_string_to_jsonb;
     use futures::{StreamExt, stream};
 
@@ -781,6 +784,75 @@ mod tests {
         assert_eq!(&target_type, output.column(1).data_type());
         assert_eq!(2, output.column(1).null_count());
         assert_eq!(int_array([10, 20]).as_ref(), output.column(3).as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_rewrite_keeps_rows_with_invalid_json2_settings() {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: false,
+            }],
+            Some(0),
+        )
+        .unwrap();
+        let target_type = json2_physical_data_type(&settings);
+        let output_schema = schema([
+            Field::new("j", target_type.clone(), true).with_extension_type(
+                Json2ExtensionType::new(Arc::new(JsonMetadata::new(settings.clone()))),
+            ),
+            Field::new("value", DataType::Int64, true),
+        ]);
+        let source = Arc::new(BinaryArray::from_iter([
+            Some(parse_string_to_jsonb(r#"{"kind":"valid"}"#).unwrap()),
+            Some(parse_string_to_jsonb(r#"{"kind":1}"#).unwrap()),
+        ])) as ArrayRef;
+        let input = RecordBatch::try_new(
+            schema([
+                Field::new("j", DataType::Binary, true)
+                    .with_extension_type(Json2ExtensionType::default()),
+                Field::new("value", DataType::Int64, true),
+            ]),
+            vec![source, int_array([10, 20])],
+        )
+        .unwrap();
+        let columns = HashMap::from([(
+            "j".to_string(),
+            Json2TargetLayout {
+                extension_metadata: serde_json::to_string(&JsonMetadata::new(settings.clone()))
+                    .unwrap(),
+                target_layout: settings,
+            },
+        )]);
+        let mut aligner = JsonSchemaAligner::new(
+            stream::iter([Ok(input)]),
+            vec![true, true],
+            output_schema,
+            AlignMode::Rewrite { columns },
+        )
+        .unwrap();
+
+        let output = aligner.next().await.unwrap().unwrap();
+        assert_eq!(2, output.num_rows());
+        assert_eq!(
+            10,
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        );
+        assert_eq!(
+            20,
+            output
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(1)
+        );
     }
 
     #[test]
