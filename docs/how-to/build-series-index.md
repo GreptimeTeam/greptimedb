@@ -20,8 +20,9 @@ are persisted, and the index snapshot is published for readers. There is no
 implicit flush, cluster-wide snapshot, or wait for concurrent writes or follower
 replicas. Existing TTL and bucket eligibility rules still apply, including
 requiring at least four SST files per bucket, skipping unknown sequence coverage,
-and deferring series builds without a compaction window. Reusable indexes are retained. Companion range indexes are
-also reconciled when `experimental_enable_range_index` is enabled.
+and deferring series builds without a compaction window. Reusable indexes are
+retained. Companion range indexes are also reconciled when
+`experimental_enable_range_index` is enabled.
 
 The operation shares a serial maintenance task with background reconciliation.
 Client timeouts do not roll back completed work; retrying is safe. Background

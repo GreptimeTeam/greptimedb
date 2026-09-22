@@ -632,10 +632,8 @@ mod test {
             .handle_request(env.default_physical_region_id(), request())
             .await
             .unwrap_err();
-        assert!(
-            error.to_string().contains("series index is disabled"),
-            "{error}"
-        );
+        let error = format!("{error:?}");
+        assert!(error.contains("series index is disabled"), "{error}");
         let error = env
             .metric()
             .handle_request(env.default_logical_region_id(), request())

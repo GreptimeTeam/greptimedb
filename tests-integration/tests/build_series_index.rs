@@ -61,7 +61,7 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
         execute_sql(
             frontend,
             &format!(
-                "INSERT INTO series_logical VALUES ({timestamp}, 'a', 1), ({timestamp}, 'z', 2)"
+                "INSERT INTO series_logical (ts, host, val) VALUES ({timestamp}, 'a', 1), ({timestamp}, 'z', 2)"
             ),
         )
         .await;
@@ -75,7 +75,7 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
     let error = try_execute_sql(frontend, "ADMIN BUILD_SERIES_INDEX('series_logical')")
         .await
         .unwrap_err();
-    assert!(error.to_string().contains("physical metric table"));
+    assert!(format!("{error:?}").contains("physical metric table"));
     for sql in [
         "ADMIN BUILD_SERIES_INDEX()",
         "ADMIN BUILD_SERIES_INDEX(1)",
