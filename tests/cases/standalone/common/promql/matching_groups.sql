@@ -19,6 +19,9 @@ INSERT INTO matching_groups_right VALUES
   ('x', 'a', 0, 2), ('x', 'b', 0, 4), ('y', 'a', 0, 100),
   ('', 'a', 0, 8), (NULL, 'a', 0, 10);
 
+-- The result labels are the right operand's tag set rather than what the modifier implies
+-- (#9207), so `zone` is absent wherever the right side aggregates it away and rows differing
+-- only by it are indistinguishable.
 -- Filtering whole ranking partitions preserves the aggregate and scalar arithmetic.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') (8 * matching_groups_left{host="x"}) / on(host) group_left topk by(host)(1, max by(host)(matching_groups_right));

@@ -66,6 +66,9 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// `left_field_labels` and `right_field_labels` exclude value fields promoted to grouping
 /// labels: filtering them before sample selection could replace the latest sample with an
 /// older one (#9242).
+///
+/// Whether a matcher reaches a scan is decided per receiving operand ([`preserves_filter`]), so
+/// propagation is one-way when only one of the two can take the filter.
 pub(super) fn propagate(
     binary: &BinaryExpr,
     left_tags: &[String],
@@ -206,8 +209,10 @@ fn ranks_by_grouping_labels(aggregate: &AggregateExpr) -> bool {
     matches!(aggregate.op.id(), token::T_TOPK | token::T_BOTTOMK)
 }
 
-/// Proves output-label uniqueness through a partitioning aggregate, not through selectors.
-/// All output tags must also be matching labels to prove uniqueness per match signature.
+/// Whether a partitioning aggregate proves the operand emits at most one series per combination
+/// of its output labels; ranking narrows its input, so it inherits the proof. Uniqueness per
+/// *match signature* additionally requires every output label to be a matching label, which the
+/// caller checks.
 fn has_unique_aggregate_output(expr: &Expr) -> bool {
     match expr {
         Expr::Paren(paren) => has_unique_aggregate_output(&paren.expr),
@@ -236,10 +241,13 @@ fn vector_operand_is_lhs(binary: &BinaryExpr) -> Option<bool> {
     }
 }
 
-/// A filter may cross an aggregate only when it removes whole groups. In particular,
-/// a label retained by topk is not necessarily one of its partitioning labels.
+/// Whether adding a matcher on `label` to the scan [`selector_matchers`] finds leaves the
+/// operand's output equal to the subset of its unfiltered output that satisfies the matcher.
+/// A filter may cross an aggregate only when it removes whole groups: in particular, a label
+/// retained by topk is not necessarily one of its partitioning labels.
 fn preserves_filter(expr: &Expr, label: &str) -> bool {
     match expr {
+        Expr::VectorSelector(_) => true,
         Expr::Paren(paren) => preserves_filter(&paren.expr, label),
         Expr::Aggregate(aggregate) => {
             let partition_label = match &aggregate.modifier {
@@ -254,7 +262,9 @@ fn preserves_filter(expr: &Expr, label: &str) -> bool {
             Some(false) => preserves_filter(&binary.rhs, label),
             None => false,
         },
-        _ => true,
+        // A rollup emits at most one output series per input series and carries its labels.
+        Expr::Call(call) if LABEL_PRESERVING_RANGE_FUNCTIONS.contains(&call.func.name) => true,
+        _ => false,
     }
 }
 
