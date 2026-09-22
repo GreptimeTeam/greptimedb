@@ -12,14 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::path::Path;
+
 use async_trait::async_trait;
 use clap::{Parser, Subcommand};
 use common_error::ext::BoxedError;
 use common_meta::snapshot::MetadataSnapshotManager;
-use object_store::{ObjectStore, services};
+use object_store::ObjectStore;
+use snafu::OptionExt;
 
 use crate::Tool;
 use crate::common::{ObjectStoreConfig, StoreConfig, new_fs_object_store};
+use crate::error::InvalidFilePathSnafu;
 use crate::utils::resolve_relative_path_with_current_dir;
 
 /// Subcommand for metadata snapshot operations, including saving snapshots, restoring from snapshots, and viewing snapshot information.
@@ -270,24 +274,51 @@ fn build_object_store_and_resolve_file_path(
     fs_root: &str,
     file_path: &str,
 ) -> Result<(ObjectStore, String), BoxedError> {
-    let object_store = object_store.build().map_err(BoxedError::new)?;
-    let object_store = match object_store {
-        Some(object_store) => object_store,
-        None => new_fs_object_store(fs_root)?,
-    };
+    if let Some(object_store) = object_store.build().map_err(BoxedError::new)? {
+        return Ok((object_store, file_path.to_string()));
+    }
 
-    let file_path = if object_store.info().scheme() == services::FS_SCHEME {
-        resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?
-    } else {
-        file_path.to_string()
-    };
+    if fs_root != "/" {
+        let root = resolve_relative_path_with_current_dir(fs_root).map_err(BoxedError::new)?;
+        let path = Path::new(file_path);
+        let key = if path.is_absolute() {
+            path.strip_prefix(&root).map_err(|_| {
+                BoxedError::new(
+                    InvalidFilePathSnafu {
+                        msg: format!("Snapshot path is outside root {root}: {file_path}"),
+                    }
+                    .build(),
+                )
+            })?
+        } else {
+            path
+        };
+        let key = key.to_string_lossy().into_owned();
+        #[cfg(windows)]
+        let key = key.replace('\\', "/");
+        return Ok((new_fs_object_store(&root)?, key));
+    }
 
-    Ok((object_store, file_path))
+    let path = resolve_relative_path_with_current_dir(file_path).map_err(BoxedError::new)?;
+    let path = Path::new(&path);
+    let parent = path
+        .parent()
+        .with_context(|| InvalidFilePathSnafu {
+            msg: format!("Snapshot path has no parent: {}", path.display()),
+        })
+        .map_err(BoxedError::new)?;
+    let file_name = path
+        .file_name()
+        .with_context(|| InvalidFilePathSnafu {
+            msg: format!("Snapshot path has no file name: {}", path.display()),
+        })
+        .map_err(BoxedError::new)?;
+    let object_store = new_fs_object_store(&parent.to_string_lossy())?;
+    Ok((object_store, file_name.to_string_lossy().into_owned()))
 }
 
 #[cfg(test)]
 mod tests {
-    use std::env;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -311,44 +342,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_cmd_resolve_file_path() {
-        common_telemetry::init_default_ut_logging();
-        let cmd = RestoreCommand::parse_from([
-            "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-        let tool = cmd.build().await.unwrap();
-        let current_dir = env::current_dir().unwrap();
-        let file_path = current_dir.join("metadata_snapshot.metadata.fb");
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+        let name = "metadata_snapshot.metadata.fb";
+        let current_dir = std::env::current_dir().unwrap();
+        let absolute = current_dir.join(name);
+        for file_path in [name, absolute.to_str().unwrap()] {
+            let cmd = RestoreCommand::parse_from([
+                "",
+                "--file_name",
+                file_path,
+                "--backend",
+                "memory-store",
+                "--store-addrs",
+                "memory://",
+            ]);
+            let tool = cmd.build().await.unwrap();
+            assert_eq!(tool.file_path, name);
+        }
 
-        let cmd = RestoreCommand::parse_from([
-            "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-        let tool = cmd.build().await.unwrap();
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
-
-        let cmd = RestoreCommand::parse_from([
-            "",
-            "--file_name",
-            "metadata_snapshot.metadata.fb",
-            "--backend",
-            "memory-store",
-            "--store-addrs",
-            "memory://",
-        ]);
-        let tool = cmd.build().await.unwrap();
-        assert_eq!(tool.file_path, file_path.to_string_lossy().to_string());
+        let dir = tempfile::tempdir().unwrap();
+        for file_path in [
+            "backup/snapshot.fb".to_string(),
+            dir.path()
+                .join("backup/snapshot.fb")
+                .to_string_lossy()
+                .into_owned(),
+        ] {
+            let (store, key) = build_object_store_and_resolve_file_path(
+                ObjectStoreConfig::default(),
+                dir.path().to_str().unwrap(),
+                &file_path,
+            )
+            .unwrap();
+            assert_eq!(key, "backup/snapshot.fb");
+            store.write(&key, "snapshot").await.unwrap();
+            assert_eq!(
+                std::fs::read(dir.path().join("backup/snapshot.fb")).unwrap(),
+                b"snapshot"
+            );
+        }
+        assert!(
+            build_object_store_and_resolve_file_path(
+                ObjectStoreConfig::default(),
+                dir.path().to_str().unwrap(),
+                absolute.to_str().unwrap(),
+            )
+            .is_err()
+        );
     }
 
     async fn setup_backup_file(object_store: ObjectStore, file_path: &str) {

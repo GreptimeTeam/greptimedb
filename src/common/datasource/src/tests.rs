@@ -12,15 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use common_test_util::find_workspace_path;
-
 use crate::test_util;
 
 #[tokio::test]
 async fn test_stream_to_json() {
-    let origin_path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
-        .display()
-        .to_string();
+    let origin_path = "json/basic.json";
 
     // A small threshold
     // Triggers the flush each writes
@@ -33,13 +29,9 @@ async fn test_stream_to_json() {
 
 #[tokio::test]
 async fn test_stream_to_csv() {
-    let origin_path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
-        .display()
-        .to_string();
+    let origin_path = "csv/basic.csv";
 
-    let format_path = &find_workspace_path("/src/common/datasource/tests/csv/basic_format.csv")
-        .display()
-        .to_string();
+    let format_path = "csv/basic_format.csv";
 
     // A small threshold
     // Triggers the flush each writes
