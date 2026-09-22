@@ -17,7 +17,7 @@ use snafu::{OptionExt, ensure};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidSparsePrimaryKeySnafu, Result};
-use crate::row_converter::dense::encoded_string_len;
+use crate::row_converter::encoded_string_len;
 use crate::row_converter::sparse::{
     COLUMN_ID_ENCODE_SIZE, RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID,
     SparseOffsetsCache, TABLE_ID_VALUE_OFFSET, TAGS_START_OFFSET, TSID_VALUE_OFFSET,

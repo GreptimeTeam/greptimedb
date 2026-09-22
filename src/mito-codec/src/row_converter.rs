@@ -171,3 +171,28 @@ pub fn build_primary_key_codec_with_fields(
         }
     }
 }
+
+/// Finds the checked boundary of an Option<String>, shared by Dense and Sparse.
+/// This validates framing, not UTF-8; consumers decoding strings validate UTF-8.
+pub(crate) fn encoded_string_len(bytes: &[u8]) -> memcomparable::Result<usize> {
+    match bytes.first().copied().ok_or(memcomparable::Error::Eof)? {
+        0 => return Ok(1),
+        1 => {}
+        marker => return Err(memcomparable::Error::InvalidTagEncoding(marker as usize)),
+    }
+    match bytes.get(1).copied().ok_or(memcomparable::Error::Eof)? {
+        0 => return Ok(2),
+        1 => {}
+        marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
+    }
+    let mut end = 2;
+    loop {
+        let chunk = bytes.get(end..end + 9).ok_or(memcomparable::Error::Eof)?;
+        end += 9;
+        match chunk[8] {
+            1..=8 => return Ok(end),
+            9 => {}
+            marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
+        }
+    }
+}

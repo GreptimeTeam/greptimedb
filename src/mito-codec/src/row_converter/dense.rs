@@ -38,7 +38,7 @@ use crate::error::{
 use crate::key_values::KeyValue;
 use crate::primary_key_filter::DensePrimaryKeyFilter;
 use crate::row_converter::{
-    CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter,
+    CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter, encoded_string_len,
 };
 
 /// Field to serialize and deserialize value in memcomparable format.
@@ -386,31 +386,6 @@ impl SortField {
     }
 }
 
-/// Finds the checked boundary of an Option<String>, shared by Dense and Sparse.
-/// This validates framing, not UTF-8; consumers decoding strings validate UTF-8.
-pub(crate) fn encoded_string_len(bytes: &[u8]) -> memcomparable::Result<usize> {
-    match bytes.first().copied().ok_or(memcomparable::Error::Eof)? {
-        0 => return Ok(1),
-        1 => {}
-        marker => return Err(memcomparable::Error::InvalidTagEncoding(marker as usize)),
-    }
-    match bytes.get(1).copied().ok_or(memcomparable::Error::Eof)? {
-        0 => return Ok(2),
-        1 => {}
-        marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
-    }
-    let mut end = 2;
-    loop {
-        let chunk = bytes.get(end..end + 9).ok_or(memcomparable::Error::Eof)?;
-        end += 9;
-        match chunk[8] {
-            1..=8 => return Ok(end),
-            9 => {}
-            marker => return Err(memcomparable::Error::InvalidBytesEncoding(marker)),
-        }
-    }
-}
-
 /// The Option marker has already been checked by SortField.
 fn encoded_binary_len(bytes: &[u8]) -> memcomparable::Result<usize> {
     let mut current = 1;
@@ -498,14 +473,15 @@ impl DensePrimaryKeyCodec {
             }
             let start = deserializer.position();
             // Preserve the prefix error contract used by primary-key range mapping.
-            let len = SortField::encoded_len(field.encode_data_type(), &bytes[start..])
-                .map_err(|source| match source {
+            let len = SortField::encoded_len(field.encode_data_type(), &bytes[start..]).map_err(
+                |source| match source {
                     error::Error::DeserializeField { .. } => error::InvalidDensePrimaryKeySnafu {
                         reason: "truncated field or invalid encoding",
                     }
                     .build(),
                     source => source,
-                })?;
+                },
+            )?;
             // Production range mapping only needs boundaries, not allocated field values.
             #[cfg(any(debug_assertions, test))]
             field.deserialize(&mut Deserializer::new(&bytes[start..start + len]))?;
