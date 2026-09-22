@@ -24,9 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
-use servers::batcher::logical_table::{
-    LogicalTablePendingRowsBatcher, pending_rows_batch_sync_enabled,
-};
+use servers::batcher::pending_rows_batch_sync_enabled;
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::flight::FlightCraftRef;
@@ -74,6 +72,7 @@ where
 {
     pub fn new(opts: T, instance: Arc<Instance>, plugins: Plugins) -> Self {
         let feopts = opts.clone().into();
+        instance.init_logical_batcher(&feopts);
         // Create server request memory limiter for all server protocols
         let server_memory_limiter = ServerMemoryLimiter::new(
             feopts.max_in_flight_write_bytes.as_bytes(),
@@ -110,7 +109,8 @@ where
         request_memory_limiter: ServerMemoryLimiter,
     ) -> HttpServerBuilder {
         let mut builder = HttpServerBuilder::new(effective_http_options(opts))
-            .with_batching_protocols(opts.pending_rows_batcher.protocols.clone())
+            .with_batching_protocols(opts.table_batcher_options().protocols.clone())
+            .with_logical_batching_protocols(opts.logical_batcher_options().protocols)
             .with_memory_limiter(request_memory_limiter)
             .with_sql_handler(self.instance.clone());
 
@@ -134,24 +134,12 @@ where
 
         let prom_store = effective_prom_store_options(opts);
         if prom_store.enable {
-            let pending_rows_batcher = if prom_store.with_metric_engine {
-                LogicalTablePendingRowsBatcher::try_new(
-                    self.instance.partition_manager().clone(),
-                    self.instance.node_manager().clone(),
-                    self.instance.catalog_manager().clone(),
-                    self.instance.table_flownode_set_cache().clone(),
-                    prom_store.with_metric_engine,
-                    self.instance.clone(),
-                    prom_store.pending_rows_flush_interval,
-                    prom_store.max_batch_rows,
-                    prom_store.max_concurrent_flushes,
-                    prom_store.worker_channel_capacity,
-                    prom_store.max_inflight_requests,
-                    prom_store.flow_notification_queue_capacity,
-                )
-            } else {
-                None
-            };
+            let pending_rows_batcher = opts
+                .logical_batcher_options()
+                .protocols
+                .contains(&BatchingProtocol::Prom)
+                .then(|| self.instance.logical_batcher().cloned())
+                .flatten();
             builder = builder
                 .with_prom_handler(
                     self.instance.clone(),
@@ -439,15 +427,16 @@ where
 /// Selected shared controls override legacy Prom batching knobs, not protocol behavior.
 fn effective_prom_store_options(opts: &FrontendOptions) -> PromStoreOptions {
     let mut prom_store = opts.prom_store.clone();
-    let shared = &opts.pending_rows_batcher;
-    if shared.protocols.contains(&BatchingProtocol::Prom) && shared.pending_rows_batching_enabled()
-    {
+    let shared = opts.logical_batcher_options();
+    if shared.protocols.contains(&BatchingProtocol::Prom) {
         prom_store.pending_rows_flush_interval = shared.pending_rows_flush_interval;
         prom_store.max_batch_rows = shared.max_batch_rows;
         prom_store.max_concurrent_flushes = shared.max_concurrent_flushes;
         prom_store.worker_channel_capacity = shared.worker_channel_capacity;
         prom_store.max_inflight_requests = shared.max_inflight_requests;
         prom_store.flow_notification_queue_capacity = shared.flow_notification_queue_capacity;
+    } else {
+        prom_store.pending_rows_flush_interval = Duration::ZERO;
     }
     prom_store
 }
@@ -459,10 +448,9 @@ fn effective_http_options(opts: &FrontendOptions) -> HttpOptions {
 fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) -> HttpOptions {
     let mut http = opts.http.clone();
     let prom_store = effective_prom_store_options(opts);
-    let shared = &opts.pending_rows_batcher;
-    // Ordinary-table batching always waits for its flush, independently of the
-    // dedicated Prom batcher's asynchronous acknowledgement mode.
-    let common_enabled = shared.pending_rows_batching_enabled()
+    let shared = opts.table_batcher_options();
+    let common_enabled = batch_sync
+        && shared.pending_rows_batching_enabled()
         && shared.protocols.iter().any(|protocol| {
             *protocol != BatchingProtocol::Prom
                 || (prom_store.enable && !prom_store.with_metric_engine)
@@ -470,7 +458,19 @@ fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) ->
     let common_interval = common_enabled.then_some(shared.pending_rows_flush_interval);
     let prom_interval = (prom_store.pending_rows_batching_enabled() && batch_sync)
         .then_some(prom_store.pending_rows_flush_interval);
-    let Some(flush_interval) = common_interval.into_iter().chain(prom_interval).max() else {
+    let logical = opts.logical_batcher_options();
+    let otlp_interval = (batch_sync
+        && opts.otlp.enable
+        && opts.prom_store.with_metric_engine
+        && logical.protocols.contains(&BatchingProtocol::Otlp)
+        && logical.pending_rows_batching_enabled())
+    .then_some(logical.pending_rows_flush_interval);
+    let Some(flush_interval) = common_interval
+        .into_iter()
+        .chain(prom_interval)
+        .chain(otlp_interval)
+        .max()
+    else {
         return http;
     };
     let fallback_timeout = flush_interval.saturating_add(Duration::from_secs(1));
@@ -515,6 +515,81 @@ mod tests {
     use crate::instance::builder::FrontendBuilder;
     use crate::server::*;
 
+    #[tokio::test]
+    async fn test_logical_batcher_shared_without_prom_endpoint() {
+        use crate::service_config::BatcherOptions;
+        let mut options = FrontendOptions::default();
+        options.prom_store.enable = false;
+        options.pending_rows_batcher.logical_table = Some(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: Duration::from_millis(5),
+            ..Default::default()
+        });
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+        let batcher = instance.logical_batcher().unwrap().clone();
+        instance.init_logical_batcher(&options);
+        assert!(Arc::ptr_eq(&batcher, instance.logical_batcher().unwrap()));
+        let weak = Arc::downgrade(&instance);
+        drop(services);
+        drop(instance);
+        assert!(
+            weak.upgrade().is_none(),
+            "batcher must not retain its schema owner"
+        );
+    }
+
+    #[test]
+    fn test_logical_batcher_http_timeout_and_prom_disable() {
+        use crate::service_config::pending_rows_batcher::BatcherOptions;
+        let mut opts = FrontendOptions::default();
+        opts.http.timeout = Duration::from_secs(1);
+        opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
+        opts.pending_rows_batcher.logical_table = Some(BatcherOptions {
+            protocols: vec![BatchingProtocol::Otlp],
+            pending_rows_flush_interval: Duration::from_secs(5),
+            ..Default::default()
+        });
+        assert!(!effective_prom_store_options(&opts).pending_rows_batching_enabled());
+        // Both logical protocols follow the global acknowledgement policy,
+        // independently of enabling the Prom HTTP endpoint.
+        opts.prom_store.enable = false;
+        assert_eq!(
+            effective_http_options_with_sync(&opts, true).timeout,
+            Duration::from_secs(6)
+        );
+        assert_eq!(
+            effective_http_options_with_sync(&opts, false).timeout,
+            opts.http.timeout
+        );
+        opts.prom_store.with_metric_engine = false;
+        assert_eq!(
+            effective_http_options_with_sync(&opts, false).timeout,
+            opts.http.timeout
+        );
+        opts.prom_store.with_metric_engine = true;
+        opts.pending_rows_batcher
+            .logical_table
+            .as_mut()
+            .unwrap()
+            .protocols
+            .clear();
+        assert_eq!(
+            effective_http_options_with_sync(&opts, true).timeout,
+            opts.http.timeout
+        );
+    }
+
     #[test]
     fn test_effective_prom_batching_controls() {
         // Only an enabled shared Prom selection replaces the legacy controls.
@@ -532,7 +607,7 @@ mod tests {
             opts.prom_store.enable = prom_enabled;
             opts.prom_store
                 .experimental_enable_prometheus_native_histogram = true;
-            let shared = &mut opts.pending_rows_batcher;
+            let shared = &mut opts.pending_rows_batcher.table;
             shared.protocols = vec![if selected {
                 BatchingProtocol::Prom
             } else {
@@ -569,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_http_timeout_covers_synchronous_batchers() {
-        // Shared ordinary writes remain synchronous even when Prom is asynchronous.
+        // Only synchronous batchers extend the HTTP timeout.
         for (
             protocols,
             metric_engine,
@@ -579,10 +654,10 @@ mod tests {
             timeout_secs,
             expected_secs,
         ) in [
-            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, true, 5, 2, 1, 6),
-            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 6),
+            (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Influxdb], true, true, 5, 8, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, true, 8, 5, 1, 9),
             (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 0, 0),
@@ -595,8 +670,8 @@ mod tests {
             opts.http.timeout = Duration::from_secs(timeout_secs);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(legacy_secs);
-            opts.pending_rows_batcher.protocols = protocols;
-            opts.pending_rows_batcher.pending_rows_flush_interval =
+            opts.pending_rows_batcher.table.protocols = protocols;
+            opts.pending_rows_batcher.table.pending_rows_flush_interval =
                 Duration::from_secs(shared_secs);
             assert_eq!(
                 effective_http_options_with_sync(&opts, batch_sync).timeout,
@@ -697,24 +772,30 @@ mod tests {
     fn test_invalid_shared_batching_preserves_prom_store_options() {
         type KnobMutator = fn(&mut FrontendOptions);
         let cases: [KnobMutator; 5] = [
-            |opts| opts.pending_rows_batcher.max_concurrent_flushes = usize::MAX,
-            |opts| opts.pending_rows_batcher.worker_channel_capacity = usize::MAX,
-            |opts| opts.pending_rows_batcher.max_inflight_requests = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.max_concurrent_flushes = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.worker_channel_capacity = usize::MAX,
+            |opts| opts.pending_rows_batcher.table.max_inflight_requests = usize::MAX,
             |opts| {
-                opts.pending_rows_batcher.flow_notification_queue_capacity =
-                    NonZeroUsize::new(usize::MAX).unwrap()
+                opts.pending_rows_batcher
+                    .table
+                    .flow_notification_queue_capacity = NonZeroUsize::new(usize::MAX).unwrap()
             },
-            |opts| opts.pending_rows_batcher.pending_rows_flush_interval = Duration::MAX,
+            |opts| opts.pending_rows_batcher.table.pending_rows_flush_interval = Duration::MAX,
         ];
         for invalidate in cases {
             let mut opts = FrontendOptions::default();
             opts.http.timeout = Duration::from_secs(1);
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(5);
-            opts.pending_rows_batcher.protocols =
+            opts.pending_rows_batcher.table.protocols =
                 vec![BatchingProtocol::Prom, BatchingProtocol::Influxdb];
-            opts.pending_rows_batcher.pending_rows_flush_interval = Duration::from_secs(10);
+            opts.pending_rows_batcher.table.pending_rows_flush_interval = Duration::from_secs(10);
             invalidate(&mut opts);
-            assert!(!opts.pending_rows_batcher.pending_rows_batching_enabled());
+            assert!(
+                !opts
+                    .pending_rows_batcher
+                    .table
+                    .pending_rows_batching_enabled()
+            );
             assert_eq!(opts.prom_store, effective_prom_store_options(&opts));
             assert_eq!(
                 Duration::from_secs(6),

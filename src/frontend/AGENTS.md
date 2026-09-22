@@ -51,6 +51,11 @@ remote datanodes via `operator`/`client`.
 - Internal gRPC listeners mark requests with `Channel::Internal` in middleware
   (`server.rs`), including requests handled by Enterprise Flight wrappers.
 
+- **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
+  one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
+  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  The schema adapter holds a weak instance reference to avoid an ownership cycle.
+
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through
   `QueryContext`. The primary inserter prepares eligible ordinary-table writes
   for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only

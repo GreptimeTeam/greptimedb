@@ -215,6 +215,7 @@ pub struct HttpServer {
     // server configs
     options: HttpOptions,
     batching_protocols: Vec<BatchingProtocol>,
+    logical_batching_protocols: Vec<BatchingProtocol>,
     bind_addr: Option<SocketAddr>,
     /// What this server instance exposes. See [`HttpServerKind`].
     kind: HttpServerKind,
@@ -235,6 +236,9 @@ pub fn is_api_listener_path(path: &str) -> bool {
     is_namespace(path, HTTP_API_PREFIX_WITHOUT_TRAILING_SLASH) || is_namespace(path, "/dashboard")
 }
 
+#[derive(Clone)]
+struct LogicalBatchingProtocols(Vec<BatchingProtocol>);
+
 /// Sets a local-only write selector after authentication creates the context.
 async fn set_http_write_batching(
     State(protocol): State<BatchingProtocol>,
@@ -245,8 +249,13 @@ async fn set_http_write_batching(
         .extensions()
         .get::<Arc<Vec<BatchingProtocol>>>()
         .is_some_and(|protocols| protocols.contains(&protocol));
+    let logical_enabled = req
+        .extensions()
+        .get::<LogicalBatchingProtocols>()
+        .is_some_and(|protocols| protocols.0.contains(&protocol));
     if let Some(ctx) = req.extensions_mut().get_mut::<QueryContext>() {
         ctx.set_batching_enabled(enabled);
+        ctx.set_logical_batching_enabled(logical_enabled);
     }
     next.run(req).await
 }
@@ -650,6 +659,7 @@ pub struct DashboardState {
 pub struct HttpServerBuilder {
     options: HttpOptions,
     batching_protocols: Vec<BatchingProtocol>,
+    logical_batching_protocols: Vec<BatchingProtocol>,
     user_provider: Option<UserProviderRef>,
     router: Router,
     memory_limiter: ServerMemoryLimiter,
@@ -660,13 +670,20 @@ impl HttpServerBuilder {
         Self {
             options,
             batching_protocols: Vec::new(),
+            logical_batching_protocols: Vec::new(),
             user_provider: None,
             router: Router::new(),
             memory_limiter: ServerMemoryLimiter::default(),
         }
     }
 
-    /// Selects HTTP write protocols allowed to use the shared batcher.
+    /// Selects HTTP protocols allowed to use logical-table batching.
+    pub fn with_logical_batching_protocols(mut self, protocols: Vec<BatchingProtocol>) -> Self {
+        self.logical_batching_protocols = protocols;
+        self
+    }
+
+    /// Selects HTTP protocols allowed to use ordinary-table batching.
     pub fn with_batching_protocols(mut self, protocols: Vec<BatchingProtocol>) -> Self {
         self.batching_protocols = protocols;
         self
@@ -894,6 +911,7 @@ impl HttpServerBuilder {
         HttpServer {
             options: self.options,
             batching_protocols: self.batching_protocols.clone(),
+            logical_batching_protocols: self.logical_batching_protocols.clone(),
             user_provider: self.user_provider,
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router),
@@ -928,6 +946,7 @@ impl HttpServerBuilder {
         let internal = HttpServer {
             options: self.options,
             batching_protocols: self.batching_protocols.clone(),
+            logical_batching_protocols: self.logical_batching_protocols.clone(),
             user_provider: self.user_provider.clone(),
             shutdown_tx: Mutex::new(None),
             router: StdMutex::new(self.router.clone()),
@@ -946,6 +965,7 @@ impl HttpServerBuilder {
             Some(HttpServer {
                 options: api_options,
                 batching_protocols: self.batching_protocols,
+                logical_batching_protocols: self.logical_batching_protocols,
                 user_provider: self.user_provider.clone(),
                 shutdown_tx: Mutex::new(None),
                 router: StdMutex::new(self.router),
@@ -1104,6 +1124,9 @@ impl HttpServer {
                         authorize::check_http_auth,
                     ))
                     .layer(Extension(Arc::new(self.batching_protocols.clone())))
+                    .layer(Extension(LogicalBatchingProtocols(
+                        self.logical_batching_protocols.clone(),
+                    )))
                     .layer(middleware::from_fn(hints::extract_hints))
                     .layer(middleware::from_fn(client_ip::log_error_with_client_ip))
                     .layer(middleware::from_fn(
@@ -2461,6 +2484,44 @@ mod batching_tests {
     use crate::influxdb::InfluxdbRequest;
     use crate::opentsdb::codec::DataPoint;
     use crate::query_handler::{InfluxdbLineProtocolHandler, OpentsdbProtocolHandler};
+
+    #[tokio::test]
+    async fn test_batching_selectors_are_independent() {
+        use axum::routing::post;
+        use axum::{Extension, Json, Router, middleware};
+        use session::context::{QueryContext, QueryContextBuilder};
+
+        use crate::http::{LogicalBatchingProtocols, set_http_write_batching};
+        for table in [false, true] {
+            for logical in [false, true] {
+                let app = Router::new()
+                    .route(
+                        "/",
+                        post(|Extension(ctx): Extension<QueryContext>| async move {
+                            Json([ctx.batching_enabled(), ctx.logical_batching_enabled()])
+                        }),
+                    )
+                    .route_layer(middleware::from_fn_with_state(
+                        BatchingProtocol::Otlp,
+                        set_http_write_batching,
+                    ))
+                    .layer(Extension(QueryContextBuilder::default().build()))
+                    .layer(Extension(Arc::new(if table {
+                        vec![BatchingProtocol::Otlp]
+                    } else {
+                        vec![]
+                    })))
+                    .layer(Extension(LogicalBatchingProtocols(if logical {
+                        vec![BatchingProtocol::Otlp]
+                    } else {
+                        vec![]
+                    })));
+                let client = TestClient::new(app).await;
+                let actual: [bool; 2] = client.post("/").send().await.json().await;
+                assert_eq!(actual, [table, logical]);
+            }
+        }
+    }
 
     #[test]
     fn test_protocol_names_reject_unknown_values() {
