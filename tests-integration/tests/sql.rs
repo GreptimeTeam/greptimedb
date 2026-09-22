@@ -2672,3 +2672,184 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
 }
+
+/// Keeps SQL and input rows fixed while changing only the selected batching protocols.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sql_batcher_alignment() {
+    use common_telemetry::{dump_metrics, info, init_default_ut_logging};
+    use frontend::server::Services;
+    use frontend::service_config::BatcherOptions;
+    use servers::batcher::BatchingProtocol;
+    use servers::mysql::server::MYSQL_SERVER;
+    use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+
+    fn flushes() -> u64 {
+        dump_metrics()
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("greptime_table_batcher_flush_total ")
+                    .map(|value| value.parse().unwrap())
+            })
+            .unwrap_or(0)
+    }
+
+    init_default_ut_logging();
+    for protocols in [
+        vec![],
+        vec![BatchingProtocol::Mysql],
+        vec![BatchingProtocol::Postgres],
+        vec![BatchingProtocol::Mysql, BatchingProtocol::Postgres],
+    ] {
+        let mysql_enabled = protocols.contains(&BatchingProtocol::Mysql);
+        let pg_enabled = protocols.contains(&BatchingProtocol::Postgres);
+        let mut instance = GreptimeDbStandaloneBuilder::new("sql_batcher_alignment")
+            .with_table_batcher(BatcherOptions {
+                protocols,
+                pending_rows_flush_interval: Duration::from_millis(10),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let mut opts = instance.opts.clone();
+        opts.http.addr = "127.0.0.1:0".into();
+        opts.grpc.bind_addr = "127.0.0.1:0".into();
+        opts.mysql.addr = "127.0.0.1:0".into();
+        opts.postgres.addr = "127.0.0.1:0".into();
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+        servers.start_all().await.unwrap();
+        let mysql_url = format!("mysql://{}/public", servers.addr(MYSQL_SERVER).unwrap());
+        let mut mysql = MySqlConnection::connect(&mysql_url).await.unwrap();
+        let (pg, connection) = tokio_postgres::connect(
+            &format!(
+                "postgres://{}/public",
+                servers.addr("POSTGRES_SERVER").unwrap()
+            ),
+            NoTls,
+        )
+        .await
+        .unwrap();
+        let pg_task = tokio::spawn(async move { connection.await.unwrap() });
+
+        for round in 0..2 {
+            mysql.execute("CREATE TABLE batch_sql (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val INT DEFAULT 7)").await.unwrap();
+            let started = std::time::Instant::now();
+            let before = flushes();
+            // COM_QUERY and COM_STMT_EXECUTE must both opt in.
+            assert_eq!(
+                mysql
+                    .execute("INSERT INTO batch_sql (ts, host) VALUES (0, 'a')")
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                1
+            );
+            assert_eq!(
+                sqlx::query("INSERT INTO batch_sql VALUES (0, ?, ?)")
+                    .persistent(false)
+                    .bind("b")
+                    .bind(8_i32)
+                    .execute(&mut mysql)
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                1
+            );
+            assert_eq!(flushes() - before, if mysql_enabled { 2 } else { 0 });
+
+            let before = flushes();
+            let result = pg
+                .simple_query("INSERT INTO batch_sql (ts, host) VALUES (0, 'c')")
+                .await
+                .unwrap();
+            assert!(matches!(
+                result.as_slice(),
+                [SimpleQueryMessage::CommandComplete(1)]
+            ));
+            let statement = pg
+                .prepare("INSERT INTO batch_sql VALUES (0, $1, $2)")
+                .await
+                .unwrap();
+            assert_eq!(pg.execute(&statement, &[&"d", &9_i32]).await.unwrap(), 1);
+            assert_eq!(flushes() - before, if pg_enabled { 2 } else { 0 });
+
+            // Independent connections can submit to the same worker concurrently.
+            let (mysql_result, pg_result) = tokio::join!(
+                mysql.execute("INSERT INTO batch_sql VALUES (0, 'e', 10)"),
+                pg.simple_query("INSERT INTO batch_sql VALUES (0, 'f', 11)")
+            );
+            assert_eq!(mysql_result.unwrap().rows_affected(), 1);
+            assert!(matches!(
+                pg_result.unwrap().as_slice(),
+                [SimpleQueryMessage::CommandComplete(1)]
+            ));
+
+            // Errors must reach the client without affecting later requests.
+            assert!(
+                mysql
+                    .execute("INSERT INTO batch_sql (missing) VALUES (1)")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                pg.simple_query("INSERT INTO batch_sql (missing) VALUES (1)")
+                    .await
+                    .is_err()
+            );
+            let expected = vec![
+                ("a".to_string(), 7_i32),
+                ("b".to_string(), 8),
+                ("c".to_string(), 7),
+                ("d".to_string(), 9),
+                ("e".to_string(), 10),
+                ("f".to_string(), 11),
+            ];
+            // No polling: successful protocol responses guarantee visibility.
+            let rows: Vec<(String, i32)> =
+                sqlx::query_as("SELECT host, val FROM batch_sql ORDER BY host")
+                    .persistent(false)
+                    .fetch_all(&mut mysql)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, expected);
+            let rows: Vec<(String, i32)> = pg
+                .query("SELECT host, val FROM batch_sql ORDER BY host", &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+            assert_eq!(rows, expected);
+
+            mysql.execute("CREATE TABLE batch_copy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val INT)").await.unwrap();
+            assert_eq!(
+                mysql
+                    .execute("INSERT INTO batch_copy SELECT * FROM batch_sql")
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                6
+            );
+            let rows: Vec<(String, i32)> =
+                sqlx::query_as("SELECT host, val FROM batch_copy ORDER BY host")
+                    .persistent(false)
+                    .fetch_all(&mut mysql)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, expected);
+            info!(
+                "sql_batcher_alignment mysql={mysql_enabled} postgres={pg_enabled} round={round} elapsed={:?}",
+                started.elapsed()
+            );
+            mysql.execute("DROP TABLE batch_sql").await.unwrap();
+            mysql.execute("DROP TABLE batch_copy").await.unwrap();
+        }
+        mysql.close().await.unwrap();
+        drop(pg);
+        pg_task.await.unwrap();
+        servers.shutdown_all().await.unwrap();
+        instance.guard.remove_all().await;
+    }
+}

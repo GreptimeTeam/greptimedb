@@ -471,7 +471,7 @@ impl QueryContext {
         self.logical_batching_enabled = enabled;
     }
 
-    /// Whether the local HTTP entry point selected ordinary-table batching.
+    /// Whether the local protocol entry point selected ordinary-table batching.
     pub fn batching_enabled(&self) -> bool {
         self.batching_enabled
     }

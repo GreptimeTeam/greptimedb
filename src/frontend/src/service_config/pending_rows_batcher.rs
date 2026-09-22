@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use common_batcher::flush_policy::timing::TimingFlushPolicy;
 use serde::{Deserialize, Serialize};
-use servers::http::BatchingProtocol;
+use servers::batcher::BatchingProtocol;
 use tokio::sync::Semaphore;
 
 use crate::frontend::FrontendOptions;
@@ -38,11 +38,11 @@ pub struct PendingRowsBatcherOptions {
     pub logical_table: Option<BatcherOptions>,
 }
 
-/// Write batching controls shared by HTTP ingestion protocols.
+/// Write batching controls shared by ingestion protocols.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct BatcherOptions {
-    /// HTTP write protocols sharing this batcher; empty disables all entrances.
+    /// Write protocols sharing this batcher; empty disables all entrances.
     pub protocols: Vec<BatchingProtocol>,
     /// Time from the first pending submission to a timed flush. Zero disables batching.
     #[serde(with = "humantime_serde")]
@@ -238,6 +238,8 @@ mod tests {
             "opentsdb",
             "elasticsearch",
             "splunk",
+            "mysql",
+            "postgres",
         ] {
             assert!(
                 toml::from_str::<FrontendOptions>(&format!(
@@ -251,9 +253,11 @@ mod tests {
     #[test]
     fn test_protocols() {
         let options: BatcherOptions = toml::from_str(
-            "protocols = ['influxdb', 'opentsdb', 'otlp', 'logs', 'loki', 'splunk', 'elasticsearch', 'http_sql', 'prom']",
+            "protocols = ['influxdb', 'opentsdb', 'otlp', 'logs', 'loki', 'splunk', 'elasticsearch', 'http_sql', 'prom', 'mysql', 'postgres']",
         ).unwrap();
-        assert_eq!(options.protocols.len(), 9);
+        assert_eq!(options.protocols.len(), 11);
+        assert!(options.protocols.contains(&BatchingProtocol::Mysql));
+        assert!(options.protocols.contains(&BatchingProtocol::Postgres));
         assert!(options.protocols.contains(&BatchingProtocol::HttpSql));
         assert!(BatcherOptions::default().protocols.is_empty());
         for invalid in ["sql", "jaeger", "unknown"] {
