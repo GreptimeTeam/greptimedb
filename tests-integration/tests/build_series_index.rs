@@ -40,7 +40,8 @@ async fn exercise_admin(frontend: &Arc<Instance>) {
         CREATE TABLE series_physical (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE)
         PARTITION ON COLUMNS (host) (host < 'm', host >= 'm')
         ENGINE = metric WITH (
-            physical_metric_table = 'true', 'compaction.twcs.time_window' = '1h',
+            physical_metric_table = 'true', 'compaction.type' = 'twcs',
+            'compaction.twcs.time_window' = '1h',
             'compaction.twcs.active_window.trigger_file_num' = '100',
             'compaction.twcs.inactive_window.trigger_file_num' = '100'
         )
