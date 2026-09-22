@@ -1750,6 +1750,47 @@ async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_whe
 }
 
 #[tokio::test]
+async fn test_capture_recovery_windows_since_uses_supplied_retention_lower() {
+    let TestTaskParts {
+        task,
+        query_engine,
+        ..
+    } = new_time_window_test_task_with_query(
+        "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window FROM numbers_with_ts WHERE number = 42 GROUP BY output_window",
+    )
+    .await;
+    configure_source_capability(&query_engine, "mito", true).await;
+    let lower = BTreeMap::from([(1, 10)]);
+    let retention_lower = Timestamp::new_second(-10);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(recovery_stream_output(
+            vec![],
+            Some(vec![(1, Some(10))]),
+            false,
+        ))),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: Some(1),
+        expiry_lower: std::sync::Mutex::new(None),
+    });
+    let frontend = FrontendClient::from_grpc_handler(
+        Arc::downgrade(
+            &(handler.clone()
+                as Arc<dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError>),
+        ),
+        QueryOptions::default(),
+    );
+
+    let (high, windows) = task
+        .capture_recovery_windows_since(&query_engine, &frontend, &lower, Some(retention_lower))
+        .await
+        .unwrap();
+
+    assert_eq!(high, lower);
+    assert!(windows.is_empty());
+    assert_eq!(*handler.expiry_lower.lock().unwrap(), Some(retention_lower));
+}
+
+#[tokio::test]
 async fn test_capture_recovery_windows_terminal_proof_cases_leave_state_unchanged() {
     struct Case {
         name: &'static str,
@@ -2915,7 +2956,7 @@ async fn test_full_snapshot_scoped_plan_marks_checkpoint_advance_safe_only_after
 }
 
 #[tokio::test]
-async fn test_expired_empty_fenced_repair_generates_scoped_base_repair_plan() {
+async fn test_expired_fenced_repair_uses_frozen_scope() {
     let TestTaskParts {
         mut task,
         query_engine,
@@ -2953,11 +2994,18 @@ async fn test_expired_empty_fenced_repair_generates_scoped_base_repair_plan() {
         )
         .await
         .unwrap()
-        .expect("expired empty repair should fall back to live dirty");
+        .unwrap();
 
-    assert!(matches!(plan.coverage, QueryCoverage::ScopedBaseRepair));
-    assert!(plan.coverage.snapshot_seqs().is_empty());
-    assert!(task.state.read().unwrap().pending_fenced_repair().is_none());
+    // A fenced repair is a frozen explicit scope: expiry cannot discard its
+    // old window or make this query consume the live post-fence signal.
+    assert!(matches!(
+        plan.coverage,
+        QueryCoverage::FencedRepairChunk { .. }
+    ));
+    let state = task.state.read().unwrap();
+    assert!(state.pending_fenced_repair().is_some());
+    assert!(state.fenced_repair_pending_is_empty());
+    assert_eq!(state.dirty_time_windows.len(), 1);
 }
 
 #[tokio::test]
