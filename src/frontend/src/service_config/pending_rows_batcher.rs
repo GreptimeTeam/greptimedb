@@ -294,6 +294,34 @@ mod tests {
     }
 
     #[test]
+    fn test_worker_capacity_override() {
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[pending_rows_batcher]
+worker_channel_capacity = 65526
+[pending_rows_batcher.logical_table]
+worker_channel_capacity = 65526
+[prom_store]
+worker_channel_capacity = 65526
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            options.pending_rows_batcher.table.worker_channel_capacity,
+            65_526
+        );
+        assert_eq!(
+            options
+                .pending_rows_batcher
+                .logical_table
+                .unwrap()
+                .worker_channel_capacity,
+            65_526
+        );
+        assert_eq!(options.prom_store.worker_channel_capacity, 65_526);
+    }
+
+    #[test]
     fn test_partial_options_and_zero_controls() {
         let options: BatcherOptions =
             toml::from_str("pending_rows_flush_interval = '5ms'").unwrap();
