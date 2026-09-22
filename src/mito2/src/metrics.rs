@@ -318,9 +318,9 @@ lazy_static! {
 
 // Index metrics.
 lazy_static! {
-    /// Disk space reserved by all local series-index stores, rounded to KiB.
+    /// Installed series and range index bytes across all local index stores.
     pub static ref SERIES_INDEX_DISK_BYTES: IntGauge = register_int_gauge!(
-        "greptime_mito_series_index_disk_bytes", "charged series-index disk bytes"
+        "greptime_mito_series_index_disk_bytes", "installed series and range index bytes"
     ).unwrap();
     /// Index builds deferred by the disk budget.
     pub static ref SERIES_INDEX_CAPACITY_DEFERRED: IntCounter = register_int_counter!(

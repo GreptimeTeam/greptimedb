@@ -92,8 +92,9 @@ pub struct MitoConfig {
     /// Under development; do not enable. Whether to enable series indexes (default false).
     /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
     pub experimental_enable_series_index: bool,
-    /// Maximum local series-index disk usage, including range indexes, catalogs and temporary files.
-    /// Uses a shared KiB-granularity budget; older data is evicted first (default: 5 GiB).
+    /// Maximum installed series and range index bytes, shared across regions (default: 5 GiB).
+    /// Reconciliation evicts files with the oldest minimum timestamps first. Temporary output,
+    /// catalogs, and retired files retained by readers are excluded.
     pub experimental_series_index_max_size: ReadableSize,
     /// Whether to build and query range indexes when series indexes are enabled (default false).
     /// Obsolete range-index metadata and files are still cleaned up when disabled.

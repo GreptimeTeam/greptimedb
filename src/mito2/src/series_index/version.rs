@@ -23,7 +23,7 @@ use common_time::Timestamp;
 use store_api::storage::{FileId, RegionId};
 
 use crate::series_index::bucket::IndexBucket;
-use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::catalog::{IndexFileMetadata, SeriesIndexEntry};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
@@ -43,9 +43,23 @@ impl Debug for SeriesIndexFileHandle {
 }
 
 impl SeriesIndexFileHandle {
+    #[cfg(test)]
     pub(crate) fn new(
         region_id: RegionId,
         entry: SeriesIndexEntry,
+        purger: IndexFilePurger,
+    ) -> Self {
+        let metadata = IndexFileMetadata {
+            file_size: 0,
+            min_timestamp: entry.bucket_start,
+        };
+        Self::with_metadata(region_id, entry, metadata, purger)
+    }
+
+    pub(crate) fn with_metadata(
+        region_id: RegionId,
+        entry: SeriesIndexEntry,
+        metadata: IndexFileMetadata,
         purger: IndexFilePurger,
     ) -> Self {
         Self {
@@ -58,6 +72,7 @@ impl SeriesIndexFileHandle {
                     ))
                 }),
                 entry,
+                metadata,
                 deleted: AtomicBool::new(false),
                 purger,
             }),
@@ -73,14 +88,25 @@ impl SeriesIndexFileHandle {
         &self.inner.entry
     }
 
+    pub(crate) fn metadata(&self) -> IndexFileMetadata {
+        self.inner.metadata
+    }
+
     pub(crate) fn mark_deleted(&self) {
         self.inner.deleted.store(true, Ordering::Release);
+        if let Some(budget) = self.inner.purger.budget() {
+            budget.retire(&crate::series_index::catalog::series_index_path(
+                self.inner.file_id.region_id(),
+                self.inner.file_id.file_id(),
+            ));
+        }
     }
 }
 
 struct SeriesIndexFileHandleInner {
     file_id: RegionFileId,
     entry: SeriesIndexEntry,
+    metadata: IndexFileMetadata,
     _disk_pin: Option<Arc<()>>,
     deleted: AtomicBool,
     purger: IndexFilePurger,
@@ -102,6 +128,7 @@ pub(crate) struct SeriesIndexVersion {
     /// Range indexes for visible SSTs; reconciliation removes IDs absent from its SST snapshot.
     /// Physical deletion is independently handled by the SST file purger.
     pub(crate) range_indexes: HashSet<FileId>,
+    pub(crate) range_metadata: HashMap<FileId, IndexFileMetadata>,
     pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
     /// Keeps budgeted files alive even when SST garbage collection requests their deletion.
@@ -120,10 +147,33 @@ impl SeriesIndexVersion {
         }
         Self {
             range_indexes,
+            range_metadata: HashMap::new(),
             series_indexes,
             index_buckets,
             disk_pins: Vec::new(),
         }
+    }
+
+    pub(crate) fn with_range_metadata(
+        mut self,
+        mut metadata: HashMap<FileId, IndexFileMetadata>,
+    ) -> Self {
+        metadata.retain(|id, _| self.range_indexes.contains(id));
+        self.range_metadata = metadata;
+        self
+    }
+
+    /// Installed bytes for this region's snapshot; retained old snapshots are not charged.
+    pub(crate) fn disk_usage(&self) -> u64 {
+        self.range_metadata
+            .values()
+            .map(|meta| meta.file_size)
+            .sum::<u64>()
+            + self
+                .series_indexes
+                .values()
+                .map(|handle| handle.metadata().file_size)
+                .sum::<u64>()
     }
 
     pub(crate) fn with_disk_pins(
@@ -152,6 +202,8 @@ impl SeriesIndexVersion {
                     false
                 }
             });
+            self.range_metadata
+                .retain(|id, _| self.range_indexes.contains(id));
             self.index_buckets.clear();
             for handle in self.series_indexes.values() {
                 IndexBucket::from_entry(handle.entry()).insert_into(&mut self.index_buckets);

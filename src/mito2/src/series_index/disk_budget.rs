@@ -12,260 +12,242 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Shared KiB reservations and the lifecycle of local index output.
+//! Installed index accounting and deferred physical deletion, shared by all workers.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
 
-use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_telemetry::warn;
-use common_time::Timestamp;
-use object_store::{ErrorKind, ObjectStore, Writer};
-use snafu::{OptionExt, ResultExt, ensure};
-use store_api::storage::FileId;
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, OwnedSemaphorePermit, Semaphore};
+use object_store::ObjectStore;
+use snafu::{ResultExt, ensure};
+use store_api::storage::RegionId;
+use tokio::sync::Mutex as AsyncMutex;
 
-use crate::error::{self, InvalidConfigSnafu, OpenDalSnafu, Result, SeriesIndexCapacitySnafu};
+use crate::error::{InvalidConfigSnafu, OpenDalSnafu, Result};
 use crate::metrics::SERIES_INDEX_DISK_BYTES;
-use crate::region::{RegionMap, RegionMapRef};
-
-const UNIT: u64 = 1024;
+use crate::series_index::catalog::IndexFileMetadata;
+use crate::series_index::version::SeriesIndexVersionControl;
 
 pub(crate) fn validate_limit(limit: ReadableSize) -> Result<()> {
     ensure!(
-        limit.as_bytes() >= UNIT && limit.as_bytes() / UNIT <= Semaphore::MAX_PERMITS as u64,
+        limit.as_bytes() >= 1024,
         InvalidConfigSnafu {
-            reason: "experimental_series_index_max_size must be at least 1KiB and fit the semaphore capacity"
+            reason: "experimental_series_index_max_size must be at least 1KiB"
         }
     );
     Ok(())
 }
 
-pub(crate) fn is_capacity_error(mut error: &(dyn std::error::Error + 'static)) -> bool {
-    loop {
-        if matches!(
-            error.downcast_ref::<error::Error>(),
-            Some(error::Error::SeriesIndexCapacity { .. })
-        ) {
-            return true;
-        }
-        match error.source() {
-            Some(source) => error = source,
-            None => return false,
-        }
-    }
-}
-
-#[derive(Debug, Default)]
-struct Charge(Option<OwnedSemaphorePermit>);
-
-impl Charge {
-    fn units(&self) -> usize {
-        self.0.as_ref().map_or(0, OwnedSemaphorePermit::num_permits)
-    }
-
-    fn merge(&mut self, mut other: Self) {
-        if let Some(permit) = other.0.take() {
-            if let Some(current) = &mut self.0 {
-                current.merge(permit);
-            } else {
-                self.0 = Some(permit);
-            }
-        }
-    }
-
-    fn trim(&mut self, units: usize) {
-        let excess = self.units().saturating_sub(units);
-        if let Some(permit) = self.0.as_mut().and_then(|permit| permit.split(excess)) {
-            SERIES_INDEX_DISK_BYTES.sub((excess as u64 * UNIT) as i64);
-            drop(permit);
-        }
-    }
-}
-
-impl Drop for Charge {
-    fn drop(&mut self) {
-        SERIES_INDEX_DISK_BYTES.sub((self.units() as u64 * UNIT) as i64);
-    }
-}
-
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct DiskFile {
-    charge: Charge,
+    metadata: IndexFileMetadata,
+    installed: bool,
     pin: Weak<()>,
-    end: Option<Timestamp>,
-    deleting: bool,
+    retired: bool,
 }
 
-/// One budget per local series-index directory, shared by every worker.
+/// One quota per local index directory. Only published files consume capacity.
+/// Maintenance serializes catalog changes; the file mutex also protects reader pins.
 #[derive(Debug)]
 pub(crate) struct SeriesIndexDiskBudget {
-    semaphore: Arc<Semaphore>,
-    capacity: usize,
-    required: AtomicU64,
-    deferred: Mutex<HashMap<String, u64>>,
+    capacity: u64,
     files: Mutex<HashMap<String, DiskFile>>,
-    paths: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
-    pending_deletes: Mutex<HashSet<String>>,
-    pending_outputs: Mutex<Vec<DiskReservation>>,
-    regions: Mutex<Vec<Weak<RegionMap>>>,
+    versions: Mutex<HashMap<RegionId, Weak<SeriesIndexVersionControl>>>,
     pub(crate) maintenance: AsyncMutex<()>,
+    deletion: AsyncMutex<()>,
 }
 
 impl SeriesIndexDiskBudget {
     pub(crate) async fn open(store: &ObjectStore, limit: ReadableSize) -> Result<Arc<Self>> {
         validate_limit(limit)?;
-        let capacity = (limit.as_bytes() / UNIT) as usize;
         let budget = Arc::new(Self {
-            semaphore: Arc::new(Semaphore::new(capacity)),
-            capacity,
-            required: AtomicU64::new(0),
-            deferred: Mutex::default(),
+            capacity: limit.as_bytes(),
             files: Mutex::default(),
-            paths: Mutex::default(),
-            pending_deletes: Mutex::default(),
-            pending_outputs: Mutex::default(),
-            regions: Mutex::default(),
+            versions: Mutex::default(),
             maintenance: AsyncMutex::new(()),
+            deletion: AsyncMutex::new(()),
         });
         crate::series_index::recovery::recover(store, &budget).await?;
         Ok(budget)
     }
 
     pub(crate) fn capacity_bytes(&self) -> u64 {
-        self.capacity as u64 * UNIT
+        self.capacity
     }
 
-    pub(crate) fn available_bytes(&self) -> u64 {
-        self.semaphore.available_permits() as u64 * UNIT
-    }
-
-    pub(crate) fn required_bytes(&self, key: &str) -> u64 {
-        self.deferred
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(key)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    pub(crate) fn defer(&self, key: String) -> u64 {
-        let required = self.required.swap(0, Ordering::Relaxed);
-        self.deferred
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(key, required);
-        required
-    }
-
-    pub(crate) fn built(&self, key: &str) {
-        self.deferred
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(key);
-    }
-
-    pub(crate) fn register_regions(&self, regions: &RegionMapRef) {
-        self.regions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push(Arc::downgrade(regions));
-    }
-
-    pub(crate) fn regions(&self) -> Vec<crate::region::MitoRegionRef> {
-        self.regions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .iter()
-            .filter_map(Weak::upgrade)
-            .flat_map(|regions| regions.list_regions())
-            .collect()
-    }
-
-    fn acquire(&self, units: usize) -> Result<Charge> {
-        let mut charge = Charge::default();
-        let mut remaining = units;
-        while remaining > 0 {
-            let count = remaining.min(u32::MAX as usize) as u32;
-            let permit = self
-                .semaphore
-                .clone()
-                .try_acquire_many_owned(count)
-                .ok()
-                .context(SeriesIndexCapacitySnafu)?;
-            SERIES_INDEX_DISK_BYTES.add(count as i64 * UNIT as i64);
-            charge.merge(Charge(Some(permit)));
-            remaining -= count as usize;
-        }
-        Ok(charge)
-    }
-
-    pub(crate) fn register_file(
-        &self,
-        path: String,
-        bytes: u64,
-        end: Option<Timestamp>,
-    ) -> Result<()> {
-        let charge = self.acquire(bytes.div_ceil(UNIT) as usize)?;
+    pub(crate) fn used_bytes(&self) -> u64 {
         self.files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                path,
-                DiskFile {
-                    charge,
-                    end,
-                    ..Default::default()
-                },
-            );
-        Ok(())
+            .values()
+            .filter(|file| file.installed)
+            .map(|file| file.metadata.file_size)
+            .sum()
     }
 
-    pub(crate) fn set_end(&self, path: &str, end: Timestamp) {
+    #[cfg(test)]
+    pub(crate) fn available_bytes(&self) -> u64 {
+        self.capacity.saturating_sub(self.used_bytes())
+    }
+
+    /// Tracks a completed file without charging it before publication.
+    pub(crate) fn track(&self, path: String, metadata: IndexFileMetadata) {
+        self.files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(path)
+            .or_insert(DiskFile {
+                metadata,
+                installed: false,
+                pin: Weak::new(),
+                retired: false,
+            });
+    }
+
+    /// Called only after the corresponding catalog and snapshot are published.
+    pub(crate) fn install(&self, path: &str) {
+        if let Some(file) = self
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(path)
+            && !file.installed
+            && !file.retired
+        {
+            file.installed = true;
+            SERIES_INDEX_DISK_BYTES.add(file.metadata.file_size as i64);
+        }
+    }
+
+    /// Releases logical usage immediately; pins independently delay physical deletion.
+    pub(crate) fn retire(&self, path: &str) {
         if let Some(file) = self
             .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(path)
         {
-            file.end = Some(end);
+            if file.installed {
+                file.installed = false;
+                SERIES_INDEX_DISK_BYTES.sub(file.metadata.file_size as i64);
+            }
+            file.retired = true;
         }
     }
 
-    pub(crate) fn candidates(&self) -> Vec<(String, Option<Timestamp>)> {
-        let pending = self
-            .pending_deletes
+    pub(crate) fn retire_region(&self, region_id: RegionId) {
+        let prefix = format!("{}/", region_id.as_u64());
+        let paths = self
+            .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .keys()
+            .filter(|path| path.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for path in paths {
+            self.retire(&path);
+        }
+    }
+
+    /// Registers restored snapshots before their region enters the worker map.
+    pub(crate) fn register_version(
+        &self,
+        region_id: RegionId,
+        control: &Arc<SeriesIndexVersionControl>,
+    ) {
+        let mut versions = self
+            .versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        versions.retain(|_, version| version.strong_count() > 0);
+        versions.insert(region_id, Arc::downgrade(control));
+    }
+
+    pub(crate) fn version(&self, region_id: RegionId) -> Option<Arc<SeriesIndexVersionControl>> {
+        self.versions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&region_id)
+            .and_then(Weak::upgrade)
+    }
+
+    pub(crate) fn candidates(&self) -> Vec<(String, IndexFileMetadata)> {
         self.files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .filter(|(path, _)| path.ends_with(".parquet") && !pending.contains(*path))
-            .map(|(path, file)| (path.clone(), file.end))
+            .filter(|(_, file)| file.installed)
+            .map(|(path, file)| (path.clone(), file.metadata))
             .collect()
     }
 
+    /// Separate averages avoid estimating small range files as large aggregate files.
+    pub(crate) fn average_size(&self, series: bool) -> Option<u64> {
+        let files = self
+            .files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (bytes, count) = files
+            .iter()
+            .filter(|(path, file)| file.installed && path.contains("/series/") == series)
+            .fold((0u64, 0u64), |(bytes, count), (_, file)| {
+                (bytes + file.metadata.file_size, count + 1)
+            });
+        (count > 0).then(|| bytes.div_ceil(count))
+    }
+
+    /// Plans eviction without changing state. Rejected candidates evict nothing.
+    pub(crate) fn admission(
+        &self,
+        path: &str,
+        metadata: IndexFileMetadata,
+        replaced: &[String],
+    ) -> Option<Vec<String>> {
+        if metadata.file_size > self.capacity {
+            return None;
+        }
+        let mut candidates = self.candidates();
+        candidates.retain(|(candidate, _)| candidate != path && !replaced.contains(candidate));
+        let mut used = candidates
+            .iter()
+            .map(|(_, meta)| meta.file_size as u128)
+            .sum::<u128>()
+            + metadata.file_size as u128;
+        candidates.sort_by(|(left, lmeta), (right, rmeta)| {
+            eviction_key(left, *lmeta).cmp(&eviction_key(right, *rmeta))
+        });
+        let incoming = eviction_key(path, metadata);
+        let mut evicted = Vec::new();
+        for (candidate, meta) in candidates {
+            if used <= self.capacity as u128 {
+                break;
+            }
+            if eviction_key(&candidate, meta) >= incoming {
+                return None;
+            }
+            used -= meta.file_size as u128;
+            evicted.push(candidate);
+        }
+        (used <= self.capacity as u128).then_some(evicted)
+    }
+
     pub(crate) fn is_retired(&self, path: &str) -> bool {
-        self.pending_deletes
+        self.files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .contains(path)
+            .get(path)
+            .is_some_and(|file| file.retired)
     }
 
     pub(crate) fn pin(&self, path: &str) -> Option<Arc<()>> {
-        if self.is_retired(path) {
-            return None;
-        }
         let mut files = self
             .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let file = files.get_mut(path)?;
-        if file.deleting {
+        if file.retired && !file.installed {
             return None;
         }
         let pin = file.pin.upgrade().unwrap_or_else(|| Arc::new(()));
@@ -273,67 +255,20 @@ impl SeriesIndexDiskBudget {
         Some(pin)
     }
 
-    fn path_lock(&self, path: &str) -> Arc<AsyncMutex<()>> {
-        let mut paths = self
-            .paths
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        paths.retain(|_, lock| lock.strong_count() > 0);
-        let entry = paths.entry(path.to_string()).or_default();
-        let lock = entry
-            .upgrade()
-            .unwrap_or_else(|| Arc::new(AsyncMutex::new(())));
-        *entry = Arc::downgrade(&lock);
-        lock
-    }
-
-    pub(crate) async fn output(
-        self: &Arc<Self>,
-        store: ObjectStore,
-        path: &str,
-    ) -> Result<IndexOutput> {
-        let guard = self
-            .path_lock(path)
-            .try_lock_owned()
-            .ok()
-            .context(SeriesIndexCapacitySnafu)?;
-        let stage = format!("tmp/{}.index", FileId::random());
-        let reservation = DiskReservation {
-            target: path.to_string(),
-            stage: stage.clone(),
-            charge: Charge::default(),
-            bytes: 0,
-            _guard: guard,
-        };
-        let mut output = IndexOutput {
-            store: store.clone(),
-            budget: self.clone(),
-            reservation: Some(reservation),
-            writer: None,
-        };
-        output.writer = Some(store.writer(&stage).await.context(OpenDalSnafu)?);
-        Ok(output)
-    }
-
-    /// Returns false while a snapshot still pins the file or another mutation owns its path.
+    /// SST garbage collection may request deletion before reconciliation prunes metadata.
+    /// In that case keep charging the installed entry until its catalog is updated.
     pub(crate) async fn delete(&self, store: &ObjectStore, path: &str) -> Result<bool> {
-        self.pending_deletes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(path.to_string());
-        let Ok(_guard) = self.path_lock(path).try_lock_owned() else {
-            return Ok(false);
-        };
+        let _guard = self.deletion.lock().await;
         {
             let mut files = self
                 .files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(file) = files.get_mut(path) {
-                if file.pin.strong_count() > 0 {
+                file.retired = true;
+                if file.installed || file.pin.strong_count() > 0 {
                     return Ok(false);
                 }
-                file.deleting = true;
             }
         }
         store.delete(path).await.context(OpenDalSnafu)?;
@@ -341,40 +276,17 @@ impl SeriesIndexDiskBudget {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(path);
-        self.pending_deletes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(path);
         Ok(true)
     }
 
-    pub(crate) async fn retry_cleanup(self: &Arc<Self>, store: &ObjectStore) {
-        let outputs = std::mem::take(
-            &mut *self
-                .pending_outputs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        );
-        if !outputs.is_empty() {
-            let budget = self.clone();
-            let store = store.clone();
-            // Cancellation of maintenance must not drop reservations for failed output.
-            if let Err(error) = common_runtime::spawn_compact(async move {
-                for output in outputs {
-                    budget.cleanup_output(&store, output).await;
-                }
-            })
-            .await
-            {
-                warn!(error; "Failed to join deferred index cleanup");
-            }
-        }
+    pub(crate) async fn retry_cleanup(&self, store: &ObjectStore) {
         let paths = self
-            .pending_deletes
+            .files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
-            .cloned()
+            .filter(|(_, file)| file.retired && !file.installed)
+            .map(|(path, _)| path.clone())
             .collect::<Vec<_>>();
         for path in paths {
             if let Err(error) = self.delete(store, &path).await {
@@ -382,310 +294,207 @@ impl SeriesIndexDiskBudget {
             }
         }
     }
-
-    async fn cleanup_output(&self, store: &ObjectStore, mut output: DiskReservation) {
-        let result: Result<()> = async {
-            store.delete(&output.stage).await.context(OpenDalSnafu)?;
-            // Fs hides its atomic-write suffix. Each staging basename belongs to exactly one output.
-            let name = output.stage.rsplit('/').next().unwrap_or(&output.stage);
-            for entry in store
-                .list(object_store::ATOMIC_WRITE_DIR)
-                .await
-                .context(OpenDalSnafu)?
-            {
-                if !entry.metadata().is_dir() && entry.name().starts_with(name) {
-                    store.delete(entry.path()).await.context(OpenDalSnafu)?;
-                }
-            }
-            // A cancelled rename may already have replaced the target. Reconcile it under
-            // the same path lock, using the old and new charges already held by this operation.
-            let bytes = match store.stat(&output.target).await {
-                Ok(meta) => meta.content_length(),
-                Err(error) if error.kind() == ErrorKind::NotFound => 0,
-                Err(error) => return Err(error).context(OpenDalSnafu),
-            };
-            let mut files = self
-                .files
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut file = files.remove(&output.target).unwrap_or_default();
-            output.charge.merge(std::mem::take(&mut file.charge));
-            let units = bytes.div_ceil(UNIT) as usize;
-            ensure!(
-                units <= output.charge.units(),
-                InvalidConfigSnafu {
-                    reason: "index file grew outside its disk budget"
-                }
-            );
-            output.charge.trim(units);
-            if bytes > 0 {
-                file.charge = std::mem::take(&mut output.charge);
-                files.insert(output.target.clone(), file);
-            }
-            Ok(())
-        }
-        .await;
-        if let Err(error) = result {
-            warn!(error; "Failed to clean index output, path: {}", output.stage);
-            self.pending_outputs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(output);
-        }
-    }
 }
 
-#[derive(Debug)]
-struct DiskReservation {
-    target: String,
-    stage: String,
-    charge: Charge,
-    bytes: u64,
-    _guard: OwnedMutexGuard<()>,
+/// Stable ordering also decides whether an incoming file wins an equal-timestamp tie.
+pub(crate) fn eviction_key(
+    path: &str,
+    metadata: IndexFileMetadata,
+) -> (common_time::Timestamp, u64, bool, &str) {
+    let region = path
+        .split('/')
+        .next()
+        .and_then(|id| id.parse().ok())
+        .unwrap_or(0);
+    (
+        metadata.min_timestamp,
+        region,
+        path.contains("/series/"),
+        path,
+    )
 }
 
-/// Budgeted output shared by catalog writes and the existing Parquet writer.
-/// Staging gives cancellation cleanup an unambiguous file identity.
-pub(crate) struct IndexOutput {
-    store: ObjectStore,
-    budget: Arc<SeriesIndexDiskBudget>,
-    reservation: Option<DiskReservation>,
-    writer: Option<Writer>,
-}
-
-impl IndexOutput {
-    pub(crate) async fn write(&mut self, bytes: Bytes) -> Result<()> {
-        let reservation = self
-            .reservation
-            .as_mut()
-            .context(SeriesIndexCapacitySnafu)?;
-        let total = reservation
-            .bytes
-            .checked_add(bytes.len() as u64)
-            .context(SeriesIndexCapacitySnafu)?;
-        let units = total.div_ceil(UNIT) as usize;
-        let charge = self
-            .budget
-            .acquire(units.saturating_sub(reservation.charge.units()))
-            .inspect_err(|_| {
-                self.budget
-                    .required
-                    .store(units as u64 * UNIT, Ordering::Relaxed);
-            })?;
-        reservation.charge.merge(charge);
-        reservation.bytes = total;
-        self.writer
-            .as_mut()
-            .context(SeriesIndexCapacitySnafu)?
-            .write(bytes)
-            .await
-            .context(OpenDalSnafu)
-    }
-
-    pub(crate) async fn close(&mut self) -> Result<()> {
-        self.writer
-            .as_mut()
-            .context(SeriesIndexCapacitySnafu)?
-            .close()
-            .await
-            .context(OpenDalSnafu)?;
-        drop(self.writer.take());
-        let reservation = self
-            .reservation
-            .as_mut()
-            .context(SeriesIndexCapacitySnafu)?;
-        self.store
-            .rename(&reservation.stage, &reservation.target)
-            .await
-            .context(OpenDalSnafu)?;
-        let mut files = self
-            .budget
-            .files
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let previous = files.remove(&reservation.target).unwrap_or_default();
-        files.insert(
-            reservation.target.clone(),
-            DiskFile {
-                charge: std::mem::take(&mut reservation.charge),
-                pin: previous.pin,
-                end: previous.end,
-                deleting: false,
-            },
-        );
-        self.reservation.take();
-        Ok(())
-    }
-
-    pub(crate) async fn abort(&mut self) {
-        if let Some(task) = self.schedule_cleanup()
-            && let Err(error) = task.await
-        {
-            warn!(error; "Failed to join index output cleanup");
-        }
-    }
-
-    fn schedule_cleanup(&mut self) -> Option<tokio::task::JoinHandle<()>> {
-        let reservation = self.reservation.take()?;
-        let writer = self.writer.take();
-        let budget = self.budget.clone();
-        let store = self.store.clone();
-        Some(common_runtime::spawn_compact(async move {
-            if let Some(mut writer) = writer {
-                if let Err(error) = writer.abort().await {
-                    warn!(error; "Failed to abort budgeted index output");
-                }
-                drop(writer);
-            }
-            budget.cleanup_output(&store, reservation).await;
-        }))
-    }
-}
-
-impl Drop for IndexOutput {
+impl Drop for SeriesIndexDiskBudget {
     fn drop(&mut self) {
-        self.schedule_cleanup();
+        SERIES_INDEX_DISK_BYTES.sub(self.used_bytes() as i64);
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    use object_store::layers::mock::{self, MockLayerBuilder, oio};
-    use tokio::sync::Notify;
+    use common_time::Timestamp;
+    use object_store::services::Memory;
 
     use super::*;
-    use crate::config::MitoConfig;
 
-    struct PausedWriter {
-        inner: oio::Writer,
-        written: Arc<Notify>,
-        resume: Arc<Notify>,
-    }
-
-    impl oio::Write for PausedWriter {
-        async fn write(&mut self, bytes: mock::Buffer) -> mock::Result<()> {
-            self.inner.write(bytes).await?;
-            self.written.notify_one();
-            self.resume.notified().await;
-            Ok(())
-        }
-        async fn close(&mut self) -> mock::Result<mock::Metadata> {
-            self.inner.close().await
-        }
-        async fn abort(&mut self) -> mock::Result<()> {
-            self.inner.abort().await
-        }
-    }
-
-    struct FailingDeleter {
-        inner: oio::Deleter,
-        fail: Arc<AtomicBool>,
-        attempted: Arc<Notify>,
-    }
-
-    impl oio::Delete for FailingDeleter {
-        async fn delete(&mut self, path: &str, args: mock::OpDelete) -> mock::Result<()> {
-            if self.fail.load(Ordering::Relaxed) {
-                self.attempted.notify_one();
-                return Err(mock::Error::new(
-                    mock::ErrorKind::Unexpected,
-                    "injected cleanup failure",
-                ));
-            }
-            self.inner.delete(path, args).await
-        }
-        async fn close(&mut self) -> mock::Result<()> {
-            self.inner.close().await
+    fn metadata(bytes: u64, start: i64) -> IndexFileMetadata {
+        IndexFileMetadata {
+            file_size: bytes,
+            min_timestamp: Timestamp::new_second(start),
         }
     }
 
     #[tokio::test]
-    async fn test_cancelled_replacement_retains_charge_until_cleanup() {
-        let root = common_test_util::temp_dir::create_temp_dir("index-budget-cancel");
-        let store = crate::access_layer::new_fs_cache_store(root.path().to_str().unwrap())
+    async fn test_admission_uses_actual_bytes_and_minimum_timestamp() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let budget = SeriesIndexDiskBudget::open(&store, ReadableSize(4096))
             .await
             .unwrap();
-        let config = MitoConfig {
-            experimental_series_index_max_size: ReadableSize::kb(4),
-            ..Default::default()
-        };
-        let budget = SeriesIndexDiskBudget::open(&store, config.experimental_series_index_max_size)
-            .await
-            .unwrap();
-        let path = "1/series-index.json";
-        let original = Bytes::from(vec![1; 1024]);
-        let mut first = budget.output(store.clone(), path).await.unwrap();
-        first.write(original.clone()).await.unwrap();
-        first.close().await.unwrap();
+        for (path, meta) in [
+            ("1/series/old.parquet", metadata(1025, 1)),
+            ("2/range/new.parquet", metadata(2047, 9)),
+        ] {
+            budget.track(path.to_string(), meta);
+            budget.install(path);
+            budget.install(path);
+        }
+        assert_eq!(3072, budget.used_bytes());
+        assert_eq!(
+            Some(vec![]),
+            budget.admission("3/series/exact.parquet", metadata(1024, 0), &[])
+        );
+        assert_eq!(
+            None,
+            budget.admission("3/series/oversized.parquet", metadata(4097, 20), &[])
+        );
+        assert_eq!(
+            None,
+            budget.admission("3/series/older.parquet", metadata(1025, 0), &[])
+        );
+        assert_eq!(
+            Some(vec!["1/series/old.parquet".to_string()]),
+            budget.admission("3/series/middle.parquet", metadata(2049, 5), &[])
+        );
+        assert_eq!(
+            None,
+            budget.admission("3/series/middle.parquet", metadata(2050, 5), &[])
+        );
+        assert_eq!(
+            3072,
+            budget.used_bytes(),
+            "planning must not change accounting"
+        );
+        assert_eq!(
+            Some(vec![]),
+            budget.admission(
+                "1/series/replacement.parquet",
+                metadata(2049, 1),
+                &["1/series/old.parquet".to_string()]
+            )
+        );
+    }
 
-        let written = Arc::new(Notify::new());
-        let resume = Arc::new(Notify::new());
-        let fail = Arc::new(AtomicBool::new(true));
-        let attempted = Arc::new(Notify::new());
-        let layer = MockLayerBuilder::default()
-            .writer_factory(Arc::new({
-                let written = written.clone();
-                let resume = resume.clone();
-                move |_, _, inner| {
-                    Box::new(PausedWriter {
-                        inner,
-                        written: written.clone(),
-                        resume: resume.clone(),
-                    })
-                }
-            }))
-            .deleter_factory(Arc::new({
-                let fail = fail.clone();
-                let attempted = attempted.clone();
-                move |inner| {
-                    Box::new(FailingDeleter {
-                        inner,
-                        fail: fail.clone(),
-                        attempted: attempted.clone(),
-                    })
-                }
-            }))
+    #[tokio::test]
+    async fn test_average_size_and_equal_timestamp_order() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let budget = SeriesIndexDiskBudget::open(&store, ReadableSize(4096))
+            .await
+            .unwrap();
+        assert_eq!(None, budget.average_size(true));
+        budget.track("1/series/a.parquet".into(), metadata(1001, 0));
+        assert_eq!(
+            None,
+            budget.average_size(true),
+            "unpublished files are excluded"
+        );
+        budget.install("1/series/a.parquet");
+        budget.track("2/series/b.parquet".into(), metadata(2000, 0));
+        budget.install("2/series/b.parquet");
+        budget.track("2/range/c.parquet".into(), metadata(500, 0));
+        budget.install("2/range/c.parquet");
+        assert_eq!(Some(1501), budget.average_size(true));
+        assert_eq!(Some(500), budget.average_size(false));
+        assert_eq!(
+            Some(vec!["1/series/a.parquet".into()]),
+            budget.admission("10/series/d.parquet", metadata(1000, 0), &[])
+        );
+        budget.retire("1/series/a.parquet");
+        budget.retire("1/series/a.parquet");
+        assert_eq!(2500, budget.used_bytes());
+        assert_eq!(Some(2000), budget.average_size(true));
+    }
+
+    #[tokio::test]
+    async fn test_retirement_releases_usage_before_reader_and_deletion() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let budget = SeriesIndexDiskBudget::open(&store, ReadableSize(1024))
+            .await
+            .unwrap();
+        let path = "1/range/a.parquet";
+        store.write(path, vec![0; 1024]).await.unwrap();
+        budget.track(path.into(), metadata(1024, 0));
+        budget.install(path);
+        let pin = budget.pin(path).unwrap();
+        budget.retire(path);
+        assert_eq!(1024, budget.available_bytes());
+        assert!(budget.pin(path).is_none());
+        assert!(!budget.delete(&store, path).await.unwrap());
+        assert!(store.exists(path).await.unwrap());
+        drop(pin);
+        budget.retry_cleanup(&store).await;
+        assert!(!store.exists(path).await.unwrap());
+        assert!(!budget.is_retired(path));
+        assert_eq!(0, budget.used_bytes());
+        // The fixed range path becomes reusable only after deletion completes.
+        budget.track(path.into(), metadata(512, 0));
+        budget.install(path);
+        assert_eq!(512, budget.used_bytes());
+    }
+
+    struct FailingDeleter;
+
+    impl object_store::layers::mock::oio::Delete for FailingDeleter {
+        async fn delete(
+            &mut self,
+            _: &str,
+            _: object_store::layers::mock::OpDelete,
+        ) -> object_store::layers::mock::Result<()> {
+            Err(object_store::layers::mock::Error::new(
+                object_store::layers::mock::ErrorKind::Unexpected,
+                "injected deletion failure",
+            ))
+        }
+        async fn close(&mut self) -> object_store::layers::mock::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_failed_delete_does_not_charge_retired_file() {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let budget = SeriesIndexDiskBudget::open(&store, ReadableSize(1024))
+            .await
+            .unwrap();
+        let path = "1/range/a.parquet";
+        store.write(path, vec![0; 1024]).await.unwrap();
+        budget.track(path.into(), metadata(1024, 0));
+        budget.install(path);
+        // SST GC requests deletion, but its still-published metadata remains charged.
+        assert!(!budget.delete(&store, path).await.unwrap());
+        assert_eq!(1024, budget.used_bytes());
+        budget.retire(path);
+        let layer = object_store::layers::mock::MockLayerBuilder::default()
+            .deleter_factory(Arc::new(|_| Box::new(FailingDeleter)))
             .build()
             .unwrap();
-        let fault_store = store.clone().layer(layer);
-        let mut replacement = budget.output(fault_store.clone(), path).await.unwrap();
-        let task = tokio::spawn(async move { replacement.write(Bytes::from(vec![2; 3072])).await });
-        written.notified().await;
-        assert_eq!(0, budget.available_bytes());
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        attempted.notified().await;
-        // Synchronize with the detached cleanup task's bookkeeping by trying cleanup
-        // again; failure keeps the charge regardless of whether it has been enqueued yet.
-        assert_eq!(0, budget.available_bytes());
-        assert_eq!(original, store.read(path).await.unwrap().to_bytes());
-        let mut other = budget
-            .output(store.clone(), "1/series/other.parquet")
-            .await
-            .unwrap();
-        assert!(is_capacity_error(
-            &other.write(Bytes::from_static(b"x")).await.unwrap_err()
-        ));
-        other.abort().await;
-        fail.store(false, Ordering::Relaxed);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while budget.available_bytes() != 3072 {
-                budget.retry_cleanup(&fault_store).await;
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        assert_eq!(original, store.read(path).await.unwrap().to_bytes());
         assert!(
-            store
-                .list(object_store::ATOMIC_WRITE_DIR)
+            budget
+                .delete(&store.clone().layer(layer), path)
                 .await
-                .unwrap()
-                .iter()
-                .all(|entry| entry.metadata().is_dir())
+                .is_err()
         );
+        assert_eq!(0, budget.used_bytes());
+        assert!(budget.is_retired(path));
+        assert!(store.exists(path).await.unwrap());
+        budget.retry_cleanup(&store).await;
+        assert!(!store.exists(path).await.unwrap());
+        assert!(!budget.is_retired(path));
+    }
+
+    #[test]
+    fn test_limit_has_no_semaphore_upper_bound() {
+        assert!(validate_limit(ReadableSize(1023)).is_err());
+        assert!(validate_limit(ReadableSize(1024)).is_ok());
+        assert!(validate_limit(ReadableSize(u64::MAX)).is_ok());
     }
 }

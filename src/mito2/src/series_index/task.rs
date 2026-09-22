@@ -82,9 +82,6 @@ pub(crate) fn spawn_series_index_tasks(
     enable_range_index: bool,
 ) -> JoinHandle<()> {
     // Snapshots may retain senders after the worker stops; purge until all senders drop.
-    if let Some(budget) = purger.budget() {
-        budget.register_regions(&regions);
-    }
     common_runtime::spawn_compact(run_index_purge_task_with_budget(
         worker_id,
         store.clone(),

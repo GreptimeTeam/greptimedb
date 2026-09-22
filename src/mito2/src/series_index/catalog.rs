@@ -14,7 +14,7 @@
 
 //! Index catalog persistence, coverage metadata, and file paths.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use common_telemetry::warn;
 use common_time::Timestamp;
@@ -97,14 +97,25 @@ impl SeriesIndexEntry {
     }
 }
 
+/// Storage metadata for one completed index file, independent of its coverage footer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct IndexFileMetadata {
+    pub(crate) file_size: u64,
+    pub(crate) min_timestamp: Timestamp,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SeriesIndexCatalog {
     pub(crate) indexes: Vec<SeriesIndexEntry>,
+    #[serde(default)]
+    pub(crate) file_metadata: HashMap<FileId, IndexFileMetadata>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub(crate) struct RangeIndexCatalog {
     pub(crate) indexes: Vec<FileId>,
+    #[serde(default)]
+    pub(crate) file_metadata: HashMap<FileId, IndexFileMetadata>,
 }
 
 pub(crate) fn range_catalog_path(region_id: RegionId) -> String {
@@ -147,33 +158,12 @@ where
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn store_catalog<T>(store: &ObjectStore, path: &str, catalog: &T) -> Result<()>
-where
-    T: Serialize,
-{
-    store_catalog_with_budget(store, path, catalog, None).await
-}
-
-pub(crate) async fn store_catalog_with_budget<T: Serialize>(
+pub(crate) async fn store_catalog<T: Serialize>(
     store: &ObjectStore,
     path: &str,
     catalog: &T,
-    budget: Option<&std::sync::Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(catalog).context(SerdeJsonSnafu)?;
-    if let Some(budget) = budget {
-        let mut output = budget.output(store.clone(), path).await?;
-        if let Err(error) = output.write(bytes.into()).await {
-            output.abort().await;
-            return Err(error);
-        }
-        if let Err(error) = output.close().await {
-            output.abort().await;
-            return Err(error);
-        }
-        return Ok(());
-    }
     store
         .write(path, bytes)
         .await
@@ -192,6 +182,9 @@ pub(crate) async fn delete_catalogs_with_budget(
     region_id: RegionId,
     budget: Option<&std::sync::Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
 ) {
+    if let Some(budget) = budget {
+        budget.retire_region(region_id);
+    }
     for path in [
         series_catalog_path(region_id),
         range_catalog_path(region_id),
@@ -215,7 +208,7 @@ pub(crate) async fn load_version_control(
     store: &ObjectStore,
     region_id: RegionId,
     purger: &IndexFilePurger,
-) -> SeriesIndexVersionControl {
+) -> std::sync::Arc<SeriesIndexVersionControl> {
     let _guard = match purger.budget() {
         Some(budget) => Some(budget.maintenance.lock().await),
         None => None,
@@ -235,6 +228,13 @@ pub(crate) async fn load_version_control(
             .await
             .unwrap_or(false)
         {
+            if let Some(metadata) = range.file_metadata.get(&id)
+                && let Some(budget) = purger.budget()
+            {
+                let path = range_index_path(region_id, id);
+                budget.track(path.clone(), *metadata);
+                budget.install(&path);
+            }
             range_ids.push(id);
         }
     }
@@ -246,6 +246,13 @@ pub(crate) async fn load_version_control(
             .await
             .unwrap_or(false)
         {
+            if let Some(metadata) = series.file_metadata.get(&entry.index_uuid)
+                && let Some(budget) = purger.budget()
+            {
+                let path = series_index_path(region_id, entry.index_uuid);
+                budget.track(path.clone(), *metadata);
+                budget.install(&path);
+            }
             entries.push(entry);
         }
     }
@@ -256,16 +263,27 @@ pub(crate) async fn load_version_control(
             .indexes
             .into_iter()
             .map(|entry| {
-                (
-                    entry.index_uuid,
-                    SeriesIndexFileHandle::new(region_id, entry, purger.clone()),
-                )
+                (entry.index_uuid, {
+                    let metadata = series
+                        .file_metadata
+                        .get(&entry.index_uuid)
+                        .copied()
+                        .unwrap_or(IndexFileMetadata {
+                            file_size: 0,
+                            min_timestamp: entry.bucket_start,
+                        });
+                    SeriesIndexFileHandle::with_metadata(region_id, entry, metadata, purger.clone())
+                })
             })
             .collect(),
     )
+    .with_range_metadata(range.file_metadata)
     .with_disk_pins(region_id, purger.budget());
-    let control = SeriesIndexVersionControl::default();
+    let control = std::sync::Arc::new(SeriesIndexVersionControl::default());
     control.publish(std::sync::Arc::new(version));
+    if let Some(budget) = purger.budget() {
+        budget.register_version(region_id, &control);
+    }
     control
 }
 
@@ -369,6 +387,7 @@ mod tests {
             .write(
                 &range_catalog_path(region_id),
                 serde_json::to_vec(&RangeIndexCatalog {
+                    file_metadata: Default::default(),
                     indexes: vec![file_id],
                 })
                 .unwrap(),
@@ -437,6 +456,7 @@ mod tests {
             &store,
             &series_catalog_path(region_id),
             &SeriesIndexCatalog {
+                file_metadata: Default::default(),
                 indexes: vec![entry.clone()],
             },
         )

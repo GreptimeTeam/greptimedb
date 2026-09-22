@@ -126,6 +126,15 @@ where
             .await?;
         self.cleanup_dropped_region_runtime_state(region_id).await;
 
+        let index_budget = self
+            .series_index_purger
+            .as_ref()
+            .and_then(|purger| purger.budget())
+            .cloned();
+        let _index_guard = match &index_budget {
+            Some(budget) => Some(budget.maintenance.lock().await),
+            None => None,
+        };
         if let Some(store) = &self.series_index_store {
             crate::series_index::delete_catalogs_with_budget(
                 store,
@@ -140,6 +149,7 @@ where
         // Marks region version as dropped
         region.version_control.mark_dropped();
         region.series_index_version_control.mark_dropped();
+        drop(_index_guard);
         info!(
             "Region {} is dropped logically, but some files are not deleted yet",
             region_id

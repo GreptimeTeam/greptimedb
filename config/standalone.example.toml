@@ -694,9 +694,9 @@ compress_manifest = false
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
 
-## Maximum local disk space for series indexes, range indexes, catalogs, and temporary output.
-## Shared across all regions and workers. Older data is evicted first; builds defer while
-## readers retain evicted files. Accounted in KiB units, excluding filesystem overhead.
+## Maximum installed series and range index bytes, shared across all regions and workers.
+## Reconciliation evicts files with the oldest minimum timestamps first. Temporary output,
+## catalogs, and retired files retained by readers are excluded; disk usage can exceed this limit.
 ## Minimum: 1KiB. Takes effect on restart.
 #+ experimental_series_index_max_size = "5GiB"
 
