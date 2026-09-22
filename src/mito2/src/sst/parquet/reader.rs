@@ -713,7 +713,7 @@ impl ParquetReaderBuilder {
                 && context
                     .version
                     .range_indexes
-                    .contains(&self.file_handle.file_id().file_id()))
+                    .contains_key(&self.file_handle.file_id().file_id()))
             .then(|| context.store.clone())
         });
         let context = FileRangeContext::new(

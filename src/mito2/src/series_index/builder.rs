@@ -36,8 +36,7 @@ use crate::series_index::bucket::SeriesBucket;
 use crate::series_index::catalog::{
     IndexFileMetadata, SeriesIndexEntry, range_index_path, series_index_path, series_metadata,
 };
-use crate::series_index::purger::{IndexFilePurger, IndexFileType, file_operation};
-use crate::series_index::version::SeriesIndexFileHandle;
+use crate::series_index::purger::{IndexFileType, file_operation};
 use crate::series_index::{SeriesIndexWriter, SeriesIndexWriterOptions};
 use crate::sst::file::FileHandle;
 use crate::sst::parquet::reader::{FlatRowGroupReader, ReaderMetrics};
@@ -135,8 +134,7 @@ pub(crate) async fn build_series_index(
     version: &VersionRef,
     bucket: &SeriesBucket,
     entry: &SeriesIndexEntry,
-    purger: &IndexFilePurger,
-) -> Result<SeriesIndexFileHandle> {
+) -> Result<IndexFileMetadata> {
     let mut sources = Vec::<BoxedRecordBatchStream>::new();
     let mapper = FlatProjectionMapper::new(&version.metadata, [])?;
     let schema = mapper.input_arrow_schema(false);
@@ -217,16 +215,8 @@ pub(crate) async fn build_series_index(
             .min()
             .unwrap_or(entry.bucket_start),
     };
-    if let Some(budget) = purger.budget() {
-        budget.track(path, metadata);
-    }
     file_operation(IndexFileType::Series, "build", "success");
-    Ok(SeriesIndexFileHandle::with_metadata(
-        region.region_id,
-        entry.clone(),
-        metadata,
-        purger.clone(),
-    ))
+    Ok(metadata)
 }
 
 #[cfg(test)]
@@ -327,14 +317,20 @@ mod tests {
             &version,
             &bucket,
             &entry,
-            &purger,
         )
         .await;
         if fail_series {
             assert!(result.is_err());
         } else {
-            let handle = result.unwrap();
-            assert_eq!(handle.entry(), &entry);
+            let metadata = result.unwrap();
+            assert_eq!(
+                metadata.file_size,
+                store
+                    .stat(&series_index_path(region.region_id, entry.index_uuid))
+                    .await
+                    .unwrap()
+                    .content_length()
+            );
             assert!(
                 store
                     .exists(&series_index_path(region.region_id, entry.index_uuid))
@@ -345,8 +341,8 @@ mod tests {
                 &store,
                 &series_catalog_path(region.region_id),
                 &SeriesIndexCatalog {
-                    file_metadata: Default::default(),
-                    indexes: vec![handle.entry().clone()],
+                    file_metadata: HashMap::from([(entry.index_uuid, metadata)]),
+                    indexes: vec![entry.clone()],
                 },
             )
             .await
@@ -457,14 +453,13 @@ mod tests {
         let version = region.version();
         let (bucket, entry) = build_input(&version);
         let store = ObjectStore::new(Memory::default()).unwrap();
-        let (purger, _receiver) = series_index_channel(store.clone());
         for file in &bucket.files {
             build_range_index(&store, &region, &version, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
         }
-        let _handle = build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+        let _handle = build_series_index(&store, &region, &version, &bucket, &entry)
             .await
             .unwrap();
         let bytes = store
@@ -501,70 +496,6 @@ mod tests {
                 .unwrap()
                 .value(0)
         );
-        engine.stop().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_range_failure_preserves_completed_indexes_and_stops_series_stage() {
-        let mut env = TestEnv::with_prefix("range-builder-stage-failure").await;
-        let (engine, region) = prepare_region(&mut env).await;
-        let version = region.version();
-        let (bucket, entry) = build_input(&version);
-        let files = &bucket.files;
-        let failed_path = range_index_path(region.region_id, files[1].file_id().file_id());
-        let states = WriterStates::default();
-        let layer = writer_layer(&states, move |path| {
-            if path == failed_path {
-                WriterFailure::Finish
-            } else {
-                WriterFailure::None
-            }
-        });
-        let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
-        let (purger, _receiver) = series_index_channel(store.clone());
-        let mut completed = Vec::new();
-        let result: Result<Option<SeriesIndexFileHandle>> = async {
-            for file in files {
-                let Some((id, _)) =
-                    build_range_index(&store, &region, &version, file.clone()).await?
-                else {
-                    // Defer series construction if a needed range is not ready.
-                    return Ok(None);
-                };
-                completed.push(id);
-            }
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
-                .await
-                .map(Some)
-        }
-        .await;
-        assert!(format!("{:?}", result.unwrap_err()).contains("injected index finish failure"));
-        assert_eq!(vec![files[0].file_id().file_id()], completed);
-        {
-            let states = states.lock().unwrap();
-            assert_eq!(2, states.len());
-            assert!(states.keys().all(|path| !path.contains("/series/")));
-            assert_eq!(
-                1,
-                states[&range_index_path(region.region_id, completed[0])].closed
-            );
-            assert_eq!(
-                1,
-                states[&range_index_path(region.region_id, files[1].file_id().file_id())].aborted
-            );
-        }
-        for (i, file) in files.iter().enumerate() {
-            assert_eq!(
-                i == 0,
-                store
-                    .exists(&range_index_path(
-                        region.region_id,
-                        file.file_id().file_id()
-                    ))
-                    .await
-                    .unwrap()
-            );
-        }
         engine.stop().await.unwrap();
     }
 
@@ -738,8 +669,7 @@ mod tests {
                 .await
                 .map(|_| ())
         } else {
-            let (purger, _receiver) = series_index_channel(store.clone());
-            build_series_index(&store, &region, &version, &bucket, &entry, &purger)
+            build_series_index(&store, &region, &version, &bucket, &entry)
                 .await
                 .map(|_| ())
         };

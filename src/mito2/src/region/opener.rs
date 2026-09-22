@@ -71,7 +71,7 @@ use crate::region::{
 use crate::region_write_ctx::RegionWriteCtx;
 use crate::request::OptionOutputTx;
 use crate::schedule::scheduler::SchedulerRef;
-use crate::series_index::{IndexFilePurger, load_version_control};
+use crate::series_index::SeriesIndexMaintenance;
 use crate::sst::FormatType;
 use crate::sst::file::{FileHandle, RegionFileId, RegionIndexId};
 use crate::sst::file_purger::{FilePurgerRef, create_file_purger};
@@ -81,7 +81,6 @@ use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::sst::location::{self, region_dir_from_table_dir};
 use crate::sst::parquet::metadata::{MetadataLoader, extract_primary_key_range};
 use crate::sst::parquet::reader::MetadataCacheMetrics;
-use crate::sst::range_index::RangeIndexDeleter;
 use crate::time_provider::TimeProviderRef;
 use crate::wal::entry_reader::WalEntryReader;
 use crate::wal::{EntryId, Wal};
@@ -167,7 +166,7 @@ pub(crate) struct RegionOpener {
     partition_expr_fetcher: PartitionExprFetcherRef,
     hook: Option<RegionHookRef>,
     series_index_store: Option<ObjectStore>,
-    series_index_purger: Option<IndexFilePurger>,
+    series_index_maintenance: Option<Arc<SeriesIndexMaintenance>>,
 }
 
 impl RegionOpener {
@@ -208,7 +207,7 @@ impl RegionOpener {
             partition_expr_fetcher,
             hook: None,
             series_index_store: None,
-            series_index_purger: None,
+            series_index_maintenance: None,
         }
     }
 
@@ -218,9 +217,12 @@ impl RegionOpener {
         self
     }
 
-    /// Sets the purger shared with the worker's series-index maintenance task.
-    pub(crate) fn series_index_purger(mut self, purger: Option<IndexFilePurger>) -> Self {
-        self.series_index_purger = purger;
+    /// Sets the shared index maintenance state.
+    pub(crate) fn series_index_maintenance(
+        mut self,
+        maintenance: Option<Arc<SeriesIndexMaintenance>>,
+    ) -> Self {
+        self.series_index_maintenance = maintenance;
         self
     }
 
@@ -455,13 +457,7 @@ impl RegionOpener {
                 access_layer,
                 self.cache_manager,
                 self.file_ref_manager.clone(),
-                self.series_index_store.map(|store| {
-                    RangeIndexDeleter::new(store, region_id).with_budget(
-                        self.series_index_purger
-                            .as_ref()
-                            .and_then(|purger| purger.budget().cloned()),
-                    )
-                }),
+                None,
             ),
             provider,
             last_flush_millis: AtomicI64::new(now),
@@ -577,13 +573,7 @@ impl RegionOpener {
             access_layer.clone(),
             self.cache_manager.clone(),
             self.file_ref_manager.clone(),
-            self.series_index_store.clone().map(|store| {
-                RangeIndexDeleter::new(store, region_id).with_budget(
-                    self.series_index_purger
-                        .as_ref()
-                        .and_then(|purger| purger.budget().cloned()),
-                )
-            }),
+            None,
         );
         // We should sanitize the region options before creating a new memtable.
         let memtable_builder = self
@@ -683,11 +673,11 @@ impl RegionOpener {
         let now = self.time_provider.current_time_millis();
 
         let series_index_version_control =
-            match (&self.series_index_store, &self.series_index_purger) {
-                (Some(store), Some(purger))
+            match (&self.series_index_store, &self.series_index_maintenance) {
+                (Some(store), Some(maintenance))
                     if is_sparse_metric_metadata(&version_control.current().version.metadata) =>
                 {
-                    load_version_control(store, self.region_id, purger).await
+                    maintenance.open_region(store, self.region_id).await
                 }
                 _ => Default::default(),
             };

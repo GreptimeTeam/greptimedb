@@ -126,7 +126,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         )
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
-        .series_index_purger(self.series_index_purger.clone())
+        .series_index_maintenance(self.series_index_maintenance.clone())
         .hook(self.plugins.get())
         .options(region.version().options.clone())?
         .skip_wal_replay(true)

@@ -72,7 +72,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .parse_options(request.options)?
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
-        .series_index_purger(self.series_index_purger.clone())
+        .series_index_maintenance(self.series_index_maintenance.clone())
         .hook(self.plugins.get());
 
         opener.ensure_region_requirements(requirements)?;

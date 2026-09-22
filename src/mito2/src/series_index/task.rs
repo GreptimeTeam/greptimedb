@@ -21,16 +21,12 @@ use std::time::Duration;
 use common_telemetry::{info, warn};
 use object_store::ObjectStore;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::metrics::SERIES_INDEX_RECONCILE_TOTAL;
 use crate::region::{RegionLeaderState, RegionMapRef, RegionRoleState};
-use crate::series_index::maintenance::reconcile_series_indexes;
-use crate::series_index::purger::{
-    IndexFilePurger, PurgeRequest, run_index_purge_task_with_budget,
-};
+use crate::series_index::maintenance::{SeriesIndexMaintenance, reconcile_series_indexes};
 use crate::time_provider::TimeProviderRef;
 
 /// Shared lifecycle state for a worker's series-index task.
@@ -67,7 +63,7 @@ impl SeriesIndexTaskState {
     }
 }
 
-/// Starts both tasks on the compaction runtime, detaching purge and returning the maintenance handle.
+/// Starts worker maintenance on the compaction runtime.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
@@ -75,26 +71,18 @@ pub(crate) fn spawn_series_index_tasks(
     regions: RegionMapRef,
     state: Arc<SeriesIndexTaskState>,
     bucket_width: Duration,
-    purger: IndexFilePurger,
-    purge_receiver: UnboundedReceiver<PurgeRequest>,
+    maintenance: Arc<SeriesIndexMaintenance>,
     interval: Duration,
     time_provider: TimeProviderRef,
     enable_range_index: bool,
 ) -> JoinHandle<()> {
-    // Snapshots may retain senders after the worker stops; purge until all senders drop.
-    common_runtime::spawn_compact(run_index_purge_task_with_budget(
-        worker_id,
-        store.clone(),
-        purge_receiver,
-        purger.budget().cloned(),
-    ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
             worker_id,
             store,
             regions,
             bucket_width,
-            purger,
+            maintenance,
             state,
             interval,
             time_provider,
@@ -110,7 +98,7 @@ struct SeriesIndexTask {
     store: ObjectStore,
     regions: RegionMapRef,
     bucket_width: Duration,
-    purger: IndexFilePurger,
+    maintenance: Arc<SeriesIndexMaintenance>,
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
     interval: Duration,
@@ -159,7 +147,7 @@ impl SeriesIndexTask {
                 region.clone(),
                 self.bucket_width,
                 self.time_provider.current_time_millis(),
-                self.purger.clone(),
+                self.maintenance.clone(),
                 self.enable_range_index,
             )
             .await
@@ -207,13 +195,17 @@ mod tests {
             .unwrap();
         let store = ObjectStore::new(Memory::default()).unwrap();
         let (purger, _receiver) = series_index_channel(store.clone());
+        let maintenance = Arc::new(SeriesIndexMaintenance::new(
+            common_base::readable_size::ReadableSize::mb(1),
+            purger,
+        ));
         let regions = Arc::new(RegionMap::default());
         regions.insert_region(region.clone());
         let mut task = SeriesIndexTask {
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
-            purger,
+            maintenance,
             worker_id: 0,
             state: Arc::new(SeriesIndexTaskState::new()),
             interval: Duration::from_secs(3600),

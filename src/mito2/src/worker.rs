@@ -79,9 +79,7 @@ use crate::request::{
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
-use crate::series_index::{
-    IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
-};
+use crate::series_index::{SeriesIndexMaintenance, SeriesIndexTaskState, spawn_series_index_tasks};
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
@@ -198,13 +196,10 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_budget = match &series_index_store {
+        let series_index_maintenance = match &series_index_store {
             Some(store) => Some(
-                crate::series_index::disk_budget::SeriesIndexDiskBudget::open(
-                    store,
-                    config.experimental_series_index_max_size,
-                )
-                .await?,
+                SeriesIndexMaintenance::open(store, config.experimental_series_index_max_size)
+                    .await?,
             ),
             None => None,
         };
@@ -261,7 +256,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
-                    series_index_budget: series_index_budget.clone(),
+                    series_index_maintenance: series_index_maintenance.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -421,13 +416,10 @@ impl WorkerGroup {
         let index_build_job_pool =
             Arc::new(LocalScheduler::new(config.max_background_index_builds));
         let series_index_store = series_index_store_from_config(&config, data_home).await?;
-        let series_index_budget = match &series_index_store {
+        let series_index_maintenance = match &series_index_store {
             Some(store) => Some(
-                crate::series_index::disk_budget::SeriesIndexDiskBudget::open(
-                    store,
-                    config.experimental_series_index_max_size,
-                )
-                .await?,
+                SeriesIndexMaintenance::open(store, config.experimental_series_index_max_size)
+                    .await?,
             ),
             None => None,
         };
@@ -485,7 +477,7 @@ impl WorkerGroup {
                     write_buffer_manager: write_buffer_manager.clone(),
                     index_build_job_pool: index_build_job_pool.clone(),
                     series_index_store: series_index_store.clone(),
-                    series_index_budget: series_index_budget.clone(),
+                    series_index_maintenance: series_index_maintenance.clone(),
                     flush_job_pool: flush_job_pool.clone(),
                     compact_job_pool: compact_job_pool.clone(),
                     purge_scheduler: purge_scheduler.clone(),
@@ -594,7 +586,7 @@ struct WorkerStarter<S> {
     compact_job_pool: SchedulerRef,
     index_build_job_pool: SchedulerRef,
     series_index_store: Option<ObjectStore>,
-    series_index_budget: Option<Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
+    series_index_maintenance: Option<Arc<SeriesIndexMaintenance>>,
     flush_job_pool: SchedulerRef,
     purge_scheduler: SchedulerRef,
     listener: WorkerListener,
@@ -627,23 +619,19 @@ impl<S: LogStore> WorkerStarter<S> {
             .series_index_store
             .as_ref()
             .map(|_| Arc::new(SeriesIndexTaskState::new()));
-        let mut series_index_purger = None;
         let series_index_handle = self
             .series_index_store
             .clone()
             .zip(series_index_task_state.clone())
-            .map(|(store, state)| {
-                let (purger, purge_receiver) = series_index_channel(store.clone());
-                let purger = purger.with_budget(self.series_index_budget.clone());
-                series_index_purger = Some(purger.clone());
+            .zip(self.series_index_maintenance.clone())
+            .map(|((store, state), maintenance)| {
                 spawn_series_index_tasks(
                     self.id,
                     store,
                     regions.clone(),
                     state,
                     self.config.experimental_series_index_bucket_width,
-                    purger,
-                    purge_receiver,
+                    maintenance,
                     self.config.experimental_series_index_maintenance_interval,
                     self.time_provider.clone(),
                     self.config.experimental_enable_range_index,
@@ -675,7 +663,7 @@ impl<S: LogStore> WorkerStarter<S> {
             ),
             series_index_task_state: series_index_task_state.clone(),
             series_index_store: self.series_index_store,
-            series_index_purger,
+            series_index_maintenance: self.series_index_maintenance.clone(),
             flush_scheduler: FlushScheduler::new(self.flush_job_pool),
             compaction_scheduler: CompactionScheduler::new(
                 self.compact_job_pool,
@@ -975,9 +963,9 @@ struct RegionWorkerLoop<S> {
     index_build_scheduler: IndexBuildScheduler,
     /// Controls the worker-owned series-index task.
     series_index_task_state: Option<Arc<SeriesIndexTaskState>>,
-    /// Store for companion range indexes deleted by the region SST purger.
+    /// Local store for series and range indexes managed by reconciliation.
     series_index_store: Option<ObjectStore>,
-    series_index_purger: Option<IndexFilePurger>,
+    series_index_maintenance: Option<Arc<SeriesIndexMaintenance>>,
     /// Schedules background flush requests.
     flush_scheduler: FlushScheduler,
     /// Scheduler for compaction tasks.

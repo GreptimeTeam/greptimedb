@@ -172,29 +172,11 @@ pub(crate) async fn store_catalog<T: Serialize>(
 }
 
 /// Best-effort removal of both catalogs when dropping a region.
-#[cfg(test)]
 pub(crate) async fn delete_catalogs(store: &ObjectStore, region_id: RegionId) {
-    delete_catalogs_with_budget(store, region_id, None).await;
-}
-
-pub(crate) async fn delete_catalogs_with_budget(
-    store: &ObjectStore,
-    region_id: RegionId,
-    budget: Option<&std::sync::Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
-) {
-    if let Some(budget) = budget {
-        budget.retire_region(region_id);
-    }
     for path in [
         series_catalog_path(region_id),
         range_catalog_path(region_id),
     ] {
-        if let Some(budget) = budget {
-            if let Err(error) = budget.delete(store, &path).await {
-                warn!(error; "Failed to delete index catalog, path: {path}");
-            }
-            continue;
-        }
         if let Err(error) = store.delete(&path).await
             && error.kind() != ErrorKind::NotFound
         {
@@ -209,10 +191,6 @@ pub(crate) async fn load_version_control(
     region_id: RegionId,
     purger: &IndexFilePurger,
 ) -> std::sync::Arc<SeriesIndexVersionControl> {
-    let _guard = match purger.budget() {
-        Some(budget) => Some(budget.maintenance.lock().await),
-        None => None,
-    };
     let range = load_catalog::<RangeIndexCatalog>(store, &range_catalog_path(region_id))
         .await
         .unwrap_or_default();
@@ -228,13 +206,6 @@ pub(crate) async fn load_version_control(
             .await
             .unwrap_or(false)
         {
-            if let Some(metadata) = range.file_metadata.get(&id)
-                && let Some(budget) = purger.budget()
-            {
-                let path = range_index_path(region_id, id);
-                budget.track(path.clone(), *metadata);
-                budget.install(&path);
-            }
             range_ids.push(id);
         }
     }
@@ -246,19 +217,35 @@ pub(crate) async fn load_version_control(
             .await
             .unwrap_or(false)
         {
-            if let Some(metadata) = series.file_metadata.get(&entry.index_uuid)
-                && let Some(budget) = purger.budget()
-            {
-                let path = series_index_path(region_id, entry.index_uuid);
-                budget.track(path.clone(), *metadata);
-                budget.install(&path);
-            }
             entries.push(entry);
         }
     }
     series.indexes = entries;
     let version = SeriesIndexVersion::new(
-        range.indexes.into_iter().collect(),
+        range
+            .indexes
+            .into_iter()
+            .map(|id| {
+                let metadata = range
+                    .file_metadata
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(IndexFileMetadata {
+                        file_size: 0,
+                        min_timestamp: common_time::Timestamp::new_second(0),
+                    });
+                (
+                    id,
+                    crate::series_index::version::IndexFileHandle::new(
+                        region_id,
+                        id,
+                        crate::series_index::purger::IndexFileType::Range,
+                        metadata,
+                        purger.clone(),
+                    ),
+                )
+            })
+            .collect(),
         series
             .indexes
             .into_iter()
@@ -276,14 +263,9 @@ pub(crate) async fn load_version_control(
                 })
             })
             .collect(),
-    )
-    .with_range_metadata(range.file_metadata)
-    .with_disk_pins(region_id, purger.budget());
+    );
     let control = std::sync::Arc::new(SeriesIndexVersionControl::default());
     control.publish(std::sync::Arc::new(version));
-    if let Some(budget) = purger.budget() {
-        budget.register_version(region_id, &control);
-    }
     control
 }
 

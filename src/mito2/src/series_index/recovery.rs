@@ -15,7 +15,6 @@
 //! Restores installed usage and removes orphaned local outputs before readers start.
 
 use std::collections::HashSet;
-use std::sync::Arc;
 
 use object_store::ObjectStore;
 use snafu::ResultExt;
@@ -23,13 +22,13 @@ use store_api::storage::RegionId;
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::series_index::catalog::{self, RangeIndexCatalog, SeriesIndexCatalog};
-use crate::series_index::disk_budget::{SeriesIndexDiskBudget, eviction_key};
-use crate::series_index::maintenance::evict_index;
+use crate::series_index::maintenance::{SeriesIndexMaintenance, evict_index, eviction_key};
 
 pub(crate) async fn recover(
     store: &ObjectStore,
-    budget: &Arc<SeriesIndexDiskBudget>,
+    maintenance: &SeriesIndexMaintenance,
 ) -> Result<()> {
+    let mut state = maintenance.state.lock().await;
     let files = store
         .list_with("")
         .recursive(true)
@@ -60,10 +59,8 @@ pub(crate) async fn recover(
                 .map(|entry| entry.index_uuid)
                 .collect::<HashSet<_>>();
             catalog.file_metadata.retain(|id, _| ids.contains(id));
-            for (id, metadata) in &catalog.file_metadata {
+            for id in catalog.file_metadata.keys() {
                 let path = catalog::series_index_path(region, *id);
-                budget.track(path.clone(), *metadata);
-                budget.install(&path);
                 referenced.insert(path);
             }
             catalog::store_catalog(store, &series_path, &catalog).await?;
@@ -80,29 +77,28 @@ pub(crate) async fn recover(
             catalog
                 .file_metadata
                 .retain(|id, _| catalog.indexes.contains(id));
-            for (id, metadata) in &catalog.file_metadata {
+            for id in catalog.file_metadata.keys() {
                 let path = catalog::range_index_path(region, *id);
-                budget.track(path.clone(), *metadata);
-                budget.install(&path);
                 referenced.insert(path);
             }
             catalog::store_catalog(store, &range_path, &catalog).await?;
             referenced.insert(range_path);
         }
+        let control = catalog::load_version_control(store, region, &maintenance.purger).await;
+        state.register(region, control);
     }
     for path in files.difference(&referenced) {
         store.delete(path).await.context(OpenDalSnafu)?;
     }
-    let mut candidates = budget.candidates();
+    let mut candidates = state.candidates();
     candidates.sort_by(|(left, lmeta), (right, rmeta)| {
         eviction_key(left, *lmeta).cmp(&eviction_key(right, *rmeta))
     });
     for (path, _) in candidates {
-        if budget.used_bytes() <= budget.capacity_bytes() {
+        if state.used <= state.capacity {
             break;
         }
-        evict_index(store, budget, &path).await?;
+        evict_index(store, &mut state, &path).await?;
     }
-    budget.retry_cleanup(store).await;
     Ok(())
 }

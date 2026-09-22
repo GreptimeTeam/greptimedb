@@ -285,9 +285,12 @@ impl MitoConfig {
     /// Returns an error if there is a configuration that unable to sanitize.
     pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
         if self.experimental_enable_series_index {
-            crate::series_index::disk_budget::validate_limit(
-                self.experimental_series_index_max_size,
-            )?;
+            snafu::ensure!(
+                self.experimental_series_index_max_size.as_bytes() >= 1024,
+                crate::error::InvalidConfigSnafu {
+                    reason: "experimental_series_index_max_size must be at least 1KiB"
+                }
+            );
         }
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
@@ -473,6 +476,10 @@ mod tests {
         );
         let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(config, restored);
+        config.experimental_series_index_max_size = ReadableSize(1023);
+        assert!(config.sanitize("/data").is_err());
+        config.experimental_series_index_max_size = ReadableSize(1024);
+        config.sanitize("/data").unwrap();
 
         let mut config: MitoConfig =
             toml::from_str("experimental_series_index_maintenance_interval = '0s'").unwrap();

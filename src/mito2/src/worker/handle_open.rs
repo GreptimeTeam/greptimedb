@@ -197,7 +197,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         .skip_wal_replay(request.skip_wal_replay)
         .cache(Some(self.cache_manager.clone()))
         .series_index_store(self.series_index_store.clone())
-        .series_index_purger(self.series_index_purger.clone())
+        .series_index_maintenance(self.series_index_maintenance.clone())
         .hook(self.plugins.get())
         .wal_entry_reader(wal_entry_receiver.map(|receiver| Box::new(receiver) as _))
         .replay_checkpoint(request.checkpoint.map(|checkpoint| checkpoint.entry_id))

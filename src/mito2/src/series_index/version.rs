@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Immutable index snapshots and aggregate series-file handles.
+//! Immutable index snapshots and reference-counted file handles.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fmt::{self, Debug, Formatter};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -24,22 +23,62 @@ use store_api::storage::{FileId, RegionId};
 
 use crate::series_index::bucket::IndexBucket;
 use crate::series_index::catalog::{IndexFileMetadata, SeriesIndexEntry};
-use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
+use crate::series_index::purger::{IndexFilePurger, IndexFileType, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
-/// A reference-counted series-index file with deferred deletion semantics.
-#[derive(Clone)]
-pub(crate) struct SeriesIndexFileHandle {
-    inner: Arc<SeriesIndexFileHandleInner>,
+/// Physical deletion waits until every snapshot releases its handle.
+#[derive(Debug, Clone)]
+pub(crate) struct IndexFileHandle(Arc<IndexFileHandleInner>);
+
+#[derive(Debug)]
+struct IndexFileHandleInner {
+    request: PurgeRequest,
+    metadata: IndexFileMetadata,
+    deleted: AtomicBool,
+    purger: IndexFilePurger,
 }
 
-impl Debug for SeriesIndexFileHandle {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SeriesIndexFileHandle")
-            .field("file_id", &self.inner.file_id)
-            .field("deleted", &self.inner.deleted.load(Ordering::Relaxed))
-            .finish()
+impl IndexFileHandle {
+    pub(crate) fn new(
+        region_id: RegionId,
+        file_id: FileId,
+        kind: IndexFileType,
+        metadata: IndexFileMetadata,
+        purger: IndexFilePurger,
+    ) -> Self {
+        Self(Arc::new(IndexFileHandleInner {
+            request: PurgeRequest {
+                file_id: RegionFileId::new(region_id, file_id),
+                kind,
+            },
+            metadata,
+            deleted: AtomicBool::new(false),
+            purger,
+        }))
     }
+
+    pub(crate) fn metadata(&self) -> IndexFileMetadata {
+        self.0.metadata
+    }
+
+    pub(crate) fn mark_deleted(&self) {
+        self.0.purger.retire(self.0.request);
+        self.0.deleted.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for IndexFileHandleInner {
+    fn drop(&mut self) {
+        if self.deleted.load(Ordering::Acquire) {
+            self.purger.purge(self.request);
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SeriesIndexFileHandle {
+    file: IndexFileHandle,
+    entry: Arc<SeriesIndexEntry>,
 }
 
 impl SeriesIndexFileHandle {
@@ -63,82 +102,48 @@ impl SeriesIndexFileHandle {
         purger: IndexFilePurger,
     ) -> Self {
         Self {
-            inner: Arc::new(SeriesIndexFileHandleInner {
-                file_id: RegionFileId::new(region_id, entry.index_uuid),
-                _disk_pin: purger.budget().and_then(|budget| {
-                    budget.pin(&crate::series_index::catalog::series_index_path(
-                        region_id,
-                        entry.index_uuid,
-                    ))
-                }),
-                entry,
+            file: IndexFileHandle::new(
+                region_id,
+                entry.index_uuid,
+                IndexFileType::Series,
                 metadata,
-                deleted: AtomicBool::new(false),
                 purger,
-            }),
+            ),
+            entry: Arc::new(entry),
         }
     }
 
-    /// Returns the region and file identity used for storage and deletion.
     pub(crate) fn file_id(&self) -> RegionFileId {
-        self.inner.file_id
+        self.file.0.request.file_id
+    }
+
+    pub(crate) fn file_handle(&self) -> &IndexFileHandle {
+        &self.file
     }
 
     pub(crate) fn entry(&self) -> &SeriesIndexEntry {
-        &self.inner.entry
+        &self.entry
     }
 
     pub(crate) fn metadata(&self) -> IndexFileMetadata {
-        self.inner.metadata
+        self.file.metadata()
     }
 
     pub(crate) fn mark_deleted(&self) {
-        self.inner.deleted.store(true, Ordering::Release);
-        if let Some(budget) = self.inner.purger.budget() {
-            budget.retire(&crate::series_index::catalog::series_index_path(
-                self.inner.file_id.region_id(),
-                self.inner.file_id.file_id(),
-            ));
-        }
+        self.file.mark_deleted();
     }
 }
 
-struct SeriesIndexFileHandleInner {
-    file_id: RegionFileId,
-    entry: SeriesIndexEntry,
-    metadata: IndexFileMetadata,
-    _disk_pin: Option<Arc<()>>,
-    deleted: AtomicBool,
-    purger: IndexFilePurger,
-}
-
-impl Drop for SeriesIndexFileHandleInner {
-    fn drop(&mut self) {
-        if self.deleted.load(Ordering::Acquire) {
-            self.purger.purge(PurgeRequest {
-                file_id: self.file_id,
-            });
-        }
-    }
-}
-
-/// Immutable series-index snapshot for one region.
 #[derive(Debug, Default)]
 pub(crate) struct SeriesIndexVersion {
-    /// Range indexes for visible SSTs; reconciliation removes IDs absent from its SST snapshot.
-    /// Physical deletion is independently handled by the SST file purger.
-    pub(crate) range_indexes: HashSet<FileId>,
-    pub(crate) range_metadata: HashMap<FileId, IndexFileMetadata>,
+    pub(crate) range_indexes: HashMap<FileId, IndexFileHandle>,
     pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
-    /// Keeps budgeted files alive even when SST garbage collection requests their deletion.
-    pub(crate) disk_pins: Vec<Arc<()>>,
 }
 
 impl SeriesIndexVersion {
-    /// Restores bucket lookup from immutable index coverage stored in the catalog.
     pub(crate) fn new(
-        range_indexes: HashSet<FileId>,
+        range_indexes: HashMap<FileId, IndexFileHandle>,
         series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     ) -> Self {
         let mut index_buckets = BTreeMap::new();
@@ -147,79 +152,35 @@ impl SeriesIndexVersion {
         }
         Self {
             range_indexes,
-            range_metadata: HashMap::new(),
             series_indexes,
             index_buckets,
-            disk_pins: Vec::new(),
         }
     }
 
-    pub(crate) fn with_range_metadata(
-        mut self,
-        mut metadata: HashMap<FileId, IndexFileMetadata>,
-    ) -> Self {
-        metadata.retain(|id, _| self.range_indexes.contains(id));
-        self.range_metadata = metadata;
-        self
-    }
-
-    /// Installed bytes for this region's snapshot; retained old snapshots are not charged.
+    /// Published bytes; retained old snapshots are not charged.
     pub(crate) fn disk_usage(&self) -> u64 {
-        self.range_metadata
+        self.range_indexes
             .values()
-            .map(|meta| meta.file_size)
+            .map(|h| h.metadata().file_size)
             .sum::<u64>()
             + self
                 .series_indexes
                 .values()
-                .map(|handle| handle.metadata().file_size)
+                .map(|h| h.metadata().file_size)
                 .sum::<u64>()
     }
 
-    pub(crate) fn with_disk_pins(
-        mut self,
-        region_id: RegionId,
-        budget: Option<&Arc<crate::series_index::disk_budget::SeriesIndexDiskBudget>>,
-    ) -> Self {
-        if let Some(budget) = budget {
-            self.range_indexes.retain(|id| {
-                if let Some(pin) = budget.pin(&crate::series_index::catalog::range_index_path(
-                    region_id, *id,
-                )) {
-                    self.disk_pins.push(pin);
-                    true
-                } else {
-                    false
-                }
-            });
-            self.series_indexes.retain(|id, _| {
-                if let Some(pin) = budget.pin(&crate::series_index::catalog::series_index_path(
-                    region_id, *id,
-                )) {
-                    self.disk_pins.push(pin);
-                    true
-                } else {
-                    false
-                }
-            });
-            self.range_metadata
-                .retain(|id, _| self.range_indexes.contains(id));
-            self.index_buckets.clear();
-            for handle in self.series_indexes.values() {
-                IndexBucket::from_entry(handle.entry()).insert_into(&mut self.index_buckets);
-            }
-        }
-        self
-    }
-
     fn mark_all_deleted(&self) {
+        self.range_indexes
+            .values()
+            .for_each(IndexFileHandle::mark_deleted);
         self.series_indexes
             .values()
             .for_each(SeriesIndexFileHandle::mark_deleted);
     }
 }
 
-/// Copy-on-write series-index snapshots owned by a region.
+/// Shared by maintenance and the region, including while the region is closed.
 #[derive(Debug, Default)]
 pub(crate) struct SeriesIndexVersionControl {
     current: RwLock<Arc<SeriesIndexVersion>>,

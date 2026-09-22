@@ -14,46 +14,29 @@
 
 //! Direct deletion of per-SST range index files.
 
-use std::sync::Arc;
-
 use object_store::{ErrorKind, ObjectStore};
 use snafu::ResultExt;
 use store_api::storage::{FileId, RegionId};
 
 use crate::error::{OpenDalSnafu, Result};
 use crate::metrics::SERIES_INDEX_FILE_OPERATION_TOTAL;
-use crate::series_index::disk_budget::SeriesIndexDiskBudget;
 
 /// Deletes range indexes belonging to one region, independently of SST garbage collection.
 #[derive(Debug, Clone)]
 pub struct RangeIndexDeleter {
     store: ObjectStore,
     region_id: RegionId,
-    budget: Option<Arc<SeriesIndexDiskBudget>>,
 }
 
 impl RangeIndexDeleter {
     /// Creates a deleter using the owning region ID, including for imported SSTs.
     pub fn new(store: ObjectStore, region_id: RegionId) -> Self {
-        Self {
-            store,
-            region_id,
-            budget: None,
-        }
-    }
-
-    pub(crate) fn with_budget(mut self, budget: Option<Arc<SeriesIndexDiskBudget>>) -> Self {
-        self.budget = budget;
-        self
+        Self { store, region_id }
     }
 
     /// Deletes the range index directly from the index store.
     pub async fn delete(&self, file_id: FileId) -> Result<()> {
         let path = range_index_path(self.region_id, file_id);
-        if let Some(budget) = &self.budget {
-            budget.delete(&self.store, &path).await?;
-            return Ok(());
-        }
         let result = match self.store.delete(&path).await {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
