@@ -1509,7 +1509,7 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
     else {
         return Ok(());
     };
-    if let Some(actual) = table_info.meta.options.extra_options.get(TABLE_DATA_MODEL) {
+    if let Some(actual) = table_info.meta.options.data_model() {
         ensure!(
             actual == expected,
             InvalidInsertRequestSnafu {
