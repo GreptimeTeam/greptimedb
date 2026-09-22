@@ -909,6 +909,50 @@ async fn an_abandoned_request_leaves_nothing_behind() {
     assert_eq!(cache.entry_count().await, 0);
 }
 
+/// A datanode holding several regions of one table receives the same pushed
+/// down plan for each of them: the region enters only through the table source,
+/// which the key does not hold. So plan, options and scope are all identical
+/// and the region metadata is the only thing telling the keys apart. Hashing
+/// just the discriminant would put every one of those regions in a single
+/// bucket, turning each lookup into a run of full plan comparisons.
+#[tokio::test]
+async fn regions_of_one_table_do_not_share_a_hash_bucket() {
+    let state = engine_state(false);
+    let session = state.session_state();
+    let cache = PromqlPlanCache::new(8);
+
+    let key_of = |region: u32| {
+        let provider = Arc::new(mock_table_provider(store_api::storage::RegionId::new(
+            1, region,
+        )));
+        let plan = region_instant_plan(provider, EVAL_START_MS, EVAL_START_MS);
+        cache
+            .candidate(&plan, &session, &QueryContext::arc())
+            .expect("region plan must be admitted")
+            .key
+    };
+    let hash_of = |key: &Key| {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    };
+
+    let first = key_of(1);
+    let second = key_of(2);
+    // The premise: everything except the metadata really is identical.
+    assert_eq!(
+        first.plan.display_indent_schema().to_string(),
+        second.plan.display_indent_schema().to_string()
+    );
+    assert_eq!(first.options, second.options);
+    assert_eq!(first.scope, second.scope);
+
+    assert!(first != second);
+    assert_ne!(hash_of(&first), hash_of(&second));
+    // The same region twice must still agree, or nothing would ever hit.
+    assert_eq!(hash_of(&first), hash_of(&key_of(1)));
+}
+
 /// Region-server plans read through a [`DummyTableProvider`], and the scan
 /// hints the optimizer derives are written to that provider rather than into
 /// the plan. A reused template carries no provider, so the hints must be

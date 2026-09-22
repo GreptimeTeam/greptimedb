@@ -174,6 +174,27 @@ impl PartialEq for Dependency {
 
 impl Eq for Dependency {}
 
+impl Hash for Dependency {
+    /// Hashes the identity that equality already compares, and nothing else.
+    /// A deep traversal of the metadata on every lookup would cost more than it
+    /// saves, but hashing only the discriminant would put every region of a
+    /// table in one bucket: their plans are byte-identical, since the region
+    /// only enters through the table source, which the key does not hold.
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Table(info) => {
+                info.ident.table_id.hash(state);
+                info.ident.version.hash(state);
+            }
+            Self::Region(metadata) => {
+                metadata.region_id.hash(state);
+                metadata.schema_version.hash(state);
+            }
+        }
+    }
+}
+
 /// Everything the reused plan was derived from, besides the data itself.
 #[derive(Clone, PartialEq, Eq)]
 struct Key {
@@ -192,9 +213,7 @@ impl Hash for Key {
         self.plan.hash(state);
         self.options.hash(state);
         self.scope.hash(state);
-        // Metadata only takes part in equality; hashing its discriminant keeps
-        // the hash consistent without a deep traversal on every lookup.
-        std::mem::discriminant(&self.dependency).hash(state);
+        self.dependency.hash(state);
     }
 }
 
