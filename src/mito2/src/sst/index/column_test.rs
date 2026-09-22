@@ -29,7 +29,9 @@ use index::bitmap::{Bitmap, BitmapType};
 use index::bloom_filter::reader::{BloomFilterReader, BloomFilterReaderImpl};
 use index::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
 use mito_codec::index::IndexValueCodec;
-use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+use mito_codec::row_converter::{
+    DensePrimaryKeyCodec, PrimaryKeyCodec, PrimaryKeyCodecExt, SortField,
+};
 use object_store::ObjectStore;
 use object_store::services::Memory;
 use prost::Message;
@@ -201,13 +203,85 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
         vector_index_config: Default::default(),
     };
     let mut expected = None;
-    // The legacy Batch path is an independent whole-PK decode/owned-encoding oracle.
+    // Demand is the union of active creators' PK columns, not their counts or
+    // all columns in the metadata. A malformed unneeded suffix distinguishes
+    // the lazy path from a premature whole-key decode.
+    for (inverted, bloom, disable_bloom, all_pk) in [
+        (vec![0, 1], vec![], false, true),
+        (vec![], vec![0, 1], false, true),
+        (vec![0], vec![1], false, true),
+        (vec![0, 2], vec![0, 2], false, false),
+        (vec![0], vec![1], true, false),
+        (vec![2], vec![2], false, false),
+    ] {
+        let mut case_metadata = RegionMetadataBuilder::new(metadata.region_id);
+        for column in &metadata.column_metadatas {
+            let mut column = column.clone();
+            column
+                .column_schema
+                .set_inverted_index(inverted.contains(&column.column_id));
+            if !bloom.contains(&column.column_id) {
+                column.column_schema.unset_skipping_options().unwrap();
+            }
+            case_metadata.push_column_metadata(column);
+        }
+        case_metadata.primary_key(metadata.primary_key.clone());
+        let mut case_builder = builder.clone();
+        case_builder.metadata = Arc::new(case_metadata.build().unwrap());
+        if disable_bloom {
+            case_builder.bloom_filter_index_config.create_on_flush = crate::config::Mode::Disable;
+        }
+        let mut indexer = case_builder
+            .build(
+                RegionFileId::new(metadata.region_id, FileId::random()),
+                0,
+                None,
+            )
+            .await;
+        let make_batch = |key| {
+            let mut batch_builder = BatchBuilder::new(key);
+            batch_builder
+                .timestamps_array(batch.column(3).slice(0, 1))
+                .unwrap();
+            batch_builder
+                .sequences_array(batch.column(5).slice(0, 1))
+                .unwrap();
+            batch_builder
+                .op_types_array(batch.column(6).slice(0, 1))
+                .unwrap();
+            batch_builder.build().unwrap()
+        };
+        let mut valid = make_batch(encoded[0].clone());
+        indexer.prepare_primary_key(&mut valid).unwrap();
+        if all_pk {
+            assert_eq!(
+                valid.pk_values(),
+                Some(
+                    &DensePrimaryKeyCodec::new(&metadata)
+                        .decode(&encoded[0])
+                        .unwrap()
+                )
+            );
+        } else {
+            assert!(valid.pk_values().is_none());
+        }
+        let mut truncated = make_batch(vec![0, 1]);
+        assert_eq!(indexer.prepare_primary_key(&mut truncated).is_err(), all_pk);
+        assert!(truncated.pk_values().is_none());
+        indexer.abort().await;
+        // Aborted creators must not retain their previous all-PK demand.
+        indexer.prepare_primary_key(&mut truncated).unwrap();
+    }
+    // Explicit full decoding is the oracle for lazy encoded-only Batch inputs.
     // One-row slices disable run merging; a tag-only projection also exercises the no-PK fallback.
-    for mode in ["legacy", "runs", "single_rows", "no_pk"] {
+    for mode in ["eager", "legacy", "lazy", "runs", "single_rows", "no_pk"] {
         let file = RegionFileId::new(metadata.region_id, FileId::random());
         let mut indexer = builder.build(file, 0, None).await;
+        if mode == "lazy" {
+            indexer.dense_pk_decoder = None;
+        }
         match mode {
-            "legacy" => {
+            "eager" | "legacy" | "lazy" => {
                 for (row, key) in encoded.iter().enumerate() {
                     let mut old = BatchBuilder::new(key.clone());
                     old.push_field_array(2, batch.column(2).slice(row, 1))
@@ -215,7 +289,13 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
                     old.timestamps_array(batch.column(3).slice(row, 1)).unwrap();
                     old.sequences_array(batch.column(5).slice(row, 1)).unwrap();
                     old.op_types_array(batch.column(6).slice(row, 1)).unwrap();
-                    indexer.update(&mut old.build().unwrap()).await;
+                    let mut old = old.build().unwrap();
+                    if mode == "eager" {
+                        old.set_pk_values(
+                            DensePrimaryKeyCodec::new(&metadata).decode(key).unwrap(),
+                        );
+                    }
+                    indexer.update(&mut old).await;
                 }
             }
             "single_rows" => {

@@ -37,11 +37,13 @@ use std::sync::Arc;
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
+use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
 use smallvec::{SmallVec, smallvec};
 use snafu::ResultExt;
 use statistics::{ByteCount, RowCount};
+use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, FileId, RegionId};
 use strum::IntoStaticStr;
@@ -272,6 +274,8 @@ pub struct Indexer {
     last_mem_fulltext_index: usize,
     bloom_filter_indexer: Option<BloomFilterIndexer>,
     last_mem_bloom_filter: usize,
+    /// Present only when the active creators together need every Dense PK field.
+    dense_pk_decoder: Option<DensePrimaryKeyCodec>,
     #[cfg(feature = "vector_index")]
     vector_indexer: Option<VectorIndexer>,
     #[cfg(feature = "vector_index")]
@@ -280,6 +284,54 @@ pub struct Indexer {
 }
 
 impl Indexer {
+    /// Wraps real creators for update-only benchmarks without a Puffin output.
+    #[cfg(feature = "testing")]
+    pub fn for_bench(
+        metadata: &RegionMetadataRef,
+        inverted_indexer: Option<InvertedIndexer>,
+        bloom_filter_indexer: Option<BloomFilterIndexer>,
+    ) -> Self {
+        let mut indexer = Self {
+            region_id: metadata.region_id,
+            inverted_indexer,
+            bloom_filter_indexer,
+            ..Default::default()
+        };
+        indexer.prepare_dense_pk_decoder(metadata);
+        indexer
+    }
+
+    /// Computes demand once from active creators. Field columns and duplicate
+    /// requests across creators cannot turn a partial PK projection into a full one.
+    fn prepare_dense_pk_decoder(&mut self, metadata: &RegionMetadataRef) {
+        if metadata.primary_key_encoding != PrimaryKeyEncoding::Dense
+            || metadata.primary_key.is_empty()
+        {
+            return;
+        }
+        let requested: HashSet<_> = self
+            .inverted_indexer
+            .iter()
+            .flat_map(|indexer| indexer.column_ids())
+            .chain(
+                self.bloom_filter_indexer
+                    .iter()
+                    .flat_map(|indexer| indexer.column_ids()),
+            )
+            .collect();
+        if metadata.primary_key.iter().all(|id| requested.contains(id)) {
+            self.dense_pk_decoder = Some(DensePrimaryKeyCodec::new(metadata));
+        }
+    }
+
+    /// Called before any creator consumes the batch, so the full decode is shared.
+    fn prepare_primary_key(&self, batch: &mut Batch) -> Result<()> {
+        if let Some(codec) = &self.dense_pk_decoder {
+            batch.ensure_dense_pk_decoded(codec)?;
+        }
+        Ok(())
+    }
+
     /// Updates the index with the given batch.
     pub async fn update(&mut self, batch: &mut Batch) {
         self.do_update(batch).await;
@@ -398,6 +450,7 @@ impl IndexerBuilder for IndexerBuilderImpl {
             self.build_inverted_indexer(region_file_id.file_id(), row_group_size);
         indexer.fulltext_indexer = self.build_fulltext_indexer(region_file_id.file_id()).await;
         indexer.bloom_filter_indexer = self.build_bloom_filter_indexer(region_file_id.file_id());
+        indexer.prepare_dense_pk_decoder(&self.metadata);
         #[cfg(feature = "vector_index")]
         {
             indexer.vector_indexer = self.build_vector_indexer(region_file_id.file_id());

@@ -27,6 +27,7 @@ use crate::sst::index::{
 
 impl Indexer {
     pub(crate) async fn do_finish(&mut self) -> IndexOutput {
+        self.dense_pk_decoder = None;
         let mut output = IndexOutput::default();
 
         let Some(mut writer) = self.build_puffin_writer().await else {
