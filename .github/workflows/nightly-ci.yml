@@ -181,7 +181,7 @@ jobs:
 
   check-status:
     name: Check status
-    needs: [sqlness-test, sqlness-windows, test-on-windows]
+    needs: [sqlness-test, sqlness-windows, test-on-windows, test-on-linux-real-s3]
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: ubuntu-latest
     outputs:

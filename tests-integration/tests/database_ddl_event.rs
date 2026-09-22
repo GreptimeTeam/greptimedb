@@ -38,13 +38,12 @@ const RECONCILIATION_DATABASE_NAME: &str = "event_schema_reconciliation";
 async fn test_event_table_auto_creation_with_auto_create_disabled() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("test_event_table_auto_creation")
-        .with_event_recorder_options(test_event_recorder_options())
         .with_auto_create_table(false)
         .with_event_recorder_options(EventRecorderOptions {
             event_types: Arc::new(EventTypeFilter::Only(
                 [String::from("create_database")].into_iter().collect(),
             )),
-            ..Default::default()
+            ..test_event_recorder_options()
         })
         .build()
         .await;
@@ -91,13 +90,12 @@ async fn test_event_table_auto_creation_with_auto_create_disabled() {
 async fn test_event_table_schema_reconciliation_with_auto_create_disabled() {
     common_telemetry::init_default_ut_logging();
     let standalone = GreptimeDbStandaloneBuilder::new("test_event_table_schema_reconciliation")
-        .with_event_recorder_options(test_event_recorder_options())
         .with_auto_create_table(false)
         .with_event_recorder_options(EventRecorderOptions {
             event_types: Arc::new(EventTypeFilter::Only(
                 [String::from("create_database")].into_iter().collect(),
             )),
-            ..Default::default()
+            ..test_event_recorder_options()
         })
         .build()
         .await;
