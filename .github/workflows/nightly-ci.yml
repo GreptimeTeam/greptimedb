@@ -5,7 +5,7 @@ permissions:
   contents: read
 jobs:
   test-on-windows:
-    name: PR07 affected tests on Windows (source fae799a98c)
+    name: PR07 affected tests on Windows (source 0690ff2c55)
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' }}
     runs-on: windows-2022-8-cores
     timeout-minutes: 60
@@ -13,7 +13,7 @@ jobs:
       - run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
-          ref: fae799a98c22d9aebe0bb53b34a1c85e27698c6c
+          ref: 0690ff2c55439ce1edbd081fece8976336675d0c
           fetch-depth: 0
           persist-credentials: false
       - uses: ./.github/actions/setup-cyborg
@@ -40,7 +40,7 @@ jobs:
       - name: Running tests
         run: >-
           cargo nextest run -F dashboard --no-fail-fast --retries 0
-          -E 'package(object-store) | test(parquet_writer::) | test(export_logical_tables::) | test(export_database::) | test(copy_table_to::) | test(data::export_v2::) | test(data::snapshot_storage::)'
+          -E 'package(object-store) | test(parquet_writer::) | test(export_logical_tables::) | test(export_database::) | test(copy_table_to::) | test(data::export_v2::) | test(data::snapshot_storage::) | test(metric_export_http_timeout_cancels_ordinary_source)'
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
