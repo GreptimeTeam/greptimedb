@@ -796,8 +796,10 @@ fn valid_chunk_filename(name: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::Arc;
 
     use object_store::ObjectStore;
+    use object_store::layers::mock::{self, MockLayerBuilder, OpDelete, oio};
     use object_store::services::Fs;
     use tempfile::tempdir;
     use url::Url;
@@ -1140,27 +1142,49 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_prepare_export_chunk_reports_delete_failure() {
-        use std::os::unix::fs::PermissionsExt;
+        struct FailingDeleter;
+
+        impl oio::Delete for FailingDeleter {
+            async fn delete(&mut self, _path: &str, _args: OpDelete) -> mock::Result<()> {
+                Err(mock::Error::new(
+                    ErrorKind::PermissionDenied,
+                    "injected delete failure",
+                ))
+            }
+
+            async fn close(&mut self) -> mock::Result<()> {
+                Ok(())
+            }
+        }
+
         let dir = tempdir().unwrap();
-        let storage = make_storage_with_rooted_fs(dir.path());
+        let mut storage = make_storage_with_rooted_fs(dir.path());
+        storage.object_store = storage.object_store.layer(
+            MockLayerBuilder::default()
+                .deleter_factory(Arc::new(|_| Box::new(FailingDeleter)))
+                .build()
+                .unwrap(),
+        );
         storage
             .write_text("data/public/2/a.parquet", "keep")
             .await
             .unwrap();
-        let chunk_dir = dir.path().join("data/public/2");
-        std::fs::set_permissions(&chunk_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = storage
+        let error = storage
             .prepare_export_chunk(&["public".into()], 2, true)
-            .await;
-        std::fs::set_permissions(&chunk_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            .await
+            .unwrap_err();
         assert!(
-            result
-                .unwrap_err()
+            error
                 .to_string()
-                .contains("delete unfinished chunk file")
+                .contains("delete unfinished chunk file data/public/2/a.parquet")
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .to_string()
+                .contains("injected delete failure")
         );
         assert_eq!(
             storage.read_text("data/public/2/a.parquet").await.unwrap(),
