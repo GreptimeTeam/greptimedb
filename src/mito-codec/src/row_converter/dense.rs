@@ -295,7 +295,7 @@ impl SortField {
             .get(pos..)
             .ok_or(memcomparable::Error::Eof)
             .context(error::DeserializeFieldSnafu)?;
-        let len = Self::encoded_length(self.encode_data_type(), remaining)?;
+        let len = Self::encoded_len(self.encode_data_type(), remaining)?;
         if len > 1 && self.encode_data_type().is_boolean() && remaining[1] > 1 {
             return Err(memcomparable::Error::InvalidBoolEncoding(remaining[1]))
                 .context(error::DeserializeFieldSnafu);
@@ -305,7 +305,7 @@ impl SortField {
     }
 
     /// Checks field boundaries before any unchecked reads in memcomparable.
-    fn encoded_length(data_type: &ConcreteDataType, bytes: &[u8]) -> Result<usize> {
+    fn encoded_len(data_type: &ConcreteDataType, bytes: &[u8]) -> Result<usize> {
         let marker = bytes
             .first()
             .copied()
@@ -498,7 +498,7 @@ impl DensePrimaryKeyCodec {
             }
             let start = deserializer.position();
             // Preserve the prefix error contract used by primary-key range mapping.
-            let len = SortField::encoded_length(field.encode_data_type(), &bytes[start..])
+            let len = SortField::encoded_len(field.encode_data_type(), &bytes[start..])
                 .map_err(|source| match source {
                     error::Error::DeserializeField { .. } => error::InvalidDensePrimaryKeySnafu {
                         reason: "truncated field or invalid encoding",
@@ -545,7 +545,7 @@ impl DensePrimaryKeyCodec {
             move |state, (id, field)| {
                 let deserializer = state.as_mut()?;
                 let remaining = &bytes[deserializer.position()..];
-                let decoded = SortField::encoded_length(field.encode_data_type(), remaining)
+                let decoded = SortField::encoded_len(field.encode_data_type(), remaining)
                     .and_then(|_| field.deserialize(deserializer).map(|value| (*id, value)));
                 if decoded.is_err() {
                     *state = None;
@@ -573,7 +573,7 @@ impl DensePrimaryKeyCodec {
         for (pos, (_, field)) in self.ordered_primary_key_columns.iter().enumerate() {
             let data_type = field.encode_data_type();
             let remaining = &bytes[deserializer.position()..];
-            SortField::encoded_length(data_type, remaining)?;
+            SortField::encoded_len(data_type, remaining)?;
             if data_type.is_string() && remaining[0] != 0 {
                 deserializer.advance(1);
                 deserializer
