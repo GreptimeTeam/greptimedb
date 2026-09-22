@@ -803,6 +803,26 @@ impl BatchingTask {
                     context: "Failed to project recovery source timestamps".to_string(),
                 })?,
         );
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        let timestamp_plan = timestamp_plan
+            .clone()
+            .transform_down_with_subqueries(|p| {
+                if let LogicalPlan::TableScan(mut table_scan) = p {
+                    let resolved = table_scan.table_name.resolve(catalog, schema);
+                    table_scan.table_name = resolved.into();
+                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+                } else {
+                    Ok(Transformed::no(p))
+                }
+            })
+            .with_context(|_| DatafusionSnafu {
+                context: format!(
+                    "Failed to fix table ref in recovery timestamp plan, plan={:?}",
+                    timestamp_plan
+                ),
+            })?
+            .data;
         let message = DFLogicalSubstraitConvertor {}
             .encode(&timestamp_plan, DefaultSerializer)
             .context(SubstraitEncodeLogicalPlanSnafu)?;
@@ -820,8 +840,6 @@ impl BatchingTask {
             (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
             (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
         ];
-        let catalog = &self.config.sink_table_name[0];
-        let schema = &self.config.sink_table_name[1];
         let mut peer_desc = None;
         let result = frontend_client
             .query_with_terminal_metrics(
