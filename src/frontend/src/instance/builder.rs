@@ -381,6 +381,7 @@ impl FrontendBuilder {
                 self.options.event_recorder.ttl,
             )),
             self.options.event_recorder.event_types.clone(),
+            self.options.event_recorder.flush_interval,
         ));
         admin_event_recorder.install(&event_recorder);
 

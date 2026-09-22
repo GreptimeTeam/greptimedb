@@ -2196,47 +2196,6 @@ async fn test_delete(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_copy_to_s3(instance: Arc<dyn MockInstance>) {
-    if let Ok(bucket) = env::var("GT_S3_BUCKET")
-        && !bucket.is_empty()
-    {
-        let instance = instance.frontend();
-
-        // setups
-        assert!(matches!(execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await.data, OutputData::AffectedRows(0)));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-        let key_id = env::var("GT_S3_ACCESS_KEY_ID").unwrap();
-        let key = env::var("GT_S3_ACCESS_KEY").unwrap();
-        let region = env::var("GT_S3_REGION").unwrap();
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        // exports
-        let copy_to_stmt = format!(
-            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-            bucket, root, key_id, key, region
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-    }
-}
-
-#[apply(both_instances_cases)]
 async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     if let Ok(bucket) = env::var("GT_S3_BUCKET")
@@ -2268,9 +2227,21 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
         let key = env::var("GT_S3_ACCESS_KEY").unwrap();
         let region = env::var("GT_S3_REGION").unwrap();
 
+        let mut connection = format!(
+            "ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}'",
+            key_id, key, region
+        );
+        // Honors an S3-compatible endpoint (MinIO in CI) so the test does not
+        // fall back to resolving the bucket against real AWS.
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL")
+            && !endpoint.is_empty()
+        {
+            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
+        }
+
         let copy_to_stmt = format!(
-            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-            bucket, root, key_id, key, region
+            "Copy demo TO 's3://{}/{}/export/demo.parquet' CONNECTION ({})",
+            bucket, root, connection
         );
 
         let output = execute_sql(&instance, &copy_to_stmt).await.data;
@@ -2315,10 +2286,7 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
                     .data,
                     OutputData::AffectedRows(0)
                 ));
-            let sql = format!(
-                "{} CONNECTION (ACCESS_KEY_ID='{}',SECRET_ACCESS_KEY='{}',REGION='{}')",
-                test.sql, key_id, key, region,
-            );
+            let sql = format!("{} CONNECTION ({})", test.sql, connection);
             let output = execute_sql(&instance, &sql).await.data;
             assert!(matches!(output, OutputData::AffectedRows(2)));
 
@@ -2337,50 +2305,6 @@ async fn test_execute_copy_from_s3(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+";
             check_output_stream(output, expected).await;
         }
-    }
-}
-
-#[apply(both_instances_cases)]
-async fn test_execute_copy_to_oss(instance: Arc<dyn MockInstance>) {
-    if let Ok(bucket) = env::var("GT_OSS_BUCKET")
-        && !bucket.is_empty()
-    {
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let key_id = env::var("GT_OSS_ACCESS_KEY_ID").unwrap();
-        let key = env::var("GT_OSS_ACCESS_KEY").unwrap();
-        let endpoint = env::var("GT_OSS_ENDPOINT").unwrap();
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'oss://{}/{}/export/demo.parquet' CONNECTION (ACCESS_KEY_ID='{}',ACCESS_KEY_SECRET='{}',ENDPOINT='{}')",
-            bucket, root, key_id, key, endpoint
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
     }
 }
 
@@ -2491,54 +2415,6 @@ async fn test_execute_copy_from_oss(instance: Arc<dyn MockInstance>) {
 }
 
 #[apply(both_instances_cases)]
-async fn test_execute_copy_to_gcs(instance: Arc<dyn MockInstance>) {
-    if let (Ok(bucket), Ok(scope), Ok(credential)) = (
-        env::var("GT_GCS_BUCKET"),
-        env::var("GT_GCS_SCOPE"),
-        env::var("GT_GCS_CREDENTIAL"),
-    ) && !bucket.is_empty()
-    {
-        let endpoint = env::var("GT_GCS_ENDPOINT").unwrap_or_default();
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let root = uuid::Uuid::new_v4().to_string();
-        let mut connection = format!("SCOPE='{}',CREDENTIAL='{}'", scope, credential);
-        if !endpoint.is_empty() {
-            connection = format!("{},ENDPOINT='{}'", connection, endpoint);
-        }
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'gcs://{}/{}/export/demo.parquet' CONNECTION ({})",
-            bucket, root, connection
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-    }
-}
-
-#[apply(both_instances_cases)]
 async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
     common_telemetry::init_default_ut_logging();
     if let (Ok(bucket), Ok(scope), Ok(credential)) = (
@@ -2643,50 +2519,6 @@ async fn test_execute_copy_from_gcs(instance: Arc<dyn MockInstance>) {
 +-------+------+--------+---------------------+";
             check_output_stream(output, expected).await;
         }
-    }
-}
-
-#[apply(both_instances_cases)]
-async fn test_execute_copy_to_azblob(instance: Arc<dyn MockInstance>) {
-    if let (Ok(container), Ok(account_name), Ok(account_key), Ok(endpoint)) = (
-        env::var("GT_AZBLOB_CONTAINER"),
-        env::var("GT_AZBLOB_ACCOUNT_NAME"),
-        env::var("GT_AZBLOB_ACCOUNT_KEY"),
-        env::var("GT_AZBLOB_ENDPOINT"),
-    ) && !container.is_empty()
-    {
-        let instance = instance.frontend();
-
-        assert!(matches!(
-            execute_sql(
-                &instance,
-                "create table demo(host string, cpu double, memory double, ts timestamp time index);",
-            )
-            .await
-            .data,
-            OutputData::AffectedRows(0)
-        ));
-
-        let output = execute_sql(
-            &instance,
-            r#"insert into demo(host, cpu, memory, ts) values
-                            ('host1', 66.6, 1024, 1655276557000),
-                            ('host2', 88.8,  333.3, 1655276558000)
-                            "#,
-        )
-        .await
-        .data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
-
-        let root = uuid::Uuid::new_v4().to_string();
-
-        let copy_to_stmt = format!(
-            "Copy demo TO 'azblob://{}/{}/export/demo.parquet' CONNECTION (ACCOUNT_NAME='{}',ACCOUNT_KEY='{}',ENDPOINT='{}')",
-            container, root, account_name, account_key, endpoint
-        );
-
-        let output = execute_sql(&instance, &copy_to_stmt).await.data;
-        assert!(matches!(output, OutputData::AffectedRows(2)));
     }
 }
 

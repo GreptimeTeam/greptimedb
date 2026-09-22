@@ -19,12 +19,13 @@ use api::v1::greptime_database_client::GreptimeDatabaseClient;
 use api::v1::greptime_request::Request as RequestBody;
 use api::v1::greptime_response::Response as ResponseBody;
 use api::v1::promql_request::Promql;
+use api::v1::query_request::Query;
 use api::v1::value::ValueData;
 use api::v1::{
     AddColumn, AddColumns, AlterTableExpr, Basic, Column, ColumnDataType, ColumnDef, ColumnSchema,
     CreateTableExpr, GreptimeRequest, InsertRequest, InsertRequests, PromInstantQuery,
-    PromRangeQuery, PromqlRequest, RequestHeader, Row, RowInsertRequest, RowInsertRequests, Rows,
-    SemanticType, Value, column,
+    PromRangeQuery, PromqlRequest, QueryRequest, RequestHeader, Row, RowInsertRequest,
+    RowInsertRequests, Rows, SemanticType, Value, column,
 };
 use auth::user_provider_from_option;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -72,6 +73,7 @@ use tests_integration::test_util::{
     setup_grpc_server_with_auto_create_table_disabled, setup_grpc_server_with_user_provider,
 };
 use tonic::Request;
+use tonic::codec::CompressionEncoding;
 use tonic::metadata::MetadataValue;
 
 use crate::both_deployment_cases;
@@ -89,9 +91,13 @@ macro_rules! grpc_test {
                     async fn [< $test >]() {
                         let store_type = tests_integration::test_util::StorageType::$service;
                         if store_type.test_on() {
-                            let _ = $crate::grpc::$test(store_type).await;
+                            // Support both unit tests and fallible tests without discarding errors.
+                            let result = $crate::grpc::$test(store_type).await;
+                            assert_eq!(
+                                std::process::Termination::report(result),
+                                std::process::ExitCode::SUCCESS,
+                            );
                         }
-
                     }
                 )*
             }
@@ -198,29 +204,128 @@ pub async fn test_grpc_message_size_ok(store_type: StorageType) {
     let _ = fe_grpc_server.shutdown().await;
 }
 
+/// Both the server (`servers::grpc::builder`) and the standard client
+/// (`configure_tonic_client!`) enable zstd, so a plain round trip never shows
+/// whether negotiation actually happened. This drives raw tonic clients instead
+/// and asserts on the `grpc-encoding` the server answers with.
 pub async fn test_grpc_zstd_compression(store_type: StorageType) {
-    // server and client both support gzip
-    let config = GrpcServerConfig {
-        max_recv_message_size: 1024,
-        max_send_message_size: 1024,
-        ..Default::default()
-    };
-    let (_db, fe_grpc_server) = setup_grpc_server_with(
-        store_type,
-        "test_grpc_zstd_compression",
-        None,
-        Some(config),
-        None,
-    )
-    .await;
+    let (_db, fe_grpc_server) = setup_grpc_server(store_type, "test_grpc_zstd_compression").await;
     let addr = fe_grpc_server.bind_addr().unwrap().to_string();
 
-    let grpc_client = Client::with_urls(vec![addr]);
+    let ddl = |sql: &str| GreptimeRequest {
+        header: Some(RequestHeader {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            ..Default::default()
+        }),
+        request: Some(RequestBody::Query(QueryRequest {
+            query: Some(Query::Sql(sql.to_string())),
+        })),
+    };
+
+    // Sends zstd and accepts zstd: the server has to decode a compressed request
+    // body and compress its response.
+    let mut zstd_client = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd)
+        .accept_compressed(CompressionEncoding::Zstd);
+    let response = zstd_client
+        .handle(Request::new(ddl(
+            "CREATE TABLE zstd_compression (ts TIMESTAMP TIME INDEX, payload STRING)",
+        )))
+        .await
+        .unwrap();
+    assert_eq!(
+        response
+            .metadata()
+            .get("grpc-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("zstd")
+    );
+
+    // A payload far above the zstd frame overhead, so the request body really is
+    // compressed rather than passed through.
+    let payload = "compressible-".repeat(4096);
+    let insert = |ts: i64| GreptimeRequest {
+        header: Some(RequestHeader {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            ..Default::default()
+        }),
+        request: Some(RequestBody::RowInserts(RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "zstd_compression".to_string(),
+                rows: Some(Rows {
+                    schema: vec![
+                        ColumnSchema {
+                            column_name: "ts".to_string(),
+                            semantic_type: SemanticType::Timestamp as i32,
+                            datatype: ColumnDataType::TimestampMillisecond as i32,
+                            ..Default::default()
+                        },
+                        ColumnSchema {
+                            column_name: "payload".to_string(),
+                            semantic_type: SemanticType::Field as i32,
+                            datatype: ColumnDataType::String as i32,
+                            ..Default::default()
+                        },
+                    ],
+                    rows: vec![Row {
+                        values: vec![
+                            Value {
+                                value_data: Some(ValueData::TimestampMillisecondValue(ts)),
+                            },
+                            Value {
+                                value_data: Some(ValueData::StringValue(payload.clone())),
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        })),
+    };
+
+    let response = zstd_client
+        .handle(Request::new(insert(1000)))
+        .await
+        .unwrap();
+    let ResponseBody::AffectedRows(rows) = response.into_inner().response.unwrap();
+    assert_eq!(rows.value, 1);
+
+    // A client that does not advertise zstd gets an uncompressed response.
+    let mut plain_client = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    let response = plain_client
+        .handle(Request::new(insert(2000)))
+        .await
+        .unwrap();
+    assert!(response.metadata().get("grpc-encoding").is_none());
+
+    // Both payloads survived their respective paths intact.
     let db = Database::new_with_dbname(
         format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
-        grpc_client,
+        Client::with_urls(vec![addr]),
     );
-    db.sql("show tables;").await.unwrap();
+    let sql = format!(
+        "SELECT count(*) AS c FROM zstd_compression WHERE length(payload) = {}",
+        payload.len()
+    );
+    let OutputData::Stream(stream) = db.sql(&sql).await.unwrap().data else {
+        panic!("expected a stream");
+    };
+    let recordbatches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(
+        recordbatches.pretty_print().unwrap(),
+        "\
++---+
+| c |
++---+
+| 2 |
++---+"
+    );
+
     let _ = fe_grpc_server.shutdown().await;
 }
 
