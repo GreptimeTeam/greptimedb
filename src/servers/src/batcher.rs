@@ -22,6 +22,8 @@ pub mod table;
 #[cfg(test)]
 mod test_util;
 
+use serde::{Deserialize, Serialize};
+
 /// Controls whether batching waits for storage before replying to the client.
 const PENDING_ROWS_BATCH_SYNC_ENV: &str = "PENDING_ROWS_BATCH_SYNC";
 
@@ -39,8 +41,6 @@ pub fn pending_rows_batch_sync_enabled() -> bool {
         .and_then(|v| v.parse::<bool>().ok())
         .unwrap_or(true)
 }
-
-use serde::{Deserialize, Serialize};
 
 /// Ingestion protocols that can opt into pending-row batching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
