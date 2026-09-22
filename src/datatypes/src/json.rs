@@ -402,8 +402,13 @@ fn encode_json_value_with_hint(
         return Ok(JsonValue::null());
     }
 
+    if hint.data_type.is_string() {
+        if let Json::String(value) = json {
+            return Ok(value.into());
+        }
+    }
+
     let encoded = match (&hint.data_type, &json) {
-        (ConcreteDataType::String(_), Json::String(v)) => Some(v.clone().into()),
         (
             ConcreteDataType::Int8(_)
             | ConcreteDataType::Int16(_)
