@@ -12,21 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Construction and footer-based recovery of an object store WAL.
+//! Object store WAL construction, recovery and region reads.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
+use async_stream::try_stream;
 use bytes::Bytes;
 use common_wal::config::object_store::ObjectStoreWalConfig;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
-use store_api::logstore::entry::Entry;
+use store_api::logstore::entry::{Entry, NaiveEntry};
 use store_api::logstore::provider::{ObjectStoreProvider, Provider};
 use store_api::logstore::{AppendBatchResponse, EntryId, LogStore, SendableEntryStream, WalIndex};
 use store_api::storage::RegionId;
@@ -34,13 +35,13 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{
     CorruptedWalObjectSnafu, Error, InvalidProviderSnafu, InvalidWalObjectSnafu,
-    InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu, ObjectStoreWalSnafu, Result,
-    UnsupportedObjectStoreWalOperationSnafu,
+    InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu, MismatchedWalRegionSnafu,
+    ObjectStoreWalSnafu, Result, UnsupportedObjectStoreWalOperationSnafu,
 };
 use crate::object_store_wal::catalog::ObjectCatalog;
 use crate::object_store_wal::format::{
     FixedTrailer, FooterEntry, HEADER_LEN, MIN_OBJECT_LEN, TRAILER_LEN, decode_footer,
-    decode_header, decode_trailer, footer_range, verify_segment_ranges,
+    decode_header, decode_segment, decode_trailer, footer_range, verify_segment_ranges,
 };
 use crate::object_store_wal::io::{ListedObject, ObjectStoreIo, PutResult};
 
@@ -58,10 +59,13 @@ pub(crate) struct ObjectStoreLogStore {
     prefix: String,
     io: Arc<dyn WalObjectIo>,
     catalog: Arc<RwLock<ObjectCatalog>>,
+    obsolete_entry_ids: ObsoleteEntryIds,
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
     command_tx: mpsc::Sender<Command>,
 }
+
+type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
 
 type TerminalError = Arc<Mutex<Option<Arc<Error>>>>;
 
@@ -122,6 +126,7 @@ impl ObjectStoreLogStore {
             prefix,
             io,
             catalog,
+            obsolete_entry_ids: ObsoleteEntryIds::default(),
             terminal_error,
             stopped,
             command_tx,
@@ -152,12 +157,35 @@ impl ObjectStoreLogStore {
         Ok(provider.region_id)
     }
 
+    fn check_region(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
+        self.check_terminal()?;
+        let provider_region = self.region_of(provider)?;
+        ensure!(
+            provider_region == region_id,
+            MismatchedWalRegionSnafu {
+                region_id,
+                reason: format!("provider belongs to region {provider_region}"),
+            }
+        );
+        Ok(())
+    }
+
     fn check_terminal(&self) -> Result<()> {
         match terminal(&self.terminal_error) {
             Some(error) => Err(shared(&error)),
             None => Ok(()),
         }
     }
+}
+
+/// Records the obsolete watermark of `region_id`, which never moves down.
+fn record_obsolete(obsolete_entry_ids: &ObsoleteEntryIds, region_id: RegionId, entry_id: EntryId) {
+    obsolete_entry_ids
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .entry(region_id)
+        .and_modify(|current| *current = (*current).max(entry_id))
+        .or_insert(entry_id);
 }
 
 fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
@@ -193,48 +221,127 @@ impl LogStore for ObjectStoreLogStore {
         UnsupportedObjectStoreWalOperationSnafu.fail()
     }
 
+    /// Reads the provider's region from `entry_id`, hiding obsolete entries.
+    /// The catalog locates each segment, so a caller-supplied index is unnecessary.
     async fn read(
         &self,
-        _provider: &Provider,
-        _entry_id: EntryId,
+        provider: &Provider,
+        entry_id: EntryId,
         _index: Option<WalIndex>,
     ) -> Result<SendableEntryStream<'static, Entry, Error>> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+        self.check_terminal()?;
+        let region_id = self.region_of(provider)?;
+        let obsolete = self
+            .obsolete_entry_ids
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&region_id)
+            .copied();
+        let start_entry_id =
+            entry_id.max(obsolete.map_or(0, |obsolete| obsolete.saturating_add(1)));
+        let objects = {
+            let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+            match catalog.region_max_entry_id(region_id) {
+                Some(max_entry_id)
+                    if start_entry_id <= max_entry_id && obsolete != Some(EntryId::MAX) =>
+                {
+                    catalog
+                        .objects_for_entry_range(region_id, start_entry_id, max_entry_id)?
+                        .into_iter()
+                        .map(|(object_seq, entry)| (object_seq, entry.clone()))
+                        .collect::<Vec<_>>()
+                }
+                _ => Vec::new(),
+            }
+        };
+
+        let io = self.io.clone();
+        let provider = provider.clone();
+        Ok(Box::pin(try_stream! {
+            for (object_seq, footer_entry) in objects {
+                let bytes = io
+                    .get_range(object_seq, footer_entry.segment_offset, footer_entry.segment_len)
+                    .await?;
+                let records = decode_segment(&bytes, &footer_entry)
+                    .with_context(|_| InvalidWalObjectSnafu {
+                        path: io.object_path(object_seq),
+                    })?;
+                let entries = records
+                    .into_iter()
+                    .filter(|record| record.entry_id >= start_entry_id)
+                    .map(|record| {
+                        Entry::Naive(NaiveEntry {
+                            provider: provider.clone(),
+                            region_id,
+                            entry_id: record.entry_id,
+                            data: record.payload.into(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !entries.is_empty() {
+                    yield entries;
+                }
+            }
+        }))
     }
 
-    async fn create_namespace(&self, _ns: &Provider) -> Result<()> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+    async fn create_namespace(&self, ns: &Provider) -> Result<()> {
+        self.check_terminal()?;
+        self.region_of(ns).map(|_| ())
     }
 
-    async fn delete_namespace(&self, _ns: &Provider) -> Result<()> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+    async fn delete_namespace(&self, ns: &Provider) -> Result<()> {
+        self.check_terminal()?;
+        self.region_of(ns).map(|_| ())
     }
 
     async fn list_namespaces(&self) -> Result<Vec<Provider>> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+        self.check_terminal()?;
+        let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
+        let regions = catalog
+            .objects_in_order()
+            .flat_map(|(_, footer)| footer.iter().map(|entry| entry.region_id))
+            .collect::<BTreeSet<_>>();
+        Ok(regions
+            .into_iter()
+            .map(|region_id| Provider::object_store_provider(region_id, self.prefix.clone()))
+            .collect())
     }
 
+    /// Records a memory-only watermark. The caller re-establishes it after a restart.
     async fn obsolete(
         &self,
-        _provider: &Provider,
-        _region_id: RegionId,
-        _entry_id: EntryId,
+        provider: &Provider,
+        region_id: RegionId,
+        entry_id: EntryId,
     ) -> Result<()> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+        self.check_region(provider, region_id)?;
+        record_obsolete(&self.obsolete_entry_ids, region_id, entry_id);
+        Ok(())
     }
 
-    async fn obsolete_all(&self, _provider: &Provider, _region_id: RegionId) -> Result<()> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+    /// Hides every entry of the region in memory. The caller re-establishes
+    /// the watermark after a restart.
+    async fn obsolete_all(&self, provider: &Provider, region_id: RegionId) -> Result<()> {
+        self.check_region(provider, region_id)?;
+        record_obsolete(&self.obsolete_entry_ids, region_id, EntryId::MAX);
+        Ok(())
     }
 
     fn entry(
         &self,
-        _data: Vec<u8>,
-        _entry_id: EntryId,
-        _region_id: RegionId,
-        _provider: &Provider,
+        data: Vec<u8>,
+        entry_id: EntryId,
+        region_id: RegionId,
+        provider: &Provider,
     ) -> Result<Entry> {
-        UnsupportedObjectStoreWalOperationSnafu.fail()
+        self.check_region(provider, region_id)?;
+        Ok(Entry::Naive(NaiveEntry {
+            provider: provider.clone(),
+            region_id,
+            entry_id,
+            data,
+        }))
     }
 
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId> {
@@ -1058,15 +1165,32 @@ mod tests {
     #[tokio::test]
     async fn test_store_rejects_foreign_providers() {
         let store = open(memory_store(), &eager()).await;
-        let other = Provider::object_store_provider(region(1), "other/prefix".to_string());
-        assert!(matches!(store.latest_entry_id(&other).unwrap_err(),
-            Error::MismatchedWalPrefix { expected, actual, .. }
-                if expected == PREFIX && actual == "other/prefix"));
-        let raft = Provider::raft_engine_provider(region(1).as_u64());
-        assert!(matches!(
-            store.latest_entry_id(&raft),
-            Err(Error::InvalidProvider { .. })
-        ));
+        let region_id = region(1);
+        let other = Provider::object_store_provider(region_id, "other/prefix".to_string());
+        let raft = Provider::raft_engine_provider(region_id.as_u64());
+        for foreign in [&other, &raft] {
+            let errors = [
+                store.latest_entry_id(foreign).unwrap_err(),
+                store.read(foreign, 0, None).await.err().unwrap(),
+                store.create_namespace(foreign).await.unwrap_err(),
+                store.delete_namespace(foreign).await.unwrap_err(),
+                store.obsolete(foreign, region_id, 1).await.unwrap_err(),
+                store.obsolete_all(foreign, region_id).await.unwrap_err(),
+                store.entry(Vec::new(), 1, region_id, foreign).unwrap_err(),
+            ];
+            for error in errors {
+                if foreign == &raft {
+                    assert!(matches!(error, Error::InvalidProvider { .. }), "{error:?}");
+                } else {
+                    assert!(
+                        matches!(&error,
+                        Error::MismatchedWalPrefix { expected, actual, .. }
+                        if expected == PREFIX && actual == "other/prefix"),
+                        "{error:?}"
+                    );
+                }
+            }
+        }
         store.stop().await.unwrap();
     }
 
@@ -1089,6 +1213,7 @@ mod tests {
             prefix: PREFIX.to_string(),
             io: Arc::new(ObjectStoreIo::new(memory_store(), PREFIX).unwrap()),
             catalog: Arc::default(),
+            obsolete_entry_ids: ObsoleteEntryIds::default(),
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             command_tx,
@@ -1125,10 +1250,27 @@ mod tests {
             CorruptedWalObjectSnafu { reason: "second" }.build(),
         );
         assert!(Arc::ptr_eq(&first, &second));
-        match store.latest_entry_id(&provider(region(1))).unwrap_err() {
-            Error::ObjectStoreWal { source, .. } => assert!(Arc::ptr_eq(&first, &source)),
-            error => panic!("{error:?}"),
+        let region_id = region(1);
+        let provider = provider(region_id);
+        let errors = [
+            store.latest_entry_id(&provider).unwrap_err(),
+            store.read(&provider, 0, None).await.err().unwrap(),
+            store.create_namespace(&provider).await.unwrap_err(),
+            store.delete_namespace(&provider).await.unwrap_err(),
+            store.list_namespaces().await.unwrap_err(),
+            store.obsolete(&provider, region_id, 1).await.unwrap_err(),
+            store.obsolete_all(&provider, region_id).await.unwrap_err(),
+            store
+                .entry(Vec::new(), 1, region_id, &provider)
+                .unwrap_err(),
+        ];
+        for error in errors {
+            match error {
+                Error::ObjectStoreWal { source, .. } => assert!(Arc::ptr_eq(&first, &source)),
+                error => panic!("{error:?}"),
+            }
         }
+        assert!(store.obsolete_entry_ids.lock().unwrap().is_empty());
         store.stop().await.unwrap();
     }
 
@@ -1267,30 +1409,270 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_unsupported_operations() {
+    async fn test_store_append_is_unsupported() {
         let store = open(memory_store(), &eager()).await;
-        let region = region(1);
-        let provider = provider(region);
+        let error = store.append_batch(Vec::new()).await.unwrap_err();
+        assert!(matches!(
+            error,
+            Error::UnsupportedObjectStoreWalOperation { .. }
+        ));
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+        store.stop().await.unwrap();
+    }
+
+    async fn read_entries(
+        store: &ObjectStoreLogStore,
+        region_id: RegionId,
+        start: EntryId,
+    ) -> Vec<Entry> {
+        store
+            .read(&provider(region_id), start, None)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    fn expected_entries(region_id: RegionId, entries: &[(EntryId, &str)]) -> Vec<Entry> {
+        entries
+            .iter()
+            .map(|(entry_id, data)| {
+                Entry::Naive(NaiveEntry {
+                    provider: provider(region_id),
+                    region_id,
+                    entry_id: *entry_id,
+                    data: data.as_bytes().to_vec(),
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_store_reads_only_region_segments_in_entry_order() {
+        let object_store = memory_store();
+        let mut expected_ranges = HashMap::<_, Vec<_>>::new();
+        for (seq, first) in [(1, 10), (3, 30), (7, 70)] {
+            let records = [region(2), region(1)]
+                .into_iter()
+                .flat_map(|region_id| {
+                    (first..first + 3).map(move |entry_id| Record {
+                        region_id,
+                        entry_id,
+                        payload: Bytes::from(format!("r{}-e{entry_id}", region_id.region_number())),
+                    })
+                })
+                .collect::<Vec<_>>();
+            put_records(&object_store, seq, &records).await;
+            let bytes = object_store
+                .read(&object_path(&object_store, seq))
+                .await
+                .unwrap()
+                .to_vec();
+            for entry in footer_of(&bytes).1 {
+                expected_ranges.entry(entry.region_id).or_default().push((
+                    seq,
+                    entry.segment_offset,
+                    entry.segment_len,
+                ));
+            }
+        }
+        let (io, reads) = RecordingIo::over(object_store);
+        let store = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+            .await
+            .unwrap();
+        for number in [1, 2] {
+            reads.lock().unwrap().clear();
+            let entries = read_entries(&store, region(number), 11).await;
+            let ids = [11, 12, 30, 31, 32, 70, 71, 72];
+            let expected = ids
+                .into_iter()
+                .map(|entry_id| {
+                    Entry::Naive(NaiveEntry {
+                        provider: provider(region(number)),
+                        region_id: region(number),
+                        entry_id,
+                        data: format!("r{number}-e{entry_id}").into_bytes(),
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(expected, entries);
+            assert_eq!(expected_ranges[&region(number)], *reads.lock().unwrap());
+        }
+        reads.lock().unwrap().clear();
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&store, region(1), 73).await
+        );
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&store, region(3), 0).await
+        );
+        assert!(reads.lock().unwrap().is_empty());
+        assert_eq!(
+            vec![provider(region(1)), provider(region(2))],
+            store.list_namespaces().await.unwrap()
+        );
+        store.create_namespace(&provider(region(3))).await.unwrap();
+        store.delete_namespace(&provider(region(1))).await.unwrap();
+        assert_eq!(
+            vec![provider(region(1)), provider(region(2))],
+            store.list_namespaces().await.unwrap()
+        );
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_obsolete_hides_entries_from_read_only() {
+        let object_store = memory_store();
+        put_object(&object_store, 0, region(1), &[10, 11, 12]).await;
+        put_object(&object_store, 1, region(1), &[20]).await;
+        put_object(&object_store, 2, region(2), &[10]).await;
+        let store = open(object_store.clone(), &eager()).await;
+        let p = provider(region(1));
+        let all = expected_entries(
+            region(1),
+            &[(10, "e10"), (11, "e11"), (12, "e12"), (20, "e20")],
+        );
+        store.obsolete(&p, region(1), 9).await.unwrap();
+        assert_eq!(all, read_entries(&store, region(1), 0).await);
+        store.obsolete(&p, region(1), 11).await.unwrap();
+        let remaining = expected_entries(region(1), &[(12, "e12"), (20, "e20")]);
+        assert_eq!(remaining, read_entries(&store, region(1), 0).await);
+        assert_eq!(
+            expected_entries(region(1), &[(20, "e20")]),
+            read_entries(&store, region(1), 20).await
+        );
+        assert_eq!(20, latest(&store, region(1)));
+        store.obsolete(&p, region(1), 10).await.unwrap();
+        assert_eq!(remaining, read_entries(&store, region(1), 0).await);
+        store.obsolete_all(&p, region(1)).await.unwrap();
+        store.obsolete(&p, region(1), 0).await.unwrap();
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&store, region(1), 0).await
+        );
+        assert_eq!(20, latest(&store, region(1)));
+        assert_eq!(
+            expected_entries(region(2), &[(10, "e10")]),
+            read_entries(&store, region(2), 0).await
+        );
+        store.stop().await.unwrap();
+        let reopened = open(object_store, &eager()).await;
+        assert_eq!(all, read_entries(&reopened, region(1), 0).await);
+        reopened
+            .obsolete(&p, region(1), EntryId::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            Vec::<Entry>::new(),
+            read_entries(&reopened, region(1), 0).await
+        );
+        assert_eq!(20, latest(&reopened, region(1)));
+        reopened.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_entry_and_watermarks_reject_another_region() {
+        let store = open(memory_store(), &eager()).await;
+        let p = provider(region(2));
         let errors = [
-            store.append_batch(Vec::new()).await.unwrap_err(),
-            store.read(&provider, 0, None).await.err().unwrap(),
-            store.create_namespace(&provider).await.unwrap_err(),
-            store.delete_namespace(&provider).await.unwrap_err(),
-            store.list_namespaces().await.unwrap_err(),
-            store.obsolete(&provider, region, 1).await.unwrap_err(),
-            store.obsolete_all(&provider, region).await.unwrap_err(),
-            store.entry(Vec::new(), 1, region, &provider).unwrap_err(),
+            store
+                .entry(b"payload".to_vec(), 7, region(1), &p)
+                .unwrap_err(),
+            store.obsolete(&p, region(1), 7).await.unwrap_err(),
+            store.obsolete_all(&p, region(1)).await.unwrap_err(),
         ];
         for error in errors {
-            assert!(matches!(
-                error,
-                Error::UnsupportedObjectStoreWalOperation { .. }
-            ));
+            assert!(
+                matches!(&error, Error::MismatchedWalRegion { region_id, reason, .. }
+                if *region_id == region(1) && reason == &format!("provider belongs to region {}", region(2)))
+            );
             assert_eq!(
-                common_error::status_code::StatusCode::Unsupported,
+                common_error::status_code::StatusCode::InvalidArguments,
                 error.status_code()
             );
         }
+        assert!(store.obsolete_entry_ids.lock().unwrap().is_empty());
+        assert_eq!(
+            expected_entries(region(2), &[(7, "payload")]),
+            vec![store.entry(b"payload".to_vec(), 7, region(2), &p).unwrap()]
+        );
+        assert!(store.list_namespaces().await.unwrap().is_empty());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_corrupted_segment_fails_the_read_that_decodes_it() {
+        let object_store = memory_store();
+        put_records(
+            &object_store,
+            0,
+            &[
+                Record {
+                    region_id: region(1),
+                    entry_id: 1,
+                    payload: Bytes::from_static(b"a1"),
+                },
+                Record {
+                    region_id: region(2),
+                    entry_id: 1,
+                    payload: Bytes::from_static(b"b1"),
+                },
+            ],
+        )
+        .await;
+        put_object(&object_store, 1, region(2), &[10]).await;
+        let path = object_path(&object_store, 0);
+        let bytes = object_store.read(&path).await.unwrap().to_vec();
+        let footer = footer_of(&bytes).1;
+        let corrupt = &footer[1];
+        corrupt_object(&object_store, &path, |bytes| {
+            bytes[(corrupt.segment_offset + corrupt.segment_len - 1) as usize] ^= 1;
+        })
+        .await;
+        let (io, reads) = RecordingIo::over(object_store);
+        let store = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+            .await
+            .unwrap();
+        assert_eq!(1, latest(&store, region(1)));
+        assert_eq!(10, latest(&store, region(2)));
+        reads.lock().unwrap().clear();
+        assert_eq!(
+            expected_entries(region(1), &[(1, "a1")]),
+            read_entries(&store, region(1), 0).await
+        );
+        assert_eq!(
+            vec![(0, footer[0].segment_offset, footer[0].segment_len)],
+            *reads.lock().unwrap()
+        );
+        assert_eq!(
+            expected_entries(region(2), &[(10, "e10")]),
+            read_entries(&store, region(2), 10).await
+        );
+        reads.lock().unwrap().clear();
+        let error = store
+            .read(&provider(region(2)), 0, None)
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap_err();
+        assert_invalid_object(
+            &error,
+            &path,
+            &format!("segment of region {} checksum mismatch", region(2)),
+        );
+        assert_eq!(
+            vec![(0, corrupt.segment_offset, corrupt.segment_len)],
+            *reads.lock().unwrap()
+        );
         store.stop().await.unwrap();
     }
 

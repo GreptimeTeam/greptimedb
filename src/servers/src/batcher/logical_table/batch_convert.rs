@@ -290,9 +290,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
 
-    use arrow::array::{BinaryArray, StringArray, TimestampMillisecondArray};
+    use arrow::array::{Array, BinaryArray, StringArray, TimestampMillisecondArray};
     use arrow::datatypes::{DataType as ArrowDataType, Field, Schema as ArrowSchema};
     use arrow::record_batch::RecordBatch;
+    use metric_engine::batch_modifier::modify_batch_sparse;
     use smallvec::SmallVec;
 
     use crate::batcher::logical_table::batch_convert::{
@@ -501,7 +502,6 @@ mod tests {
     #[test]
     fn test_modify_batch_sparse_with_taxonomy_per_batch() {
         use arrow::array::BinaryArray;
-        use metric_engine::batch_modifier::modify_batch_sparse;
 
         let schema1 = Arc::new(ArrowSchema::new(vec![
             Field::new(
