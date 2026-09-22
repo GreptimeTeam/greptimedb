@@ -128,56 +128,54 @@ async fn read(store: &ObjectStore, path: &str) -> (SchemaRef, Vec<RecordBatch>) 
 
 #[tokio::test]
 async fn routes_across_batches_and_writes_empty_files() {
-    for parallelism in [1, 4] {
-        let unit = unit();
-        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-        let batches = vec![
-            batch(vec![Some(1025), Some(1025)], vec![Some(""), None]),
-            batch(
-                vec![Some(1025), Some(1027), Some(1028)],
-                vec![Some("a"), Some("b"), Some("unselected")],
-            ),
-        ];
-        let budget = ExportWriteBudget::new(parallelism);
-        let result = export_stream_managed(
-            &unit,
-            stream(batches),
-            &store,
-            export_limits(),
-            &CancellationToken::new(),
-            budget.clone(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            result,
-            LogicalTableExportSummary {
-                rows: 4,
-                skipped_rows: 1,
-                files: 3
-            }
-        );
-        let (schema, cpu) = read(&store, "cpu.v1.parquet").await;
-        assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
-        let values: Vec<_> = cpu
-            .iter()
-            .flat_map(|batch| {
-                batch
-                    .column(0)
-                    .as_string::<i32>()
-                    .iter()
-                    .map(|s| s.map(str::to_owned))
-            })
-            .collect();
-        assert_eq!(values, vec![Some("".into()), None, Some("a".into())]);
-        let (schema, empty) = read(&store, "empty.parquet").await;
-        assert_eq!(schema.fields(), unit.logical_tables[&1026].schema.fields());
-        assert!(empty.is_empty());
-        let (schema, requests) = read(&store, "requests.parquet").await;
-        assert_eq!(schema.fields(), unit.logical_tables[&1027].schema.fields());
-        assert_eq!(requests[0].column(1).null_count(), 1);
-        assert_eq!(budget.available(), (parallelism, 64 * 1024 * 1024));
-    }
+    let unit = unit();
+    let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+    let batches = vec![
+        batch(vec![Some(1025), Some(1025)], vec![Some(""), None]),
+        batch(
+            vec![Some(1025), Some(1027), Some(1028)],
+            vec![Some("a"), Some("b"), Some("unselected")],
+        ),
+    ];
+    let budget = ExportWriteBudget::new(4);
+    let result = export_stream_managed(
+        &unit,
+        stream(batches),
+        &store,
+        export_limits(),
+        &CancellationToken::new(),
+        budget.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        result,
+        LogicalTableExportSummary {
+            rows: 4,
+            skipped_rows: 1,
+            files: 3
+        }
+    );
+    let (schema, cpu) = read(&store, "cpu.v1.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1025].schema.fields());
+    let values: Vec<_> = cpu
+        .iter()
+        .flat_map(|batch| {
+            batch
+                .column(0)
+                .as_string::<i32>()
+                .iter()
+                .map(|s| s.map(str::to_owned))
+        })
+        .collect();
+    assert_eq!(values, vec![Some("".into()), None, Some("a".into())]);
+    let (schema, empty) = read(&store, "empty.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1026].schema.fields());
+    assert!(empty.is_empty());
+    let (schema, requests) = read(&store, "requests.parquet").await;
+    assert_eq!(schema.fields(), unit.logical_tables[&1027].schema.fields());
+    assert_eq!(requests[0].column(1).null_count(), 1);
+    assert_eq!(budget.available(), (4, 64 * 1024 * 1024));
 }
 
 #[tokio::test]

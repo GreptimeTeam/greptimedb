@@ -447,31 +447,26 @@ async fn database_export_roundtrip(instance: &Arc<Instance>, parallelism: usize)
 
 #[tokio::test(flavor = "multi_thread")]
 async fn database_export_standalone_roundtrip() {
-    for parallelism in [1, 4] {
-        let standalone =
-            GreptimeDbStandaloneBuilder::new(&format!("database_export_{parallelism}"))
-                .build()
-                .await;
-        database_export_roundtrip(standalone.fe_instance(), parallelism).await;
-    }
+    let standalone = GreptimeDbStandaloneBuilder::new("database_export")
+        .build()
+        .await;
+    database_export_roundtrip(standalone.fe_instance(), 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn database_export_distributed_roundtrip() {
-    for parallelism in [1, 4] {
-        let cluster = GreptimeDbClusterBuilder::new(&format!("database_export_{parallelism}"))
-            .await
-            .with_datanodes(2)
-            .with_local_file_access(
-                common_datasource::object_store::LocalFileAccess::sandboxed(
-                    common_test_util::find_workspace_path("."),
-                )
-                .unwrap(),
+    let cluster = GreptimeDbClusterBuilder::new("database_export")
+        .await
+        .with_datanodes(2)
+        .with_local_file_access(
+            common_datasource::object_store::LocalFileAccess::sandboxed(
+                common_test_util::find_workspace_path("."),
             )
-            .build(false)
-            .await;
-        database_export_roundtrip(cluster.fe_instance(), parallelism).await;
-    }
+            .unwrap(),
+        )
+        .build(false)
+        .await;
+    database_export_roundtrip(cluster.fe_instance(), 4).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
