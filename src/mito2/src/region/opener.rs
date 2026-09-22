@@ -1247,7 +1247,12 @@ async fn preload_parquet_meta_cache_for_files(
             let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
             if let Some(metadata) = write_cache
                 .file_cache()
-                .get_sst_meta_data(key, &mut cache_metrics, PageIndexPolicy::Optional)
+                .get_sst_meta_data(
+                    key,
+                    &mut cache_metrics,
+                    PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime(),
+                )
                 .await
             {
                 let decoded = metadata.decoded();
@@ -1297,6 +1302,7 @@ async fn preload_parquet_meta_cache_for_files(
                     // instead of substituting the region's current schema.
                     None,
                     PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime(),
                 )
                 .await
                 {
