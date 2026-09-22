@@ -1,10 +1,10 @@
 name: Follow Up Docs
 on:
   pull_request_target:
-    types: [opened, edited]
+    types: [opened, edited, closed]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event.action }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
 
 jobs:
@@ -13,6 +13,7 @@ jobs:
     permissions:
       pull-requests: write
       contents: read
+      actions: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
