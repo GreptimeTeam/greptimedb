@@ -1,12 +1,13 @@
-# Natural-language evaluation with Jev (experimental MVP)
+# AI functions (experimental MVP)
 
-Three asynchronous SQL scalar functions expose Jev's question types:
+Three asynchronous SQL scalar functions provide natural-language matching,
+classification, and rating. The current backend is TypeSafe's Jev model:
 
 | Function | Mode | Result |
 | --- | --- | --- |
-| `jev(text, prompt)` | Noul | `Float64` probability in **[0, 1]** that the prompt's statement is true |
-| `jev_choice(text, prompt, criteria)` | Choice | `String` containing the selected option's name |
-| `jev_score(text, prompt, criteria)` | Score | `Float64` rating in **[0, N − 1]**, where N is the number of levels |
+| `ai_match(text, prompt)` | Noul | `Float64` probability in **[0, 1]** that the prompt's statement is true |
+| `ai_choose(text, prompt, criteria)` | Choice | `String` containing the selected option's name |
+| `ai_score(text, prompt, criteria)` | Score | `Float64` rating in **[0, N − 1]**, where N is the number of levels |
 
 All are usable in `SELECT`, comparisons in `WHERE`, and `ORDER BY`.
 All arguments are SQL strings. Any SQL NULL argument produces SQL `NULL`
@@ -14,8 +15,8 @@ without validating that row's criteria or calling the API.
 
 ## Start GreptimeDB
 
-Jev is compiled and registered by the **default-enabled Cargo feature
-`ai_functions`**. Enable API evaluation separately in the server process:
+The functions are compiled and registered by the **default-enabled Cargo feature
+`ai_functions`**. Enable the Jev backend separately in the server process:
 
 ```sh
 export GREPTIMEDB_EXPERIMENTAL_JEV=true
@@ -54,7 +55,7 @@ FROM events
 WHERE occurred_at >= '2026-09-19T00:00:00Z'
   AND occurred_at <  '2026-09-20T00:00:00Z'
   AND service = 'payments'
-  AND jev(
+  AND ai_match(
     (message),
     'The event reports that a payment still failed after retries.'
   ) >= 0.8
@@ -65,7 +66,7 @@ To return the scores and rank matching events:
 
 ```sql
 SELECT occurred_at, message,
-       jev(message, 'The event reports that a payment still failed after retries.') AS score
+       ai_match(message, 'The event reports that a payment still failed after retries.') AS score
 FROM events
 WHERE occurred_at >= '2026-09-19T00:00:00Z'
   AND occurred_at <  '2026-09-20T00:00:00Z'
@@ -78,10 +79,6 @@ Both arguments are strings; larger scores indicate a stronger match.
 combine them explicitly, for example `concat(service, ': ', message)`.
 Any null argument produces SQL `NULL`, which `WHERE` excludes, without an API call.
 
-The former `jev(text, statement, threshold) -> Boolean` signature is replaced by
-this two-argument function. Migrate `WHERE jev(text, statement, 0.8)` to
-`WHERE jev(text, statement) >= 0.8` to preserve the inclusive threshold behavior.
-
 ### Classification (Choice)
 
 `criteria` is a JSON object with **1 to 255 options**. Each key is an option name;
@@ -91,7 +88,7 @@ or grouping:
 
 ```sql
 SELECT occurred_at, message,
-       jev_choice(message, 'Which team should handle this event?',
+       ai_choose(message, 'Which team should handle this event?',
                   '{"billing":"Payments, invoices, refunds","technical":"Bugs and outages","other":null}') AS team
 FROM events
 WHERE occurred_at >= '2026-09-19T00:00:00Z'
@@ -108,7 +105,7 @@ fall between levels. For three levels, the range is `[0, 2]`; a score such as
 
 ```sql
 SELECT occurred_at, message,
-       jev_score(message, 'How severe is this event?',
+       ai_score(message, 'How severe is this event?',
                  '["No impact to functionality","Degraded service with a workaround","Blocking issue with no workaround"]') AS severity
 FROM events
 WHERE occurred_at >= '2026-09-19T00:00:00Z'
@@ -149,7 +146,7 @@ API reference: <https://docs.typesafe.ai/api>
 
 The experimental MVP still needs the following controls before stabilization:
 
-- A process-wide concurrency limit shared by Jev invocations, such as a semaphore.
+- A process-wide concurrency limit shared by AI function invocations, such as a semaphore.
 - Bounded retries with exponential backoff for HTTP `429` and `529`, following
   TypeSafe's rate-limit guidance.
 - Request budgets and metrics for API calls, latency, retries, and rate-limit errors.
@@ -159,7 +156,7 @@ These are follow-up work, not guarantees provided by the current implementation.
 ## Validation
 
 Check both the default build (where all three functions are registered) and an isolated
-`common-function` build without default features. Jev's regular tests use a local
+`common-function` build without default features. The regular AI function tests use a local
 HTTP server and need no API key:
 
 ```sh
@@ -171,7 +168,7 @@ cargo nextest run -p common-function --no-default-features --features ai_functio
 The sqlness runner explicitly includes `ai_functions` when building its test binary:
 
 ```sh
-cargo sqlness bare -t jev
+cargo sqlness bare -t ai_functions
 ```
 
 If using `--bins-dir`, provide a binary built with `ai_functions` (included by
@@ -183,5 +180,5 @@ An opt-in test calls the real service on synthetic payment events:
 ```sh
 source ~/.zshrc
 GREPTIMEDB_EXPERIMENTAL_JEV=true cargo nextest run -p common-function \
-  -E 'test(test_jev_live)' --run-ignored ignored-only
+  -E 'test(test_ai_match_live)' --run-ignored ignored-only
 ```

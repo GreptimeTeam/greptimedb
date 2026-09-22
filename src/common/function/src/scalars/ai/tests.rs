@@ -37,8 +37,8 @@ impl MockServer {
         Self { endpoint, task }
     }
 
-    fn function<Q: JevQuestion>(&self) -> JevFunction<Q> {
-        JevFunction {
+    fn function<Q: AiQuestion>(&self) -> AiFunction<Q> {
+        AiFunction {
             enabled: true,
             api_key: Some("test-key".to_string()),
             endpoint: self.endpoint.clone(),
@@ -54,14 +54,14 @@ impl Drop for MockServer {
     }
 }
 
-fn context<Q: JevQuestion>(function: JevFunction<Q>) -> SessionContext {
+fn context<Q: AiQuestion>(function: AiFunction<Q>) -> SessionContext {
     let ctx = SessionContext::new_with_config(SessionConfig::new().with_target_partitions(1));
     ctx.register_udf(AsyncScalarUDF::new(Arc::new(function)).into_scalar_udf());
     ctx
 }
 
 #[tokio::test]
-async fn test_jev_sql_returns_and_filters_noul_probability() {
+async fn test_ai_match_sql_returns_and_filters_noul_probability() {
     let server = MockServer::start(Router::new().route(
         "/v1/systemone",
         post(
@@ -95,7 +95,7 @@ async fn test_jev_sql_returns_and_filters_noul_probability() {
     let events = "(VALUES (1, 'failed'), (2, 'boundary'), (3, 'recovered'), (4, NULL), (5, 'impossible'), (6, 'certain')) AS events(id, message)";
     let batches = ctx
         .sql(&format!(
-            "SELECT id FROM {events} WHERE jev((message), 'payment failed') >= 0.8 ORDER BY id"
+            "SELECT id FROM {events} WHERE ai_match((message), 'payment failed') >= 0.8 ORDER BY id"
         ))
         .await
         .unwrap()
@@ -111,7 +111,7 @@ async fn test_jev_sql_returns_and_filters_noul_probability() {
 
     let batches = ctx
         .sql(&format!(
-            "SELECT id, jev(message, 'payment failed') AS score FROM {events} ORDER BY score DESC NULLS LAST"
+            "SELECT id, ai_match(message, 'payment failed') AS score FROM {events} ORDER BY score DESC NULLS LAST"
         ))
         .await
         .unwrap()
@@ -137,14 +137,14 @@ async fn test_jev_sql_returns_and_filters_noul_probability() {
 }
 
 #[tokio::test]
-async fn test_jev_nulls_need_no_api_key() {
-    let ctx = context(JevFunction::<Noul> {
+async fn test_ai_match_nulls_need_no_api_key() {
+    let ctx = context(AiFunction::<Noul> {
         enabled: true,
         api_key: None,
         ..Default::default()
     });
     let batches = ctx
-        .sql("SELECT jev(NULL, 'condition') AS a, jev('text', NULL) AS b")
+        .sql("SELECT ai_match(NULL, 'condition') AS a, ai_match('text', NULL) AS b")
         .await
         .unwrap()
         .collect()
@@ -163,7 +163,7 @@ async fn test_jev_nulls_need_no_api_key() {
     );
 
     let error = ctx
-        .sql("SELECT jev('text', 'condition')")
+        .sql("SELECT ai_match('text', 'condition')")
         .await
         .unwrap()
         .collect()
@@ -171,13 +171,13 @@ async fn test_jev_nulls_need_no_api_key() {
         .unwrap_err();
     assert!(error.to_string().contains("JEV_API_KEY"), "{error}");
 
-    let ctx = context(JevFunction::<Noul> {
+    let ctx = context(AiFunction::<Noul> {
         enabled: false,
         api_key: None,
         ..Default::default()
     });
     let error = ctx
-        .sql("SELECT jev('text', 'condition')")
+        .sql("SELECT ai_match('text', 'condition')")
         .await
         .unwrap()
         .collect()
@@ -192,29 +192,37 @@ async fn test_jev_nulls_need_no_api_key() {
 }
 
 #[tokio::test]
-async fn test_jev_bad_api_responses_fail_the_query() {
+async fn test_ai_match_bad_api_responses_fail_the_query() {
     for (status, body, expected) in [
-        (StatusCode::TOO_MANY_REQUESTS, "{}", "jev request failed"),
-        (StatusCode::OK, "not json", "jev response is not valid JSON"),
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            "{}",
+            "ai_match request failed",
+        ),
+        (
+            StatusCode::OK,
+            "not json",
+            "ai_match response is not valid JSON",
+        ),
         (
             StatusCode::OK,
             r#"{"answers":{}}"#,
-            "jev response must contain",
+            "ai_match response must contain",
         ),
         (
             StatusCode::OK,
             r#"{"answers":{"matches":{"type":"noul","noul":1.1}}}"#,
-            "jev response must contain",
+            "ai_match response must contain",
         ),
         (
             StatusCode::OK,
             r#"{"answers":{"matches":{"type":"noul","noul":-0.1}}}"#,
-            "jev response must contain",
+            "ai_match response must contain",
         ),
         (
             StatusCode::OK,
             r#"{"answers":{"matches":{"type":"score","noul":0.9}}}"#,
-            "jev response must contain",
+            "ai_match response must contain",
         ),
     ] {
         let server = MockServer::start(
@@ -223,7 +231,7 @@ async fn test_jev_bad_api_responses_fail_the_query() {
         .await;
         let ctx = context(server.function::<Noul>());
         let error = ctx
-            .sql("SELECT jev('text', 'condition')")
+            .sql("SELECT ai_match('text', 'condition')")
             .await
             .unwrap()
             .collect()
@@ -234,7 +242,7 @@ async fn test_jev_bad_api_responses_fail_the_query() {
 }
 
 #[tokio::test]
-async fn test_jev_choice_returns_and_filters_supplied_labels() {
+async fn test_ai_choose_returns_and_filters_supplied_labels() {
     let server = MockServer::start(Router::new().route(
         "/v1/systemone",
         post(|Json(request): Json<Value>| async move {
@@ -267,7 +275,7 @@ async fn test_jev_choice_returns_and_filters_supplied_labels() {
     ) AS events(id, message, prompt, criteria)"#;
     let batches = ctx
         .sql(&format!(
-            "SELECT id, jev_choice(message, prompt, criteria) AS team FROM {events} ORDER BY id"
+            "SELECT id, ai_choose(message, prompt, criteria) AS team FROM {events} ORDER BY id"
         ))
         .await
         .unwrap()
@@ -291,7 +299,7 @@ async fn test_jev_choice_returns_and_filters_supplied_labels() {
     );
     let batches = ctx
         .sql(&format!(
-            "SELECT id FROM {events} WHERE jev_choice(message, prompt, criteria) = 'billing'"
+            "SELECT id FROM {events} WHERE ai_choose(message, prompt, criteria) = 'billing'"
         ))
         .await
         .unwrap()
@@ -302,7 +310,7 @@ async fn test_jev_choice_returns_and_filters_supplied_labels() {
 }
 
 #[tokio::test]
-async fn test_jev_score_returns_fractional_scores_on_each_rows_scale() {
+async fn test_ai_score_returns_fractional_scores_on_each_rows_scale() {
     let server = MockServer::start(Router::new().route(
         "/v1/systemone",
         post(|Json(request): Json<Value>| async move {
@@ -335,7 +343,7 @@ async fn test_jev_score_returns_fractional_scores_on_each_rows_scale() {
     let batches = ctx
         .sql(
             r#"
-        SELECT id, jev_score(message, 'Rate severity', criteria) AS severity
+        SELECT id, ai_score(message, 'Rate severity', criteria) AS severity
         FROM (VALUES
             (1, 'low', '["low", {"description":"medium"}, ["high"]]'),
             (2, 'fractional', '["low", "medium", "high"]'),
@@ -373,13 +381,13 @@ async fn test_jev_score_returns_fractional_scores_on_each_rows_scale() {
 }
 
 #[tokio::test]
-async fn test_jev_invalid_criteria_fail_before_requests() {
-    let choice_ctx = context(JevFunction::<Choice> {
+async fn test_ai_invalid_criteria_fail_before_requests() {
+    let choice_ctx = context(AiFunction::<Choice> {
         enabled: true,
         api_key: None,
         ..Default::default()
     });
-    let score_ctx = context(JevFunction::<Score> {
+    let score_ctx = context(AiFunction::<Score> {
         enabled: true,
         api_key: None,
         ..Default::default()
@@ -390,7 +398,7 @@ async fn test_jev_invalid_criteria_fail_before_requests() {
     for (ctx, name, valid, invalid) in [
         (
             &choice_ctx,
-            "jev_choice",
+            "ai_choose",
             r#"{"billing":null}"#,
             vec![
                 "not json".to_string(),
@@ -404,7 +412,7 @@ async fn test_jev_invalid_criteria_fail_before_requests() {
         ),
         (
             &score_ctx,
-            "jev_score",
+            "ai_score",
             r#"["low","high"]"#,
             vec![
                 "not json".to_string(),
@@ -433,49 +441,45 @@ async fn test_jev_invalid_criteria_fail_before_requests() {
 }
 
 #[tokio::test]
-async fn test_jev_choice_and_score_reject_invalid_answers() {
+async fn test_ai_choose_and_score_reject_invalid_answers() {
     for (name, criteria, answer) in [
         (
-            "jev_choice",
+            "ai_choose",
             r#"{"billing":null}"#,
             json!({"type":"score","choice":"billing"}),
         ),
         (
-            "jev_choice",
+            "ai_choose",
             r#"{"billing":null}"#,
             json!({"type":"choice","choice":"unknown"}),
         ),
         (
-            "jev_choice",
+            "ai_choose",
             r#"{"billing":null}"#,
             json!({"type":"choice","choice":1}),
         ),
+        ("ai_choose", r#"{"billing":null}"#, json!({"type":"choice"})),
         (
-            "jev_choice",
-            r#"{"billing":null}"#,
-            json!({"type":"choice"}),
-        ),
-        (
-            "jev_score",
+            "ai_score",
             r#"["low","medium","high"]"#,
             json!({"type":"noul","score":0.5}),
         ),
         (
-            "jev_score",
+            "ai_score",
             r#"["low","medium","high"]"#,
             json!({"type":"score","score":2.1}),
         ),
         (
-            "jev_score",
+            "ai_score",
             r#"["low","high"]"#,
             json!({"type":"score","score":-0.1}),
         ),
         (
-            "jev_score",
+            "ai_score",
             r#"["low","high"]"#,
             json!({"type":"score","score":"NaN"}),
         ),
-        ("jev_score", r#"["low","high"]"#, json!({"type":"score"})),
+        ("ai_score", r#"["low","high"]"#, json!({"type":"score"})),
     ] {
         let server = MockServer::start(Router::new().route(
             "/v1/systemone",
@@ -507,9 +511,9 @@ async fn test_jev_choice_and_score_reject_invalid_answers() {
 
 #[tokio::test]
 #[ignore = "calls the real Jev API; requires JEV_API_KEY and GREPTIMEDB_EXPERIMENTAL_JEV=true"]
-async fn test_jev_live() {
+async fn test_ai_match_live() {
     let ctx = SessionContext::new();
-    let function = FUNCTION_REGISTRY.get_function("jev").unwrap();
+    let function = FUNCTION_REGISTRY.get_function("ai_match").unwrap();
     ctx.register_udf(function.provide(FunctionContext::default()));
     let batches = ctx.sql(
         "SELECT id FROM (VALUES
@@ -517,7 +521,7 @@ async fn test_jev_live() {
             (2, 'Payment succeeded on the second retry; the payment is complete.'),
             (3, 'User logged in successfully.')
          ) AS events(id, message)
-         WHERE jev(message, 'The event reports that a payment still failed after retries.') >= 0.8
+         WHERE ai_match(message, 'The event reports that a payment still failed after retries.') >= 0.8
          ORDER BY id",
     ).await.unwrap().collect().await.unwrap();
     assert_batches_eq!(["+----+", "| id |", "+----+", "| 1  |", "+----+"], &batches);

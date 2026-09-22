@@ -12,13 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(feature = "ai_functions")]
+pub(crate) mod ai;
 pub mod anomaly;
 pub(crate) mod date;
 pub mod expression;
 #[cfg(feature = "geo")]
 pub mod geo;
-#[cfg(feature = "ai_functions")]
-pub(crate) mod jev;
 pub mod json;
 pub mod matches;
 pub mod matches_term;

@@ -36,16 +36,16 @@ use serde_json::{Map, Value, json};
 use crate::function_factory::ScalarFunctionFactory;
 use crate::function_registry::FunctionRegistry;
 
-/// Registers the experimental Noul, Choice, and Score SQL functions.
+/// Registers the experimental AI matching, classification, and rating functions.
 pub(crate) fn register(registry: &FunctionRegistry) {
-    JevFunction::<Noul>::register(registry);
-    JevFunction::<Choice>::register(registry);
-    JevFunction::<Score>::register(registry);
+    AiFunction::<Noul>::register(registry);
+    AiFunction::<Choice>::register(registry);
+    AiFunction::<Score>::register(registry);
 }
 
-/// Shared asynchronous execution for the three typed Jev questions.
+/// Shared asynchronous execution for AI functions using the Jev backend.
 #[derive(PartialEq, Eq, Hash)]
-struct JevFunction<Q> {
+struct AiFunction<Q> {
     signature: Signature,
     question: PhantomData<Q>,
     enabled: bool,
@@ -54,13 +54,13 @@ struct JevFunction<Q> {
     model: String,
 }
 
-struct JevRequest<'a, Q: JevQuestion> {
+struct AiRequest<'a, Q: AiQuestion> {
     text: &'a str,
     prompt: &'a str,
     criteria: Q::Criteria,
 }
 
-impl<Q: JevQuestion> JevFunction<Q> {
+impl<Q: AiQuestion> AiFunction<Q> {
     fn register(registry: &FunctionRegistry) {
         registry.register(ScalarFunctionFactory {
             name: Q::NAME.to_string(),
@@ -68,7 +68,7 @@ impl<Q: JevQuestion> JevFunction<Q> {
         });
     }
 
-    async fn evaluate(&self, client: &Client, request: JevRequest<'_, Q>) -> Result<ScalarValue> {
+    async fn evaluate(&self, client: &Client, request: AiRequest<'_, Q>) -> Result<ScalarValue> {
         let mut question = json!({ "type": Q::TYPE, "instructions": request.prompt });
         if Q::ARG_COUNT == 3 {
             question["criteria"] = json!(request.criteria);
@@ -103,7 +103,7 @@ impl<Q: JevQuestion> JevFunction<Q> {
         &self,
         arrays: &'a [ArrayRef],
         number_rows: usize,
-    ) -> Result<Vec<Option<JevRequest<'a, Q>>>> {
+    ) -> Result<Vec<Option<AiRequest<'a, Q>>>> {
         if arrays.len() != Q::ARG_COUNT {
             return exec_err!("{} requires {} arguments", Q::NAME, Q::ARG_COUNT);
         }
@@ -121,7 +121,7 @@ impl<Q: JevQuestion> JevFunction<Q> {
                     .collect();
                 values
                     .map(|values| {
-                        Ok(JevRequest {
+                        Ok(AiRequest {
                             text: values[0],
                             prompt: values[1],
                             criteria: Q::parse_criteria(&values[2..])?,
@@ -159,7 +159,7 @@ impl<Q: JevQuestion> JevFunction<Q> {
     }
 }
 
-impl<Q: JevQuestion> Default for JevFunction<Q> {
+impl<Q: AiQuestion> Default for AiFunction<Q> {
     fn default() -> Self {
         Self {
             // External model evaluations must not be constant-folded during planning.
@@ -177,10 +177,10 @@ impl<Q: JevQuestion> Default for JevFunction<Q> {
     }
 }
 
-impl<Q: JevQuestion> fmt::Debug for JevFunction<Q> {
+impl<Q: AiQuestion> fmt::Debug for AiFunction<Q> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Credentials must never appear in plans or diagnostic output.
-        f.debug_struct("JevFunction")
+        f.debug_struct("AiFunction")
             .field("name", &Q::NAME)
             .field("signature", &self.signature)
             .field("enabled", &self.enabled)
@@ -189,7 +189,7 @@ impl<Q: JevQuestion> fmt::Debug for JevFunction<Q> {
     }
 }
 
-impl<Q: JevQuestion> ScalarUDFImpl for JevFunction<Q> {
+impl<Q: AiQuestion> ScalarUDFImpl for AiFunction<Q> {
     fn name(&self) -> &str {
         Q::NAME
     }
@@ -208,7 +208,7 @@ impl<Q: JevQuestion> ScalarUDFImpl for JevFunction<Q> {
 }
 
 #[async_trait]
-impl<Q: JevQuestion> AsyncScalarUDFImpl for JevFunction<Q> {
+impl<Q: AiQuestion> AsyncScalarUDFImpl for AiFunction<Q> {
     async fn invoke_async_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
         let arrays = args
             .args
@@ -246,8 +246,8 @@ impl<Q: JevQuestion> AsyncScalarUDFImpl for JevFunction<Q> {
     }
 }
 
-/// The request criteria and scalar answer contract for a Jev question type.
-trait JevQuestion: fmt::Debug + Eq + Hash + Send + Sync + 'static {
+/// The request criteria and scalar answer contract for an AI question type.
+trait AiQuestion: fmt::Debug + Eq + Hash + Send + Sync + 'static {
     type Criteria: Serialize + Send + Sync;
 
     const NAME: &'static str;
@@ -262,10 +262,10 @@ trait JevQuestion: fmt::Debug + Eq + Hash + Send + Sync + 'static {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Noul;
 
-impl JevQuestion for Noul {
+impl AiQuestion for Noul {
     type Criteria = ();
 
-    const NAME: &'static str = "jev";
+    const NAME: &'static str = "ai_match";
     const TYPE: &'static str = "noul";
     const ARG_COUNT: usize = 2;
 
@@ -285,10 +285,10 @@ impl JevQuestion for Noul {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Choice;
 
-impl JevQuestion for Choice {
+impl AiQuestion for Choice {
     type Criteria = Map<String, Value>;
 
-    const NAME: &'static str = "jev_choice";
+    const NAME: &'static str = "ai_choose";
     const TYPE: &'static str = "choice";
     const ARG_COUNT: usize = 3;
 
@@ -298,7 +298,7 @@ impl JevQuestion for Choice {
 
     fn parse_criteria(args: &[&str]) -> Result<Self::Criteria> {
         let criteria: Value = serde_json::from_str(args[0])
-            .map_err(|e| exec_datafusion_err!("jev_choice criteria is not valid JSON: {e}"))?;
+            .map_err(|e| exec_datafusion_err!("ai_choose criteria is not valid JSON: {e}"))?;
         match criteria {
             Value::Object(options)
                 if (1..=255).contains(&options.len())
@@ -307,7 +307,7 @@ impl JevQuestion for Choice {
                 Ok(options)
             }
             _ => exec_err!(
-                "jev_choice criteria must be a JSON object with 1 to 255 options; descriptions must be strings, objects, arrays, or null"
+                "ai_choose criteria must be a JSON object with 1 to 255 options; descriptions must be strings, objects, arrays, or null"
             ),
         }
     }
@@ -317,7 +317,7 @@ impl JevQuestion for Choice {
             .as_str()
             .filter(|choice| criteria.contains_key(*choice))
             .ok_or_else(|| {
-                exec_datafusion_err!("jev_choice response must contain a choice from the criteria")
+                exec_datafusion_err!("ai_choose response must contain a choice from the criteria")
             })?;
         Ok(ScalarValue::Utf8(Some(choice.to_string())))
     }
@@ -326,10 +326,10 @@ impl JevQuestion for Choice {
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Score;
 
-impl JevQuestion for Score {
+impl AiQuestion for Score {
     type Criteria = Vec<Value>;
 
-    const NAME: &'static str = "jev_score";
+    const NAME: &'static str = "ai_score";
     const TYPE: &'static str = "score";
     const ARG_COUNT: usize = 3;
 
@@ -339,7 +339,7 @@ impl JevQuestion for Score {
 
     fn parse_criteria(args: &[&str]) -> Result<Self::Criteria> {
         let criteria: Value = serde_json::from_str(args[0])
-            .map_err(|e| exec_datafusion_err!("jev_score criteria is not valid JSON: {e}"))?;
+            .map_err(|e| exec_datafusion_err!("ai_score criteria is not valid JSON: {e}"))?;
         match criteria {
             Value::Array(levels)
                 if (2..=10).contains(&levels.len()) && levels.iter().all(is_description) =>
@@ -347,7 +347,7 @@ impl JevQuestion for Score {
                 Ok(levels)
             }
             _ => exec_err!(
-                "jev_score criteria must be a JSON array with 2 to 10 levels; descriptions must be strings, objects, or arrays"
+                "ai_score criteria must be a JSON array with 2 to 10 levels; descriptions must be strings, objects, or arrays"
             ),
         }
     }
