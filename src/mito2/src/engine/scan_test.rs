@@ -1405,7 +1405,7 @@ async fn check_two_phase_series_scan(
             let file_id = file.file_id().file_id();
             let mut writer = SstRangeIndexWriter::try_new(
                 metadata.clone(),
-                store.clone(),
+                store,
                 &range_index_path(region_id, file_id),
                 SstRangeIndexWriterOptions::default(),
             )

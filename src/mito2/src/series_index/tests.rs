@@ -14,7 +14,6 @@
 
 //! Behavioral coverage for series-index reconciliation.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,18 +52,11 @@ async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
-    prepare_region_with_id(env, timestamps, RegionId::new(1, 1)).await
-}
-
-pub(super) async fn prepare_region_with_id(
-    env: &mut TestEnv,
-    timestamps: &[i64],
-    region_id: RegionId,
-) -> (MitoEngine, MitoRegionRef) {
     let engine = env.create_engine(MitoConfig::default()).await;
     let metadata = Arc::new(sst_region_metadata_with_encoding(
         PrimaryKeyEncoding::Sparse,
     ));
+    let region_id = RegionId::new(1, 1);
     let mut request = CreateRequestBuilder::new().build();
     request.column_metadatas = metadata.column_metadatas.clone();
     request.primary_key = metadata.primary_key.clone();
@@ -327,18 +319,17 @@ async fn test_reconcile_restores_and_reuses_indexes() {
         store.delete(path).await.unwrap();
     }
 
-    // Reopening trusts catalog entries without checking the index files.
+    // Restore catalog entries even when their index files are missing.
     let restored = load_version_control(store, region.region_id, purger)
         .await
         .current();
     assert_eq!(first.range_indexes, restored.range_indexes);
     assert_eq!(first.index_buckets, restored.index_buckets);
-    assert_eq!(first.series_indexes.len(), restored.series_indexes.len());
+    assert_eq!(first.disk_usage(), restored.disk_usage());
     assert_eq!(
         first.series_indexes[&first_id].entry(),
         restored.series_indexes[&first_id].entry()
     );
-    assert_eq!(first.disk_usage(), restored.disk_usage());
 
     // Catalog changes are not reloaded, and missing index files are not repaired.
     for path in [
@@ -411,9 +402,9 @@ async fn test_reconcile_range_only_build_and_removal() {
     engine.stop().await.unwrap();
 }
 
-pub(super) struct FailingSeriesWriter {
-    pub(super) inner: oio::Writer,
-    pub(super) fail: bool,
+struct FailingSeriesWriter {
+    inner: oio::Writer,
+    fail: bool,
 }
 
 #[rstest::rstest]
@@ -467,7 +458,6 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
         crate::test_util::new_noop_file_purger(),
     );
 
-    let failed_series_publication = failure != "range-index.json";
     let failure = failure.to_string();
     let layer = MockLayerBuilder::default()
         .writer_factory(Arc::new(move |path, _, inner| {
@@ -487,24 +477,14 @@ async fn test_reconcile_replaces_whole_bucket_after_failure(#[case] failure: &st
             .await
             .is_err()
     );
-    assert_eq!(
-        failed_series_publication,
-        region
-            .series_index_version()
-            .series_indexes
-            .contains_key(&old_id)
-    );
+    assert!(Arc::ptr_eq(&previous, &region.series_index_version()));
     // Failed catalog publication may retire a completed replacement, never its predecessor.
     while let Ok(request) = receiver.try_recv() {
         assert_ne!(old_id, request.file_id.file_id());
     }
 
     let stats = test.reconcile(test.store.clone()).await.unwrap();
-    let expected_replacements = usize::from(failed_series_publication);
-    assert_eq!(
-        (expected_replacements, expected_replacements),
-        (stats.built_series, stats.removed_series)
-    );
+    assert_eq!((1, 1), (stats.built_series, stats.removed_series));
     let replacement = region.series_index_version();
     assert_eq!(1, replacement.series_indexes.len());
     assert!(!replacement.series_indexes.contains_key(&old_id));
@@ -548,7 +528,7 @@ impl mock::Write for FailingSeriesWriter {
 }
 
 #[tokio::test]
-async fn test_failed_series_build_leaves_no_published_indexes() {
+async fn test_failed_series_build_keeps_completed_sst_range_indexes() {
     let mut env = TestEnv::with_prefix("series-build-failure").await;
     let (engine, region) = prepare_region(&mut env).await;
     let (test, mut receiver) = IndexTest::new(region.clone());
@@ -574,9 +554,9 @@ async fn test_failed_series_build_leaves_no_published_indexes() {
         .flat_map(|level| level.files())
     {
         let path = range_index_path(region.region_id, file.file_id().file_id());
-        assert!(!store.exists(&path).await.unwrap());
+        assert!(store.exists(&path).await.unwrap());
     }
-    // A retry builds and publishes each index independently.
+    // A retry can rebuild and publish the complete snapshot.
     let stats = test.reconcile(store.clone()).await.unwrap();
     assert_eq!((4, 1), (stats.built_range, stats.built_series));
     engine.stop().await.unwrap();
@@ -618,14 +598,7 @@ async fn test_reconcile_publishes_after_region_version_changes() {
         assert_eq!(4, published.range_indexes.len());
         assert_eq!(1, published.series_indexes.len());
         let restored = load_version_control(store, region.region_id, purger).await;
-        assert_eq!(
-            published.range_indexes.keys().collect::<HashSet<_>>(),
-            restored
-                .current()
-                .range_indexes
-                .keys()
-                .collect::<HashSet<_>>()
-        );
+        assert_eq!(published.range_indexes, restored.current().range_indexes);
         let handle = published.series_indexes.values().next().unwrap();
         assert_eq!(
             handle.entry(),
@@ -647,11 +620,13 @@ async fn test_reconcile_cleans_up_after_region_drop() {
     let layer = MockLayerBuilder::default()
         .writer_factory(Arc::new(move |path, _, inner| {
             if path == catalog_path {
-                // Drop after series publication, while the first range catalog is written.
+                // Simulate drop cleanup after building indexes but before persisting the
+                // first catalog. Neither catalog exists yet, so deletion is a no-op.
                 target_region
                     .set_dropping(crate::region::RegionLeaderState::Writable)
                     .unwrap();
                 target_region.version_control.mark_dropped();
+                target_region.series_index_version_control.mark_dropped();
             }
             inner
         }))
@@ -669,24 +644,13 @@ async fn test_reconcile_cleans_up_after_region_drop() {
     let published = region.series_index_version();
     assert!(published.range_indexes.is_empty());
     assert!(published.series_indexes.is_empty());
-    let mut retired = Vec::new();
-    while let Ok(request) = receiver.try_recv() {
-        retired.push(request);
-    }
-    assert_eq!(1, retired.len());
-    let paths = retired
-        .iter()
-        .map(|request| series_index_path(request.file_id.region_id(), request.file_id.file_id()))
-        .collect::<Vec<_>>();
-    for request in retired {
-        test.purger.purge(request);
-    }
-    let task = test.purger.run(receiver);
+    let retired = receiver.try_recv().unwrap();
+    assert!(receiver.try_recv().is_err());
+    let series_path = series_index_path(region.region_id, retired.file_id.file_id());
+    test.purger.purge(retired);
     drop(test);
-    task.await;
-    for path in paths {
-        assert!(!store.exists(&path).await.unwrap());
-    }
+    super::purger::run_index_purge_task(0, store.clone(), receiver).await;
+    assert!(!store.exists(&series_path).await.unwrap());
     engine.stop().await.unwrap();
 }
 
@@ -697,6 +661,7 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
 
     use super::bucket::{group_files_into_series_buckets, plan_series_indexes};
     use super::builder::{build_range_index, build_series_index};
+    use super::purger::run_index_purge_task;
     use super::version::SeriesIndexVersion;
 
     for failure in ["series", "range", "range-index.json", "series-index.json"] {
@@ -741,10 +706,9 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
                 .unwrap();
             ranges.insert(entry.file_id, entry);
         }
-        let completed = build_series_index(store, &region, &version, bucket, entry)
+        let handle = build_series_index(store, &region, &version, bucket, entry, purger)
             .await
             .unwrap();
-        let handle = super::SeriesIndexFileHandle::new(region.region_id, completed, purger.clone());
         let reused_path = series_index_path(region.region_id, entry.index_uuid);
         region
             .series_index_version_control
@@ -783,81 +747,39 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
             "expected {failure} failure, got {result:?}; attempted series paths: {:?}",
             attempted.lock().unwrap()
         );
-        let snapshot = region.series_index_version();
-        for entry in snapshot.range_indexes.values() {
-            assert_eq!(
-                entry.file_size,
-                store
-                    .stat(&range_index_path(region.region_id, entry.file_id))
-                    .await
-                    .unwrap()
-                    .content_length()
-            );
-        }
-        for handle in snapshot.series_indexes.values() {
-            assert_eq!(
-                handle.entry().file_size,
-                store
-                    .stat(&series_index_path(
-                        region.region_id,
-                        handle.entry().index_uuid
-                    ))
-                    .await
-                    .unwrap()
-                    .content_length()
-            );
-        }
-        drop(snapshot);
-        let published_paths = region
-            .series_index_version()
-            .series_indexes
-            .keys()
-            .map(|id| series_index_path(region.region_id, *id))
-            .collect::<HashSet<_>>();
-        assert!(published_paths.contains(&reused_path));
+        assert!(Arc::ptr_eq(&previous, &region.series_index_version()));
+
         let completed = attempted
             .lock()
             .unwrap()
             .iter()
-            .take(if failure == "series" { 1 } else { usize::MAX })
+            .take(if failure.ends_with(".json") { 2 } else { 1 })
             .cloned()
             .collect::<HashSet<_>>();
-        let unpublished = completed
-            .difference(&published_paths)
-            .cloned()
-            .collect::<HashSet<_>>();
+        assert_eq!(
+            if failure.ends_with(".json") { 2 } else { 1 },
+            completed.len()
+        );
         let mut retired = HashSet::new();
-        let mut requests = Vec::new();
+        // Drain through the real purge task using a finite channel.
+        let (drain_purger, drain_receiver) = series_index_channel(store.clone());
         while let Ok(request) = receiver.try_recv() {
             let path = series_index_path(request.file_id.region_id(), request.file_id.file_id());
             assert!(store.exists(&path).await.unwrap());
             assert!(retired.insert(path));
-            requests.push(request);
-        }
-        assert_eq!(unpublished, retired);
-        let (drain_purger, drain_receiver) = series_index_channel(store.clone());
-        for request in requests {
             drain_purger.purge(request);
         }
-        let drain = drain_purger.run(drain_receiver);
+        assert_eq!(completed, retired);
         drop(drain_purger);
-        drain.await;
+        run_index_purge_task(0, store.clone(), drain_receiver).await;
         let attempted_paths = attempted.lock().unwrap().clone();
         for path in attempted_paths {
-            assert_eq!(
-                published_paths.contains(&path),
-                store.exists(&path).await.unwrap()
-            );
+            assert!(!store.exists(&path).await.unwrap());
         }
         assert!(store.exists(&reused_path).await.unwrap());
 
         let stats = test.reconcile(store.clone()).await.unwrap();
-        let expected = match failure {
-            "series" => 1,
-            "series-index.json" => 2,
-            _ => 0,
-        };
-        assert_eq!(expected, stats.built_series);
+        assert_eq!(if failure == "range" { 1 } else { 2 }, stats.built_series);
         let published = region.series_index_version();
         for handle in published.series_indexes.values() {
             assert!(
@@ -875,16 +797,13 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         region.series_index_version_control.publish(Arc::default());
         drop(published);
         drop(previous);
-        for path in published_paths {
-            assert!(store.exists(&path).await.unwrap());
-        }
         assert!(receiver.try_recv().is_err());
         engine.stop().await.unwrap();
     }
 }
 
 /// Waits for a background state change without relying on exact scheduling delays.
-pub(super) async fn wait_for(mut ready: impl FnMut() -> bool) {
+async fn wait_for(mut ready: impl FnMut() -> bool) {
     tokio::time::timeout(Duration::from_secs(10), async {
         while !ready() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -905,7 +824,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
     options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(100)));
     region.version_control.alter_options(options);
     let store = ObjectStore::new(Memory::default()).unwrap();
-    let purger = super::purger::IndexFilePurger::start(store.clone());
+    let (purger, receiver) = series_index_channel(store.clone());
     let state = Arc::new(super::task::SeriesIndexTaskState::new());
     let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(0));
     // A notification issued before the task starts must also trigger maintenance.
@@ -919,6 +838,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
         state.clone(),
         Duration::from_secs(100),
         purger,
+        receiver,
         Arc::default(),
         u64::MAX,
         Duration::from_secs(3600),
@@ -984,7 +904,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     )
     .await
     .unwrap();
-    let purger = super::purger::IndexFilePurger::start(store.clone());
+    let (purger, receiver) = series_index_channel(store.clone());
     let control = load_version_control(&store, region_id, &purger).await;
     let snapshot = control.current();
     assert_eq!(&entry, snapshot.series_indexes[&entry.index_uuid].entry());
@@ -997,6 +917,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         state,
         Duration::from_secs(100),
         purger,
+        receiver,
         Arc::default(),
         u64::MAX,
         Duration::from_secs(3600),

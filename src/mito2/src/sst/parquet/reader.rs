@@ -731,11 +731,6 @@ impl ParquetReaderBuilder {
                 partition_filter,
             },
             range_index_store,
-        )
-        .with_series_index_version(
-            self.series_index
-                .as_ref()
-                .map(|context| context.version.clone()),
         );
 
         metrics.build_cost += start.elapsed();

@@ -156,11 +156,10 @@ where
     }
 }
 
-pub(crate) async fn store_catalog<T: Serialize>(
-    store: &ObjectStore,
-    path: &str,
-    catalog: &T,
-) -> Result<()> {
+pub(crate) async fn store_catalog<T>(store: &ObjectStore, path: &str, catalog: &T) -> Result<()>
+where
+    T: Serialize,
+{
     let bytes = serde_json::to_vec_pretty(catalog).context(SerdeJsonSnafu)?;
     store
         .write(path, bytes)
@@ -188,7 +187,7 @@ pub(crate) async fn load_version_control(
     store: &ObjectStore,
     region_id: RegionId,
     purger: &IndexFilePurger,
-) -> std::sync::Arc<SeriesIndexVersionControl> {
+) -> SeriesIndexVersionControl {
     let range = load_catalog::<RangeIndexCatalog>(store, &range_catalog_path(region_id))
         .await
         .unwrap_or_default();
@@ -212,7 +211,7 @@ pub(crate) async fn load_version_control(
             })
             .collect(),
     );
-    let control = std::sync::Arc::new(SeriesIndexVersionControl::default());
+    let control = SeriesIndexVersionControl::default();
     control.publish(std::sync::Arc::new(version));
     control
 }
@@ -396,13 +395,6 @@ mod tests {
         )
         .await
         .unwrap();
-        store
-            .write(
-                &super::series_index_path(region_id, entry.index_uuid),
-                "index",
-            )
-            .await
-            .unwrap();
         let (purger, _receiver) = series_index_channel(store.clone());
         let current = load_version_control(&store, region_id, &purger)
             .await

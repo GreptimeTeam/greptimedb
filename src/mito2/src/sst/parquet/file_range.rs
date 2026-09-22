@@ -458,8 +458,6 @@ fn refine_primary_key_selection(
 
 /// Context shared by ranges of the same parquet SST.
 pub struct FileRangeContext {
-    /// Pins index files for lazy range-index reads after the scan builder is dropped.
-    _series_index_version: Option<Arc<crate::series_index::SeriesIndexVersion>>,
     /// Store for a range index registered in the scan's index snapshot.
     range_index_store: Option<ObjectStore>,
     /// Lazily opened range index shared by all ranges of this file.
@@ -480,20 +478,11 @@ impl FileRangeContext {
         range_index_store: Option<ObjectStore>,
     ) -> Self {
         Self {
-            _series_index_version: None,
             reader_builder,
             base,
             range_index_store,
             range_index_searcher: OnceCell::new(),
         }
-    }
-
-    pub(crate) fn with_series_index_version(
-        mut self,
-        version: Option<Arc<crate::series_index::SeriesIndexVersion>>,
-    ) -> Self {
-        self._series_index_version = version;
-        self
     }
 
     /// Opens the range index once, retaining the SST handle throughout its use.

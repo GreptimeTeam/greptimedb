@@ -21,6 +21,7 @@ use std::time::Duration;
 use common_telemetry::{info, warn};
 use object_store::ObjectStore;
 use tokio::sync::Notify;
+use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, MissedTickBehavior};
 
@@ -29,7 +30,7 @@ use crate::metrics::{
 };
 use crate::region::{RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::series_index::maintenance::reconcile_series_indexes;
-use crate::series_index::purger::IndexFilePurger;
+use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
 use crate::time_provider::TimeProviderRef;
 
 /// Shared lifecycle state for a worker's series-index task.
@@ -66,7 +67,7 @@ impl SeriesIndexTaskState {
     }
 }
 
-/// Starts worker maintenance on the compaction runtime.
+/// Starts both tasks on the compaction runtime, detaching purge and returning the maintenance handle.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_series_index_tasks(
     worker_id: u32,
@@ -75,12 +76,19 @@ pub(crate) fn spawn_series_index_tasks(
     state: Arc<SeriesIndexTaskState>,
     bucket_width: Duration,
     purger: IndexFilePurger,
+    purge_receiver: UnboundedReceiver<PurgeRequest>,
     disk_usage: Arc<AtomicU64>,
     max_size: u64,
     interval: Duration,
     time_provider: TimeProviderRef,
     enable_range_index: bool,
 ) -> JoinHandle<()> {
+    // Snapshots may retain senders after the worker stops; purge until all senders drop.
+    common_runtime::spawn_compact(run_index_purge_task(
+        worker_id,
+        store.clone(),
+        purge_receiver,
+    ));
     common_runtime::spawn_compact(async move {
         SeriesIndexTask {
             worker_id,
@@ -272,17 +280,8 @@ mod tests {
         engine.stop().await.unwrap();
     }
 
-    #[rstest::rstest]
-    #[case::complete(false)]
-    #[case::partial_publication(true)]
     #[tokio::test]
-    async fn test_shared_usage_skips_maintenance_and_allows_overshoot(
-        #[case] fail_range_catalog: bool,
-    ) {
-        use object_store::layers::mock::MockLayerBuilder;
-
-        use crate::series_index::tests::FailingSeriesWriter;
-
+    async fn test_shared_usage_skips_maintenance_and_allows_overshoot() {
         let mut env = TestEnv::with_prefix("series-approximate-usage").await;
         let (engine, region) = prepare_region(&mut env).await;
         let usage = Arc::new(AtomicU64::new(0));
@@ -291,7 +290,7 @@ mod tests {
             store: store.clone(),
             regions: Arc::new(RegionMap::default()),
             bucket_width: Duration::from_secs(100),
-            purger: IndexFilePurger::start(store.clone()),
+            purger: series_index_channel(store.clone()).0,
             disk_usage: usage.clone(),
             max_size: 1024,
             reported_usage: 0,
@@ -303,18 +302,6 @@ mod tests {
         };
         let mut task = make_task();
         task.regions.insert_region(region.clone());
-        if fail_range_catalog {
-            let layer = MockLayerBuilder::default()
-                .writer_factory(Arc::new(|path, _, inner| {
-                    Box::new(FailingSeriesWriter {
-                        inner,
-                        fail: path.ends_with("range-index.json"),
-                    })
-                }))
-                .build()
-                .unwrap();
-            task.store = store.clone().layer(layer);
-        }
         task.maintain().await;
         let bytes = region.series_index_version().disk_usage();
         assert!(
@@ -322,19 +309,9 @@ mod tests {
             "a started reconciliation may exceed the limit"
         );
         assert_eq!(bytes, usage.load(Ordering::Relaxed));
-        assert_eq!(
-            fail_range_catalog,
-            region.series_index_version().range_indexes.is_empty()
-        );
-
         // Another worker sees the same estimate and skips without creating coverage.
         let mut other_env = TestEnv::with_prefix("series-approximate-other").await;
-        let (other_engine, other_region) = crate::series_index::tests::prepare_region_with_id(
-            &mut other_env,
-            &[1000, 2000, 3000, 4000],
-            store_api::storage::RegionId::new(2, 1),
-        )
-        .await;
+        let (other_engine, other_region) = prepare_region(&mut other_env).await;
         let mut other = make_task();
         other.regions.insert_region(other_region.clone());
         other.max_size = bytes; // Exact equality also skips.

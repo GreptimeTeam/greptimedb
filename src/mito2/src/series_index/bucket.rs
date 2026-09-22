@@ -111,7 +111,6 @@ pub(crate) struct SeriesBucket {
 
 /// Next bucket coverage and the work required to publish it, computed without I/O.
 pub(crate) struct SeriesIndexPlan {
-    #[cfg(test)]
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
     pub(crate) builds: Vec<(SeriesBucket, SeriesIndexEntry)>,
     pub(crate) expired_index_ids: Vec<FileId>,
@@ -179,7 +178,6 @@ pub(crate) fn plan_series_indexes(
     }
     index_buckets.retain(|_, bucket| !bucket.index_ids.is_empty());
     SeriesIndexPlan {
-        #[cfg(test)]
         index_buckets,
         skipped_buckets: computed_buckets - builds.len(),
         builds,

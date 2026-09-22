@@ -57,19 +57,6 @@ impl Debug for IndexFilePurger {
 }
 
 impl IndexFilePurger {
-    pub(crate) fn start(store: ObjectStore) -> Self {
-        let (purger, receiver) = series_index_channel(store);
-        common_runtime::spawn_compact(purger.run(receiver));
-        purger
-    }
-
-    pub(crate) fn run(
-        &self,
-        receiver: UnboundedReceiver<PurgeRequest>,
-    ) -> impl std::future::Future<Output = ()> + Send + use<> {
-        run_index_purge_task(self.store.clone(), receiver)
-    }
-
     pub(crate) fn purge(&self, request: PurgeRequest) {
         if let Err(error) = self.sender.send(request) {
             let store = self.store.clone();
@@ -87,12 +74,16 @@ pub(crate) fn file_operation(index_type: IndexFileType, operation: &str, result:
 }
 
 /// Processes queued deletions once each, independently of periodic maintenance.
-async fn run_index_purge_task(store: ObjectStore, mut receiver: UnboundedReceiver<PurgeRequest>) {
-    info!("Start series-index purge task");
+pub(crate) async fn run_index_purge_task(
+    worker_id: u32,
+    store: ObjectStore,
+    mut receiver: UnboundedReceiver<PurgeRequest>,
+) {
+    info!("Start series-index purge task, worker: {worker_id}");
     while let Some(request) = receiver.recv().await {
         purge_file(&store, request).await;
     }
-    info!("Stop series-index purge task");
+    info!("Stop series-index purge task, worker: {worker_id}");
 }
 
 async fn purge_file(store: &ObjectStore, request: PurgeRequest) {
@@ -143,7 +134,7 @@ mod tests {
         drop(purger);
         tokio::time::timeout(
             Duration::from_secs(10),
-            run_index_purge_task(store.clone(), receiver),
+            run_index_purge_task(0, store.clone(), receiver),
         )
         .await
         .unwrap();

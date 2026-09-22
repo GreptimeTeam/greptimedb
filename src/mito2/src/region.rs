@@ -153,7 +153,7 @@ pub struct MitoRegion {
     /// We MUST update the version control inside the write lock of the region manifest manager.
     pub(crate) version_control: VersionControlRef,
     /// Snapshot controller for range and series indexes.
-    pub(crate) series_index_version_control: Arc<SeriesIndexVersionControl>,
+    pub(crate) series_index_version_control: SeriesIndexVersionControl,
     /// Store containing the region's series indexes.
     pub(crate) series_index_store: Option<ObjectStore>,
     /// SSTs accessor for this region.

@@ -79,7 +79,9 @@ use crate::request::{
     SenderDdlRequest, SenderWriteRequest, WorkerRequest, WorkerRequestWithTime,
 };
 use crate::schedule::scheduler::{LocalScheduler, SchedulerRef};
-use crate::series_index::{IndexFilePurger, SeriesIndexTaskState, spawn_series_index_tasks};
+use crate::series_index::{
+    IndexFilePurger, SeriesIndexTaskState, series_index_channel, spawn_series_index_tasks,
+};
 use crate::sst::file::RegionFileId;
 use crate::sst::file_ref::FileReferenceManagerRef;
 use crate::sst::index::IndexBuildScheduler;
@@ -607,13 +609,14 @@ impl<S: LogStore> WorkerStarter<S> {
             .series_index_store
             .as_ref()
             .map(|_| Arc::new(SeriesIndexTaskState::new()));
-        let series_index_purger = self.series_index_store.clone().map(IndexFilePurger::start);
+        let mut series_index_purger = None;
         let series_index_handle = self
             .series_index_store
             .clone()
             .zip(series_index_task_state.clone())
-            .zip(series_index_purger.clone())
-            .map(|((store, state), purger)| {
+            .map(|(store, state)| {
+                let (purger, purge_receiver) = series_index_channel(store.clone());
+                series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
                     self.id,
                     store,
@@ -621,6 +624,7 @@ impl<S: LogStore> WorkerStarter<S> {
                     state,
                     self.config.experimental_series_index_bucket_width,
                     purger,
+                    purge_receiver,
                     self.series_index_disk_usage.clone(),
                     self.config.experimental_series_index_max_size.as_bytes(),
                     self.config.experimental_series_index_maintenance_interval,

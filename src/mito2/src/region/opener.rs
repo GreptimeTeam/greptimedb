@@ -218,7 +218,7 @@ impl RegionOpener {
         self
     }
 
-    /// Sets the worker's series-index purger.
+    /// Sets the purger shared with the worker's series-index maintenance task.
     pub(crate) fn series_index_purger(mut self, purger: Option<IndexFilePurger>) -> Self {
         self.series_index_purger = purger;
         self
@@ -456,7 +456,6 @@ impl RegionOpener {
                 self.cache_manager,
                 self.file_ref_manager.clone(),
                 self.series_index_store
-                    .clone()
                     .map(|store| RangeIndexDeleter::new(store, region_id)),
             ),
             provider,

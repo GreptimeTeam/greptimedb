@@ -14,7 +14,7 @@
 
 //! Worker-owned series-index reconciliation and publication.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,26 +25,32 @@ use store_api::storage::RegionId;
 use crate::error::Result;
 use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTAL};
 use crate::read::series_candidate::is_sparse_metric_metadata;
+use crate::region::version::VersionRef;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionRoleState};
 use crate::series_index::bucket::{
     group_files_into_series_buckets, plan_series_indexes, rounded_bucket_width,
 };
 use crate::series_index::builder::{build_range_index, build_series_index};
 use crate::series_index::catalog::{
-    RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path, range_index_path,
+    RangeIndexCatalog, SeriesIndexCatalog, delete_catalogs, range_catalog_path,
     series_catalog_path, store_catalog,
 };
 use crate::series_index::purger::IndexFilePurger;
-use crate::series_index::version::{
-    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
-};
+use crate::series_index::version::{SeriesIndexFileHandle, SeriesIndexVersion};
 
-/// Failed or cancelled publications retire only their completed output.
-struct UnpublishedFile(Option<SeriesIndexFileHandle>);
+/// Retires newly completed series files unless their snapshot is published.
+#[derive(Default)]
+struct UnpublishedSeriesFiles(Vec<SeriesIndexFileHandle>);
 
-impl Drop for UnpublishedFile {
+impl UnpublishedSeriesFiles {
+    fn disarm(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for UnpublishedSeriesFiles {
     fn drop(&mut self) {
-        if let Some(handle) = &self.0 {
+        for handle in &self.0 {
             handle.mark_deleted();
         }
     }
@@ -67,7 +73,7 @@ impl ReconcileStats {
     }
 }
 
-/// Reconciles one captured SST snapshot. Each catalog is published independently.
+/// Reconciles indexes for one region snapshot, persists catalogs, then atomically publishes it.
 pub(crate) async fn reconcile_series_indexes(
     worker_id: u32,
     store: ObjectStore,
@@ -77,60 +83,89 @@ pub(crate) async fn reconcile_series_indexes(
     purger: IndexFilePurger,
     enable_range_index: bool,
 ) -> Result<ReconcileStats> {
-    let start = Instant::now();
-    let result = reconcile(
+    let total_start = Instant::now();
+    // Use this snapshot throughout reconciliation, even if the region version advances.
+    let version = region.version_control.current().version;
+    if !is_sparse_metric_metadata(&version.metadata) {
+        SERIES_INDEX_RECONCILE_TOTAL
+            .with_label_values(&["noop"])
+            .inc();
+        return Ok(ReconcileStats::default());
+    }
+    let build_start = Instant::now();
+    let mut unpublished = UnpublishedSeriesFiles::default();
+    let (next, mut stats) = build_index_version(
+        worker_id,
         &store,
         &region,
+        &version,
         requested_bucket_width,
         now_ms,
         &purger,
+        &mut unpublished,
         enable_range_index,
     )
+    .await?;
+    SERIES_INDEX_RECONCILE_ELAPSED
+        .with_label_values(&["build"])
+        .observe(build_start.elapsed().as_secs_f64());
+    // Persist changed catalogs before making the new snapshot visible to readers.
+    let publish_result: Result<()> = async {
+        if let Some(next) = next {
+            persist_index_catalogs(&store, region.region_id, &next, &stats).await?;
+            publish_index_version(&region, Arc::new(next));
+            unpublished.disarm();
+        }
+        Ok(())
+    }
     .await;
-    // Drop may begin while a catalog write is in flight.
-    let dropping = region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping);
-    if dropping {
+    // Drop may have cleaned up while catalogs were being written, even if a write failed.
+    // If dropping starts after this check, the normal drop path cleans up our publication.
+    // This assumes the region ID is not reopened or replaced during cleanup.
+    if region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping) {
         delete_catalogs(&store, region.region_id).await;
         region.series_index_version_control.mark_dropped();
+        stats = ReconcileStats::default();
     }
-    let stats = if dropping {
-        result.map(|_| ReconcileStats::default())
-    } else {
-        result
-    }?;
-    debug!(
-        "Reconciled {} source SSTs in {} buckets, skipped {} buckets",
-        stats.source_files, stats.computed_buckets, stats.skipped_buckets
-    );
+    publish_result?;
+    let result = if stats.changed() { "changed" } else { "noop" };
+    SERIES_INDEX_RECONCILE_TOTAL
+        .with_label_values(&[result])
+        .inc();
     SERIES_INDEX_RECONCILE_ELAPSED
         .with_label_values(&["total"])
-        .observe(start.elapsed().as_secs_f64());
-    SERIES_INDEX_RECONCILE_TOTAL
-        .with_label_values(&[if stats.changed() { "changed" } else { "noop" }])
-        .inc();
+        .observe(total_start.elapsed().as_secs_f64());
     if stats.changed() {
         info!(
-            "Reconciled series indexes, worker: {worker_id}, region: {}, elapsed: {:?}, stats: {:?}",
+            "Reconciled series-index snapshot, worker: {worker_id}, region: {}, elapsed: {:?}, stats: {:?}",
             region.region_id,
-            start.elapsed(),
+            total_start.elapsed(),
             stats
+        );
+    } else {
+        debug!(
+            "Series-index reconciliation made no changes, worker: {worker_id}, region: {}",
+            region.region_id
         );
     }
     Ok(stats)
 }
 
-async fn reconcile(
+/// Builds a changed snapshot, retaining reusable indexes and removing obsolete coverage.
+/// Returns `None` when no range or series indexes were added or removed.
+#[allow(clippy::too_many_arguments)]
+async fn build_index_version(
+    worker_id: u32,
     store: &ObjectStore,
     region: &MitoRegionRef,
+    version: &VersionRef,
     requested_bucket_width: Duration,
     now_ms: i64,
     purger: &IndexFilePurger,
+    unpublished: &mut UnpublishedSeriesFiles,
     enable_range_index: bool,
-) -> Result<ReconcileStats> {
-    let version = region.version_control.current().version;
-    if !is_sparse_metric_metadata(&version.metadata) {
-        return Ok(ReconcileStats::default());
-    }
+) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
+    let mut stats = ReconcileStats::default();
     let files = version
         .ssts
         .levels()
@@ -138,179 +173,162 @@ async fn reconcile(
         .flat_map(|level| level.files())
         .cloned()
         .collect::<Vec<_>>();
+    stats.source_files = files.len();
     let visible = files
         .iter()
         .map(|file| file.file_id().file_id())
         .collect::<HashSet<_>>();
     let current = region.series_index_version();
-    let buckets = version
-        .compaction_time_window
-        .and_then(|window| {
-            rounded_bucket_width(requested_bucket_width, window).map(|width| {
+    // The SST purger deletes companion range files after final handle release. Prune
+    // metadata here using the captured SST snapshot, independently of physical deletion;
+    // a later region-version change is picked up by the next reconciliation.
+    stats.removed_range = current
+        .range_indexes
+        .keys()
+        .filter(|id| !visible.contains(id))
+        .count();
+    let buckets = match version.compaction_time_window {
+        Some(window) => rounded_bucket_width(requested_bucket_width, window)
+            // Successful rounding guarantees the window fits in i64; subsecond windows
+            // use the same one-second minimum as rounded_bucket_width.
+            .map(|width| {
                 group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1))
             })
-        })
-        .unwrap_or_default();
+            .unwrap_or_default(),
+        None => {
+            debug!(
+                "Deferring series indexes without compaction window, worker: {worker_id}, region: {}",
+                region.region_id
+            );
+            Vec::new()
+        }
+    };
     let plan = plan_series_indexes(
         buckets,
         current.index_buckets.clone(),
         version.options.ttl,
         now_ms,
     );
-    let mut stats = ReconcileStats {
-        source_files: files.len(),
-        computed_buckets: plan.computed_buckets,
-        skipped_buckets: plan.skipped_buckets,
-        ..Default::default()
-    };
-    let ranges: HashMap<_, _> = current
-        .range_indexes
+    stats.computed_buckets = plan.computed_buckets;
+    stats.skipped_buckets = plan.skipped_buckets;
+    if plan.builds.is_empty()
+        && plan.expired_index_ids.is_empty()
+        && stats.removed_range == 0
+        && (!enable_range_index || current.range_indexes.len() == visible.len())
+    {
+        return Ok((None, stats));
+    }
+    let mut range_indexes = current.range_indexes.clone();
+    range_indexes.retain(|file_id, _| visible.contains(file_id));
+    let mut series_indexes = current.series_indexes.clone();
+    for id in plan
+        .expired_index_ids
         .iter()
-        .filter(|(id, _)| visible.contains(id))
-        .map(|(id, entry)| (*id, *entry))
-        .collect();
-    stats.removed_range = current.range_indexes.len() - ranges.len();
-    if stats.removed_range > 0 {
-        publish_catalog(
-            store,
-            region.region_id,
-            &region.series_index_version_control,
-            SeriesIndexVersion::new(ranges, current.series_indexes.clone()),
-            false,
-        )
-        .await?;
+        .chain(&plan.superseded_index_ids)
+    {
+        series_indexes.remove(id);
     }
-    if !plan.expired_index_ids.is_empty() {
-        let current = region.series_index_version();
-        let mut series = current.series_indexes.clone();
-        series.retain(|id, _| !plan.expired_index_ids.contains(id));
-        stats.removed_series += current.series_indexes.len() - series.len();
-        publish_catalog(
-            store,
-            region.region_id,
-            &region.series_index_version_control,
-            SeriesIndexVersion::new(current.range_indexes.clone(), series),
-            true,
-        )
-        .await?;
-    }
-    drop(current);
     for (bucket, expected) in plan.builds {
-        if region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping) {
-            break;
+        // Complete companion indexes independently so a failed series build preserves them.
+        for file in &bucket.files {
+            if enable_range_index
+                && !range_indexes.contains_key(&file.file_id().file_id())
+                && let Some(entry) = build_range_index(store, region, version, file.clone()).await?
+            {
+                stats.built_range += 1;
+                range_indexes.insert(entry.file_id, entry);
+            }
         }
-        let current = region.series_index_version();
-        let replaced = current
-            .series_indexes
-            .iter()
-            .filter(|(id, handle)| {
-                plan.superseded_index_ids.contains(id)
-                    && handle.entry().bucket_start < expected.bucket_end
-                    && expected.bucket_start < handle.entry().bucket_end
-            })
-            .map(|(id, _)| *id)
-            .collect::<Vec<_>>();
-        drop(current);
-        let entry = build_series_index(store, region, &version, &bucket, &expected).await?;
-        let handle = SeriesIndexFileHandle::new(region.region_id, entry, purger.clone());
-        let mut unpublished = UnpublishedFile(Some(handle.clone()));
-        let current = region.series_index_version();
-        let mut series = current.series_indexes.clone();
-        series.retain(|id, _| !replaced.contains(id));
-        stats.removed_series += current.series_indexes.len() - series.len();
-        series.insert(expected.index_uuid, handle);
-        publish_catalog(
-            store,
-            region.region_id,
-            &region.series_index_version_control,
-            SeriesIndexVersion::new(current.range_indexes.clone(), series),
-            true,
-        )
-        .await?;
-        unpublished.0 = None;
+        let series_handle =
+            build_series_index(store, region, version, &bucket, &expected, purger).await?;
+        unpublished.0.push(series_handle.clone());
         stats.built_series += 1;
+        series_indexes.insert(expected.index_uuid, series_handle);
     }
+    // Cover SSTs outside planned aggregate builds, including skipped buckets.
     if enable_range_index {
         for file in files {
-            if region.state() == RegionRoleState::Leader(RegionLeaderState::Dropping) {
-                break;
-            }
-            let id = file.file_id().file_id();
-            if region
-                .series_index_version()
-                .range_indexes
-                .contains_key(&id)
-            {
+            let file_id = file.file_id().file_id();
+            if range_indexes.contains_key(&file_id) {
                 continue;
             }
-            let Some(entry) = build_range_index(store, region, &version, file).await? else {
-                continue;
-            };
-            let current = region.series_index_version();
-            let mut ranges = current.range_indexes.clone();
-            ranges.insert(id, entry);
-            if let Err(error) = publish_catalog(
-                store,
-                region.region_id,
-                &region.series_index_version_control,
-                SeriesIndexVersion::new(ranges, current.series_indexes.clone()),
-                false,
-            )
-            .await
-            {
-                let path = range_index_path(region.region_id, id);
-                if let Err(cleanup_error) = store.delete(&path).await {
-                    common_telemetry::warn!(cleanup_error; "Failed to remove unpublished range index, path: {path}");
-                }
-                return Err(error);
+            if let Some(entry) = build_range_index(store, region, version, file).await? {
+                stats.built_range += 1;
+                range_indexes.insert(entry.file_id, entry);
             }
-            stats.built_range += 1;
         }
     }
-    Ok(stats)
+    stats.removed_series = current
+        .series_indexes
+        .keys()
+        .filter(|id| !series_indexes.contains_key(id))
+        .count();
+    // Bucket reconciliation is speculative until indexes change. Recompute its coverage
+    // next time rather than replacing the published snapshot on a no-op pass.
+    if !stats.changed() {
+        return Ok((None, stats));
+    }
+    let next = SeriesIndexVersion {
+        range_indexes,
+        series_indexes,
+        index_buckets: plan.index_buckets,
+    };
+    Ok((Some(next), stats))
 }
 
-/// Publishes each catalog before making its coverage visible to readers.
-async fn publish_catalog(
+/// Writes changed catalogs in a stable order; the two writes are not atomic together.
+async fn persist_index_catalogs(
     store: &ObjectStore,
     region_id: RegionId,
-    control: &SeriesIndexVersionControl,
-    next: SeriesIndexVersion,
-    series: bool,
+    next: &SeriesIndexVersion,
+    stats: &ReconcileStats,
 ) -> Result<()> {
-    if series {
-        let mut indexes = next
-            .series_indexes
-            .values()
-            .map(|handle| handle.entry().clone())
-            .collect::<Vec<_>>();
-        indexes.sort_by(|left, right| {
-            (left.bucket_start, left.index_uuid.as_bytes())
-                .cmp(&(right.bucket_start, right.index_uuid.as_bytes()))
-        });
-        store_catalog(
-            store,
-            &series_catalog_path(region_id),
-            &SeriesIndexCatalog { indexes },
-        )
-        .await?;
-    } else {
-        let mut indexes = next.range_indexes.values().copied().collect::<Vec<_>>();
-        indexes
+    if stats.built_range + stats.removed_range > 0 {
+        let mut range_entries = next.range_indexes.values().copied().collect::<Vec<_>>();
+        range_entries
             .sort_unstable_by(|left, right| left.file_id.as_bytes().cmp(right.file_id.as_bytes()));
         store_catalog(
             store,
             &range_catalog_path(region_id),
-            &RangeIndexCatalog { indexes },
+            &RangeIndexCatalog {
+                indexes: range_entries,
+            },
         )
         .await?;
     }
-    let next = Arc::new(next);
-    let previous = control.publish(next.clone());
+    if stats.built_series + stats.removed_series > 0 {
+        let mut series_entries = next
+            .series_indexes
+            .values()
+            .map(|handle| handle.entry().clone())
+            .collect::<Vec<_>>();
+        series_entries.sort_unstable_by_key(|entry| {
+            (
+                entry.bucket_start,
+                entry.bucket_end,
+                entry.min_file_sequence,
+                entry.max_file_sequence,
+            )
+        });
+        store_catalog(
+            store,
+            &series_catalog_path(region_id),
+            &SeriesIndexCatalog {
+                indexes: series_entries,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Publishes the snapshot and retires series files absent from the new version.
+fn publish_index_version(region: &MitoRegionRef, next: Arc<SeriesIndexVersion>) {
+    let previous = region.series_index_version_control.publish(next.clone());
     for (id, handle) in &previous.series_indexes {
         if !next.series_indexes.contains_key(id) {
+            // Purge only after readers release their retained handles.
             handle.mark_deleted();
         }
     }
-    Ok(())
 }
