@@ -18,7 +18,7 @@ use api::helper::to_pb_time_unit;
 use api::v1::region::region_request::Body as RegionRequestBody;
 use api::v1::region::{
     BuildIndexRequest, CompactRequest, CompactionTimeRange, FlushRequest, RegionRequestHeader,
-    TruncateRequest, Unflushed, truncate_request,
+    TruncateRequest, Unflushed, build_index_request, truncate_request,
 };
 use catalog::CatalogManagerRef;
 use common_catalog::build_db_string;
@@ -107,6 +107,30 @@ impl Requester {
         request: BuildIndexTableRequest,
         ctx: QueryContextRef,
     ) -> Result<AffectedRows> {
+        if matches!(
+            request.options,
+            Some(build_index_request::Options::SeriesIndex(_))
+        ) {
+            let table = self
+                .catalog_manager
+                .table(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                    None,
+                )
+                .await
+                .context(CatalogSnafu)?;
+            let table = table.with_context(|| TableNotFoundSnafu {
+                table_name: common_catalog::format_full_table_name(
+                    &request.catalog_name,
+                    &request.schema_name,
+                    &request.table_name,
+                ),
+            })?;
+            let info = table.table_info();
+            ensure_build_series_index_supported(&info.meta.engine, info.is_physical_table())?;
+        }
         let partitions = &self
             .get_table_partition_info(
                 &request.catalog_name,
@@ -405,6 +429,16 @@ impl Requester {
     }
 }
 
+fn ensure_build_series_index_supported(engine: &str, is_physical_table: bool) -> Result<()> {
+    ensure!(
+        engine == METRIC_ENGINE && is_physical_table,
+        NotSupportedSnafu {
+            feat: "building series indexes requires a physical metric table",
+        }
+    );
+    Ok(())
+}
+
 fn ensure_discard_unflushed_supported(engine: &str, is_physical_table: bool) -> Result<()> {
     ensure!(
         engine != METRIC_ENGINE || is_physical_table,
@@ -422,6 +456,14 @@ mod tests {
     use common_time::range::TimestampRange;
 
     use super::*;
+
+    #[test]
+    fn test_build_series_index_requires_physical_metric_table() {
+        ensure_build_series_index_supported(METRIC_ENGINE, true).unwrap();
+        assert!(ensure_build_series_index_supported(METRIC_ENGINE, false).is_err());
+        assert!(ensure_build_series_index_supported("mito", false).is_err());
+        assert!(ensure_build_series_index_supported("mito", true).is_err());
+    }
 
     #[test]
     fn test_to_pb_compaction_time_range_normalizes_mixed_units() {

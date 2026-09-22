@@ -963,7 +963,8 @@ async fn test_build_series_index_region_request(#[case] enabled: bool) {
         experimental_series_index_maintenance_interval: Duration::from_secs(3600),
         ..Default::default()
     };
-    let (engine, region) = prepare_region_with_config(&mut env, &[1000, 2000], config).await;
+    let (engine, region) =
+        prepare_region_with_config(&mut env, &[1000, 2000, 3000, 4000], config).await;
     for _ in 0..2 {
         let result = engine
             .handle_request(

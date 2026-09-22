@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use api::v1::region::build_index_request;
 use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
 use common_macro::admin_fn;
@@ -39,6 +40,45 @@ pub(crate) async fn build_index(
     query_ctx: &QueryContextRef,
     params: &[ValueRef<'_>],
 ) -> Result<Value> {
+    build_index_impl(
+        table_mutation_handler,
+        query_ctx,
+        params,
+        "build_index",
+        None,
+    )
+    .await
+}
+
+/// Reconciles series indexes on every physical data-region leader and waits for publication.
+#[admin_fn(
+    name = BuildSeriesIndexFunction,
+    display_name = build_series_index,
+    sig_fn = build_index_signature,
+    ret = uint64
+)]
+pub(crate) async fn build_series_index(
+    table_mutation_handler: &TableMutationHandlerRef,
+    query_ctx: &QueryContextRef,
+    params: &[ValueRef<'_>],
+) -> Result<Value> {
+    build_index_impl(
+        table_mutation_handler,
+        query_ctx,
+        params,
+        "build_series_index",
+        Some(build_index_request::Options::SeriesIndex(Default::default())),
+    )
+    .await
+}
+
+async fn build_index_impl(
+    table_mutation_handler: &TableMutationHandlerRef,
+    query_ctx: &QueryContextRef,
+    params: &[ValueRef<'_>],
+    function: &str,
+    options: Option<build_index_request::Options>,
+) -> Result<Value> {
     ensure!(
         params.len() == 1,
         InvalidFuncArgsSnafu {
@@ -51,7 +91,7 @@ pub(crate) async fn build_index(
 
     let ValueRef::String(table_name) = params[0] else {
         return UnsupportedInputDataTypeSnafu {
-            function: "build_index",
+            function,
             datatypes: params.iter().map(|v| v.data_type()).collect::<Vec<_>>(),
         }
         .fail();
@@ -64,7 +104,7 @@ pub(crate) async fn build_index(
     let affected_rows = table_mutation_handler
         .build_index(
             BuildIndexTableRequest {
-                options: None,
+                options,
                 catalog_name,
                 schema_name,
                 table_name,
@@ -78,4 +118,46 @@ pub(crate) async fn build_index(
 
 fn build_index_signature() -> Signature {
     Signature::uniform(1, vec![ArrowDataType::Utf8], Volatility::Immutable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::function::FunctionContext;
+
+    #[tokio::test]
+    async fn test_build_series_index_arguments() {
+        let ctx = FunctionContext::mock();
+        let handler = ctx.state.table_mutation_handler.as_ref().unwrap();
+        for params in [
+            vec![],
+            vec![ValueRef::Int32(1)],
+            vec![ValueRef::Null],
+            vec![ValueRef::String("a"), ValueRef::String("b")],
+        ] {
+            assert!(
+                build_index_impl(
+                    handler,
+                    &ctx.query_ctx,
+                    &params,
+                    "build_series_index",
+                    Some(build_index_request::Options::SeriesIndex(Default::default()))
+                )
+                .await
+                .is_err()
+            );
+        }
+        assert_eq!(
+            Value::UInt64(42),
+            build_index_impl(
+                handler,
+                &ctx.query_ctx,
+                &[ValueRef::String("greptime.public.test")],
+                "build_series_index",
+                Some(build_index_request::Options::SeriesIndex(Default::default())),
+            )
+            .await
+            .unwrap()
+        );
+    }
 }

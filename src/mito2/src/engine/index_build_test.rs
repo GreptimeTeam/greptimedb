@@ -1919,3 +1919,38 @@ async fn test_index_build_type_compact_abort_race() {
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 }
+
+#[tokio::test]
+async fn test_build_series_index_rejects_non_metric_region() {
+    let mut env = TestEnv::with_prefix("series-unsupported-schema").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+                    Default::default(),
+                )),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("sparse metric metadata"),
+        "{error}"
+    );
+    engine.stop().await.unwrap();
+}

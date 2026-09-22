@@ -463,6 +463,10 @@ mod tests {
             time_provider: Arc::new(crate::time_provider::StdTimeProvider),
             enable_range_index: true,
         };
+        assert_eq!(
+            role == RegionRoleState::Leader(RegionLeaderState::Writable),
+            task.validate_manual_region(&region).is_ok(),
+        );
         task.maintain().await;
         assert_eq!(
             builds,

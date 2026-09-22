@@ -102,19 +102,22 @@ impl<S> RegionWorkerLoop<S> {
         req: RegionBuildIndexRequest,
         sender: OptionOutputTx,
     ) {
-        if let Some(build_index_request::Options::SeriesIndex(_)) = req.options {
-            self.handle_build_series_index_request(region_id, sender);
-            return;
+        match req.options {
+            Some(build_index_request::Options::SeriesIndex(_)) => {
+                self.handle_build_series_index_request(region_id, sender);
+            }
+            None | Some(build_index_request::Options::SstIndex(_)) => {
+                self.handle_rebuild_index(
+                    BuildIndexRequest {
+                        region_id,
+                        build_type: IndexBuildType::Manual,
+                        file_metas: Vec::new(),
+                    },
+                    sender,
+                )
+                .await;
+            }
         }
-        self.handle_rebuild_index(
-            BuildIndexRequest {
-                region_id,
-                build_type: IndexBuildType::Manual,
-                file_metas: Vec::new(),
-            },
-            sender,
-        )
-        .await;
     }
 
     /// Submits manual reconciliation without blocking the region worker on index I/O.
