@@ -20,30 +20,52 @@ use std::time::Duration;
 
 use common_telemetry::{info, warn};
 use object_store::ObjectStore;
-use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedReceiver;
+use snafu::ensure;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 
+use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
 use crate::metrics::SERIES_INDEX_RECONCILE_TOTAL;
-use crate::region::{RegionLeaderState, RegionMapRef, RegionRoleState};
-use crate::series_index::maintenance::reconcile_series_indexes;
+use crate::read::series_candidate::is_sparse_metric_metadata;
+use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
+use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest, run_index_purge_task};
 use crate::time_provider::TimeProviderRef;
 
-/// Shared lifecycle state for a worker's series-index task.
+/// Commands serialized with periodic series-index maintenance.
+#[derive(Debug)]
+pub(crate) enum SeriesIndexCommand {
+    Wake,
+    Reconcile {
+        region: MitoRegionRef,
+        sender: oneshot::Sender<Result<ReconcileStats>>,
+    },
+    Stop,
+}
+
+/// Shared lifecycle state and command sender for a worker's series-index task.
 #[derive(Debug)]
 pub(crate) struct SeriesIndexTaskState {
+    worker_id: u32,
     running: AtomicBool,
-    notify: Notify,
+    wake_pending: AtomicBool,
+    sender: UnboundedSender<SeriesIndexCommand>,
 }
 
 impl SeriesIndexTaskState {
-    pub(crate) fn new() -> Self {
-        Self {
-            running: AtomicBool::new(true),
-            notify: Notify::new(),
-        }
+    pub(crate) fn new(worker_id: u32) -> (Self, UnboundedReceiver<SeriesIndexCommand>) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        (
+            Self {
+                worker_id,
+                running: AtomicBool::new(true),
+                wake_pending: AtomicBool::new(false),
+                sender,
+            },
+            receiver,
+        )
     }
 
     pub(crate) fn is_running(&self) -> bool {
@@ -51,17 +73,28 @@ impl SeriesIndexTaskState {
     }
 
     pub(crate) fn wake(&self) {
-        self.notify.notify_one();
+        if self.is_running() && !self.wake_pending.swap(true, Ordering::AcqRel) {
+            let _ = self.sender.send(SeriesIndexCommand::Wake);
+        }
+    }
+
+    /// Enqueues reconciliation without waiting for the build on the region worker.
+    pub(crate) fn reconcile(
+        &self,
+        region: MitoRegionRef,
+    ) -> Result<oneshot::Receiver<Result<ReconcileStats>>> {
+        ensure!(self.is_running(), WorkerStoppedSnafu { id: self.worker_id });
+        let (sender, receiver) = oneshot::channel();
+        self.sender
+            .send(SeriesIndexCommand::Reconcile { region, sender })
+            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+        Ok(receiver)
     }
 
     pub(crate) fn stop(&self) {
-        self.running.store(false, Ordering::Release);
-        // Retain a permit if maintenance has not started waiting yet.
-        self.notify.notify_one();
-    }
-
-    pub(crate) async fn notified(&self) {
-        self.notify.notified().await;
+        if self.running.swap(false, Ordering::AcqRel) {
+            let _ = self.sender.send(SeriesIndexCommand::Stop);
+        }
     }
 }
 
@@ -72,6 +105,7 @@ pub(crate) fn spawn_series_index_tasks(
     store: ObjectStore,
     regions: RegionMapRef,
     state: Arc<SeriesIndexTaskState>,
+    receiver: UnboundedReceiver<SeriesIndexCommand>,
     bucket_width: Duration,
     purger: IndexFilePurger,
     purge_receiver: UnboundedReceiver<PurgeRequest>,
@@ -93,6 +127,7 @@ pub(crate) fn spawn_series_index_tasks(
             bucket_width,
             purger,
             state,
+            receiver,
             interval,
             time_provider,
             enable_range_index,
@@ -110,6 +145,7 @@ struct SeriesIndexTask {
     purger: IndexFilePurger,
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
+    receiver: UnboundedReceiver<SeriesIndexCommand>,
     interval: Duration,
     time_provider: TimeProviderRef,
     enable_range_index: bool,
@@ -121,19 +157,88 @@ impl SeriesIndexTask {
         let worker_id = self.worker_id;
         info!("Start series-index background task, worker: {worker_id}");
         let interval = self.time_provider.wait_duration(self.interval);
-        let mut timer = tokio::time::interval_at(Instant::now() + interval, interval);
-        // Schedule future ticks from a late tick rather than the original cadence.
-        timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut deadline = Instant::now() + interval;
         while self.state.is_running() {
-            tokio::select! {
-                _ = self.state.notified() => {}
-                _ = timer.tick() => {}
-            }
-            if self.state.is_running() {
+            // Check before receiving so a busy channel cannot starve periodic maintenance.
+            if Instant::now() >= deadline {
                 self.maintain().await;
+                deadline = Instant::now() + interval;
+                continue;
+            }
+            match tokio::time::timeout_at(deadline, self.receiver.recv()).await {
+                Err(_) => continue,
+                Ok(None | Some(SeriesIndexCommand::Stop)) => break,
+                Ok(Some(SeriesIndexCommand::Wake)) => {
+                    self.state.wake_pending.store(false, Ordering::Release);
+                    if self.state.is_running() {
+                        self.maintain().await;
+                        deadline = Instant::now() + interval;
+                    }
+                }
+                Ok(Some(SeriesIndexCommand::Reconcile { region, sender })) => {
+                    let result = self.reconcile_manual(region).await;
+                    let _ = sender.send(result);
+                }
+            }
+        }
+        self.state.stop();
+        self.receiver.close();
+        while let Some(command) = self.receiver.recv().await {
+            if let SeriesIndexCommand::Reconcile { sender, .. } = command {
+                let _ = sender.send(WorkerStoppedSnafu { id: worker_id }.fail());
             }
         }
         info!("Stop series-index background task, worker: {worker_id}");
+    }
+
+    /// A manual request must still refer to the same writable region instance.
+    fn validate_manual_region(&self, region: &MitoRegionRef) -> Result<()> {
+        ensure!(
+            self.state.is_running(),
+            WorkerStoppedSnafu { id: self.worker_id }
+        );
+        let current = self.regions.writable_region(region.region_id)?;
+        ensure!(
+            Arc::ptr_eq(&current, region),
+            InvalidRequestSnafu {
+                region_id: region.region_id,
+                reason: "region was replaced during series-index reconciliation",
+            }
+        );
+        ensure!(
+            is_sparse_metric_metadata(&region.version().metadata),
+            InvalidRequestSnafu {
+                region_id: region.region_id,
+                reason: "series indexes require sparse metric metadata",
+            }
+        );
+        Ok(())
+    }
+
+    async fn reconcile_manual(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+        self.validate_manual_region(&region)?;
+        let result = self.reconcile_region(region.clone()).await?;
+        self.validate_manual_region(&region)?;
+        Ok(result)
+    }
+
+    async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+        let result = reconcile_series_indexes(
+            self.worker_id,
+            self.store.clone(),
+            region,
+            self.bucket_width,
+            self.time_provider.current_time_millis(),
+            self.purger.clone(),
+            self.enable_range_index,
+        )
+        .await;
+        if result.is_err() {
+            SERIES_INDEX_RECONCILE_TOTAL
+                .with_label_values(&["failure"])
+                .inc();
+        }
+        result
     }
 
     /// Runs periodic maintenance independently of incoming deletion requests.
@@ -150,20 +255,7 @@ impl SeriesIndexTask {
             ) {
                 continue;
             }
-            if let Err(error) = reconcile_series_indexes(
-                self.worker_id,
-                self.store.clone(),
-                region.clone(),
-                self.bucket_width,
-                self.time_provider.current_time_millis(),
-                self.purger.clone(),
-                self.enable_range_index,
-            )
-            .await
-            {
-                SERIES_INDEX_RECONCILE_TOTAL
-                    .with_label_values(&["failure"])
-                    .inc();
+            if let Err(error) = self.reconcile_region(region.clone()).await {
                 warn!(error; "Failed to reconcile series indexes, worker: {}, region: {}", self.worker_id, region.region_id);
             }
         }
@@ -181,6 +273,158 @@ mod tests {
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
     use crate::test_util::TestEnv;
+
+    fn new_task(region: MitoRegionRef) -> (SeriesIndexTask, UnboundedReceiver<PurgeRequest>) {
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let (purger, purge_receiver) = series_index_channel(store.clone());
+        let regions = Arc::new(RegionMap::default());
+        regions.insert_region(region);
+        let (state, receiver) = SeriesIndexTaskState::new(0);
+        (
+            SeriesIndexTask {
+                store,
+                regions,
+                bucket_width: Duration::from_secs(100),
+                purger,
+                worker_id: 0,
+                state: Arc::new(state),
+                receiver,
+                interval: Duration::from_secs(3600),
+                time_provider: Arc::new(crate::time_provider::StdTimeProvider),
+                enable_range_index: true,
+            },
+            purge_receiver,
+        )
+    }
+
+    #[test]
+    fn test_coalesce_wakeups_and_stop() {
+        let (state, mut receiver) = SeriesIndexTaskState::new(0);
+        state.wake();
+        state.wake();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SeriesIndexCommand::Wake
+        ));
+        assert!(receiver.try_recv().is_err());
+        state.stop();
+        state.stop();
+        state.wake();
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            SeriesIndexCommand::Stop
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[rstest::rstest]
+    #[case(true)]
+    #[case(false)]
+    #[tokio::test]
+    async fn test_manual_reconcile_publishes_before_reply(#[case] range_enabled: bool) {
+        let mut env = TestEnv::with_prefix("series-manual").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (mut task, _purge_receiver) = new_task(region.clone());
+        task.enable_range_index = range_enabled;
+        let state = task.state.clone();
+        let store = task.store.clone();
+        let first = state.reconcile(region.clone()).unwrap();
+        let second = state.reconcile(region.clone()).unwrap();
+        // Queue both before starting: they must execute serially and reuse publication.
+        let handle = tokio::spawn(task.run());
+        let first = first.await.unwrap().unwrap();
+        let second = second.await.unwrap().unwrap();
+        assert_eq!(1, first.built_series);
+        assert_eq!(if range_enabled { 4 } else { 0 }, first.built_range);
+        assert_eq!(0, second.built_series);
+        assert_eq!(0, second.built_range);
+        assert_eq!(1, region.series_index_version().series_indexes.len());
+        assert!(
+            store
+                .exists(&series_catalog_path(region.region_id))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            range_enabled,
+            store
+                .exists(&range_catalog_path(region.region_id))
+                .await
+                .unwrap()
+        );
+        state.stop();
+        handle.await.unwrap();
+        assert!(state.reconcile(region).is_err());
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shutdown_fails_queued_reconciliation() {
+        let mut env = TestEnv::with_prefix("series-manual-stop").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (task, _purge_receiver) = new_task(region.clone());
+        let result = task.state.reconcile(region.clone()).unwrap();
+        task.state.stop();
+        task.run().await;
+        assert!(matches!(
+            result.await.unwrap(),
+            Err(crate::error::Error::WorkerStopped { .. })
+        ));
+        assert!(region.series_index_version().series_indexes.is_empty());
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manual_reconcile_rejects_closed_region() {
+        let mut env = TestEnv::with_prefix("series-manual-closed").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (task, _purge_receiver) = new_task(region.clone());
+        let result = task.state.reconcile(region.clone()).unwrap();
+        task.regions.remove_region(region.region_id);
+        let state = task.state.clone();
+        let handle = tokio::spawn(task.run());
+        assert!(matches!(
+            result.await.unwrap(),
+            Err(crate::error::Error::RegionNotFound { .. })
+        ));
+        assert!(region.series_index_version().series_indexes.is_empty());
+        state.stop();
+        handle.await.unwrap();
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manual_traffic_does_not_postpone_periodic_maintenance() {
+        let mut env = TestEnv::with_prefix("series-manual-deadline").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        region.switch_state_to_staging(RegionLeaderState::Writable);
+        region
+            .manifest_ctx
+            .exit_staging(region.region_id, RegionRoleState::Follower)
+            .unwrap();
+        let (mut task, _purge_receiver) = new_task(region.clone());
+        task.interval = Duration::from_millis(20);
+        let state = task.state.clone();
+        let handle = tokio::spawn(task.run());
+        // Manual builds on followers fail. Only a periodic sweep can publish coverage.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while region.series_index_version().series_indexes.is_empty() {
+                assert!(
+                    state
+                        .reconcile(region.clone())
+                        .unwrap()
+                        .await
+                        .unwrap()
+                        .is_err()
+                );
+            }
+        })
+        .await
+        .unwrap();
+        state.stop();
+        handle.await.unwrap();
+        engine.stop().await.unwrap();
+    }
 
     #[rstest::rstest]
     #[case::follower(RegionRoleState::Follower, true)]
@@ -206,13 +450,15 @@ mod tests {
         let (purger, _receiver) = series_index_channel(store.clone());
         let regions = Arc::new(RegionMap::default());
         regions.insert_region(region.clone());
+        let (state, receiver) = SeriesIndexTaskState::new(0);
         let mut task = SeriesIndexTask {
             store: store.clone(),
             regions,
             bucket_width: Duration::from_secs(100),
             purger,
             worker_id: 0,
-            state: Arc::new(SeriesIndexTaskState::new()),
+            state: Arc::new(state),
+            receiver,
             interval: Duration::from_secs(3600),
             time_provider: Arc::new(crate::time_provider::StdTimeProvider),
             enable_range_index: true,

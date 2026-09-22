@@ -600,16 +600,20 @@ impl<S: LogStore> WorkerStarter<S> {
         let (sender, receiver) = mpsc::channel(self.config.worker_channel_size);
 
         let running = Arc::new(AtomicBool::new(true));
-        let series_index_task_state = self
-            .series_index_store
-            .as_ref()
-            .map(|_| Arc::new(SeriesIndexTaskState::new()));
+        let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
+        {
+            let (state, receiver) = SeriesIndexTaskState::new(self.id);
+            (Some(Arc::new(state)), Some(receiver))
+        } else {
+            (None, None)
+        };
         let mut series_index_purger = None;
         let series_index_handle = self
             .series_index_store
             .clone()
             .zip(series_index_task_state.clone())
-            .map(|(store, state)| {
+            .zip(series_index_receiver)
+            .map(|((store, state), receiver)| {
                 let (purger, purge_receiver) = series_index_channel(store.clone());
                 series_index_purger = Some(purger.clone());
                 spawn_series_index_tasks(
@@ -617,6 +621,7 @@ impl<S: LogStore> WorkerStarter<S> {
                     store,
                     regions.clone(),
                     state,
+                    receiver,
                     self.config.experimental_series_index_bucket_width,
                     purger,
                     purge_receiver,

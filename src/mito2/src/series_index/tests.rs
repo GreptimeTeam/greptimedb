@@ -824,7 +824,8 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
     region.version_control.alter_options(options);
     let store = ObjectStore::new(Memory::default()).unwrap();
     let (purger, receiver) = series_index_channel(store.clone());
-    let state = Arc::new(super::task::SeriesIndexTaskState::new());
+    let (state, commands) = super::task::SeriesIndexTaskState::new(0);
+    let state = Arc::new(state);
     let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(0));
     // A notification issued before the task starts must also trigger maintenance.
     state.wake();
@@ -835,6 +836,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
         store,
         regions,
         state.clone(),
+        commands,
         Duration::from_secs(100),
         purger,
         receiver,
@@ -904,13 +906,15 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let control = load_version_control(&store, region_id, &purger).await;
     let snapshot = control.current();
     assert_eq!(&entry, snapshot.series_indexes[&entry.index_uuid].entry());
-    let state = Arc::new(super::task::SeriesIndexTaskState::new());
+    let (state, commands) = super::task::SeriesIndexTaskState::new(0);
+    let state = Arc::new(state);
     state.stop();
     super::task::spawn_series_index_tasks(
         0,
         store.clone(),
         Arc::new(RegionMap::default()),
         state,
+        commands,
         Duration::from_secs(100),
         purger,
         receiver,
