@@ -18,7 +18,7 @@ ALTER TABLE application_logs
     MODIFY COLUMN attrs JSON2 (
         max_auto_expanded_paths = 2000,
         service STRING,
-        duration INT64,
+        duration BIGINT,
         trace_id STRING
     );
 
