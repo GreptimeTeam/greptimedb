@@ -26,7 +26,7 @@ use crate::error::{CorruptedWalObjectSnafu, Result};
 
 const HEADER_MAGIC: &[u8; 8] = b"GTWALOBJ";
 const TRAILER_MAGIC: &[u8; 8] = b"GTWALTRL";
-const FORMAT_VERSION: u16 = 2;
+const FORMAT_VERSION: u16 = 1;
 /// Predecessor sequence recorded for an object that starts a chain. Object
 /// sequences stay below `OBJECT_SEQ_LIMIT`, so it never names an object.
 const NO_PREDECESSOR: u64 = u64::MAX;
@@ -841,14 +841,9 @@ mod tests {
         bad_magic[0] ^= 1;
         assert_corrupted(decode_object(&bad_magic), "invalid header magic");
 
-        for version in [1u16, 3] {
-            let mut bad_version = encoded.bytes.to_vec();
-            bad_version[8..10].copy_from_slice(&version.to_be_bytes());
-            assert_corrupted(
-                decode_object(&bad_version),
-                &format!("unsupported format version {version}"),
-            );
-        }
+        let mut bad_version = encoded.bytes.to_vec();
+        bad_version[8..10].copy_from_slice(&(FORMAT_VERSION + 1).to_be_bytes());
+        assert_corrupted(decode_object(&bad_version), "unsupported format version 2");
 
         // Every field after the version is covered by the header checksum,
         // which recovery verifies without reading the whole object.
@@ -978,22 +973,22 @@ mod tests {
         );
     }
 
-    /// A version 2 object holding entries 1, 2 and 3 of region 1 and entries
+    /// A version 1 object holding entries 1, 2 and 3 of region 1 and entries
     /// 10 and 11 of region 2. The bytes were derived from the layout described in
     /// the module documentation, independently of [`encode_object`], so a change
     /// to field order, endianness or checksum coverage fails this test even when
     /// the encoder and the decoder change together.
-    const FIXTURE_V2_HEX: &str = concat!(
-        // Header: magic, version 2, object sequence 7, writer instance, epoch 3,
+    const FIXTURE_V1_HEX: &str = concat!(
+        // Header: magic, version 1, object sequence 7, writer instance, epoch 3,
         // predecessor sequence 6, predecessor writer instance, header CRC32.
         "475457414c4f424a",
-        "0002",
+        "0001",
         "0000000000000007",
         "7772697465722d666978747572652d31",
         "0000000000000003",
         "0000000000000006",
         "7772697465722d666978747572652d30",
-        "1d0b703d",
+        "34f40691",
         // Segment of region 1 at offset 70: region id, entry count, then
         // (entry id, payload length, payload) per entry.
         "0000000100000001",
@@ -1037,12 +1032,12 @@ mod tests {
         "00000000000000a3",
         "0000000000000064",
         "cd9b4193",
-        "ae746a9f",
+        "29e46d97",
         "475457414c54524c",
     );
 
     fn fixture_bytes() -> Vec<u8> {
-        let hex = FIXTURE_V2_HEX.as_bytes();
+        let hex = FIXTURE_V1_HEX.as_bytes();
         hex.chunks(2)
             .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
             .collect()
@@ -1066,7 +1061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_format_matches_version_2_fixture() {
+    fn test_format_matches_version_1_fixture() {
         let fixture = fixture_bytes();
         let header = Header {
             object_seq: 7,
@@ -1108,7 +1103,7 @@ mod tests {
                 footer_offset: 163,
                 footer_len: 100,
                 footer_crc32: 0xcd9b4193,
-                object_crc32: 0xae746a9f,
+                object_crc32: 0x29e46d97,
             },
             decode_trailer(&fixture[fixture.len() - TRAILER_LEN..]).unwrap()
         );

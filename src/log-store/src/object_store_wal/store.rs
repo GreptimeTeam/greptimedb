@@ -1146,8 +1146,8 @@ mod tests {
                 let last = bytes.len() - 1;
                 bytes[last] ^= 1;
             }),
-            ("unsupported format version 3", |bytes| {
-                bytes[8..10].copy_from_slice(&3u16.to_be_bytes());
+            ("unsupported format version 2", |bytes| {
+                bytes[8..10].copy_from_slice(&2u16.to_be_bytes());
             }),
             ("footer checksum mismatch", |bytes| {
                 let (trailer, _) = footer_of(bytes);
