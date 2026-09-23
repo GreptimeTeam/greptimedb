@@ -1373,6 +1373,12 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     }
 }
 
+/// Whether the left-hand metric name survives a binary operation.
+///
+/// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
+/// and comparisons keep the name, while arithmetic operators drop it. A
+/// comparison also drops it when it returns a bool or is a one-to-one
+/// `on(...)` match, which keeps only the listed labels.
 fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> bool {
     if op.is_set_operator() {
         return true;
