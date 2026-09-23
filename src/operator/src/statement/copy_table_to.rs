@@ -245,6 +245,14 @@ pub(crate) async fn stream_to_managed_parquet(
     use common_recordbatch::{RecordBatch, map_dictionary_to_values_schema};
     let original = stream.schema();
     let (expanded_schema, expand) = map_dictionary_to_values_schema(original.clone());
+    let json_columns = expanded_schema
+        .column_schemas()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, column)| {
+            (column.data_type.is_json() && !column.data_type.is_json2()).then_some(index)
+        })
+        .collect::<Vec<_>>();
     let (mapped_schema, json) = map_json_type_to_string_schema(expanded_schema.clone());
     let output_schema = if json {
         mapped_schema
@@ -273,14 +281,13 @@ pub(crate) async fn stream_to_managed_parquet(
                 let (conversion, retained) =
                     ExportWriteBudget::conversion_budget(&batch, usize::MAX)?;
                 let input = batch.clone();
-                // JSON escaping and number formatting can expand binary JSON.
-                let expansion = if json { 8 } else { 1 };
+                let json_columns = json_columns.clone();
                 let (len, estimated) = common_runtime::spawn_blocking_global(move || {
-                    rows_within_budget(&input, offset, input.num_rows(), conversion / expansion)
+                    rows_within_budget(&input, offset, input.num_rows(), conversion, &json_columns)
                 })
                 .await
                 .context(error::JoinTaskSnafu)??;
-                let reservation = retained.saturating_add(estimated.saturating_mul(4 * expansion));
+                let reservation = retained.saturating_add(estimated.saturating_mul(4));
                 let permit = budget.reserve(reservation, token).await?;
                 let batch = batch.clone();
                 let (original, expanded_schema, output_schema) = (
@@ -422,8 +429,8 @@ mod tests {
             ),
         ]));
         let dictionary = DictionaryArray::<Int32Type>::new(
-            Int32Array::from(vec![Some(0), None, Some(1)]),
-            Arc::new(StringArray::from(vec!["tag", &"x".repeat(1_100_000)])),
+            Int32Array::from(vec![Some(0), None, Some(1), Some(1)]),
+            Arc::new(StringArray::from(vec!["tag", &"x".repeat(3 * 1024 * 1024)])),
         );
         let json = datatypes::types::parse_string_to_jsonb(&format!(
             r#"{{"value":"escaped\ntext{}","n":123456789}}"#,
@@ -435,16 +442,19 @@ mod tests {
             Arc::new(BinaryArray::from(vec![
                 Some(json.as_slice()),
                 None,
+                None,
                 Some(json.as_slice()),
             ])),
             Arc::new(StringViewArray::from(vec![
                 Some("short"),
                 None,
                 Some("long view"),
+                Some("long view"),
             ])),
             Arc::new(BinaryViewArray::from(vec![
                 Some(&b"short"[..]),
                 None,
+                Some(&b"long view"[..]),
                 Some(&b"long view"[..]),
             ])),
         ];

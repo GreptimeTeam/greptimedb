@@ -270,10 +270,10 @@ fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
         ("histogram", Arc::new(histogram)),
     ])
     .unwrap();
-    assert_eq!(rows_within_budget(&batch, 0, 3, 4300).unwrap().0, 1);
+    assert_eq!(rows_within_budget(&batch, 0, 3, 4300, &[]).unwrap().0, 1);
     // The dictionary and container overhead fit; the nested list elements do not.
-    assert!(rows_within_budget(&batch, 0, 3, 4180).is_err());
-    assert_eq!(rows_within_budget(&batch, 0, 3, 15000).unwrap().0, 3);
+    assert!(rows_within_budget(&batch, 0, 3, 4180, &[]).is_err());
+    assert_eq!(rows_within_budget(&batch, 0, 3, 15000, &[]).unwrap().0, 3);
 }
 
 #[test]
@@ -918,7 +918,7 @@ async fn nested_dictionary_conversion_limits_child_ranges_and_charges_null_paren
         Some(arrow::buffer::NullBuffer::from(vec![false])),
     );
     let input = RecordBatch::try_from_iter([("struct", Arc::new(structure) as ArrayRef)]).unwrap();
-    assert!(rows_within_budget(&input, 0, 1, 128).is_err());
+    assert!(rows_within_budget(&input, 0, 1, 128, &[]).is_err());
 }
 
 #[tokio::test]

@@ -583,7 +583,7 @@ async fn expand_bounded_slice(
     let (conversion, retained) = ExportWriteBudget::conversion_budget(&batch, requested)?;
     let input = batch.clone();
     let (len, estimated) = common_runtime::spawn_blocking_global(move || {
-        rows_within_budget(&input, start, end, conversion)
+        rows_within_budget(&input, start, end, conversion, &[])
     })
     .await
     .context(error::JoinTaskSnafu)??;
@@ -761,13 +761,26 @@ pub(crate) fn rows_within_budget(
     start: usize,
     end: usize,
     budget: usize,
+    json_columns: &[usize],
 ) -> Result<(usize, usize)> {
     let mut bytes = 0usize;
     let mut row = start;
     while row < end {
-        let row_bytes = batch.columns().iter().try_fold(0usize, |sum, array| {
-            Ok::<_, error::Error>(sum.saturating_add(estimate_value_size(array.as_ref(), row)?))
-        })?;
+        let row_bytes =
+            batch
+                .columns()
+                .iter()
+                .enumerate()
+                .try_fold(0usize, |sum, (index, array)| {
+                    // JSON escaping and number formatting only expand JSON values.
+                    let expansion = if json_columns.contains(&index) && !array.is_null(row) {
+                        8
+                    } else {
+                        1
+                    };
+                    let size = estimate_value_size(array.as_ref(), row)?;
+                    Ok::<_, error::Error>(sum.saturating_add(size.saturating_mul(expansion)))
+                })?;
         if row_bytes > budget.saturating_sub(bytes) {
             break;
         }
