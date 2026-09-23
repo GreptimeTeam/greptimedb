@@ -195,6 +195,16 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
                     )
                 }
             );
+            ensure!(
+                !path
+                    .iter()
+                    .any(|segment| segment == JSON2_REMAINDER_FIELD_NAME),
+                InvalidSqlSnafu {
+                    msg: format!(
+                        "JSON2 indexed type hint path cannot contain reserved field '{JSON2_REMAINDER_FIELD_NAME}'"
+                    )
+                }
+            );
             inverted_index = true;
         } else if let Token::Word(word) = parser.peek_token().token
             && word.value.eq_ignore_ascii_case(SKIPPING)
