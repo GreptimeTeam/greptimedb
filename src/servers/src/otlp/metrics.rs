@@ -2627,6 +2627,26 @@ mod tests {
 
     #[test]
     fn test_exponential_histogram_rejection_metrics() {
+        // Other conversion tests update the same process-global counters.
+        const ISOLATED_ENV: &str = "GREPTIME_TEST_OTLP_REJECTION_METRICS_ISOLATED";
+        if std::env::var_os(ISOLATED_ENV).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "otlp::metrics::tests::test_exponential_histogram_rejection_metrics",
+                ])
+                .env(ISOLATED_ENV, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success() && stdout.contains("1 passed"),
+                "isolated rejection metrics test failed\nstdout:\n{stdout}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let mut invalid = exponential_point();
         invalid.scale = -5;
         for (temporality, points, reason, accepted, rejected) in [
