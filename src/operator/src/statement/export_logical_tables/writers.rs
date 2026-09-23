@@ -175,7 +175,7 @@ impl TableWriters {
             let result = tokio::select! {
                 biased;
                 _ = token.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
-                result = self.tasks.next() => result.expect("writer task queue is not empty"),
+                result = self.tasks.next() => result.context(error::UnexpectedSnafu { violated: "writer task queue unexpectedly empty" })?,
             };
             result.context(error::JoinTaskSnafu)??;
         }

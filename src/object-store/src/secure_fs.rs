@@ -476,14 +476,20 @@ impl oio::Write for SecureFsWriter {
             }
             return flush;
         }
-        flush?;
         if self.file.is_none() {
-            return Ok(());
+            return flush;
         }
-        Err(Error::new(
+        let mut error = Error::new(
             ErrorKind::Unsupported,
             "filesystem writes cannot be aborted without atomic writes",
-        ))
+        );
+        if let Err(flush_error) = flush {
+            if self.closing {
+                return Err(flush_error);
+            }
+            error = error.set_source(flush_error);
+        }
+        Err(error)
     }
 }
 
@@ -875,7 +881,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn test_conditional_abort_cleans_after_background_write_error() {
+    async fn test_abort_after_background_write_error() {
         use std::path::PathBuf;
 
         use opendal::options::WriteOptions;
@@ -883,34 +889,41 @@ mod tests {
         use opendal::raw::oio::Write;
         use tokio::io::AsyncWriteExt;
 
-        let temp_dir = create_temp_dir("secure_fs_flush_error_abort");
-        let root = SecureFsRoot::open(temp_dir.path()).unwrap();
-        let (args, _) = OpWrite::from_options(
-            &root.build_operator().info().capability(),
-            WriteOptions {
-                if_not_exists: true,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let mut writer = super::SecureFsWriter {
-            root,
-            path: PathBuf::from("partial"),
-            args,
-            file: None,
-            closing: false,
-        };
-        writer.ensure_file().await.unwrap();
-        let mut failing_file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .open("/dev/full")
-            .await
+        for if_not_exists in [true, false] {
+            let temp_dir = create_temp_dir("secure_fs_flush_error_abort");
+            let root = SecureFsRoot::open(temp_dir.path()).unwrap();
+            let (args, _) = OpWrite::from_options(
+                &root.build_operator().info().capability(),
+                WriteOptions {
+                    if_not_exists,
+                    ..Default::default()
+                },
+            )
             .unwrap();
-        failing_file.write_all(b"partial").await.unwrap();
-        writer.file = Some(failing_file);
+            let mut writer = super::SecureFsWriter {
+                root,
+                path: PathBuf::from("partial"),
+                args,
+                file: None,
+                closing: false,
+            };
+            writer.ensure_file().await.unwrap();
+            let mut failing_file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/full")
+                .await
+                .unwrap();
+            failing_file.write_all(b"partial").await.unwrap();
+            writer.file = Some(failing_file);
 
-        assert!(writer.abort().await.is_err());
-        assert!(!temp_dir.path().join("partial").exists());
+            let error = writer.abort().await.unwrap_err();
+            if if_not_exists {
+                assert!(!temp_dir.path().join("partial").exists());
+            } else {
+                assert_eq!(error.kind(), opendal::ErrorKind::Unsupported);
+                assert!(std::error::Error::source(&error).is_some());
+            }
+        }
     }
 
     #[test]

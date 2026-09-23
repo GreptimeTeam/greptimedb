@@ -47,7 +47,7 @@ use crate::error::{self, BuildDfLogicalPlanSnafu, ExecLogicalPlanSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::export_logical_tables::writers::ExportWriteBudget;
 use crate::statement::export_logical_tables::{
-    LogicalTableExportLimits, expand_export_batch, map_writer_error, rows_within_budget,
+    expand_export_batch, map_writer_error, rows_within_budget,
 };
 
 // The buffer size should be greater than 5MB (minimum multipart upload size).
@@ -270,10 +270,8 @@ pub(crate) async fn stream_to_managed_parquet(
                 .into_df_record_batch();
             let mut offset = 0;
             while offset < batch.num_rows() {
-                let (conversion, retained) = ExportWriteBudget::conversion_budget(
-                    &batch,
-                    LogicalTableExportLimits::default().conversion_bytes,
-                )?;
+                let (conversion, retained) =
+                    ExportWriteBudget::conversion_budget(&batch, usize::MAX)?;
                 let input = batch.clone();
                 // JSON escaping and number formatting can expand binary JSON.
                 let expansion = if json { 8 } else { 1 };
@@ -415,15 +413,21 @@ mod tests {
             ColumnSchema::new("json", ConcreteDataType::json_datatype(), true),
         ]));
         let dictionary = DictionaryArray::<Int32Type>::new(
-            Int32Array::from(vec![Some(0), None]),
-            Arc::new(StringArray::from(vec!["tag"])),
+            Int32Array::from(vec![Some(0), None, Some(1)]),
+            Arc::new(StringArray::from(vec!["tag", &"x".repeat(1_100_000)])),
         );
-        let json =
-            datatypes::types::parse_string_to_jsonb(r#"{"value":"escaped\ntext","n":123456789}"#)
-                .unwrap();
+        let json = datatypes::types::parse_string_to_jsonb(&format!(
+            r#"{{"value":"escaped\ntext{}","n":123456789}}"#,
+            "y".repeat(160_000)
+        ))
+        .unwrap();
         let arrays = vec![
             Arc::new(dictionary) as ArrayRef,
-            Arc::new(BinaryArray::from(vec![Some(json.as_slice()), None])),
+            Arc::new(BinaryArray::from(vec![
+                Some(json.as_slice()),
+                None,
+                Some(json.as_slice()),
+            ])),
         ];
         let batch =
             arrow::record_batch::RecordBatch::try_new(schema.arrow_schema().clone(), arrays)
