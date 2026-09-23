@@ -2071,7 +2071,7 @@ mod tests {
         ] {
             let request = BuildIndexRequest {
                 region_id: 42,
-                options: options.clone(),
+                options,
             };
             let decoded = BuildIndexRequest::decode(request.encode_to_vec().as_slice()).unwrap();
             let requests = make_region_build_index(decoded).unwrap();

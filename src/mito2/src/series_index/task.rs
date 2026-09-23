@@ -266,8 +266,10 @@ impl SeriesIndexTask {
 
 #[cfg(test)]
 mod tests {
+    use object_store::layers::mock::{self, MockLayerBuilder, oio};
     use object_store::services::Memory;
-    use store_api::region_engine::RegionEngine;
+    use store_api::region_engine::{RegionEngine, RegionRole};
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::region::RegionMap;
@@ -275,6 +277,35 @@ mod tests {
     use crate::series_index::purger::series_index_channel;
     use crate::series_index::tests::prepare_region;
     use crate::test_util::TestEnv;
+
+    struct BlockingCatalogWriter {
+        inner: oio::Writer,
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl mock::Write for BlockingCatalogWriter {
+        async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+            self.inner.write(buffer).await
+        }
+
+        async fn close(&mut self) -> mock::Result<mock::Metadata> {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.close().await
+        }
+
+        async fn abort(&mut self) -> mock::Result<()> {
+            self.inner.abort().await
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum LifecycleChange {
+        Remove,
+        Demote,
+        Stop,
+    }
 
     fn new_task(region: MitoRegionRef) -> (SeriesIndexTask, UnboundedReceiver<PurgeRequest>) {
         let store = ObjectStore::new(Memory::default()).unwrap();
@@ -418,6 +449,85 @@ mod tests {
         state.stop();
         handle.await.unwrap();
         engine.stop().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::remove(LifecycleChange::Remove)]
+    #[case::demote(LifecycleChange::Demote)]
+    #[case::stop(LifecycleChange::Stop)]
+    #[tokio::test]
+    async fn test_manual_reconcile_rejects_lifecycle_change_during_io(
+        #[case] change: LifecycleChange,
+    ) {
+        let mut env = TestEnv::with_prefix("series-manual-lifecycle").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (mut task, _purge_receiver) = new_task(region.clone());
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let writer_entered = entered.clone();
+        let writer_release = release.clone();
+        let catalog_path = series_catalog_path(region.region_id);
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                if path == catalog_path {
+                    Box::new(BlockingCatalogWriter {
+                        inner,
+                        entered: writer_entered.clone(),
+                        release: writer_release.clone(),
+                    })
+                } else {
+                    inner
+                }
+            }))
+            .build()
+            .unwrap();
+        task.store = task.store.layer(layer);
+        let state = task.state.clone();
+        let regions = task.regions.clone();
+        let mut result = state.reconcile(region.clone()).await.unwrap();
+        let handle = tokio::spawn(task.run());
+        tokio::time::timeout(Duration::from_secs(10), entered.notified())
+            .await
+            .unwrap();
+        assert!(matches!(
+            result.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+
+        // The initial validation passed; invalidate the request during catalog I/O.
+        match change {
+            LifecycleChange::Remove => {
+                regions.remove_region(region.region_id).unwrap();
+            }
+            LifecycleChange::Demote => region.set_role(RegionRole::Follower),
+            LifecycleChange::Stop => state.stop(),
+        }
+        release.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(10), result)
+            .await
+            .unwrap()
+            .unwrap();
+        state.stop();
+        tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .unwrap()
+            .unwrap();
+        engine.stop().await.unwrap();
+
+        match change {
+            LifecycleChange::Remove => assert!(matches!(
+                result,
+                Err(crate::error::Error::RegionNotFound { .. })
+            )),
+            LifecycleChange::Demote => assert!(matches!(
+                result,
+                Err(crate::error::Error::RegionState { .. })
+            )),
+            LifecycleChange::Stop => assert!(matches!(
+                result,
+                Err(crate::error::Error::WorkerStopped { .. })
+            )),
+        }
     }
 
     #[tokio::test]
