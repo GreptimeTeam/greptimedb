@@ -154,7 +154,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
         }
     );
     let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-    let data_type = validate_json2_type_hint_type(data_type)?;
+    let data_type = normalize_json2_type_hint_type(data_type)?;
 
     let mut inverted_index = false;
 
@@ -237,8 +237,11 @@ fn parse_json2_path(parser: &mut Parser<'_>) -> Result<Vec<String>> {
     Ok(path)
 }
 
-fn validate_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
+fn normalize_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
     match data_type {
+        DataType::Int64 => Ok(DataType::BigInt(None)),
+        DataType::UInt64 => Ok(DataType::BigIntUnsigned(None)),
+        DataType::Float64 => Ok(DataType::Double(ExactNumberInfo::None)),
         DataType::String(None)
         | DataType::BigInt(None)
         | DataType::BigIntUnsigned(None)
@@ -246,7 +249,7 @@ fn validate_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
         | DataType::Boolean => Ok(data_type),
         _ => InvalidSqlSnafu {
             msg: format!(
-                "unsupported JSON2 type hint data type: {data_type}; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN"
+                "unsupported JSON2 type hint data type: {data_type}; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64"
             ),
         }
         .fail(),
@@ -454,6 +457,9 @@ CREATE TABLE traces (
             ("BIGINT UNSIGNED", DataType::BigIntUnsigned(None)),
             ("DOUBLE", DataType::Double(ExactNumberInfo::None)),
             ("BOOLEAN", DataType::Boolean),
+            ("INT64", DataType::BigInt(None)),
+            ("UINT64", DataType::BigIntUnsigned(None)),
+            ("FLOAT64", DataType::Double(ExactNumberInfo::None)),
         ] {
             for sql_type in [sql_type.to_string(), sql_type.to_lowercase()] {
                 let column = parse_json2_column(&format!(
@@ -471,10 +477,11 @@ CREATE TABLE traces (
     #[test]
     fn test_parse_json2_type_hint_rejects_unsupported_types() {
         for sql_type in [
+            "INT2",
+            "INT4",
             "INT8",
             "INT16",
             "INT32",
-            "INT64",
             "TINYINT",
             "SMALLINT",
             "INT",
@@ -482,14 +489,15 @@ CREATE TABLE traces (
             "UINT8",
             "UINT16",
             "UINT32",
-            "UINT64",
             "TINYINT UNSIGNED",
             "SMALLINT UNSIGNED",
             "INT UNSIGNED",
             "FLOAT",
             "REAL",
+            "FLOAT4",
+            "FLOAT8",
             "FLOAT32",
-            "FLOAT64",
+            "BOOL",
             "TEXT",
             "VARCHAR(10)",
             "CHAR(10)",
@@ -512,7 +520,7 @@ CREATE TABLE traces (
                 .unwrap_err();
                 assert!(
                     err.to_string().contains(
-                        "supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN"
+                        "supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN; supported aliases: INT64, UINT64, FLOAT64"
                     ),
                     "{sql}: {err}"
                 );
