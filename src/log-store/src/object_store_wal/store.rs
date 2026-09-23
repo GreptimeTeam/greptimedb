@@ -58,9 +58,11 @@ const COMMAND_BUFFER: usize = 1024;
 const APPEND_BUFFER: usize = 16;
 const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_IN_FLIGHT_CREATES: usize = 4;
-/// Number of sealed batches that may wait to be created or indexed. While this
-/// many wait, the actor takes no append from its channel, so a stalled object
-/// store holds callers back instead of growing the backlog.
+/// Number of sealed batches that may wait to be created or indexed. One
+/// admission can seal two batches, the open batch before an append that would
+/// exhaust its positions and the append's own batch, so the actor takes an
+/// append from its channel only while two more fit: a stalled object store
+/// holds callers back instead of growing the backlog.
 const MAX_SEALED_BATCHES: usize = 2 * MAX_IN_FLIGHT_CREATES;
 /// Number of objects whose footers recovery fetches at a time.
 const RECOVERY_CONCURRENCY: usize = 8;
@@ -680,7 +682,7 @@ impl Actor {
                 Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
                     self.on_create_completed(object_seq, result);
                 }
-                Some((entries, response)) = self.append_rx.recv(), if self.sealed.len() < MAX_SEALED_BATCHES => {
+                Some((entries, response)) = self.append_rx.recv(), if self.sealed.len() + 2 <= MAX_SEALED_BATCHES => {
                     self.handle_append(entries, response);
                 }
                 command = self.command_rx.recv() => match command {
@@ -3407,28 +3409,25 @@ mod tests {
         let region_id = region(1);
         let admitted = || *store.admitted_appends.borrow();
 
-        // Every create is parked: once the sealed batches are full, further
-        // appends wait in the channel and are not admitted.
-        let mut appends = spawn_appends(&store, region_id, MAX_SEALED_BATCHES).await;
+        // Every create is parked: once no two more sealed batches fit,
+        // further appends wait in the channel and are not admitted.
+        let mut appends = spawn_appends(&store, region_id, MAX_SEALED_BATCHES - 1).await;
         for index in 0..3 {
             let entries = vec![entry(&store, region_id, &format!("w{index}"))];
             appends.push(spawn_append_batch(&store, entries));
         }
         let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
         round_trip_actor(&store).await;
-        assert_eq!(MAX_SEALED_BATCHES, admitted());
+        assert_eq!(MAX_SEALED_BATCHES - 1, admitted());
 
         // A durable object frees a place, and one more append is admitted.
         releases.remove(&0).unwrap().send(true).unwrap();
-        timeout(
-            WAIT,
-            store.wait_for_admitted_appends(MAX_SEALED_BATCHES + 1),
-        )
-        .await
-        .unwrap()
-        .unwrap();
+        timeout(WAIT, store.wait_for_admitted_appends(MAX_SEALED_BATCHES))
+            .await
+            .unwrap()
+            .unwrap();
         round_trip_actor(&store).await;
-        assert_eq!(MAX_SEALED_BATCHES + 1, admitted());
+        assert_eq!(MAX_SEALED_BATCHES, admitted());
 
         // Stop is handled while appends are held back: the batches whose create
         // has not started and the appends still waiting learn of the stop.
