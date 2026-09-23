@@ -60,6 +60,11 @@ pub(super) fn remove_output_sort(plan: LogicalPlan) -> LogicalPlan {
 
 impl Instance {
     /// Handles metric names query request, returns the names.
+    ///
+    /// Returns every metric table name matching `matchers` and never truncates the candidate set.
+    /// The callers filter these names by table permission first and only then reject a query whose
+    /// *authorized* set exceeds [`servers::prometheus::MAX_METRICS_NUM`], so truncating here would
+    /// hide candidates behind the names the caller cannot read.
     #[tracing::instrument(skip_all)]
     pub(crate) async fn handle_query_metric_names(
         &self,

@@ -61,7 +61,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
 use session::hints::PROMQL_METRIC_NAMES_EXTENSION_KEY;
-use snafu::{Location, OptionExt, ResultExt};
+use snafu::{Location, OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
 };
@@ -80,6 +80,7 @@ use crate::error::{
 use crate::http::header::collect_plan_metrics;
 use crate::otlp::metrics::ucum_to_openmetrics_unit;
 use crate::prom_store::{FIELD_NAME_LABEL, METRIC_NAME_LABEL, is_database_selection_label};
+use crate::prometheus::MAX_METRICS_NUM;
 use crate::prometheus_handler::{
     ParsedPromQuery, PrometheusHandlerRef, resolve_schema_from_matchers,
 };
@@ -1291,24 +1292,59 @@ fn current_schema_metric_targets(
     )
 }
 
+/// Resolves the candidate tables of a non-equality `__name__` matcher into the set the caller is
+/// authorized to read.
+///
+/// The order matters and must not be relaxed: candidate tables are discovered first, then
+/// filtered by their own table permission, and only the remaining tables are authorized. A table
+/// the user cannot read is never passed on, so resolving a metric name matcher can never widen
+/// the caller's access.
+///
+/// The candidates are resolved without a cap, so the permission filter sees every table the
+/// matcher matches and a caller authorized for at most [`MAX_METRICS_NUM`] of them keeps the
+/// complete authorized set. A larger *authorized* set is rejected instead of being truncated to
+/// an arbitrary subset: an instant or range query unions the authorized tables into one input,
+/// and the series endpoint expands every authorized name into its own query.
+async fn authorized_metric_name_candidates(
+    handler: &PrometheusHandlerRef,
+    metric_names: Vec<String>,
+    schema: &str,
+    query_ctx: &QueryContextRef,
+) -> Result<Vec<String>> {
+    let mut allowed = handler
+        .filter_metadata_metric_names(metric_names, schema, query_ctx)
+        .await?;
+    allowed.sort_unstable();
+    allowed.dedup();
+
+    ensure!(
+        allowed.len() <= MAX_METRICS_NUM,
+        InvalidQuerySnafu {
+            reason: format!(
+                "the `{METRIC_NAME}` matcher resolves to more than {MAX_METRICS_NUM} authorized \
+                 metric tables, found {}; the query is rejected instead of being answered from a \
+                 partial result",
+                allowed.len()
+            ),
+        }
+    );
+
+    Ok(allowed)
+}
+
 /// Authorizes the metric tables discovered for a non-equality `__name__` matcher and records
 /// them for the planner.
 ///
-/// The order matters and must not be relaxed: candidate tables are discovered first, then
-/// filtered by their own table permission, and only the remaining tables are authorized and
-/// handed to the planner. A table the user cannot read is never passed on, so planning a
-/// metric name union can never widen the caller's access.
+/// Only the candidates of [`authorized_metric_name_candidates`] are recorded, so a table the user
+/// cannot read is never handed to the planner.
 async fn authorize_metric_name_union(
     handler: &PrometheusHandlerRef,
     metric_names: Vec<String>,
     schema: &str,
     query_ctx: &QueryContextRef,
 ) -> Result<QueryContextRef> {
-    let mut allowed = handler
-        .filter_metadata_metric_names(metric_names, schema, query_ctx)
-        .await?;
-    allowed.sort_unstable();
-    allowed.dedup();
+    let allowed =
+        authorized_metric_name_candidates(handler, metric_names, schema, query_ctx).await?;
 
     let mut targets = Vec::with_capacity(allowed.len());
     for metric in &allowed {
@@ -2437,6 +2473,13 @@ pub async fn series_query(
                 .query_metric_names(discovery.name_matchers, &schema, &query_ctx)
                 .await
         );
+        // Each authorized candidate becomes its own query below, so an unreadable candidate must
+        // not reject the readable ones and an authorized set over the cap is rejected instead of
+        // being answered from a partial expansion. The batch permission check on the expanded
+        // queries stays as the last word on what may be read.
+        let metric_names = try_call_return_response!(
+            authorized_metric_name_candidates(&handler, metric_names, &schema, &query_ctx).await
+        );
         expanded_queries.extend(expand_metric_name_queries(&prom_query, metric_names));
     }
     let prom_queries = expanded_queries;
@@ -2556,6 +2599,8 @@ mod tests {
         label_lookups: Mutex<Vec<Vec<Matcher>>>,
         queries: Mutex<Vec<String>>,
         ordered_outputs: Mutex<Vec<bool>>,
+        /// Metric name candidates the query context carried into each executed query.
+        metric_name_candidates: Mutex<Vec<Option<Vec<String>>>>,
     }
 
     #[async_trait::async_trait]
@@ -2567,7 +2612,7 @@ mod tests {
         async fn do_query_parsed(
             &self,
             query: ParsedPromQuery,
-            _: QueryContextRef,
+            query_ctx: QueryContextRef,
         ) -> Result<Output> {
             self.ordered_outputs
                 .lock()
@@ -2577,6 +2622,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(query.query().query.clone());
+            self.metric_name_candidates
+                .lock()
+                .unwrap()
+                .push(query::promql::query_context_metric_names(&query_ctx));
             Ok(Output::new_with_record_batches(RecordBatches::empty()))
         }
 
@@ -2710,6 +2759,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         });
         let state: PrometheusHandlerRef = handler.clone();
         instant_query(
@@ -2769,6 +2819,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         });
         let handler_ref: PrometheusHandlerRef = handler.clone();
         (handler, handler_ref)
@@ -2836,6 +2887,133 @@ mod tests {
         );
     }
 
+    /// Builds `count` distinct metric names.
+    fn metric_union_names(count: usize) -> Vec<String> {
+        (0..count).map(|i| format!("m_{i}")).collect()
+    }
+
+    /// The union cap applies to the authorized candidate set, never to the raw candidate count:
+    /// a matcher over more raw names than the cap still answers from its complete authorized set,
+    /// while an authorized set over the cap is rejected instead of being truncated to a subset.
+    /// The test handler drops `denied` in `filter_metadata_metric_names`.
+    #[tokio::test]
+    async fn metric_name_union_caps_the_authorized_candidate_set() {
+        // The unreadable candidate comes first: capping the raw candidates would either answer
+        // with a table the caller cannot read or drop a readable one behind the cap.
+        let mut raw_over_cap = vec!["denied".to_string()];
+        raw_over_cap.extend(metric_union_names(MAX_METRICS_NUM));
+
+        // (name, raw candidates, expected authorized names)
+        let cases = [
+            (
+                "raw over cap",
+                raw_over_cap,
+                Some(metric_union_names(MAX_METRICS_NUM)),
+            ),
+            (
+                "authorized at cap",
+                metric_union_names(MAX_METRICS_NUM),
+                Some(metric_union_names(MAX_METRICS_NUM)),
+            ),
+            (
+                "authorized over cap",
+                metric_union_names(MAX_METRICS_NUM + 1),
+                None,
+            ),
+        ];
+
+        for (name, raw, expected_authorized) in cases {
+            let raw = raw.iter().map(String::as_str).collect::<Vec<_>>();
+            let (handler, handler_ref) = new_test_handler(raw, None);
+
+            let result = authorize_metric_name_union(
+                &handler_ref,
+                handler.metric_names.clone(),
+                "public",
+                &QueryContext::arc(),
+            )
+            .await;
+
+            match expected_authorized {
+                Some(mut expected) => {
+                    let authorized = result.unwrap();
+                    let mut names = query::promql::query_context_metric_names(&authorized).unwrap();
+                    names.sort_unstable();
+                    expected.sort_unstable();
+                    assert_eq!(expected, names, "{name}");
+                }
+                None => {
+                    let err = result.unwrap_err();
+                    assert_eq!(StatusCode::InvalidArguments, err.status_code(), "{name}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn instant_query_executes_no_query_for_a_rejected_metric_name_union() {
+        // An authorized set over the cap cannot be planned in full, so the query is rejected
+        // rather than executed against a partial set of metric tables.
+        let raw = metric_union_names(MAX_METRICS_NUM + 1);
+        let (handler, handler_ref) =
+            new_test_handler(raw.iter().map(String::as_str).collect(), None);
+
+        let response = instant_query(
+            State(handler_ref),
+            Query(InstantQuery {
+                query: Some(r#"{__name__=~"m_.*"}"#.to_string()),
+                time: Some("0".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await;
+
+        assert_eq!(Some(StatusCode::InvalidArguments), response.status_code);
+        assert!(handler.queries.lock().unwrap().is_empty());
+    }
+
+    /// The planner reads the authorized candidates from the query context, so the endpoint must
+    /// hand it the filtered set and execute the query once instead of once per candidate.
+    #[tokio::test]
+    async fn instant_query_hands_the_authorized_metric_name_union_to_the_planner() {
+        let (handler, handler_ref) = new_test_handler(vec!["cpu_user", "denied"], None);
+
+        let response = instant_query(
+            State(handler_ref),
+            Query(InstantQuery {
+                query: Some(r#"{__name__=~"cpu_.*"}"#.to_string()),
+                time: Some("0".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            *handler.metric_name_candidates.lock().unwrap(),
+            vec![Some(vec!["cpu_user".to_string()])]
+        );
+        assert_eq!(
+            *handler.queries.lock().unwrap(),
+            vec![r#"{__name__=~"cpu_.*"}"#.to_string()]
+        );
+    }
+
     #[test]
     fn non_equal_metric_name_matcher_reports_no_metric_name() {
         // The matcher text is a pattern, not a metric name: reporting it would label every
@@ -2872,6 +3050,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         });
         let query_ctx = QueryContext::with("promql_timer_test", "parse_error");
         let db = query_ctx.get_db_string();
@@ -2958,6 +3137,7 @@ mod tests {
                 label_lookups: Mutex::new(Vec::new()),
                 queries: Mutex::new(Vec::new()),
                 ordered_outputs: Mutex::new(Vec::new()),
+                metric_name_candidates: Mutex::new(Vec::new()),
             })),
             Path(FIELD_NAME_LABEL.to_string()),
             Extension(query_ctx),
@@ -3010,6 +3190,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         })
     }
 
@@ -3151,6 +3332,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         });
         let state: PrometheusHandlerRef = handler.clone();
         let query_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
@@ -3195,6 +3377,96 @@ mod tests {
             .collect_vec();
         targets.sort_unstable();
         assert_eq!(vec!["cpu_system", "cpu_user"], targets);
+    }
+
+    /// Runs a series query over `{__name__=~".+"}` and returns the response along with the metric
+    /// table names the handler was asked to execute.
+    ///
+    /// The handler has no catalog tables, so fetching the series of each executed query resolves
+    /// to an empty result; the executed queries are what the tests inspect.
+    async fn series_query_targets(
+        handler: Arc<TestPrometheusHandler>,
+        query_ctx: QueryContext,
+    ) -> (PrometheusJsonResponse, Vec<String>) {
+        let target_ctx = Arc::new(query_ctx.clone());
+        let response = series_query(
+            State(handler.clone()),
+            Query(SeriesQuery {
+                matches: Matches(vec![r#"{__name__=~".+"}"#.to_string()]),
+                ..Default::default()
+            }),
+            Extension(query_ctx),
+            Form(SeriesQuery::default()),
+        )
+        .await;
+
+        let mut targets = handler
+            .queries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|query| {
+                let query = ParsedPromQuery::parse(
+                    PromQuery {
+                        query: query.clone(),
+                        ..Default::default()
+                    },
+                    &target_ctx,
+                )
+                .unwrap();
+                resolved_promql_targets(std::slice::from_ref(&query), &target_ctx)
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .table
+            })
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        (response, targets)
+    }
+
+    /// Every readable candidate of a raw match over the cap is expanded, and the unreadable one is
+    /// dropped before expansion: it can neither be executed nor reject the readable candidates in
+    /// the batch permission check that runs over the expanded queries.
+    #[tokio::test]
+    async fn series_query_keeps_every_readable_candidate_of_an_over_cap_raw_match() {
+        let mut raw = vec!["denied".to_string()];
+        raw.extend(metric_union_names(MAX_METRICS_NUM));
+        let (handler, _) =
+            new_test_handler(raw.iter().map(String::as_str).collect(), Some("denied"));
+
+        let (response, targets) = series_query_targets(
+            handler,
+            QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        let mut expected = metric_union_names(MAX_METRICS_NUM);
+        expected.sort_unstable();
+        assert_eq!(expected, targets);
+    }
+
+    /// An authorized set over the cap cannot be expanded in full, so the request is rejected
+    /// before any query runs instead of being answered from a partial expansion.
+    #[tokio::test]
+    async fn series_query_rejects_an_authorized_metric_name_union_over_the_cap() {
+        let raw = metric_union_names(MAX_METRICS_NUM + 1);
+        let (handler, _) = new_test_handler(raw.iter().map(String::as_str).collect(), None);
+
+        let (response, targets) = series_query_targets(
+            handler,
+            QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        )
+        .await;
+
+        assert_eq!(Some(StatusCode::InvalidArguments), response.status_code);
+        assert!(targets.is_empty());
     }
 
     #[test]
@@ -4060,6 +4332,7 @@ mod tests {
                 label_lookups: Mutex::new(Vec::new()),
                 queries: Mutex::new(Vec::new()),
                 ordered_outputs: Mutex::new(Vec::new()),
+                metric_name_candidates: Mutex::new(Vec::new()),
             })),
             Query(MetadataQuery::default()),
             Extension(query_ctx.clone()),
@@ -4076,6 +4349,7 @@ mod tests {
             label_lookups: Mutex::new(Vec::new()),
             queries: Mutex::new(Vec::new()),
             ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
         });
         let response = metadata_query(
             State(handler.clone()),
