@@ -50,15 +50,12 @@ use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
 use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
-use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScanBuilder, TableSource, col, lit,
-};
+use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, col, lit};
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
@@ -654,50 +651,11 @@ impl PromPlanner {
             param,
         } = aggr_expr;
 
-        let mut input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         let input_has_tsid = input.schema().fields().iter().any(|field| {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
         });
-
-        // `__tsid` based scan projection may prune tag columns. Ensure tags referenced in
-        // aggregation modifiers (`by`/`without`) are available before planning group keys.
-        //
-        // Only the labels the operand still has may be restored. A label the operand dropped by
-        // PromQL semantics, say through `on(...)`, is gone from the input's label set even though
-        // the scan underneath can still produce the column, and grouping on it would resurrect a
-        // series distinction the operand deleted.
-        let required_group_tags: BTreeSet<String> = match modifier {
-            None => BTreeSet::new(),
-            Some(LabelModifier::Include(labels)) => {
-                let current_tags = self.ctx.tag_columns.iter().collect::<HashSet<_>>();
-                labels
-                    .labels
-                    .iter()
-                    .filter(|label| !is_metric_engine_internal_column(label.as_str()))
-                    .filter(|label| current_tags.contains(label))
-                    .cloned()
-                    .collect()
-            }
-            Some(LabelModifier::Exclude(labels)) => {
-                let excluded = labels.labels.iter().collect::<HashSet<_>>();
-                self.ctx
-                    .tag_columns
-                    .iter()
-                    .filter(|tag| !excluded.contains(tag))
-                    .cloned()
-                    .collect()
-            }
-        };
-
-        if !required_group_tags.is_empty()
-            && required_group_tags
-                .iter()
-                .any(|tag| Self::find_case_sensitive_column(input.schema(), tag.as_str()).is_none())
-        {
-            input = self.ensure_tag_columns_available(input, &required_group_tags)?;
-            self.refresh_tag_columns_from_schema(input.schema());
-        }
 
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
@@ -3297,130 +3255,6 @@ impl PromPlanner {
         let mut out = BTreeSet::new();
         walk(self, plan, &mut out)?;
         Ok(out)
-    }
-
-    fn ensure_tag_columns_available(
-        &self,
-        plan: LogicalPlan,
-        required_tags: &BTreeSet<String>,
-    ) -> Result<LogicalPlan> {
-        if required_tags.is_empty() {
-            return Ok(plan);
-        }
-
-        struct Rewriter {
-            required_tags: BTreeSet<String>,
-        }
-
-        impl TreeNodeRewriter for Rewriter {
-            type Node = LogicalPlan;
-
-            fn f_up(
-                &mut self,
-                node: Self::Node,
-            ) -> datafusion_common::Result<Transformed<Self::Node>> {
-                match node {
-                    LogicalPlan::TableScan(scan) => {
-                        let schema = scan.source.schema();
-                        let mut projection = match scan.projection.clone() {
-                            Some(p) => p,
-                            None => {
-                                // Scanning all columns already covers required tags.
-                                return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
-                            }
-                        };
-
-                        let mut changed = false;
-                        for tag in &self.required_tags {
-                            if let Some((idx, _)) = schema
-                                .fields()
-                                .iter()
-                                .enumerate()
-                                .find(|(_, field)| field.name() == tag)
-                                && !projection.contains(&idx)
-                            {
-                                projection.push(idx);
-                                changed = true;
-                            }
-                        }
-
-                        if !changed {
-                            return Ok(Transformed::no(LogicalPlan::TableScan(scan)));
-                        }
-
-                        projection.sort_unstable();
-                        projection.dedup();
-
-                        let new_scan =
-                            TableScanBuilder::new(scan.table_name.clone(), scan.source.clone())
-                                .with_projection(Some(projection))
-                                .with_filters(scan.filters)
-                                .with_fetch(scan.fetch)
-                                .build()?;
-                        Ok(Transformed::yes(LogicalPlan::TableScan(new_scan)))
-                    }
-                    LogicalPlan::Projection(proj) => {
-                        let input_schema = proj.input.schema();
-
-                        let existing = proj
-                            .schema
-                            .fields()
-                            .iter()
-                            .map(|f| f.name().as_str())
-                            .collect::<HashSet<_>>();
-
-                        let mut expr = proj.expr.clone();
-                        let mut has_changed = false;
-                        for tag in &self.required_tags {
-                            if existing.contains(tag.as_str()) {
-                                continue;
-                            }
-
-                            if let Some(idx) = input_schema.index_of_column_by_name(None, tag) {
-                                expr.push(DfExpr::Column(Column::from(
-                                    input_schema.qualified_field(idx),
-                                )));
-                                has_changed = true;
-                            }
-                        }
-
-                        if !has_changed {
-                            return Ok(Transformed::no(LogicalPlan::Projection(proj)));
-                        }
-
-                        let new_proj = Projection::try_new(expr, proj.input)?;
-                        Ok(Transformed::yes(LogicalPlan::Projection(new_proj)))
-                    }
-                    other => Ok(Transformed::no(other)),
-                }
-            }
-        }
-
-        let mut rewriter = Rewriter {
-            required_tags: required_tags.clone(),
-        };
-        let rewritten = plan
-            .rewrite(&mut rewriter)
-            .context(DataFusionPlanningSnafu)?;
-        Ok(rewritten.data)
-    }
-
-    fn refresh_tag_columns_from_schema(&mut self, schema: &DFSchemaRef) {
-        let time_index = self.ctx.time_index_column.as_deref();
-        let field_columns = self.ctx.field_columns.iter().collect::<HashSet<_>>();
-
-        let mut tags = schema
-            .fields()
-            .iter()
-            .map(|f| f.name())
-            .filter(|name| Some(name.as_str()) != time_index)
-            .filter(|name| !field_columns.contains(name))
-            .filter(|name| !is_metric_engine_internal_column(name))
-            .cloned()
-            .collect::<Vec<_>>();
-        tags.sort_unstable();
-        tags.dedup();
-        self.ctx.tag_columns = tags;
     }
 
     /// Setup [PromPlannerContext]'s state fields.
