@@ -188,17 +188,26 @@ const AT_MODIFIER_UNSAFE_FUNCTIONS: [&str; 15] = [
 /// every series into new rows. Both gather rows of different series into shared batches, which
 /// [`PromPlanner::replay_over_grid`] cannot report per series.
 ///
+/// `label_join` rewrites a label of every input series, so its output rows no longer describe the
+/// series the promoted subtree was divided by ([`PromPlanner::series_divide_plan`]): joining the
+/// label that tells distinct series apart into one value (`label_join(m @ 300, "host", "-", "")`)
+/// makes the replay treat them as one timeline and report a single mixed series per step. Without
+/// the promotion the call is evaluated at every step above the per-series replay of its selector,
+/// which keeps every input row. Rejecting duplicate output label sets is a separate, pre-existing
+/// validation gap not handled here; see the sqlness case `promql/at_modifier.sql`.
+///
 /// Skipping the promotion costs no correctness: the selectors below such a call anchor themselves
 /// and are replayed per series, and the call is evaluated at every step over that replayed input.
 ///
 /// See [`PromPlanner::is_row_wise_chain`].
-const REPLAY_UNSAFE_FUNCTIONS: [&str; 6] = [
+const REPLAY_UNSAFE_FUNCTIONS: [&str; 7] = [
     "sort",
     "sort_desc",
     "sort_by_label",
     "sort_by_label_desc",
     "histogram_quantile",
     "histogram_fraction",
+    "label_join",
 ];
 
 /// Interval 1 hour in millisecond
@@ -2214,9 +2223,10 @@ impl PromPlanner {
     ///
     /// Everything that merges series into shared rows disqualifies the subtree: an aggregation or a
     /// binary expression does (`abs(sum(m @ 1))`, `abs(m @ 1 + m @ 0)`), and so do the calls listed
-    /// in [`REPLAY_UNSAFE_FUNCTIONS`]. Those shapes are correct without the promotion, since their
-    /// selectors anchor and replay per series on their own and the operator above them is evaluated
-    /// at every step.
+    /// in [`REPLAY_UNSAFE_FUNCTIONS`] — `label_join` merges series by rewriting the very labels
+    /// they are divided by. Those shapes are correct without the promotion, since their selectors
+    /// anchor and replay per series on their own and the operator above them is evaluated at every
+    /// step.
     fn is_row_wise_chain(expr: &PromExpr) -> bool {
         match expr {
             // The selector that establishes the layout, and the literals of the calls above it.
@@ -10138,6 +10148,74 @@ mod test {
                 .count(),
             1,
             "{plan_str}"
+        );
+    }
+
+    /// `label_join` rewrites the labels of its input series, so a subtree ending in one is not
+    /// promoted: the anchored selector keeps replaying one series per batch, and the join runs at
+    /// every step above that replay. Promoting it would replay the joined rows through the labels
+    /// the join just rewrote, which merges the distinct input series into one timeline; see
+    /// [`REPLAY_UNSAFE_FUNCTIONS`].
+    #[tokio::test]
+    async fn at_modifier_does_not_promote_label_join() {
+        for query in [
+            // Directly above the anchored instant selector...
+            "label_join(some_metric @ 300, \"tag_0\", \"-\", \"\")",
+            // ... and below another call, which follows it out of the promoted subtree.
+            "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"\"))",
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            // The join is not wrapped in a replay of its own; the only replay over the grid is the
+            // one of the anchored selector...
+            assert!(
+                !plan_str.starts_with("PromInstantManipulate"),
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str
+                    .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            // ... and the projected join stays above it, evaluated at every step.
+            let join = plan_str
+                .find("concat_ws(")
+                .unwrap_or_else(|| panic!("no `label_join` projection in:\n{plan_str}"));
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .expect("replay node");
+            assert!(
+                join < replay,
+                "`label_join` must be evaluated above the per-series replay:\n{plan_str}"
+            );
+        }
+
+        // A range call below the join is still promoted on its own: the anchored window is folded
+        // once per series, and the join above it is evaluated at every step over that replay.
+        let plan = build_at_modifier_plan(
+            "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"\")",
+            0,
+            1000,
+        )
+        .await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+        let join = plan_str.find("concat_ws(").expect("join projection");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            join < replay,
+            "the join must be evaluated above the replay of the range call:\n{plan_str}"
         );
     }
 

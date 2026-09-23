@@ -235,6 +235,30 @@ TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m], 60);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset 1m, 60);
 
+-- 11. `label_join` above an anchored selector. The call rewrites the label the input series are
+-- told apart by (`host` becomes the empty string), so it must stay above the per-series replay of
+-- the selector and be evaluated at every step: both hosts are still reported, with their own
+-- value, at every step. A promoted `label_join` would instead be replayed through the labels it
+-- just rewrote and report the two series as a single timeline, i.e. one mixed row per step.
+--
+-- The invariant asserted here is scoped to the replay: it must not drop or mix the input rows.
+-- It is not a claim about the final PromQL semantics of this query: joining `host` to one value
+-- leaves two samples with the same label set at the same timestamp, which Prometheus rejects,
+-- while `label_join` does not validate that yet (`label_replace` errors on such a rewrite
+-- instead). That duplicate-labelset validation gap is pre-existing and out of scope here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "", "");
+
+-- The same join below another call: `abs` follows it out of the promoted subtree, and both are
+-- evaluated at every step over the per-series replay.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "", ""));
+
+-- A range call below the join is still promoted on its own: the anchored window is folded once
+-- per series, and the join above that replay reports the rate of both hosts at every step.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "", "");
+
 DROP TABLE at_modifier_gauge;
 
 DROP TABLE at_modifier_counter_total;
