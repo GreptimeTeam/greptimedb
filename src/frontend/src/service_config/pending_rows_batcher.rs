@@ -302,6 +302,8 @@ worker_channel_capacity = 12345
 [pending_rows_batcher.logical_table]
 worker_channel_capacity = 12345
 [prom_store]
+enable = true
+with_metric_engine = true
 worker_channel_capacity = 12345
 "#,
         )
