@@ -356,6 +356,52 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn managed_copy_preserves_existing_file_before_sink_open() {
+        let temp_dir = common_test_util::temp_dir::create_temp_dir("managed_copy_existing_file");
+        let store = object_store::secure_fs::SecureFsRoot::open(temp_dir.path())
+            .unwrap()
+            .build_operator();
+        let path = "existing.parquet";
+        store.write(path, "original").await.unwrap();
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "value",
+            ConcreteDataType::int32_datatype(),
+            false,
+        )]));
+        let batch = arrow::record_batch::RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![Arc::new(Int32Array::from(vec![1]))],
+        )
+        .unwrap();
+        let batches = async_stream::stream! {
+            yield Ok(batch);
+            yield Err(datafusion::error::DataFusionError::Execution("source failed".into()));
+        };
+        let stream = datafusion::physical_plan::stream::RecordBatchStreamAdapter::new(
+            schema.arrow_schema().clone(),
+            batches,
+        );
+        let stream =
+            common_recordbatch::adapter::RecordBatchStreamAdapter::try_new(Box::pin(stream))
+                .unwrap();
+
+        let result = stream_to_managed_parquet(
+            Box::pin(stream),
+            store.clone(),
+            path,
+            &ExportWriteBudget::new(1),
+            &CancellationToken::new(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            store.read(path).await.unwrap().to_bytes().as_ref(),
+            b"original"
+        );
+    }
+
+    #[tokio::test]
     async fn managed_copy_preserves_dictionary_json_and_empty_schema() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
