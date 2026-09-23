@@ -154,6 +154,7 @@ mod tests {
         assert_pool_has_one_address(&node_clients.control_channel_manager);
 
         let manager = ChannelManager::new();
+        #[allow(deprecated)]
         let legacy = Client::with_manager_and_urls(manager.clone(), [PEER_ADDR]);
         legacy.make_flight_client(false, false).unwrap();
         legacy.make_control_flight_client(false, false).unwrap();
