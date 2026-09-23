@@ -504,6 +504,232 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_logical_batcher_alignment() {
+        use std::time::Duration;
+
+        use common_base::Plugins;
+        use frontend::server::Services;
+        use frontend::service_config::pending_rows_batcher::BatcherOptions;
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+            ExponentialHistogram, ExponentialHistogramDataPoint, exponential_histogram_data_point,
+        };
+        use prost::Message;
+        use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
+        use servers::http::test_helpers::TestClient;
+        use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+        // Fixed workload, only the batcher opt-in changes. Compare stored rows,
+        // schema evolution and visibility under the configured acknowledgement policy.
+        let mut results = Vec::new();
+        for enabled in [false, true] {
+            let standalone = GreptimeDbStandaloneBuilder::new(&format!("otlp_logical_{enabled}"))
+                .with_logical_batcher(BatcherOptions {
+                    protocols: if enabled {
+                        vec![BatchingProtocol::Otlp]
+                    } else {
+                        vec![]
+                    },
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+            let instance = standalone.fe_instance();
+            let mut options = standalone.opts.clone();
+            options.otlp.experimental_enable_exponential_histogram = true;
+            let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+            let server = services
+                .http_server_builder(
+                    &options.frontend_options(),
+                    services.server_memory_limiter.clone(),
+                )
+                .build();
+            let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+            let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            ctx.set_logical_batching_enabled(true);
+            ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+                with_metric_engine: true,
+                ..Default::default()
+            }));
+            let ctx = Arc::new(ctx);
+            let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+                .with_label_values(&["submit_wait_flush_result"]);
+            let before = submissions.get_sample_count();
+            for (ts, value) in [(60, 10), (120, 20)] {
+                let mut request = build_sum_request(
+                    "batch.alignment",
+                    AggregationTemporality::Cumulative,
+                    &[(ts, value)],
+                );
+                if ts == 120
+                    && let Some(metric::Data::Sum(sum)) =
+                        &mut request.resource_metrics[0].scope_metrics[0].metrics[0].data
+                {
+                    sum.data_points[0].attributes.push(keyvalue("extra", "new"));
+                }
+                let response = client
+                    .post("/v1/otlp/v1/metrics")
+                    .header("content-type", "application/x-protobuf")
+                    .body(request.encode_to_vec())
+                    .send()
+                    .await;
+                assert_eq!(response.status().as_u16(), 200);
+            }
+            if enabled {
+                assert_eq!(
+                    submissions.get_sample_count() - before,
+                    if pending_rows_batch_sync_enabled() {
+                        2
+                    } else {
+                        0
+                    },
+                    "logical submissions must follow the global acknowledgement policy"
+                );
+            }
+            let sql = "SELECT greptime_timestamp, greptime_value, stream, extra FROM batch_alignment_total ORDER BY greptime_timestamp";
+            let batches = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                    let OutputData::Stream(stream) = output.data else {
+                        panic!("expected stream")
+                    };
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    if !enabled
+                        || pending_rows_batch_sync_enabled()
+                        || batches.iter().map(|batch| batch.num_rows()).sum::<usize>() == 2
+                    {
+                        break batches;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                2
+            );
+            results.push(batches.pretty_print().unwrap());
+
+            let before_histograms = submissions.get_sample_count();
+            // First create a histogram table, then reuse it in a mixed export.
+            // Neither request may enter the scalar-only logical batcher.
+            for mixed in [false, true] {
+                let mut request = build_sum_request(
+                    "batch.mixed",
+                    AggregationTemporality::Cumulative,
+                    &[(180, 30)],
+                );
+                let metrics = &mut request.resource_metrics[0].scope_metrics[0].metrics;
+                let mut histogram = metrics[0].clone();
+                histogram.name = "batch.histogram".to_string();
+                histogram.data = Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                    aggregation_temporality: AggregationTemporality::Cumulative as i32,
+                    data_points: vec![ExponentialHistogramDataPoint {
+                        start_time_unix_nano: 1_000_000_000,
+                        time_unix_nano: if mixed { 4_000_000_000 } else { 3_000_000_000 },
+                        count: 4,
+                        sum: Some(8.0),
+                        zero_count: 1,
+                        positive: Some(exponential_histogram_data_point::Buckets {
+                            offset: -1,
+                            bucket_counts: vec![1, 2],
+                        }),
+                        ..Default::default()
+                    }],
+                }));
+                if !mixed {
+                    metrics.clear();
+                }
+                metrics.push(histogram);
+                let response = client
+                    .post("/v1/otlp/v1/metrics")
+                    .header("content-type", "application/x-protobuf")
+                    .body(request.encode_to_vec())
+                    .send()
+                    .await;
+                assert_eq!(
+                    response.status().as_u16(),
+                    200,
+                    "enabled={enabled}, mixed={mixed}"
+                );
+            }
+            assert_eq!(submissions.get_sample_count(), before_histograms);
+            for (sql, expected_rows) in [
+                (
+                    "SELECT greptime_timestamp, greptime_native_histogram FROM batch_histogram ORDER BY greptime_timestamp",
+                    2,
+                ),
+                (
+                    "SELECT greptime_timestamp, greptime_value FROM batch_mixed_total ORDER BY greptime_timestamp",
+                    1,
+                ),
+            ] {
+                let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                assert_eq!(
+                    batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
+                    expected_rows
+                );
+                results.push(batches.pretty_print().unwrap());
+            }
+
+            // An existing metric attached to another physical table must use
+            // the original routing, not the request's default physical table.
+            for sql in [
+                "CREATE TABLE custom_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='')",
+                "CREATE TABLE custom_total (greptime_timestamp TIMESTAMP(3) TIME INDEX, greptime_value DOUBLE, \"stream\" STRING PRIMARY KEY) ENGINE=metric WITH ('on_physical_table'='custom_physical')",
+            ] {
+                instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+            }
+            instance
+                .metrics(
+                    build_sum_request("custom", AggregationTemporality::Cumulative, &[(60, 7)]),
+                    ctx.clone(),
+                )
+                .await
+                .unwrap();
+            let output = instance
+                .do_query("SELECT greptime_value FROM custom_total", ctx.clone())
+                .await
+                .remove(0)
+                .unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                panic!("expected stream")
+            };
+            assert!(
+                RecordBatches::try_collect(stream)
+                    .await
+                    .unwrap()
+                    .pretty_print()
+                    .unwrap()
+                    .contains("7.0")
+            );
+
+            // Request-level schema policy cannot be bypassed by batching.
+            let mut fixed = ctx.fork();
+            fixed.set_extension("auto_create_table", "false");
+            assert!(
+                instance
+                    .metrics(
+                        build_sum_request(
+                            "missing",
+                            AggregationTemporality::Cumulative,
+                            &[(60, 1)]
+                        ),
+                        Arc::new(fixed)
+                    )
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(results[..3], results[3..]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     pub async fn test_otlp_on_standalone() {
         let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_otlp")
             .build()

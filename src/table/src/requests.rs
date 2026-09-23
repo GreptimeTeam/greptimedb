@@ -25,6 +25,7 @@ use common_query::AddColumnLocation;
 use common_time::TimeToLive;
 use common_time::range::TimestampRange;
 use datatypes::data_type::ConcreteDataType;
+use datatypes::json::JsonSettings;
 use datatypes::prelude::VectorRef;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
@@ -63,17 +64,14 @@ pub const TABLE_DATA_MODEL_TRACE_V1: &str = "greptime_trace_v1";
 /// Table data model used by the JSON2-based OTLP trace pipeline.
 pub const TABLE_DATA_MODEL_TRACE_V2: &str = "greptime_trace_v2";
 
-/// Returns true if the table stores spans in the `greptime_trace_v1` data model
-/// (fixed span columns), the shape the Jaeger query path and the entity-graph
-/// derivation rely on.
-pub fn is_trace_v1_table(table_info: &crate::metadata::TableInfo) -> bool {
-    table_info
-        .meta
-        .options
-        .extra_options
-        .get(TABLE_DATA_MODEL)
-        .map(|v| v == TABLE_DATA_MODEL_TRACE_V1)
-        .unwrap_or(false)
+/// Returns true for the Trace V1 and V2 data models supported
+/// by semantic graph derivation.
+pub fn is_trace_table(table_info: &crate::metadata::TableInfo) -> bool {
+    let table_data_model = table_info.meta.options.data_model();
+    matches!(
+        table_data_model,
+        Some(TABLE_DATA_MODEL_TRACE_V1 | TABLE_DATA_MODEL_TRACE_V2)
+    )
 }
 
 pub const OTLP_METRIC_COMPAT_KEY: &str = "otlp_metric_compat";
@@ -226,6 +224,11 @@ pub const REPARTITION_COLUMN_HINT_KEY: &str = "repartition.column.hint";
 pub const REPARTITION_PARTITION_NUM_HINT_KEY: &str = "repartition.partition.num.hint";
 
 impl TableOptions {
+    /// Returns the table data model, if specified.
+    pub fn data_model(&self) -> Option<&str> {
+        self.extra_options.get(TABLE_DATA_MODEL).map(String::as_str)
+    }
+
     pub fn try_from_iter<T: ToString, U: IntoIterator<Item = (T, T)>>(
         iter: U,
     ) -> Result<TableOptions> {
@@ -369,6 +372,13 @@ pub struct ModifyColumnTypeRequest {
     pub target_type: ConcreteDataType,
 }
 
+/// Set JSON2 settings request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetJsonSettingsRequest {
+    pub column_name: String,
+    pub settings: JsonSettings,
+}
+
 /// A family of annotation table options: pure metadata markers that no region
 /// consumes. Setting or unsetting them only rewrites the table's
 /// `extra_options`, so the alter skips region dispatch entirely.
@@ -480,6 +490,7 @@ pub fn validate_annotation_keys<'a>(
 
 /// Table shape an annotation option is validated against.
 pub struct AnnotationContext<'a> {
+    pub data_model: Option<&'a str>,
     pub schema: &'a Schema,
     pub partition_key_indices: &'a [usize],
 }
@@ -570,6 +581,9 @@ pub(crate) fn validate_and_normalize_annotation(
             }
             if parse_entity_option_key(key).is_some() {
                 for column in parse_entity_columns(value) {
+                    if trace_v2_attribute(cx.schema, cx.data_model, &column).is_some() {
+                        continue;
+                    }
                     let schema = cx.schema.column_schema_by_name(&column).ok_or_else(|| {
                         AnnotationValidationError::ColumnNotFound {
                             column: column.clone(),
@@ -620,14 +634,20 @@ pub(crate) fn validate_and_normalize_annotation(
 /// and writes normalized values back in place.
 pub fn validate_and_normalize_annotation_options(
     options: &mut TableOptions,
-    cx: &AnnotationContext<'_>,
+    schema: &Schema,
+    partition_key_indices: &[usize],
 ) -> std::result::Result<(), AnnotationValidationError> {
+    let cx = AnnotationContext {
+        data_model: options.data_model(),
+        schema,
+        partition_key_indices,
+    };
     let mut normalized = Vec::new();
     for (key, value) in &options.extra_options {
         let Some(family) = AnnotationFamily::of_key(key) else {
             continue;
         };
-        let checked = validate_and_normalize_annotation(family, cx, key, value)?;
+        let checked = validate_and_normalize_annotation(family, &cx, key, value)?;
         if checked != *value {
             normalized.push((key.clone(), checked));
         }
@@ -648,6 +668,9 @@ pub enum AlterKind {
     },
     ModifyColumnTypes {
         columns: Vec<ModifyColumnTypeRequest>,
+    },
+    SetJsonSettings {
+        request: SetJsonSettingsRequest,
     },
     RenameTable {
         new_table_name: String,

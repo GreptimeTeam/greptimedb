@@ -1,0 +1,8 @@
+name = "snapshot_parquet_copy"
+reason = "Preserve explicit-file Parquet restore from snapshots written before packed import support."
+introduced_by = "packed snapshot reader"
+topologies = ["standalone"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["copy", "parquet"]
+owner = "GreptimeTeam"

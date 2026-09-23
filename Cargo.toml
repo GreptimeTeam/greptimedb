@@ -104,7 +104,6 @@ aquamarine = "0.6"
 arrow = { version = "=59.2.0", features = ["prettyprint"] }
 arrow-array = { version = "=59.2.0", default-features = false, features = ["chrono-tz"] }
 arrow-buffer = "=59.2.0"
-arrow-cast = "=59.2.0"
 arrow-flight = "=59.2.0"
 arrow-ipc = { version = "=59.2.0", default-features = false, features = ["lz4", "zstd"] }
 arrow-schema = { version = "=59.2.0", features = ["serde"] }
@@ -161,7 +160,7 @@ fs2 = "0.4"
 fst = "0.4.7"
 futures = "0.3"
 futures-util = "0.3"
-greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "0c4beffaa2b3968034915867593a717c6ab0c6b4" }
+greptime-proto = { git = "https://github.com/GreptimeTeam/greptime-proto.git", rev = "3d232f406fad574e8c630fb1c304fe2ebb013c9c" }
 hex = "0.4"
 hostname = "0.4.0"
 http = "1"
@@ -236,7 +235,6 @@ rskafka = { git = "https://github.com/influxdata/rskafka.git", rev = "80f42eb15e
 rstest = "0.25"
 rstest_reuse = "0.7"
 rust_decimal = "1.33"
-rustc-hash = "2.0"
 rustls = { version = "0.23.25", default-features = false }
 ryu = "1.0"
 sea-query = "0.32"

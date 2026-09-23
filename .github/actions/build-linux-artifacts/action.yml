@@ -31,6 +31,22 @@ inputs:
     description: Build GreptimeDB with large page size (65536).
     required: false
     default: 'false'
+  aws-ci-test-bucket:
+    description: Bucket used by the object-store integration tests
+    required: false
+    default: ''
+  aws-region:
+    description: Region of the test bucket
+    required: false
+    default: ''
+  aws-access-key-id:
+    description: Access key id for the test bucket
+    required: false
+    default: ''
+  aws-secret-access-key:
+    description: Secret access key for the test bucket
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -38,6 +54,13 @@ runs:
       if: ${{ inputs.disable-run-tests == 'false' }}
       shell: bash
       # NOTE: If the BUILD_JOBS > 4, it's always OOM in EC2 instance.
+      # Without GT_S3_*, every remote object-store case is skipped and the
+      # release only ever exercises the local file backend.
+      env:
+        GT_S3_BUCKET: ${{ inputs.aws-ci-test-bucket }}
+        GT_S3_REGION: ${{ inputs.aws-region }}
+        GT_S3_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        GT_S3_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
       run: |
         cd ${{ inputs.working-dir }} && \
         make run-it-in-container BUILD_JOBS=4 \

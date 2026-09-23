@@ -26,6 +26,7 @@ pub mod layers;
 pub mod manager;
 mod metrics;
 pub mod secure_fs;
+#[cfg(feature = "testing")]
 pub mod test_util;
 pub mod util;
 

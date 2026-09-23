@@ -157,6 +157,127 @@ pub struct InstantAndNormalInsertRequests {
 }
 
 impl Inserter {
+    /// Checks the assumptions of the logical bulk path without changing tables.
+    /// Unsupported requests retain ordinary insertion, including schema policy,
+    /// defaults, instant TTL and row-based Flow delivery.
+    pub async fn can_batch_metric_rows(
+        &self,
+        requests: &RowInsertRequests,
+        ctx: &QueryContextRef,
+        physical_table: &str,
+    ) -> Result<bool> {
+        if self.auto_create_disabled_reason(ctx)?.is_some() || ctx.extension(TTL_KEY).is_some() {
+            return Ok(false);
+        }
+        for request in &requests.inserts {
+            // The logical bulk encoder only supports scalar metric schemas.
+            // Check new tables too, before catalog lookup or schema changes.
+            if request.rows.as_ref().is_some_and(|rows| {
+                rows.schema.iter().any(|column| {
+                    column.datatype_extension.is_some()
+                        || !matches!(
+                            ColumnDataType::try_from(column.datatype),
+                            Ok(ColumnDataType::TimestampMillisecond
+                                | ColumnDataType::Float64
+                                | ColumnDataType::String)
+                        )
+                })
+            }) {
+                return Ok(false);
+            }
+
+            let Some(table) = self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &request.table_name,
+                )
+                .await?
+            else {
+                continue;
+            };
+            let info = table.table_info();
+            if info.meta.engine != METRIC_ENGINE_NAME
+                || info.is_ttl_instant_table()
+                || info
+                    .meta
+                    .options
+                    .extra_options
+                    .get(LOGICAL_TABLE_METADATA_KEY)
+                    .map(String::as_str)
+                    != Some(physical_table)
+                || info
+                    .meta
+                    .schema
+                    .column_schemas()
+                    .iter()
+                    .any(|column| column.default_constraint().is_some())
+            {
+                return Ok(false);
+            }
+            // Physical metric tags are nullable even when their logical schema
+            // is not. Arrow alignment is stricter than ordinary metric insertion.
+            if info
+                .meta
+                .primary_key_indices
+                .iter()
+                .any(|&index| !info.meta.schema.column_schemas()[index].is_nullable())
+            {
+                return Ok(false);
+            }
+            // The current Flow cache does not distinguish streaming and batch
+            // flows. Keep all Flow sources on the row-based delivery path.
+            match self.table_flownode_set_cache.get(info.table_id()).await {
+                Ok(None) => {}
+                Ok(Some(flows)) if flows.is_empty() => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
+
+    /// Meters an original logical-table request before bulk routing, without
+    /// cloning its rows or changing the request boundary used for accounting.
+    pub async fn meter_row_inserts(
+        requests: &mut RowInsertRequests,
+        ctx: &QueryContextRef,
+    ) -> Result<u64> {
+        let metered = InstantAndNormalInsertRequests {
+            normal_requests: RegionInsertRequests {
+                requests: requests
+                    .inserts
+                    .iter_mut()
+                    .map(|request| RegionInsertRequest {
+                        rows: request.rows.take(),
+                        ..Default::default()
+                    })
+                    .collect(),
+            },
+            instant_requests: RegionInsertRequests::default(),
+        };
+        let cost = write_meter!(
+            ctx.current_catalog(),
+            ctx.current_schema(),
+            metered,
+            ctx.write_rows_to_admit(
+                ctx.current_catalog(),
+                &ctx.current_schema(),
+                count_insert_rows(&metered)?
+            ),
+            ctx.channel() as u8
+        )
+        .await
+        .context(WriteRejectedSnafu);
+        for (request, region) in requests
+            .inserts
+            .iter_mut()
+            .zip(metered.normal_requests.requests)
+        {
+            request.rows = region.rows;
+        }
+        cost
+    }
+
     pub fn new(
         catalog_manager: CatalogManagerRef,
         partition_manager: PartitionRuleManagerRef,
@@ -1588,7 +1709,7 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
     else {
         return Ok(());
     };
-    if let Some(actual) = table_info.meta.options.extra_options.get(TABLE_DATA_MODEL) {
+    if let Some(actual) = table_info.meta.options.data_model() {
         ensure!(
             actual == expected,
             InvalidInsertRequestSnafu {
@@ -2392,19 +2513,67 @@ mod tests {
             );
             assert_eq!(ctx.channel(), Channel::Prometheus);
         }
-        let attempts = meter.attempts.lock().unwrap();
-        let totals = attempts
+        {
+            let attempts = meter.attempts.lock().unwrap();
+            let totals = attempts
+                .iter()
+                .map(|r| (r.schema.as_str(), r.rows, r.value))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                totals,
+                if enabled {
+                    vec![("a", 4, 0), ("b", 2, 0)]
+                } else {
+                    vec![]
+                }
+            );
+        }
+        meter.attempts.lock().unwrap().clear();
+        meter.reject.store(false, Ordering::Relaxed);
+        let ctx = Arc::new(QueryContext::with_channel(
+            CATALOG,
+            "logical",
+            Channel::Otlp,
+        ));
+        let admitted = admit_write(2, &ctx).await.unwrap();
+        let mut requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "metric".to_string(),
+                rows: Some(Rows {
+                    schema: vec![],
+                    rows: vec![api::v1::Row::default(); 2],
+                }),
+            }],
+        };
+        let original = requests.clone();
+        let cost = Inserter::meter_row_inserts(&mut requests, &admitted)
+            .await
+            .unwrap();
+        assert_eq!(cost, if enabled { 17 } else { 0 });
+        assert_eq!(requests, original);
+        let records = meter
+            .attempts
+            .lock()
+            .unwrap()
             .iter()
-            .map(|r| (r.schema.as_str(), r.rows, r.value))
+            .map(|record| (record.rows, record.value))
             .collect::<Vec<_>>();
         assert_eq!(
-            totals,
+            records,
             if enabled {
-                vec![("a", 4, 0), ("b", 2, 0)]
+                vec![(2, 0), (0, 17)]
             } else {
                 vec![]
             }
         );
+        meter.reject.store(true, Ordering::Relaxed);
+        let result = Inserter::meter_row_inserts(&mut requests, &admitted).await;
+        if enabled {
+            assert_eq!(result.unwrap_err().status_code(), StatusCode::RateLimited);
+        } else {
+            assert_eq!(result.unwrap(), 0);
+        }
+        assert_eq!(requests, original);
     }
 
     #[test]
@@ -2647,6 +2816,142 @@ mod tests {
             )),
             true,
         )
+    }
+
+    #[tokio::test]
+    async fn test_logical_batcher_eligibility() {
+        use catalog::RegisterTableRequest;
+        use catalog::memory::MemoryCatalogManager;
+        use common_meta::instruction::{CacheIdent, CreateFlow};
+        use common_meta::kv_backend::KvBackendRef;
+        use common_meta::kv_backend::memory::MemoryKvBackend;
+        use datatypes::schema::{ColumnDefaultConstraint, SchemaBuilder};
+        let requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "test_table".to_string(),
+                rows: None,
+            }],
+        };
+        let original =
+            make_table_ref_with_schema("ts", "value", ConcreteDataType::float64_datatype())
+                .table_info();
+        for case in [
+            "eligible",
+            "physical",
+            "ordinary",
+            "instant",
+            "disabled",
+            "hint",
+            "flow",
+            "required_tag",
+            "default",
+        ] {
+            let mut info = (*original).clone();
+            info.meta.engine = METRIC_ENGINE_NAME.to_string();
+            info.meta.options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                "physical".to_string(),
+            );
+            let mut ctx = QueryContext::arc().fork();
+            match case {
+                "physical" => {
+                    info.meta
+                        .options
+                        .extra_options
+                        .insert(LOGICAL_TABLE_METADATA_KEY.to_string(), "other".to_string());
+                }
+                "ordinary" => info.meta.engine = "mito".to_string(),
+                "instant" => info.meta.options.ttl = Some(common_time::ttl::TimeToLive::Instant),
+                "hint" => ctx.set_extension(AUTO_CREATE_TABLE_KEY, "false"),
+                "required_tag" | "default" => {
+                    let mut columns = info.meta.schema.column_schemas().to_vec();
+                    let mut tag = ColumnSchema::new(
+                        "tag",
+                        ConcreteDataType::string_datatype(),
+                        case != "required_tag",
+                    );
+                    if case == "default" {
+                        tag = tag
+                            .with_default_constraint(Some(ColumnDefaultConstraint::null_value()))
+                            .unwrap();
+                    }
+                    columns.push(tag);
+                    info.meta.schema = Arc::new(
+                        SchemaBuilder::try_from_columns(columns)
+                            .unwrap()
+                            .build()
+                            .unwrap(),
+                    );
+                    info.meta.primary_key_indices = vec![2];
+                }
+                _ => {}
+            }
+            let catalog = MemoryCatalogManager::with_default_setup();
+            let table = Arc::new(table::Table::new(
+                Arc::new(info),
+                table::metadata::FilterPushDownType::Unsupported,
+                Arc::new(DummyDataSource),
+            ));
+            catalog
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "test_table".to_string(),
+                    table_id: 1,
+                    table,
+                })
+                .unwrap();
+            let mut inserter = batcher_test_inserter().await;
+            inserter.catalog_manager = catalog;
+            inserter.auto_create_table = case != "disabled";
+            let kv_backend: KvBackendRef = Arc::new(MemoryKvBackend::default());
+            inserter.table_flownode_set_cache = Arc::new(new_table_flownode_set_cache(
+                String::new(),
+                Cache::new(10),
+                kv_backend,
+            ));
+            if case == "flow" {
+                inserter
+                    .table_flownode_set_cache
+                    .invalidate(&[CacheIdent::CreateFlow(CreateFlow {
+                        flow_id: 1,
+                        source_table_ids: vec![1],
+                        partition_to_peer_mapping: vec![(0, Peer::empty(1))],
+                    })])
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                inserter
+                    .can_batch_metric_rows(&requests, &Arc::new(ctx), "physical")
+                    .await
+                    .unwrap(),
+                case == "eligible",
+                "{case}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_batcher_meter_preserves_request() {
+        let mut requests = RowInsertRequests {
+            inserts: vec![RowInsertRequest {
+                table_name: "sample".to_string(),
+                rows: Some(Rows {
+                    schema: vec![],
+                    rows: vec![api::v1::Row {
+                        values: vec![Value {
+                            value_data: Some(api::v1::value::ValueData::F64Value(1.5)),
+                        }],
+                    }],
+                }),
+            }],
+        };
+        let expected = requests.clone();
+        Inserter::meter_row_inserts(&mut requests, &QueryContext::arc())
+            .await
+            .unwrap();
+        assert_eq!(requests, expected);
     }
 
     #[tokio::test]

@@ -82,6 +82,9 @@ pub struct QueryContext {
     /// Local-only write batching selection; never transported in protobuf extensions.
     #[builder(default)]
     batching_enabled: bool,
+    /// Local-only opt-in for logical metric writes, independent of ordinary-table batching.
+    #[builder(default)]
+    logical_batching_enabled: bool,
     /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
@@ -458,7 +461,17 @@ impl QueryContext {
         &self.configuration_parameter
     }
 
-    /// Whether the local HTTP entry point selected write batching.
+    /// Whether the local HTTP entry point selected logical-table batching.
+    pub fn logical_batching_enabled(&self) -> bool {
+        self.logical_batching_enabled
+    }
+
+    /// Sets local logical-table batching selection without adding a wire-visible extension.
+    pub fn set_logical_batching_enabled(&mut self, enabled: bool) {
+        self.logical_batching_enabled = enabled;
+    }
+
+    /// Whether the local protocol entry point selected ordinary-table batching.
     pub fn batching_enabled(&self) -> bool {
         self.batching_enabled
     }
@@ -634,6 +647,7 @@ impl QueryContextBuilder {
             channel,
             batching_enabled: self.batching_enabled.unwrap_or_default(),
             admitted_write: None,
+            logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
             protocol_ctx: self.protocol_ctx.unwrap_or_default(),
@@ -923,11 +937,17 @@ mod test {
     fn test_batching_selection_is_local_only() {
         let mut ctx = QueryContextBuilder::default().build();
         assert!(!ctx.batching_enabled());
+        assert!(!ctx.logical_batching_enabled());
+        ctx.set_logical_batching_enabled(true);
+        assert!(ctx.clone().logical_batching_enabled());
+        assert!(ctx.fork().logical_batching_enabled());
         ctx.set_batching_enabled(true);
         assert!(ctx.clone().batching_enabled());
         assert!(ctx.fork().batching_enabled());
         let wire: api::v1::QueryContext = ctx.into();
-        assert!(!QueryContext::from(wire).batching_enabled());
+        let restored = QueryContext::from(wire);
+        assert!(!restored.batching_enabled());
+        assert!(!restored.logical_batching_enabled());
         let ctx = QueryContextBuilder::default()
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();

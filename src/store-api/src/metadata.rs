@@ -30,6 +30,7 @@ use common_error::status_code::StatusCode;
 use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
+use datatypes::extension::json::json2_metadata_with_updated_settings;
 use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, VectorIndexOptions};
 use datatypes::types::TimestampType;
 use itertools::Itertools;
@@ -663,6 +664,10 @@ impl RegionMetadataBuilder {
             AlterKind::AddColumns { columns } => self.add_columns(columns)?,
             AlterKind::DropColumns { names } => self.drop_columns(&names),
             AlterKind::ModifyColumnTypes { columns } => self.modify_column_types(columns)?,
+            AlterKind::SetJsonSettings {
+                column_name,
+                settings,
+            } => self.set_json_settings(column_name, settings)?,
             AlterKind::SetIndexes { options } => self.set_indexes(options)?,
             AlterKind::UnsetIndexes { options } => self.unset_indexes(options)?,
             AlterKind::SetRegionOptions { options: _ } => {
@@ -828,6 +833,37 @@ impl RegionMetadataBuilder {
             }
         }
 
+        Ok(())
+    }
+
+    fn set_json_settings(
+        &mut self,
+        col_name: String,
+        settings: datatypes::json::JsonSettings,
+    ) -> Result<()> {
+        let Some(col_meta) = self
+            .column_metadatas
+            .iter_mut()
+            .find(|col| col.column_schema.name == col_name)
+        else {
+            return InvalidRegionRequestSnafu {
+                region_id: self.region_id,
+                err: format!("column {col_name} not found"),
+            }
+            .fail();
+        };
+
+        let old_metadata = col_meta.column_schema.metadata();
+        let new_metadata =
+            json2_metadata_with_updated_settings(old_metadata, settings).map_err(|err| {
+                InvalidRegionRequestSnafu {
+                    region_id: self.region_id,
+                    err: err.to_string(),
+                }
+                .build()
+            })?;
+
+        *col_meta.column_schema.mut_metadata() = new_metadata;
         Ok(())
     }
 

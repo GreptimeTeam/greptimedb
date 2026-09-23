@@ -13516,6 +13516,30 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     }
 
     #[tokio::test]
+    async fn binary_matching_label_filter_reaches_scalar_ranking_and_grouped_operands() {
+        for query in [
+            r#"(8 * metric_a{host="foo"}) / on(host) metric_b"#,
+            r#"topk(1, metric_a{host="foo"}) / on(host, device) metric_b"#,
+            r#"(8 * metric_a{host="foo"}) / on(host) group_left topk by(host)(1, max by(host)(metric_b))"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(
+                plan.matches(r#"host = Utf8("foo")"#).count(),
+                2,
+                "{query}\n{plan}"
+            );
+        }
+        // A global ranking one-side must see every host, so the matcher stays put.
+        let query = r#"metric_a{host="foo"} / on(host) group_left topk(1, max by(host)(metric_b))"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(
+            plan.matches(r#"host = Utf8("foo")"#).count(),
+            1,
+            "{query}\n{plan}"
+        );
+    }
+
+    #[tokio::test]
     async fn binary_matching_label_filter_skips_selecting_aggregations() {
         // `topk` ranks its input, so filtering before it changes the candidate set.
         let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
@@ -13539,13 +13563,18 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     async fn binary_value_field_matcher_is_not_copied_across_aggregations() {
         // `status` varies between the samples of one series, so filtering the other operand by it
         // would drop the newest sample before sample selection (#9242).
-        let query = r#"count by(status) (metric_a) / on(status) count by(status) (metric_b{status="ready"})"#;
-        let plan = build_matching_filter_plan_with_string_field(query).await;
-        assert_eq!(
-            plan.matches(r#"Utf8("ready")"#).count(),
-            1,
-            "{query}\n{plan}"
-        );
+        for query in [
+            r#"count by(status) (metric_a) / on(status) count by(status) (metric_b{status="ready"})"#,
+            r#"(8 * count by(status)(metric_a{__field__="status"})) / on(status) topk by(status)(1, count by(status)(metric_b{__field__="status",status="ready"}))"#,
+            r#"count by(status)(metric_a{__field__="status"}) / on(status) group_left topk by(status)(1, count by(status)(metric_b{__field__="status",status="ready"}))"#,
+        ] {
+            let plan = build_matching_filter_plan_with_string_field(query).await;
+            assert_eq!(
+                plan.matches(r#"Utf8("ready")"#).count(),
+                1,
+                "{query}\n{plan}"
+            );
+        }
     }
 
     #[tokio::test]

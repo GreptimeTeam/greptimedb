@@ -268,6 +268,9 @@ pub trait SnapshotStorage: Send + Sync {
     /// Reads the manifest file.
     async fn read_manifest(&self) -> Result<Manifest>;
 
+    /// Returns file length, or None for a missing path or directory.
+    async fn file_size(&self, path: &str) -> Result<Option<u64>>;
+
     /// Writes the manifest file.
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()>;
 
@@ -669,7 +672,17 @@ impl SnapshotStorage for OpenDalStorage {
         ensure_snapshot_exists(self).await?;
 
         let data = self.read_file(MANIFEST_FILE).await?;
-        serde_json::from_slice(&data).context(ManifestParseSnafu)
+        Manifest::from_json(&data).context(ManifestParseSnafu)
+    }
+
+    async fn file_size(&self, path: &str) -> Result<Option<u64>> {
+        match self.object_store.stat(path).await {
+            Ok(metadata) => Ok(metadata.is_file().then(|| metadata.content_length())),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error).with_context(|_| StorageOperationSnafu {
+                operation: format!("stat {path}"),
+            }),
+        }
     }
 
     async fn write_manifest(&self, manifest: &Manifest) -> Result<()> {
@@ -783,13 +796,16 @@ fn valid_chunk_filename(name: &str) -> bool {
 mod tests {
     use std::collections::HashMap;
     use std::path::Path;
+    use std::sync::Arc;
 
     use object_store::ObjectStore;
+    use object_store::layers::mock::MockLayerBuilder;
     use object_store::services::Fs;
     use tempfile::tempdir;
     use url::Url;
 
     use super::*;
+    use crate::data::export_v2::error::Error;
     use crate::data::export_v2::manifest::{DataFormat, TimeRange};
     use crate::data::export_v2::schema::SchemaDefinition;
 
@@ -1127,28 +1143,36 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn test_prepare_export_chunk_reports_delete_failure() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempdir().unwrap();
-        let storage = make_storage_with_rooted_fs(dir.path());
+        let mut storage = make_storage_with_rooted_fs(dir.path());
+        storage.object_store = storage.object_store.layer(
+            MockLayerBuilder::default()
+                // OpenDAL's unit deleter returns Unsupported for every deletion.
+                .deleter_factory(Arc::new(|_| Box::new(())))
+                .build()
+                .unwrap(),
+        );
         storage
             .write_text("data/public/2/a.parquet", "keep")
             .await
             .unwrap();
-        let chunk_dir = dir.path().join("data/public/2");
-        std::fs::set_permissions(&chunk_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
-        let result = storage
+        let error = storage
             .prepare_export_chunk(&["public".into()], 2, true)
-            .await;
-        std::fs::set_permissions(&chunk_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("delete unfinished chunk file")
+            .await
+            .unwrap_err();
+        let Error::StorageOperation {
+            operation, error, ..
+        } = error
+        else {
+            panic!("expected storage operation error, got {error:?}");
+        };
+        assert_eq!(
+            operation,
+            "delete unfinished chunk file data/public/2/a.parquet"
         );
+        assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert_eq!(
             storage.read_text("data/public/2/a.parquet").await.unwrap(),
             "keep"

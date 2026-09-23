@@ -291,10 +291,21 @@ pub struct EventRecorderOptions {
         skip_serializing_if = "event_type_filter_is_all"
     )]
     pub event_types: EventTypeFilterRef,
+    /// How long buffered events may wait before reaching the event handler.
+    ///
+    /// Not a configuration option: it is skipped by serde so it never appears in
+    /// config files or `config/config.md`. Integration tests shorten it so they
+    /// do not pay a flush window per DDL they assert on.
+    #[serde(skip, default = "default_flush_interval")]
+    pub flush_interval: Duration,
 }
 
 fn default_events_table_ttl() -> Duration {
     DEFAULT_EVENTS_TABLE_TTL
+}
+
+fn default_flush_interval() -> Duration {
+    DEFAULT_FLUSH_INTERVAL_SECONDS
 }
 
 impl Default for EventRecorderOptions {
@@ -302,6 +313,7 @@ impl Default for EventRecorderOptions {
         Self {
             ttl: DEFAULT_EVENTS_TABLE_TTL,
             event_types: Arc::new(EventTypeFilter::All),
+            flush_interval: DEFAULT_FLUSH_INTERVAL_SECONDS,
         }
     }
 }
@@ -321,13 +333,18 @@ pub struct EventRecorderImpl {
 
 impl EventRecorderImpl {
     pub fn new(event_handler: Box<dyn EventHandler>) -> Self {
-        Self::with_event_type_filter(event_handler, Arc::new(EventTypeFilter::All))
+        Self::with_event_type_filter(
+            event_handler,
+            Arc::new(EventTypeFilter::All),
+            DEFAULT_FLUSH_INTERVAL_SECONDS,
+        )
     }
 
     /// Creates an event recorder with an event-type filter.
     pub fn with_event_type_filter(
         event_handler: Box<dyn EventHandler>,
         event_types: EventTypeFilterRef,
+        flush_interval: Duration,
     ) -> Self {
         let (tx, rx) = channel(DEFAULT_CHANNEL_SIZE);
         let cancel_token = CancellationToken::new();
@@ -339,13 +356,9 @@ impl EventRecorderImpl {
             cancel_token: cancel_token.clone(),
         };
 
-        let processor = EventProcessor::new(
-            rx,
-            event_handler,
-            DEFAULT_FLUSH_INTERVAL_SECONDS,
-            DEFAULT_MAX_RETRY_TIMES,
-        )
-        .with_cancel_token(cancel_token);
+        let processor =
+            EventProcessor::new(rx, event_handler, flush_interval, DEFAULT_MAX_RETRY_TIMES)
+                .with_cancel_token(cancel_token);
 
         // Spawn a background task to process the events.
         let handle = tokio::spawn(async move {
@@ -611,6 +624,7 @@ mod tests {
                 count: count.clone(),
             }),
             event_type_filter.clone(),
+            DEFAULT_FLUSH_INTERVAL_SECONDS,
         );
 
         assert!(Arc::ptr_eq(

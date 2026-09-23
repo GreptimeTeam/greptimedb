@@ -67,7 +67,7 @@ pub struct FrontendOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
-    /// Shared experimental ordinary-table batching; independent of Prom batching.
+    /// Ordinary-table batching with independent logical-table controls.
     pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub prom_store: PromStoreOptions,
     pub jaeger: JaegerOptions,
@@ -131,6 +131,7 @@ impl Configurable for FrontendOptions {
             "meta_client.metasrv_addrs",
             "event_recorder.event_types",
             "pending_rows_batcher.protocols",
+            "pending_rows_batcher.logical_table.protocols",
         ])
     }
 }
@@ -205,6 +206,7 @@ mod tests {
     use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
+    use servers::batcher::BatchingProtocol;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -226,6 +228,35 @@ mod tests {
         Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
 
     #[test]
+    fn test_logical_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                    Some("otlp,influxdb"),
+                ),
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__LOGICAL_TABLE__PROTOCOLS",
+                    Some("prom,otlp"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_LOGICAL_TEST").unwrap();
+                assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+                assert_eq!(
+                    options
+                        .pending_rows_batcher
+                        .logical_table
+                        .unwrap()
+                        .protocols,
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+                );
+            },
+        );
+    }
+
+    #[test]
     fn test_batcher_protocols_from_env() {
         temp_env::with_vars(
             [(
@@ -236,11 +267,8 @@ mod tests {
                 let options =
                     FrontendOptions::load_layered_options(None, "FRONTEND_BATCHER_TEST").unwrap();
                 assert_eq!(
-                    options.pending_rows_batcher.protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Influxdb,
-                        servers::http::BatchingProtocol::HttpSql
-                    ]
+                    options.pending_rows_batcher.table.protocols,
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
                 );
             },
         );
@@ -252,6 +280,7 @@ mod tests {
         assert!(
             !defaults
                 .pending_rows_batcher
+                .table
                 .pending_rows_batching_enabled()
         );
         let options: FrontendOptions = toml::from_str(
@@ -263,9 +292,14 @@ max_batch_rows = 25
 "#,
         )
         .unwrap();
-        assert_eq!(options.pending_rows_batcher.max_batch_rows, 25);
-        assert_eq!(options.pending_rows_batcher.protocols.len(), 2);
-        assert!(options.pending_rows_batcher.pending_rows_batching_enabled());
+        assert_eq!(options.pending_rows_batcher.table.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+        assert!(
+            options
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
         let serialized = toml::to_string(&options).unwrap();
         let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
         assert_eq!(options.influxdb, parsed.influxdb);
