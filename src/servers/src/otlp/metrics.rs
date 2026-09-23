@@ -895,16 +895,16 @@ fn convert_bucket_range(
             continue;
         }
         match (spans.last_mut(), previous_index) {
-            (Some(span), Some(previous)) if previous.checked_add(1) == Some(index) => {
+            (Some(span), Some(prev_index)) if prev_index.checked_add(1) == Some(index) => {
                 span.length = span
                     .length
                     .checked_add(1)
                     .ok_or_else(|| format!("{name} bucket span length exceeds u32"))?;
             }
-            (_, previous) => {
-                let offset = match previous {
-                    Some(previous) => index
-                        .checked_sub(previous)
+            (_, prev_index) => {
+                let offset = match prev_index {
+                    Some(prev_index) => index
+                        .checked_sub(prev_index)
                         .and_then(|gap| gap.checked_sub(1))
                         .ok_or_else(|| format!("{name} bucket span offset overflows i32"))?,
                     None => index,
