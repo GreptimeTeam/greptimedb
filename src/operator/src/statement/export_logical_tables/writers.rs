@@ -82,14 +82,14 @@ impl ExportWriteBudget {
         }
     }
 
-    /// Includes full retained input allocations, conversion capacity growth and
-    /// array metadata. Shared backing is conservatively charged for each payload.
+    /// Accounts for retained input allocations, conversion capacity growth and
+    /// array metadata. Pass zero backing when the caller detaches oversized slices.
     pub(crate) fn conversion_budget(
-        batch: &RecordBatch,
+        backing: usize,
+        columns: usize,
         requested: usize,
     ) -> Result<(usize, usize)> {
-        let backing = batch.get_array_memory_size();
-        let overhead = batch.num_columns().saturating_mul(1024);
+        let overhead = columns.saturating_mul(1024);
         let available = PAYLOAD_BYTES
             .saturating_sub(backing)
             .saturating_sub(overhead)

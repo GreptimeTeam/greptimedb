@@ -15,6 +15,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::array::{Array, ArrayRef, AsArray, UInt64Array, make_array};
+use arrow::datatypes::DataType;
 use client::OutputData;
 use common_base::readable_size::ReadableSize;
 use common_datasource::file_format::Format;
@@ -278,8 +280,10 @@ pub(crate) async fn stream_to_managed_parquet(
                 .into_df_record_batch();
             let mut offset = 0;
             while offset < batch.num_rows() {
+                // The scan batch remains query-owned. Bound the downstream slice and
+                // detach its buffers below if it would retain more than its reservation.
                 let (conversion, retained) =
-                    ExportWriteBudget::conversion_budget(&batch, usize::MAX)?;
+                    ExportWriteBudget::conversion_budget(0, batch.num_columns(), usize::MAX)?;
                 let input = batch.clone();
                 let json_columns = json_columns.clone();
                 let (len, estimated) = common_runtime::spawn_blocking_global(move || {
@@ -313,7 +317,19 @@ pub(crate) async fn stream_to_managed_parquet(
                         batch = map_json_type_to_string(batch, &expanded_schema, &output_schema)
                             .context(error::BuildRecordBatchSnafu)?;
                     }
-                    let batch = batch.into_df_record_batch();
+                    let mut batch = batch.into_df_record_batch();
+                    if batch.get_array_memory_size() > reservation {
+                        let indices = UInt64Array::from_iter_values(0..batch.num_rows() as u64);
+                        batch = arrow::compute::take_record_batch(&batch, &indices)
+                            .context(error::ComputeArrowSnafu)?;
+                        let arrays = batch
+                            .columns()
+                            .iter()
+                            .map(compact_view_buffers)
+                            .collect::<Result<Vec<_>>>()?;
+                        batch = arrow::record_batch::RecordBatch::try_new(batch.schema(), arrays)
+                            .context(error::ComputeArrowSnafu)?;
+                    }
                     ensure!(
                         batch.get_array_memory_size() <= reservation,
                         error::LogicalTableExportResourceSnafu {
@@ -347,6 +363,34 @@ pub(crate) async fn stream_to_managed_parquet(
         }
     }
     result
+}
+
+// Arrow take copies ordinary buffers but shares view data buffers, including
+// views nested inside lists or structs. Reclaim those unselected values too.
+fn compact_view_buffers(array: &ArrayRef) -> Result<ArrayRef> {
+    match array.data_type() {
+        DataType::Utf8View => Ok(Arc::new(array.as_string_view().gc())),
+        DataType::BinaryView => Ok(Arc::new(array.as_binary_view().gc())),
+        _ => {
+            let data = array.to_data();
+            if data.child_data().is_empty() {
+                return Ok(array.clone());
+            }
+            let children = data
+                .child_data()
+                .iter()
+                .map(|child| {
+                    compact_view_buffers(&make_array(child.clone())).map(|array| array.to_data())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            Ok(make_array(
+                data.into_builder()
+                    .child_data(children)
+                    .build()
+                    .context(error::ComputeArrowSnafu)?,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -407,6 +451,76 @@ mod tests {
             store.read(path).await.unwrap().to_bytes().as_ref(),
             b"original"
         );
+    }
+
+    #[tokio::test]
+    async fn managed_copy_rechunks_large_backing_buffers() {
+        let value = "x".repeat(9 * 1024);
+        for view in [false, true] {
+            let data_type = if view {
+                ConcreteDataType::utf8_view_datatype()
+            } else {
+                ConcreteDataType::string_datatype()
+            };
+            let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+                "value", data_type, false,
+            )]));
+            let values = vec![value.as_str(); 8192];
+            let array: ArrayRef = if view {
+                Arc::new(StringViewArray::from(values))
+            } else {
+                Arc::new(StringArray::from(values))
+            };
+            let batch = arrow::record_batch::RecordBatch::try_new(
+                schema.arrow_schema().clone(),
+                vec![array],
+            )
+            .unwrap();
+            assert!(batch.get_array_memory_size() > 64 * 1024 * 1024);
+            // Also exercise a small slice that still references the large allocation.
+            for input in [batch.clone(), batch.slice(200, 3)] {
+                let rows = input.num_rows();
+                let batches = RecordBatches::try_new(
+                    schema.clone(),
+                    vec![RecordBatch::from_df_record_batch(schema.clone(), input)],
+                )
+                .unwrap();
+                let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+                let budget = ExportWriteBudget::new(1);
+                assert_eq!(
+                    stream_to_managed_parquet(
+                        batches.as_stream(),
+                        store.clone(),
+                        "large.parquet",
+                        &budget,
+                        &CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap(),
+                    rows
+                );
+                let reader = ParquetRecordBatchReaderBuilder::try_new(
+                    store.read("large.parquet").await.unwrap().to_bytes(),
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+                let mut actual_rows = 0;
+                for batch in reader {
+                    let batch = batch.unwrap();
+                    let strings = arrow::compute::cast(batch.column(0), &DataType::Utf8).unwrap();
+                    assert!(
+                        strings
+                            .as_string::<i32>()
+                            .iter()
+                            .all(|item| item == Some(value.as_str()))
+                    );
+                    actual_rows += batch.num_rows();
+                }
+                assert_eq!(actual_rows, rows);
+                assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+            }
+        }
     }
 
     #[tokio::test]

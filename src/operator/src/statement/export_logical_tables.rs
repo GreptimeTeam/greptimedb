@@ -580,7 +580,11 @@ async fn expand_bounded_slice(
     budget: &ExportWriteBudget,
     cancellation: &CancellationToken,
 ) -> Result<(Payload, usize)> {
-    let (conversion, retained) = ExportWriteBudget::conversion_budget(&batch, requested)?;
+    let (conversion, retained) = ExportWriteBudget::conversion_budget(
+        batch.get_array_memory_size(),
+        batch.num_columns(),
+        requested,
+    )?;
     let input = batch.clone();
     let (len, estimated) = common_runtime::spawn_blocking_global(move || {
         rows_within_budget(&input, start, end, conversion, &[])
