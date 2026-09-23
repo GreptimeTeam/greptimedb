@@ -447,7 +447,10 @@ impl PostgresServerHandlerInner {
     /// Prepares a COPY FROM STDIN: resolves the target table, validates
     /// columns and stashes the per-connection copy state.
     pub(crate) async fn begin_copy_in(&self, stmt: CopyFromStdin) -> PgWireResult<Response> {
-        let query_ctx = self.session.new_query_context();
+        // The batching-aware context routes copy-in flushes through the
+        // pending-rows batcher like SQL INSERTs when it is enabled for
+        // this connection.
+        let query_ctx = self.new_query_context();
         let (catalog, schema, table) = resolve_table_name(&query_ctx, &stmt.table)?;
 
         let Some(table_info) = self
