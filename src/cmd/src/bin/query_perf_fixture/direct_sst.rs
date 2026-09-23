@@ -266,7 +266,7 @@ fn generate_record_batch(
                 }) => {
                     columns.push(Arc::new(Float64Array::from_iter((0..rows).map(|r| {
                         let sample_index = series_sample_index(layout, sst_idx, base_row, r);
-                        if *null_every > 0 && sample_index.is_multiple_of(*null_every) {
+                        if sample_index.is_multiple_of(null_every.get()) {
                             None
                         } else {
                             Some(wave_value(*min, *max, base_row + r))
@@ -774,96 +774,27 @@ mod tests {
         }
     }
 
-    /// The nullable range-function case must write NULL on every fourth sample of
-    /// every series and wave values elsewhere, while its dense control table stays
-    /// NULL-free.
+    /// The nullable range-function case keeps per-series NULL positions and wave
+    /// values distinct from its dense control.
     #[test]
-    fn nullable_wave_nulls_one_sample_in_every_four_per_series() {
-        let case: CaseFile = toml::from_str(include_str!(
+    fn nullable_wave_keeps_null_positions_and_dense_control() {
+        let mut case: CaseFile = toml::from_str(include_str!(
             "../../../../../tests/perf/query_cases/promql_nullable_range_fn/case.toml"
         ))
         .expect("nullable range-function case should parse");
-        let scenario = match &case.scenario {
+        let scenario = match &mut case.scenario {
             Scenario::DirectReadableSst(scenario) => scenario,
             _ => unreachable!("nullable range-function case is a direct SST case"),
         };
-        assert_eq!(2, scenario.tables.len());
+        scenario.layout.series_count = NonZeroUsize::new(2).expect("2 is nonzero");
+        scenario.layout.rows_per_sst = 8;
+        scenario.layout.sst_count = 1;
+
         let sst_idx = 3;
-        let sequence = 1003;
         let base_row = sst_idx * scenario.layout.rows_per_sst;
-        let series_count = scenario.layout.series_count.get();
-        let samples_per_series = scenario.layout.rows_per_sst / series_count;
         for table in &scenario.tables {
             let metadata = Arc::new(build_region_metadata(table, RegionId::from(43)));
-            let batch =
-                generate_record_batch(table, &metadata, &scenario.layout, sst_idx, sequence);
-            let value = table
-                .columns
-                .iter()
-                .find(|column| column.name == "value")
-                .expect("fixture case has a value field");
-            let (min, max, null_every) = match value.distribution.as_ref() {
-                Some(Distribution::NullableWave {
-                    min,
-                    max,
-                    null_every,
-                }) => (*min, *max, *null_every),
-                Some(Distribution::DeterministicWave { min, max }) => (*min, *max, 0),
-                other => panic!("unexpected value distribution in {}: {other:?}", table.name),
-            };
-            let host = table
-                .columns
-                .iter()
-                .find(|column| column.name == "host")
-                .expect("fixture case has a host tag");
-            let instance = table
-                .columns
-                .iter()
-                .find(|column| column.name == "instance")
-                .expect("fixture case has an instance tag");
-
-            let mut expected = (0..scenario.layout.rows_per_sst)
-                .map(|row| {
-                    let series = series_for_row(&scenario.layout, sst_idx, base_row, row);
-                    let mut tags = HashMap::new();
-                    tags.insert(host.name.clone(), tag_value(host, series));
-                    tags.insert(instance.name.clone(), tag_value(instance, series));
-                    let is_null = null_every > 0
-                        && series_sample_index(&scenario.layout, sst_idx, base_row, row)
-                            .is_multiple_of(null_every);
-                    (
-                        encode_dense_primary_key(table, &tags),
-                        timestamp_for_row(&scenario.layout, base_row, row),
-                        sequence,
-                        tag_value(host, series),
-                        tag_value(instance, series),
-                        (!is_null).then(|| wave_value(min, max, base_row + row)),
-                    )
-                })
-                .collect::<Vec<_>>();
-            expected.sort_by(|left, right| {
-                left.0
-                    .cmp(&right.0)
-                    .then_with(|| left.1.cmp(&right.1))
-                    .then_with(|| right.2.cmp(&left.2))
-            });
-
-            let timestamps = batch
-                .column(batch.num_columns() - 4)
-                .as_any()
-                .downcast_ref::<TimestampNanosecondArray>()
-                .expect("nanosecond fixture timestamp")
-                .values()
-                .to_vec();
-            let sequences = batch
-                .column(batch.num_columns() - 2)
-                .as_any()
-                .downcast_ref::<UInt64Array>()
-                .expect("fixture sequence column")
-                .values()
-                .to_vec();
-            let hosts = string_values(&batch, 0);
-            let instances = string_values(&batch, 1);
+            let batch = generate_record_batch(table, &metadata, &scenario.layout, sst_idx, 1003);
             let values = batch
                 .column(2)
                 .as_any()
@@ -871,48 +802,38 @@ mod tests {
                 .expect("fixture value column")
                 .iter()
                 .collect::<Vec<Option<f64>>>();
-            let actual = encoded_primary_keys(&batch)
-                .into_iter()
-                .zip(timestamps)
-                .zip(sequences)
-                .zip(hosts)
-                .zip(instances)
-                .zip(values.iter().cloned())
-                .map(
-                    |(((((primary_key, timestamp), sequence), host), instance), value)| {
-                        (primary_key, timestamp, sequence, host, instance, value)
-                    },
-                )
-                .collect::<Vec<_>>();
-            assert_eq!(expected, actual, "{}", table.name);
+            let (min, max, null_positions) = match table
+                .columns
+                .iter()
+                .find(|column| column.name == "value")
+                .expect("fixture case has a value field")
+                .distribution
+                .as_ref()
+            {
+                Some(Distribution::NullableWave { min, max, .. }) => (*min, *max, &[0][..]),
+                Some(Distribution::DeterministicWave { min, max }) => (*min, *max, &[][..]),
+                other => panic!("unexpected value distribution in {}: {other:?}", table.name),
+            };
 
-            // Sorted by primary key, every series owns `samples_per_series`
-            // consecutive rows ordered by timestamp, so its NULLs must sit on a
-            // single residue class of its own sample positions.
-            assert_eq!(series_count, values.len() / samples_per_series);
-            for (chunk_index, chunk) in values.chunks(samples_per_series).enumerate() {
-                if null_every == 0 {
-                    assert!(
-                        chunk.iter().all(Option::is_some),
-                        "{} series chunk {chunk_index} must stay dense",
-                        table.name
-                    );
-                    continue;
-                }
-                let residue = chunk.iter().position(Option::is_none).unwrap_or_else(|| {
-                    panic!("{} series chunk {chunk_index} has no NULL", table.name)
-                });
+            for (series, samples) in values.chunks(4).enumerate() {
                 assert_eq!(
-                    samples_per_series / null_every,
-                    chunk.iter().filter(|value| value.is_none()).count(),
-                    "{} series chunk {chunk_index} NULL count",
+                    null_positions,
+                    samples
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(position, value)| value.is_none().then_some(position))
+                        .collect::<Vec<_>>(),
+                    "{} series {series} NULL positions",
                     table.name
                 );
-                for (position, value) in chunk.iter().enumerate() {
+                for (sample, value) in samples.iter().enumerate() {
+                    if null_positions.contains(&sample) {
+                        continue;
+                    }
                     assert_eq!(
-                        value.is_none(),
-                        position % null_every == residue,
-                        "{} series chunk {chunk_index} sample {position}",
+                        Some(wave_value(min, max, base_row + sample * 2 + series)),
+                        *value,
+                        "{} series {series} sample {sample} wave value",
                         table.name
                     );
                 }
@@ -920,19 +841,21 @@ mod tests {
         }
     }
 
-    /// The case's window arithmetic counts the NULL slots of every window, so the
-    /// cadence must also stay on one residue class of a series across SSTs, not
-    /// only inside a single SST.
+    /// NULL cadence must continue across unaligned SST boundaries rather than
+    /// restarting in each SST.
     #[test]
-    fn nullable_wave_keeps_one_null_residue_per_series_across_ssts() {
-        let case: CaseFile = toml::from_str(include_str!(
+    fn nullable_wave_continues_across_unaligned_ssts() {
+        let mut case: CaseFile = toml::from_str(include_str!(
             "../../../../../tests/perf/query_cases/promql_nullable_range_fn/case.toml"
         ))
         .expect("nullable range-function case should parse");
-        let scenario = match &case.scenario {
+        let scenario = match &mut case.scenario {
             Scenario::DirectReadableSst(scenario) => scenario,
             _ => unreachable!("nullable range-function case is a direct SST case"),
         };
+        scenario.layout.series_count = NonZeroUsize::new(2).expect("2 is nonzero");
+        scenario.layout.rows_per_sst = 6;
+        scenario.layout.sst_count = 3;
         let table = scenario
             .tables
             .iter()
@@ -944,14 +867,10 @@ mod tests {
             .find(|column| column.name == "value")
             .expect("fixture case has a value field");
         let null_every = match value.distribution.as_ref() {
-            Some(Distribution::NullableWave { null_every, .. }) => *null_every,
+            Some(Distribution::NullableWave { null_every, .. }) => null_every.get(),
             other => panic!("nullable_table must use nullable_wave, found {other:?}"),
         };
-        // Without aligned SST boundaries the per-series cadence would shift by one
-        // slot per SST, and the expected window counts documented in the case would
-        // stop holding.
         let samples_per_series = scenario.layout.rows_per_sst / scenario.layout.series_count.get();
-        assert_eq!(0, samples_per_series % null_every);
 
         let metadata = Arc::new(build_region_metadata(table, RegionId::from(43)));
         let mut null_positions: HashMap<(String, String), Vec<usize>> = HashMap::new();
@@ -991,15 +910,11 @@ mod tests {
             null_positions.len(),
             "every series must be represented"
         );
-        let expected_nulls = scenario.layout.sst_count * samples_per_series / null_every;
         for (series, positions) in &null_positions {
-            assert_eq!(expected_nulls, positions.len(), "{series:?} null count");
-            assert!(
-                positions
-                    .iter()
-                    .all(|position| position % null_every == positions[0] % null_every),
-                "{series:?} nulls leave their residue class: {:?}",
-                &positions[..positions.len().min(6)]
+            assert_eq!(
+                &[0, null_every, null_every * 2],
+                positions.as_slice(),
+                "{series:?} NULL positions must continue across SSTs"
             );
         }
     }

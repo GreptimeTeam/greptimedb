@@ -549,17 +549,13 @@ pub(super) enum Distribution {
     #[serde(rename = "deterministic_wave")]
     DeterministicWave { min: f64, max: f64 },
     /// Wave values with periodic NULLs: every `null_every`-th sample of each
-    /// series is NULL, and `0` writes no NULLs.
-    ///
-    /// The cadence is counted in samples of the series rather than in generated
-    /// rows, so every series carries the same null ratio on every layout; a row
-    /// cadence stays constant per series whenever `series_count` is a multiple of
-    /// `null_every`.
+    /// series is NULL. The cadence is counted in samples of the series rather
+    /// than in generated rows.
     #[serde(rename = "nullable_wave")]
     NullableWave {
         min: f64,
         max: f64,
-        null_every: usize,
+        null_every: NonZeroUsize,
     },
 }
 
