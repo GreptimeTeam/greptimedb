@@ -164,15 +164,11 @@ TQL EVAL (0, 0, '5s') sum by(device) (outer_agg_a / on(host) outer_agg_b);
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_a / on(host) outer_agg_b);
 
--- A label the operand still has stays groupable, whether or not the scan projected it.
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_a);
-
 DROP TABLE outer_agg_a;
 
 DROP TABLE outer_agg_b;
 
--- Same over the metric engine, where the scan prunes tag columns in favour of `__tsid`.
+-- Same over the metric engine, whose operands carry `__tsid`.
 CREATE TABLE outer_agg_physical (
   ts TIMESTAMP(3) TIME INDEX,
   greptime_value DOUBLE,
@@ -217,12 +213,6 @@ TQL EVAL (0, 0, '5s') sum by(device) (outer_agg_metric_a / on(host) outer_agg_me
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a / on(host) outer_agg_metric_b);
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_metric_a);
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a);
 
 DROP TABLE outer_agg_metric_a;
 

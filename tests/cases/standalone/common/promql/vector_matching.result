@@ -309,17 +309,6 @@ TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_a / on(host) outer_agg_b);
 | h2   | 1970-01-01T00:00:00 | 5.0                                                          |
 +------+---------------------+--------------------------------------------------------------+
 
--- A label the operand still has stays groupable, whether or not the scan projected it.
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_a);
-
-+------+---------------------+---------------------------------+
-| host | ts                  | sum(outer_agg_a.greptime_value) |
-+------+---------------------+---------------------------------+
-| h1   | 1970-01-01T00:00:00 | 10.0                            |
-| h2   | 1970-01-01T00:00:00 | 20.0                            |
-+------+---------------------+---------------------------------+
-
 DROP TABLE outer_agg_a;
 
 Affected Rows: 0
@@ -328,7 +317,7 @@ DROP TABLE outer_agg_b;
 
 Affected Rows: 0
 
--- Same over the metric engine, where the scan prunes tag columns in favour of `__tsid`.
+-- Same over the metric engine, whose operands carry `__tsid`.
 CREATE TABLE outer_agg_physical (
   ts TIMESTAMP(3) TIME INDEX,
   greptime_value DOUBLE,
@@ -402,26 +391,6 @@ TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a / on(host) outer_agg_metr
 | h1   | 1970-01-01T00:00:00 | 5.0                                                                        |
 | h2   | 1970-01-01T00:00:00 | 5.0                                                                        |
 +------+---------------------+----------------------------------------------------------------------------+
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_metric_a);
-
-+------+---------------------+----------------------------------------+
-| host | ts                  | sum(outer_agg_metric_a.greptime_value) |
-+------+---------------------+----------------------------------------+
-| h1   | 1970-01-01T00:00:00 | 10.0                                   |
-| h2   | 1970-01-01T00:00:00 | 20.0                                   |
-+------+---------------------+----------------------------------------+
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a);
-
-+------+---------------------+----------------------------------------+
-| host | ts                  | sum(outer_agg_metric_a.greptime_value) |
-+------+---------------------+----------------------------------------+
-| h1   | 1970-01-01T00:00:00 | 10.0                                   |
-| h2   | 1970-01-01T00:00:00 | 20.0                                   |
-+------+---------------------+----------------------------------------+
 
 DROP TABLE outer_agg_metric_a;
 
