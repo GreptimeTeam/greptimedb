@@ -217,6 +217,7 @@ mod tests {
     use std::sync::Arc;
 
     use common_event_recorder::EventTypeFilter;
+    use servers::batcher::BatchingProtocol;
 
     use crate::options::*;
 
@@ -266,10 +267,7 @@ mod tests {
                         .logical_table
                         .unwrap()
                         .protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Prom,
-                        servers::http::BatchingProtocol::Otlp
-                    ]
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
                 );
             },
         );
@@ -288,10 +286,7 @@ mod tests {
                         .unwrap();
                 assert_eq!(
                     options.pending_rows_batcher.table.protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Influxdb,
-                        servers::http::BatchingProtocol::HttpSql
-                    ]
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
                 );
             },
         );

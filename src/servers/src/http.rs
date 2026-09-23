@@ -53,6 +53,7 @@ use tower_http::trace::TraceLayer;
 
 use self::authorize::AuthState;
 use self::result::table_result::TableResponse;
+use crate::batcher::BatchingProtocol;
 use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::elasticsearch;
 use crate::error::{
@@ -187,22 +188,6 @@ pub(crate) enum HttpServerKind {
     Full,
     /// Serves only the `v1` interfaces plus the dashboard.
     Api,
-}
-
-/// HTTP write protocols eligible for the shared pending-row batcher.
-/// Prometheus uses this selector only when metric-engine storage is disabled.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum BatchingProtocol {
-    Prom,
-    Influxdb,
-    Opentsdb,
-    Otlp,
-    Logs,
-    Loki,
-    Splunk,
-    Elasticsearch,
-    HttpSql,
 }
 
 #[derive(Default)]
@@ -2478,9 +2463,10 @@ mod batching_tests {
     use common_query::Output;
     use session::context::QueryContextRef;
 
+    use crate::batcher::BatchingProtocol;
     use crate::error::Result as ServerResult;
     use crate::http::test_helpers::TestClient;
-    use crate::http::{BatchingProtocol, HttpOptions, HttpServerBuilder};
+    use crate::http::{HttpOptions, HttpServerBuilder};
     use crate::influxdb::InfluxdbRequest;
     use crate::opentsdb::codec::DataPoint;
     use crate::query_handler::{InfluxdbLineProtocolHandler, OpentsdbProtocolHandler};
@@ -2521,21 +2507,6 @@ mod batching_tests {
                 assert_eq!(actual, [table, logical]);
             }
         }
-    }
-
-    #[test]
-    fn test_protocol_names_reject_unknown_values() {
-        assert_eq!(
-            serde_json::from_str::<BatchingProtocol>("\"prom\"").unwrap(),
-            BatchingProtocol::Prom
-        );
-        for name in ["sql", "unknown"] {
-            assert!(serde_json::from_str::<BatchingProtocol>(&format!("\"{name}\"")).is_err());
-        }
-        assert_eq!(
-            serde_json::from_str::<BatchingProtocol>("\"http_sql\"").unwrap(),
-            BatchingProtocol::HttpSql
-        );
     }
 
     #[derive(Default)]

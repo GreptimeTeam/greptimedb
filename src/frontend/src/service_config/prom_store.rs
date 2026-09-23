@@ -108,7 +108,6 @@ mod tests {
     use crate::service_config::prom_store::{
         default_flow_notification_queue_capacity, default_max_batch_rows,
         default_max_concurrent_flushes, default_max_inflight_requests,
-        default_worker_channel_capacity,
     };
 
     #[test]
@@ -160,10 +159,7 @@ mod tests {
             default.max_concurrent_flushes,
             default_max_concurrent_flushes()
         );
-        assert_eq!(
-            default.worker_channel_capacity,
-            default_worker_channel_capacity()
-        );
+        assert_eq!(default.worker_channel_capacity, 65_536);
         assert_eq!(
             default.max_inflight_requests,
             default_max_inflight_requests()
