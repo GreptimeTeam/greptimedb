@@ -10142,25 +10142,42 @@ mod test {
     }
 
     /// `@` beyond the representable millisecond range is rejected instead of silently wrapping.
+    ///
+    /// `@ 1e16` is 10^19 milliseconds, beyond `i64::MAX`. A Unix `SystemTime` can hold it, so
+    /// the planner rejects the anchor it cannot represent. A Windows `SystemTime` tops out
+    /// below `i64::MAX` milliseconds, so the same literal is already rejected while parsing.
     #[tokio::test]
     async fn at_modifier_rejects_unrepresentable_timestamp() {
-        let eval_stmt = build_eval_stmt("some_metric @ 1e16");
-        let table_provider = build_test_table_provider(
-            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
-            1,
-            1,
-        )
-        .await;
-        let err =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Timestamp out of range for the `@` modifier"),
-            "{err}"
-        );
-        assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        #[cfg(windows)]
+        {
+            let err = parser::parse("some_metric @ 1e16").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("timestamp out of bounds for @ modifier"),
+                "{err}"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            let eval_stmt = build_eval_stmt("some_metric @ 1e16");
+            let table_provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            let err =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("Timestamp out of range for the `@` modifier"),
+                "{err}"
+            );
+            assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        }
     }
 
     #[tokio::test]
