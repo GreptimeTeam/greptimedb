@@ -38,7 +38,7 @@ name: Docs CI
 
 jobs:
   typos:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1 }}
     name: Spell Check with Typos
     runs-on: ubuntu-latest
     steps:
@@ -48,7 +48,7 @@ jobs:
       - uses: crate-ci/typos@v1.50.2
 
   license-header-check:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1 }}
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -58,7 +58,7 @@ jobs:
       - uses: korandoru/hawkeye@v5
 
   required-checks:
-    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1 }}
     name: ${{ matrix.check }}
     runs-on: ubuntu-slim
     strategy:
