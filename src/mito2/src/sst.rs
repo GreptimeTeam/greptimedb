@@ -47,6 +47,7 @@ pub mod file_ref;
 pub mod index;
 pub mod location;
 pub mod parquet;
+pub(crate) mod primary_key;
 pub mod range_index;
 pub(crate) mod version;
 

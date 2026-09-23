@@ -61,7 +61,7 @@ use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
 use crate::instance::region_query::FrontendRegionQueryHandler;
-use crate::service_config::PendingRowsBatcherOptions;
+use crate::service_config::BatcherOptions;
 
 /// The frontend [`Instance`] builder.
 pub struct FrontendBuilder {
@@ -237,31 +237,30 @@ impl FrontendBuilder {
         };
         // The execution-only inserter owns no batchers, avoiding an Arc cycle.
         let bulk_inserter = Arc::new(create_inserter());
-        let build_batcher =
-            |options: &PendingRowsBatcherOptions| -> Option<Arc<dyn PendingRowsBatcher>> {
-                if !options.pending_rows_batching_enabled()
-                    || (self.options.prom_store.with_metric_engine
-                        && options
-                            .protocols
-                            .iter()
-                            .all(|protocol| *protocol == BatchingProtocol::Prom))
-                {
-                    return None;
-                }
-                TablePendingRowsBatcher::try_new(
-                    options.pending_rows_flush_interval,
-                    options.max_batch_rows,
-                    options.max_concurrent_flushes,
-                    options.worker_channel_capacity,
-                    options.max_inflight_requests,
-                    options.flow_notification_queue_capacity,
-                    bulk_inserter.clone(),
-                )
-                .map(|batcher| batcher as Arc<dyn PendingRowsBatcher>)
-            };
+        let build_batcher = |options: &BatcherOptions| -> Option<Arc<dyn PendingRowsBatcher>> {
+            if !options.pending_rows_batching_enabled()
+                || (self.options.prom_store.with_metric_engine
+                    && options
+                        .protocols
+                        .iter()
+                        .all(|protocol| *protocol == BatchingProtocol::Prom))
+            {
+                return None;
+            }
+            TablePendingRowsBatcher::try_new(
+                options.pending_rows_flush_interval,
+                options.max_batch_rows,
+                options.max_concurrent_flushes,
+                options.worker_channel_capacity,
+                options.max_inflight_requests,
+                options.flow_notification_queue_capacity,
+                bulk_inserter.clone(),
+            )
+            .map(|batcher| batcher as Arc<dyn PendingRowsBatcher>)
+        };
         let inserter = Arc::new(
             create_inserter()
-                .with_pending_rows_batcher(build_batcher(&self.options.pending_rows_batcher)),
+                .with_pending_rows_batcher(build_batcher(self.options.table_batcher_options())),
         );
         let deleter = Arc::new(Deleter::new(
             self.catalog_manager.clone(),
@@ -382,11 +381,14 @@ impl FrontendBuilder {
                 self.options.event_recorder.ttl,
             )),
             self.options.event_recorder.event_types.clone(),
+            self.options.event_recorder.flush_interval,
         ));
         admin_event_recorder.install(&event_recorder);
 
         Ok(Instance {
+            logical_batcher: Default::default(),
             frontend_peer_addr,
+            experimental_metric_export: self.options.experimental_metric_export,
             catalog_manager: self.catalog_manager,
             pipeline_operator,
             statement_executor,

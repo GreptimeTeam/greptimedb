@@ -143,6 +143,8 @@ pub(crate) fn decode_remote_write_v2(
     } else {
         try_decompress(!is_zstd, &body[..])?
     };
+    // Decompression copied the payload out, so the compressed body is no longer needed.
+    drop(body);
     let request = BorrowedRequest::decode(&buf).context(error::DecodePromRemoteRequestSnafu)?;
     drop(decode_timer);
 

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod matching_filters;
+
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -172,6 +174,15 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
+    /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
+    /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
+    ///
+    /// An aggregation reports every `by(...)` label it finds in its input schema among its tag
+    /// columns, and a value field named there is a group key of the aggregate rather than a
+    /// property of a series: its value varies between the samples of one series. Lowering a
+    /// matcher on it into the scan would change which samples are selected (#9242), so
+    /// [`matching_filters`] refuses to propagate such a matcher.
+    aggregation_field_labels: Vec<String>,
     /// Use metric engine internal series identifier column (`__tsid`) as series key.
     ///
     /// This is enabled only when the underlying scan can provide `__tsid` (`UInt64`). The planner
@@ -1357,6 +1368,8 @@ impl PromPlanner {
             // lhs is a literal, rhs is a column
             (Some(mut expr), None) => {
                 let input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                // Arithmetic against a literal preserves the series labels, so
+                // `aggregation_field_labels` passes through with `tag_columns` unchanged.
                 // check if the literal is a special time expr
                 if let Some(time_expr) = self.try_build_special_time_expr_with_context(lhs) {
                     expr = time_expr
@@ -1490,21 +1503,55 @@ impl PromPlanner {
             }
             // both are columns. join them on time index
             (None, None) => {
-                let left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
+                let mut left_input = self.prom_expr_to_plan(lhs, query_engine_state).await?;
                 let left_field_columns = self.ctx.field_columns.clone();
                 let left_time_index_column = self.ctx.time_index_column.clone();
                 let mut left_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let left_context = self.ctx.clone();
+                let mut left_context = self.ctx.clone();
 
-                let right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
+                let mut right_input = self.prom_expr_to_plan(rhs, query_engine_state).await?;
                 let right_field_columns = self.ctx.field_columns.clone();
                 let right_time_index_column = self.ctx.time_index_column.clone();
                 let mut right_table_ref = self
                     .table_ref()
                     .unwrap_or_else(|_| TableReference::bare(""));
-                let right_context = self.ctx.clone();
+                let mut right_context = self.ctx.clone();
+
+                // Both operands are planned first because only the planned contexts tell a tag
+                // from a value field. The rewrite merely adds matchers to a selector, so the
+                // table reference, time index and field columns captured above stay valid.
+                if let Some(rewritten) = matching_filters::propagate(
+                    binary_expr,
+                    &left_context.tag_columns,
+                    &right_context.tag_columns,
+                    &left_context.aggregation_field_labels,
+                    &right_context.aggregation_field_labels,
+                ) {
+                    // A copied matcher belongs to the scan, not to the operand's identity:
+                    // `absent()` turns `selector_matcher` into the labels it reports, so the
+                    // re-planned context keeps the matchers the operand was written with.
+                    if rewritten.lhs.as_ref() != lhs.as_ref() {
+                        let selectors = std::mem::take(&mut left_context.selector_matcher);
+                        left_input = self
+                            .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
+                            .await?;
+                        left_context = self.ctx.clone();
+                        left_context.selector_matcher = selectors;
+                    }
+                    if rewritten.rhs.as_ref() != rhs.as_ref() {
+                        let selectors = std::mem::take(&mut right_context.selector_matcher);
+                        right_input = self
+                            .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
+                            .await?;
+                        right_context = self.ctx.clone();
+                        right_context.selector_matcher = selectors;
+                    }
+                    // The code below reads `self.ctx` as the right operand's context.
+                    self.ctx = right_context.clone();
+                }
+
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
@@ -2173,6 +2220,7 @@ impl PromPlanner {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
             self.ctx.tag_columns = vec![];
+            self.ctx.aggregation_field_labels.clear();
             self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
             LogicalPlan::Extension(Extension {
                 node: Arc::new(
@@ -2344,7 +2392,9 @@ impl PromPlanner {
 
         self.ctx.table_name = metric_name;
 
-        let mut matchers = HashSet::new();
+        // Deduplicate in place instead of through a `HashSet`: the scan filter is built in
+        // this order, and a hashed order makes the plan of one query vary between runs.
+        let mut matchers: Vec<Matcher> = Vec::with_capacity(label_matchers.matchers.len());
         for matcher in &label_matchers.matchers {
             // TODO(ruihang): support other metric match ops
             if matcher.name == FIELD_COLUMN_MATCHER {
@@ -2363,11 +2413,13 @@ impl PromPlanner {
                 self.ctx.schema_name = Some(matcher.value.clone());
             } else if matcher.name != METRIC_NAME {
                 self.ctx.selector_matcher.push(matcher.clone());
-                let _ = matchers.insert(matcher.clone());
+                if !matchers.contains(matcher) {
+                    matchers.push(matcher.clone());
+                }
             }
         }
 
-        Ok(Matchers::new(matchers.into_iter().collect()))
+        Ok(Matchers::new(matchers))
     }
 
     async fn selector_to_series_normalize_plan(
@@ -2561,11 +2613,27 @@ impl PromPlanner {
             None => {
                 if update_ctx {
                     self.ctx.tag_columns.clear();
+                    self.ctx.aggregation_field_labels.clear();
                 }
                 Ok(vec![self.create_time_index_column_expr()?])
             }
             Some(LabelModifier::Include(labels)) => {
                 if update_ctx {
+                    // A `by(...)` label can name a value field of the input instead of a tag. The
+                    // aggregate still reports it among its tag columns below, but unlike a tag it
+                    // is a group key rather than a property of a series: its value varies between
+                    // the samples of one series, so a matcher on it must stay above sample
+                    // selection (#9242). Record it, before the tag columns are overwritten.
+                    self.ctx.aggregation_field_labels = labels
+                        .labels
+                        .iter()
+                        .filter(|label| {
+                            self.ctx.field_columns.contains(label)
+                                || !self.ctx.tag_columns.contains(label)
+                                || self.ctx.aggregation_field_labels.contains(label)
+                        })
+                        .cloned()
+                        .collect();
                     self.ctx.tag_columns.clear();
                 }
                 let mut exprs = Vec::with_capacity(labels.labels.len());
@@ -2617,6 +2685,12 @@ impl PromPlanner {
                 if update_ctx {
                     // change the tag columns in context
                     self.ctx.tag_columns = all_fields.iter().map(|col| (*col).clone()).collect();
+                    // `without(...)` drops the value fields of the input from its grouping labels,
+                    // so a label stays a grouping label in name only if it survives in the input
+                    // schema (e.g. an inner aggregation that grouped by it).
+                    self.ctx
+                        .aggregation_field_labels
+                        .retain(|label| all_fields.iter().any(|col| *col == label));
                 }
 
                 // collect remaining fields and convert to col expr
@@ -2649,13 +2723,17 @@ impl PromPlanner {
 
             let accepts_empty = matcher.is_match("");
             let column_name = Self::find_case_sensitive_column(table_schema, matcher.name.as_str());
+            // Prometheus reads a label a series does not carry as the empty
+            // string. A row can miss a label two ways: the table has no column
+            // for it, or the column exists but is NULL on that row — the latter
+            // is the norm for logical metrics sharing a physical table, which
+            // holds the union of their label columns.
             let col = if let Some(column_name) = column_name {
                 let column = DfExpr::Column(Column::from_name(&column_name));
                 let field = table_schema
                     .index_of_column_by_name(None, &column_name)
                     .map(|index| table_schema.field(index));
                 if accepts_empty
-                    && column_name == OTLP_AGGREGATION_TEMPORALITY_LABEL
                     && let Some(data_type) = field
                         .filter(|field| {
                             field.is_nullable()
@@ -2674,7 +2752,6 @@ impl PromPlanner {
                 }
             } else {
                 DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
-                    .alias(matcher.name.clone())
             };
             let lit = DfExpr::Literal(ScalarValue::Utf8(Some(matcher.value)), None);
             let expr = match matcher.op {
@@ -3307,6 +3384,8 @@ impl PromPlanner {
             .cloned()
             .collect();
         self.ctx.tag_columns = tags;
+        // The operand is a plain selector: its tag columns are the table's.
+        self.ctx.aggregation_field_labels.clear();
 
         self.ctx.use_tsid = false;
 
@@ -3319,6 +3398,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
+        self.ctx.aggregation_field_labels.clear();
         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
         self.ctx.use_tsid = false;
 
@@ -5163,6 +5243,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
+        self.ctx.aggregation_field_labels.clear();
         self.ctx.field_columns = vec![greptime_value().to_string()];
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(
@@ -5254,6 +5335,7 @@ impl PromPlanner {
         });
         // scalar plan have no tag columns
         self.ctx.tag_columns.clear();
+        self.ctx.aggregation_field_labels.clear();
         self.ctx.field_columns.clear();
         self.ctx
             .field_columns
@@ -5323,6 +5405,9 @@ impl PromPlanner {
             ),
         });
 
+        // The absent series carries the equality matchers as labels, not the input's
+        // tags or value fields, so the input's field grouping labels no longer apply.
+        self.ctx.aggregation_field_labels.clear();
         Ok(absent_plan)
     }
 
@@ -10686,13 +10771,13 @@ mod test {
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Filter: some_metric.tag_0 = Utf8(\"foo\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.tag_0 = Utf8(\"foo\") AND some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n    SubqueryAlias: rhs [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-            \n            Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.tag_0 = Utf8(\"bar\") AND some_metric.tag_0 = Utf8(\"foo\") AND some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
         );
 
@@ -13307,6 +13392,210 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         assert!(matches!(&plan, LogicalPlan::EmptyRelation(_)), "{plan:?}");
         assert!(!plan.schema().fields().is_empty());
         assert!(!contains_histogram_fold(&plan), "{plan:?}");
+    }
+
+    async fn build_matching_filter_plan(query: &str) -> String {
+        let table_provider = build_test_table_provider_with_distinct_tags(&[
+            ("metric_a", &["host", "device"]),
+            ("metric_b", &["host", "device"]),
+        ])
+        .await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        plan.display_indent().to_string()
+    }
+
+    /// [`build_test_table_provider_with_distinct_tags`] plus a `status` string column: a value
+    /// field that is neither a primary key nor a value column of the metric, so
+    /// `count by(status) (...)` still reports it among the aggregation's tag columns.
+    async fn build_test_table_provider_with_string_field(
+        table_tags: &[(&str, &[&str])],
+    ) -> DfTableSourceProvider {
+        let catalog_list = MemoryCatalogManager::with_default_setup();
+        for (table_name, tags) in table_tags {
+            let mut columns = tags
+                .iter()
+                .map(|tag| {
+                    ColumnSchema::new(
+                        (*tag).to_string(),
+                        ConcreteDataType::string_datatype(),
+                        false,
+                    )
+                })
+                .collect::<Vec<_>>();
+            columns.push(
+                ColumnSchema::new(
+                    greptime_timestamp().to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            columns.push(ColumnSchema::new(
+                "status".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ));
+            let table_meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices((0..tags.len()).collect())
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let table_info = TableInfoBuilder::default()
+                .name((*table_name).to_string())
+                .meta(table_meta)
+                .build()
+                .unwrap();
+
+            assert!(
+                catalog_list
+                    .register_table_sync(RegisterTableRequest {
+                        catalog: DEFAULT_CATALOG_NAME.to_string(),
+                        schema: DEFAULT_SCHEMA_NAME.to_string(),
+                        table_name: (*table_name).to_string(),
+                        table_id: 1024,
+                        table: EmptyTable::from_table_info(&table_info),
+                    })
+                    .is_ok()
+            );
+        }
+
+        DfTableSourceProvider::new(
+            catalog_list,
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    async fn build_matching_filter_plan_with_string_field(query: &str) -> String {
+        let table_provider = build_test_table_provider_with_string_field(&[
+            ("metric_a", &["host", "device"]),
+            ("metric_b", &["host", "device"]),
+        ])
+        .await;
+        let plan = PromPlanner::stmt_to_plan(
+            table_provider,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+        plan.display_indent().to_string()
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_reaches_both_operands() {
+        for query in [
+            r#"metric_a / metric_b{host="foo"}"#,
+            r#"metric_a / on(host, device) metric_b{host="foo"}"#,
+            r#"count_over_time(metric_a[1m]) / on(host) count_over_time(metric_b{host="foo"}[1m])"#,
+            r#"metric_a / ignoring(device) metric_b{host="foo"}"#,
+            r#"sum by(host) (metric_a) / on(host) sum by(host) (metric_b{host="foo"})"#,
+            r#"metric_a / on(host) avg without(device) (metric_b{host="foo"})"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(
+                plan.matches(r#"host = Utf8("foo")"#).count(),
+                2,
+                "{query}\n{plan}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_reaches_scalar_ranking_and_grouped_operands() {
+        for query in [
+            r#"(8 * metric_a{host="foo"}) / on(host) metric_b"#,
+            r#"topk(1, metric_a{host="foo"}) / on(host, device) metric_b"#,
+            r#"(8 * metric_a{host="foo"}) / on(host) group_left topk by(host)(1, max by(host)(metric_b))"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(
+                plan.matches(r#"host = Utf8("foo")"#).count(),
+                2,
+                "{query}\n{plan}"
+            );
+        }
+        // A global ranking one-side must see every host, so the matcher stays put.
+        let query = r#"metric_a{host="foo"} / on(host) group_left topk(1, max by(host)(metric_b))"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(
+            plan.matches(r#"host = Utf8("foo")"#).count(),
+            1,
+            "{query}\n{plan}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_skips_selecting_aggregations() {
+        // `topk` ranks its input, so filtering before it changes the candidate set.
+        let query = r#"topk(1, metric_a) / on(host, device) metric_b{host="foo"}"#;
+        let plan = build_matching_filter_plan(query).await;
+        assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
+    }
+
+    #[tokio::test]
+    async fn binary_value_field_matcher_stays_on_its_own_operand() {
+        let value = greptime_value();
+        for query in [
+            format!(r#"metric_a / metric_b{{{value}="2"}}"#),
+            format!(r#"metric_a / on(host, device, {value}) metric_b{{{value}="2"}}"#),
+        ] {
+            let plan = build_matching_filter_plan(&query).await;
+            assert_eq!(plan.matches(r#"Utf8("2")"#).count(), 1, "{query}\n{plan}");
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_value_field_matcher_is_not_copied_across_aggregations() {
+        // `status` varies between the samples of one series, so filtering the other operand by it
+        // would drop the newest sample before sample selection (#9242).
+        for query in [
+            r#"count by(status) (metric_a) / on(status) count by(status) (metric_b{status="ready"})"#,
+            r#"(8 * count by(status)(metric_a{__field__="status"})) / on(status) topk by(status)(1, count by(status)(metric_b{__field__="status",status="ready"}))"#,
+            r#"count by(status)(metric_a{__field__="status"}) / on(status) group_left topk by(status)(1, count by(status)(metric_b{__field__="status",status="ready"}))"#,
+        ] {
+            let plan = build_matching_filter_plan_with_string_field(query).await;
+            assert_eq!(
+                plan.matches(r#"Utf8("ready")"#).count(),
+                1,
+                "{query}\n{plan}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_reaches_aggregations_grouping_by_tags() {
+        // `count`, not `sum`: the string value field is not summable.
+        let query = r#"count by(host) (metric_a) / on(host) count by(host) (metric_b{host="foo"})"#;
+        let plan = build_matching_filter_plan_with_string_field(query).await;
+        assert_eq!(plan.matches(r#"Utf8("foo")"#).count(), 2, "{query}\n{plan}");
+    }
+
+    #[tokio::test]
+    async fn binary_matching_label_filter_skips_unproven_expressions() {
+        for query in [
+            r#"metric_a > on(host, device) metric_b{host="foo"}"#,
+            r#"metric_a / on(host) group_left metric_b{host="foo"}"#,
+            r#"metric_a / on(host) label_replace(metric_b{host="foo"},"extra","e","host",".*")"#,
+            r#"metric_a / on(device) metric_b{host="foo"}"#,
+        ] {
+            let plan = build_matching_filter_plan(query).await;
+            assert_eq!(plan.matches("foo").count(), 1, "{query}\n{plan}");
+        }
     }
 
     #[tokio::test]

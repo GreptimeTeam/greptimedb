@@ -17,6 +17,7 @@ use snafu::{OptionExt, ensure};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidSparsePrimaryKeySnafu, Result};
+use crate::row_converter::encoded_string_len;
 use crate::row_converter::sparse::{
     COLUMN_ID_ENCODE_SIZE, RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID,
     SparseOffsetsCache, TABLE_ID_VALUE_OFFSET, TAGS_START_OFFSET, TSID_VALUE_OFFSET,
@@ -86,6 +87,47 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
         Ok(None)
     }
 
+    /// Extracts a UTF-8 label into a reusable buffer, validating it once.
+    /// Missing and null labels return `None` without modifying the buffer;
+    /// an empty label returns `Some("")`. Reserved numeric columns are rejected.
+    /// The returned string borrows `buffer`, whose contents are replaced for each label.
+    pub fn label<'buf>(
+        &mut self,
+        column_id: ColumnId,
+        buffer: &'buf mut Vec<u8>,
+    ) -> Result<Option<&'buf str>> {
+        ensure!(
+            !matches!(
+                column_id,
+                RESERVED_COLUMN_ID_TABLE_ID | RESERVED_COLUMN_ID_TSID
+            ),
+            InvalidSparsePrimaryKeySnafu {
+                reason: "reserved column is not a string label"
+            }
+        );
+        let Some(encoded) = self.encoded_value(column_id)? else {
+            return Ok(None);
+        };
+        if encoded[0] == 0 {
+            return Ok(None);
+        }
+
+        buffer.clear();
+        // encoded_value checked the markers and every chunk length. Reserve once
+        // before unchunking so the buffer does not grow for each 8-byte chunk.
+        buffer.reserve(encoded.len() - 2);
+        for chunk in encoded[2..].chunks_exact(9) {
+            let len = usize::from(chunk[8]).min(8);
+            buffer.extend_from_slice(&chunk[..len]);
+        }
+        std::str::from_utf8(buffer).map(Some).map_err(|_| {
+            InvalidSparsePrimaryKeySnafu {
+                reason: "label is not valid UTF-8",
+            }
+            .build()
+        })
+    }
+
     /// Returns the table id from the non-null prefix validated by [`Self::new`].
     pub fn table_id(&self) -> u32 {
         (&self.pk[TABLE_ID_VALUE_OFFSET + 1..]).get_u32()
@@ -100,45 +142,13 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
 /// Finds the end of an Option<String> without allocating or reading its payload.
 /// Unlike memcomparable's skip_bytes, all advances are checked for truncated input.
 fn encoded_label(bytes: &[u8]) -> Result<&[u8]> {
-    match bytes.first() {
-        Some(0) => return Ok(&bytes[..1]),
-        Some(1) => {}
-        _ => {
-            return InvalidSparsePrimaryKeySnafu {
-                reason: "invalid label null marker",
-            }
-            .fail();
+    let len = encoded_string_len(bytes).map_err(|error| {
+        InvalidSparsePrimaryKeySnafu {
+            reason: error.to_string(),
         }
-    }
-    match bytes.get(1) {
-        Some(0) => return Ok(&bytes[..2]),
-        Some(1) => {}
-        _ => {
-            return InvalidSparsePrimaryKeySnafu {
-                reason: "invalid label bytes marker",
-            }
-            .fail();
-        }
-    }
-    let mut end = 2;
-    loop {
-        let chunk = bytes
-            .get(end..end + 9)
-            .context(InvalidSparsePrimaryKeySnafu {
-                reason: "truncated label chunk",
-            })?;
-        end += 9;
-        match chunk[8] {
-            1..=8 => return Ok(&bytes[..end]),
-            9 => {}
-            _ => {
-                return InvalidSparsePrimaryKeySnafu {
-                    reason: "invalid label chunk length",
-                }
-                .fail();
-            }
-        }
-    }
+        .build()
+    })?;
+    Ok(&bytes[..len])
 }
 
 #[cfg(test)]
@@ -264,5 +274,43 @@ mod tests {
         invalid_utf8[28] = 0xff;
         let mut view = SparsePrimaryKeyView::new(&invalid_utf8, &mut cache).unwrap();
         assert!(IndexValueCodec::encode_sparse_value(&mut view, 1, &mut Vec::new()).is_err());
+    }
+
+    #[test]
+    fn label_reuses_buffer_across_null_empty_invalid_and_valid_values() {
+        let codec = SparsePrimaryKeyCodec::schemaless();
+        let mut cache = SparseOffsetsCache::new();
+        let mut buffer = Vec::with_capacity(256);
+        let ptr = buffer.as_ptr();
+        for label in [
+            b"1234567\xe4\xb8\xad\0\xe6\x96\x87".as_slice(),
+            b"",
+            b"\xff",
+            b"after-error",
+        ] {
+            let mut pk = Vec::new();
+            codec.encode_internal(42, 7, &mut pk).unwrap();
+            codec
+                .encode_raw_tag_value([(1, label)].into_iter(), &mut pk)
+                .unwrap();
+            pk.extend_from_slice(&2_u32.to_be_bytes());
+            pk.push(0);
+            let mut view = SparsePrimaryKeyView::new(&pk, &mut cache).unwrap();
+            let actual = view.label(1, &mut buffer);
+            match std::str::from_utf8(label) {
+                Ok(expected) => assert_eq!(actual.unwrap(), Some(expected)),
+                Err(_) => assert!(actual.is_err()),
+            }
+            assert_eq!(view.label(2, &mut buffer).unwrap(), None);
+            assert_eq!(view.label(3, &mut buffer).unwrap(), None);
+            // Null/missing values do not overwrite the scratch buffer, matching index extraction.
+            assert_eq!(buffer, label);
+            assert_eq!(buffer.as_ptr(), ptr);
+            assert!(
+                view.label(RESERVED_COLUMN_ID_TABLE_ID, &mut buffer)
+                    .is_err()
+            );
+            assert!(view.label(RESERVED_COLUMN_ID_TSID, &mut buffer).is_err());
+        }
     }
 }

@@ -1232,7 +1232,7 @@ async fn preload_parquet_meta_cache_for_files(
             .get_compact_sst_meta_data(file_id, PageIndexPolicy::Optional)
             .await
         {
-            if file_handle.primary_key_range().is_none()
+            if file_handle.raw_primary_key_range().is_none()
                 && let Some(primary_key_range) = extract_primary_key_range(
                     metadata.parquet_metadata().as_ref(),
                     &region_metadata,
@@ -1247,11 +1247,16 @@ async fn preload_parquet_meta_cache_for_files(
             let key = IndexKey::new(file_id.region_id(), file_id.file_id(), FileType::Parquet);
             if let Some(metadata) = write_cache
                 .file_cache()
-                .get_sst_meta_data(key, &mut cache_metrics, PageIndexPolicy::Optional)
+                .get_sst_meta_data(
+                    key,
+                    &mut cache_metrics,
+                    PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime(),
+                )
                 .await
             {
                 let decoded = metadata.decoded();
-                if file_handle.primary_key_range().is_none()
+                if file_handle.raw_primary_key_range().is_none()
                     && let Some(primary_key_range) = extract_primary_key_range(
                         decoded.parquet_metadata().as_ref(),
                         &region_metadata,
@@ -1297,6 +1302,7 @@ async fn preload_parquet_meta_cache_for_files(
                     // instead of substituting the region's current schema.
                     None,
                     PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime(),
                 )
                 .await
                 {
@@ -1664,7 +1670,9 @@ mod tests {
         let file_id = FileId::random();
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3])) as ArrayRef;
-        let primary_key = Arc::new(BinaryArray::from_iter_values([b"a", b"b", b"c"])) as ArrayRef;
+        let keys =
+            ["a", "b", "c"].map(|tag| crate::test_util::sst_util::new_primary_key(&[tag, ""]));
+        let primary_key = Arc::new(BinaryArray::from_iter_values(&keys)) as ArrayRef;
         let batch = RecordBatch::try_from_iter([
             ("col", col),
             (
@@ -1744,7 +1752,7 @@ mod tests {
                 .await
                 .is_some()
         );
-        assert!(file_handle.primary_key_range().is_some());
+        assert!(file_handle.raw_primary_key_range().is_some());
     }
 
     #[tokio::test]

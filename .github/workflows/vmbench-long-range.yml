@@ -33,12 +33,17 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-65906ca9@sha256:5af45e298019474d4c5089d63031a15f9bceb663890dd87fa0a56876c99c8597
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260918-545dc570@sha256:0ff03e7e690575e875bb85b3054a03486dd9359073546dc715da177153cf7a29
         required: true
       ecs_instance_type:
         description: ECS instance type (independent of Query Regression)
         type: string
         default: ecs.c9i.2xlarge
+        required: true
+      benchmark_root:
+        description: Absolute disk-backed work directory (outside the o11ybench checkout)
+        type: string
+        default: /home/runner/benchmark-data
         required: true
       system_disk_gib:
         description: System disk GiB (20..2048)
@@ -68,6 +73,7 @@ on:
 permissions:
   contents: read
 env:
+  BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
@@ -103,6 +109,10 @@ jobs:
       run: |
         set -euo pipefail
         [[ -n "$ECS_INSTANCE_TYPE" ]]
+        [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
+        [[ "$BENCHMARK_ROOT" != /tmp && "$BENCHMARK_ROOT" != /tmp/* ]]
+        [[ "$BENCHMARK_ROOT" != *$'\n'* && "$BENCHMARK_ROOT" != *$'\r'* ]]
+        [[ "/${BENCHMARK_ROOT#/}/" != */../* && "/${BENCHMARK_ROOT#/}/" != */./* ]]
         for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
           [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers'; exit 1; }
         done
@@ -136,7 +146,7 @@ jobs:
         # Keep the original warm defaults: serial 5/1 and c1/c4 30s/5s.
         docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
           --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
-          --output-root "/tmp/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --output-root "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
     - uses: actions/upload-artifact@v4
       with:
@@ -185,10 +195,12 @@ jobs:
       RESOLVED_RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RESOLVED_O11YBENCH_REF: ${{ needs.validate.outputs.o11ybench_ref }}
       RUN_ID: ${{ needs.validate.outputs.run_id }}
-      ARTIFACT_ROOT: /tmp/o11ybench-${{ needs.validate.outputs.run_id }}
+      ARTIFACT_ROOT: ${{ inputs.benchmark_root }}/o11ybench/o11ybench-${{ needs.validate.outputs.run_id }}
       METADATA_ROOT: ${{ github.workspace }}/vmbench-metadata
       O11YBENCH_DIR: ${{ github.workspace }}/o11ybench
-      TSDG_PARALLELISM: '8'
+      TSDG_PARALLELISM: '4'
+      TSDG_BATCH_SIZE: '100000'
+      O11YBENCH_GENERATOR_CPUS: '4'
     steps:
     - name: Checkout matching benchmark tools
       uses: actions/checkout@v4
@@ -209,9 +221,11 @@ jobs:
         test "$(git -C "$O11YBENCH_DIR" rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
         jq --version
         docker info
-        df -h /tmp /var/lib/docker
+        mkdir -p "$BENCHMARK_ROOT/o11ybench"
+        test "$(stat -f -c %T "$BENCHMARK_ROOT")" != tmpfs || { echo 'Benchmark root must be disk-backed'; exit 1; }
+        df -h "$BENCHMARK_ROOT" /var/lib/docker
         # Fail before generation if either dataset space or Docker storage is too small.
-        for path in /tmp /var/lib/docker; do
+        for path in "$BENCHMARK_ROOT" /var/lib/docker; do
           available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
           ((available >= 10 * 1024 * 1024)) || { echo "Need at least 10 GiB free on $path"; exit 1; }
         done
@@ -245,16 +259,24 @@ jobs:
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+    - name: Stage benchmark artifacts
+      if: always()
+      run: |
+        mkdir -p "$RUNNER_TEMP/vmbench-artifacts"
+        if [[ -d "$METADATA_ROOT" ]]; then
+          rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/vmbench-artifacts/"
+        fi
+        if [[ -d "$ARTIFACT_ROOT-warm" ]]; then
+          # Exclude DB directories before traversal; they may be unreadable by the runner.
+          rsync -a --no-owner --no-group --exclude='db-data/' --exclude='/data/*.bin' \
+            "$ARTIFACT_ROOT-warm/" "$RUNNER_TEMP/vmbench-artifacts/$(basename "$ARTIFACT_ROOT-warm")/"
+        fi
     - name: Upload HTML and results (no dataset or DB files)
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: vmbench-long-range-${{ github.run_id }}-${{ github.run_attempt }}
-        path: |
-          ${{ env.METADATA_ROOT }}
-          ${{ env.ARTIFACT_ROOT }}-warm
-          !${{ env.ARTIFACT_ROOT }}-warm/data/*.bin
-          !${{ env.ARTIFACT_ROOT }}-warm/**/db-data/**
+        path: ${{ runner.temp }}/vmbench-artifacts
         if-no-files-found: warn
         retention-days: 14
   teardown:

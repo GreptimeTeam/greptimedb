@@ -678,8 +678,6 @@ mod tests {
                 vec![datatypes::json::JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 }],
                 None,

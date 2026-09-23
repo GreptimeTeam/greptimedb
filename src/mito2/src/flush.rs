@@ -63,7 +63,7 @@ use crate::request::{
 };
 use crate::schedule::CancellableTaskState;
 use crate::schedule::scheduler::{Job, SchedulerRef};
-use crate::sst::file::{FileMeta, UncommittedSsts};
+use crate::sst::file::{FileMeta, RegionFileId, UncommittedSsts};
 use crate::sst::parquet::metadata::extract_primary_key_range;
 use crate::sst::parquet::{
     DEFAULT_READ_BATCH_SIZE, DEFAULT_ROW_GROUP_SIZE, SstInfo, WriteOptions, flat_format,
@@ -738,12 +738,18 @@ impl RegionFlushTask {
             let access_layer = self.access_layer.clone();
             let cache_manager = self.cache_manager.clone();
             let region_id = version.metadata.region_id;
+            let write_buffer_size = write_opts.write_buffer_size;
             let semaphore = self.flush_semaphore.clone();
             let uncommitted = uncommitted.clone();
             let task = common_runtime::spawn_global(async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let metrics = access_layer
-                    .put_sst(&encoded.data, region_id, &encoded.sst_info, &cache_manager)
+                    .put_sst(
+                        &encoded.data,
+                        RegionFileId::new(region_id, encoded.sst_info.file_id),
+                        &cache_manager,
+                        write_buffer_size,
+                    )
                     .await?;
                 uncommitted.track(std::slice::from_ref(&encoded.sst_info));
                 FLUSH_FILE_TOTAL.inc();

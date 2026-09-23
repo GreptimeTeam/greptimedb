@@ -82,6 +82,8 @@ jsonb.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 loki-proto.workspace = true
+meter-core.workspace = true
+meter-macros.workspace = true
 metric-engine.workspace = true
 mime_guess = "2.0"
 mysql_common = "0.38"
@@ -95,8 +97,8 @@ operator.workspace = true
 otel-arrow-rust.workspace = true
 parking_lot.workspace = true
 partition.workspace = true
-pg_interval = "0.5"
-pgwire = { version = "0.40", default-features = false, features = [
+pg_interval = "0.6"
+pgwire = { version = "0.41", default-features = false, features = [
     "server-api-aws-lc-rs",
     "pg-ext-types",
 ] }
@@ -140,7 +142,6 @@ tonic-web = "0.14"
 tower = { workspace = true, features = ["full"] }
 tower-http = { version = "0.6", features = ["full"] }
 tracing.workspace = true
-tracing-opentelemetry.workspace = true
 urlencoding = "2.1"
 uuid.workspace = true
 vrl.workspace = true

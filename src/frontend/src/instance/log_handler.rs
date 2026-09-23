@@ -80,6 +80,11 @@ impl PipelineHandler for Instance {
             prepared.push((Arc::new(ctx.fork()), log));
         }
 
+        operator::insert::admit_row_insert_batches(&mut prepared)
+            .await
+            .map_err(BoxedError::new)
+            .context(servers::error::ExecuteGrpcQuerySnafu)?;
+
         let mut outputs = Vec::with_capacity(prepared.len());
         for (ctx, log) in prepared {
             outputs.push(self.handle_log_inserts(log, ctx).await);

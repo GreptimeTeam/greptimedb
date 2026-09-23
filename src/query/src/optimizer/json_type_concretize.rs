@@ -15,7 +15,6 @@
 use std::any::Any;
 use std::collections::HashMap;
 
-use arrow_schema::DataType;
 use common_function::scalars::json::json_get::{JsonGetWithType, parse_json_get_path};
 use datafusion::datasource::{DefaultTableSource, TableProvider};
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRecursion};
@@ -30,8 +29,10 @@ use table::table::adapter::DfTableProviderAdapter;
 use crate::dummy_catalog::DummyTableProvider;
 
 /// Concretize (deduce) the expected JSON type from query.
-/// For example, we can concretize a JSON type of `{ a: { b: Number } }` from `select j.a.b::Int64`.
-/// The JSON type will be later set into the scan request, for converting the JSON arrays.
+///
+/// For example, we can concretize a JSON type of `{ a: { b: Number } }` from
+/// `select j.a.b::Int64`. The JSON type will be later set into the scan request,
+/// for converting the JSON arrays.
 #[derive(Debug)]
 pub(crate) struct JsonTypeConcretizeRule;
 
@@ -108,7 +109,6 @@ fn apply_json_type_hint(
 
 pub(crate) fn deduce_json_types(plan: &LogicalPlan) -> Result<HashMap<String, JsonNativeType>> {
     let mut json_types = HashMap::<String, JsonNativeType>::new();
-
     // JSON2 columns in the final output must retain their complete values even when
     // predicates or other expressions access only specific paths.
     // For example, `SELECT j FROM t WHERE json_get(j, 'a') = 1`.
@@ -168,13 +168,7 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         );
     };
 
-    let Some(path) = f
-        .args
-        .get(1)
-        .and_then(|expr| expr.as_literal())
-        .and_then(|x| x.try_as_str())
-        .flatten()
-    else {
+    let Some(path) = json_get_path(f) else {
         return plan_err!(
             "Second argument of {} is expected to be a string literal, actual: {:?}",
             JsonGetWithType::NAME,
@@ -182,10 +176,10 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         );
     };
 
-    let path = parse_json_get_path(path)
+    let json_path = parse_json_get_path(path)
         .map_err(|e| plan_datafusion_err!("Invalid JSONPath {path:?}: {e}"))?;
 
-    if path
+    if json_path
         .paths
         .iter()
         .all(|segment| matches!(segment, Path::Root))
@@ -198,12 +192,14 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
         .get(2)
         .and_then(|expr| expr.as_literal())
         .map(|x| x.data_type())
-        .unwrap_or(DataType::Utf8View);
-    let with_type =
-        JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))?;
+        .map(|with_type| {
+            JsonNativeType::try_from(&with_type).map_err(|e| plan_datafusion_err!("{e:?}"))
+        })
+        .transpose()?
+        .unwrap_or(JsonNativeType::String);
 
     let mut root = with_type;
-    for segment in path.paths.into_iter().rev() {
+    for segment in json_path.paths.into_iter().rev() {
         let name = match segment {
             Path::Root => continue,
             Path::DotField(name) | Path::ColonField(name) | Path::ObjectField(name) => name,
@@ -219,11 +215,22 @@ fn deduce_json_type(expr: &Expr) -> Result<Option<(String, JsonNativeType)>> {
     Ok(Some((column.name.clone(), root)))
 }
 
+/// Returns the literal JSON path argument of a `json_get` call.
+fn json_get_path(function: &datafusion_expr::expr::ScalarFunction) -> Option<&str> {
+    function
+        .args
+        .get(1)
+        .and_then(|expr| expr.as_literal())
+        .and_then(|value| value.try_as_str())
+        .flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use api::v1::SemanticType;
+    use arrow_schema::DataType;
     use common_function::scalars::udf::create_udf;
     use datafusion::datasource::provider_as_source;
     use datafusion::functions_aggregate::expr_fn::count;
@@ -231,7 +238,8 @@ mod tests {
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{LogicalPlanBuilder, col, lit};
     use datafusion_optimizer::OptimizerContext;
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
     use datatypes::schema::ColumnSchema;
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder};
     use store_api::storage::{ConcreteDataType, RegionId};
@@ -264,6 +272,12 @@ mod tests {
     }
 
     fn build_json2_scan() -> Result<(Arc<DummyTableProvider>, LogicalPlanBuilder)> {
+        build_json2_scan_with_settings(JsonSettings::default())
+    }
+
+    fn build_json2_scan_with_settings(
+        settings: JsonSettings,
+    ) -> Result<(Arc<DummyTableProvider>, LogicalPlanBuilder)> {
         let region_id = RegionId::new(1024, 2);
         let mut builder = RegionMetadataBuilder::new(region_id);
         let mut json_column = ColumnSchema::new(
@@ -271,7 +285,9 @@ mod tests {
             ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
             true,
         );
-        json_column.with_extension_type(&Json2ExtensionType::default());
+        json_column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            settings,
+        ))));
         builder
             .push_column_metadata(ColumnMetadata {
                 column_schema: json_column,

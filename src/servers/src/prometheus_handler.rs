@@ -184,6 +184,21 @@ pub trait PrometheusHandler {
         ctx: &QueryContextRef,
     ) -> Result<Vec<String>>;
 
+    /// Query metric table names that carry data matching `matchers` in the time
+    /// range. `matchers` must hold only ordinary label matchers: `__name__`
+    /// names a table and the database and field matchers name no column, so the
+    /// caller resolves all three before calling.
+    ///
+    /// Only metric engine tables are covered.
+    async fn query_metric_names_by_labels(
+        &self,
+        matchers: Vec<Matcher>,
+        schema: &str,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> Result<Vec<String>>;
+
     async fn query_label_values(
         &self,
         metric: String,

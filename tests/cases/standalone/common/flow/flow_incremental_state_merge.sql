@@ -1,7 +1,7 @@
 -- Incremental aggregate state merge over a partitioned source (two regions).
 -- A WHERE-filtered flow mixes scalar aggregates (sum, count) with aggregate
--- state columns (hll, stddev_pop_state, uddsketch_state); each later delta in
--- the same time window must merge its state with the state already persisted
+-- state columns (hll, stddev_pop_state, uddsketch_state, avg_state); each later
+-- delta in the same time window must merge its state with the state already persisted
 -- in the sink. Covers two nonempty deltas across both regions, one round whose
 -- delta is empty because the flow's predicate drops the newly inserted row,
 -- and a final nonempty delta checked against a direct source aggregation.
@@ -30,6 +30,7 @@ SELECT
     hll(user_id) AS user_hll,
     stddev_pop_state(v) AS v_stddev_state,
     uddsketch_state(128, 0.01, v) AS v_sketch_state,
+    avg_state(v) AS v_avg_state,
     date_bin(INTERVAL '1 minute', ts, '2024-01-01 00:00:00') AS time_window
 FROM
     flow_incr_state_merge_input
@@ -77,6 +78,7 @@ SELECT
     hll_count(hll_merge(user_hll)) AS users,
     ROUND(stddev_pop_calc(stddev_pop_merge(v_stddev_state)), 6) AS v_stddev,
     ROUND(uddsketch_calc(0.5, uddsketch_merge(128, 0.01, v_sketch_state)), 4) AS v_p50,
+    ROUND(avg_calc(avg_merge(v_avg_state)), 6) AS v_avg,
     time_window
 FROM
     flow_incr_state_merge_sink
@@ -131,6 +133,7 @@ SELECT
     hll_count(hll_merge(user_hll)) AS users,
     ROUND(stddev_pop_calc(stddev_pop_merge(v_stddev_state)), 6) AS v_stddev,
     ROUND(uddsketch_calc(0.5, uddsketch_merge(128, 0.01, v_sketch_state)), 4) AS v_p50,
+    ROUND(avg_calc(avg_merge(v_avg_state)), 6) AS v_avg,
     time_window
 FROM
     flow_incr_state_merge_sink
@@ -194,7 +197,8 @@ SELECT
     merged.row_count = direct.row_count AS count_matches,
     merged.users = direct.users AS hll_matches,
     abs(merged.v_stddev - direct.v_stddev) < 1e-9 AS stddev_matches,
-    ROUND(merged.v_p50, 4) = ROUND(direct.v_p50, 4) AS p50_matches
+    ROUND(merged.v_p50, 4) = ROUND(direct.v_p50, 4) AS p50_matches,
+    abs(merged.v_avg - direct.v_avg) < 1e-9 AS avg_matches
 FROM
     (
         SELECT
@@ -202,7 +206,8 @@ FROM
             row_count,
             hll_count(hll_merge(user_hll)) AS users,
             stddev_pop_calc(stddev_pop_merge(v_stddev_state)) AS v_stddev,
-            uddsketch_calc(0.5, uddsketch_merge(128, 0.01, v_sketch_state)) AS v_p50
+            uddsketch_calc(0.5, uddsketch_merge(128, 0.01, v_sketch_state)) AS v_p50,
+            avg_calc(avg_merge(v_avg_state)) AS v_avg
         FROM
             flow_incr_state_merge_sink
         GROUP BY
@@ -215,7 +220,8 @@ FROM
             count(n) AS row_count,
             hll_count(hll(user_id)) AS users,
             stddev_pop(v) AS v_stddev,
-            uddsketch_calc(0.5, uddsketch_state(128, 0.01, v)) AS v_p50
+            uddsketch_calc(0.5, uddsketch_state(128, 0.01, v)) AS v_p50,
+            avg(v) AS v_avg
         FROM
             flow_incr_state_merge_input
         WHERE

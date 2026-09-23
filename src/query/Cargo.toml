@@ -8,6 +8,8 @@ license.workspace = true
 workspace = true
 
 [features]
+default = ["ai_functions"]
+ai_functions = ["common-function/ai_functions"]
 enterprise = ["sql/enterprise"]
 vector_index = []
 

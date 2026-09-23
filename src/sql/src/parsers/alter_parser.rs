@@ -462,19 +462,19 @@ impl ParserContext<'_> {
                         .context(error::SyntaxSnafu)?;
                     self.parse_alter_table_drop_default(column_name)
                 } else {
-                    let (data_type, json2_options) =
-                        if let Some(json2) = parse_json2_type_and_options(&mut self.parser)? {
-                            json2
-                        } else {
-                            (
-                                self.parser.parse_data_type().context(error::SyntaxSnafu)?,
-                                None,
-                            )
-                        };
+                    if let Some((_, json2_options)) =
+                        parse_json2_type_and_options(&mut self.parser)?
+                    {
+                        return Ok(AlterTableOperation::SetJsonSettings {
+                            column_name,
+                            json2_options,
+                        });
+                    }
+
                     Ok(AlterTableOperation::ModifyColumnType {
                         column_name,
-                        target_type: data_type,
-                        json2_options,
+                        target_type: self.parser.parse_data_type().context(error::SyntaxSnafu)?,
+                        json2_options: None,
                     })
                 }
             }
@@ -1565,8 +1565,8 @@ ALTER TABLE metrics REPARTITION
 MODIFY COLUMN attrs JSON2 (
     max_auto_expanded_paths = 2000,
     trace_id STRING,
-    user.id STRING NOT NULL,
-    user.name STRING DEFAULT 'anonymous',
+    user.id STRING,
+    user.name STRING,
     request_id STRING INVERTED INDEX
 )"#;
         let mut statements =
@@ -1576,9 +1576,8 @@ MODIFY COLUMN attrs JSON2 (
         let Statement::AlterTable(alter_table) = statements.remove(0) else {
             unreachable!()
         };
-        let AlterTableOperation::ModifyColumnType {
+        let AlterTableOperation::SetJsonSettings {
             column_name,
-            target_type,
             json2_options: Some(options),
         } = alter_table.alter_operation()
         else {
@@ -1586,12 +1585,9 @@ MODIFY COLUMN attrs JSON2 (
         };
 
         assert_eq!("attrs", column_name.value);
-        assert_eq!("JSON2", target_type.to_string());
         assert_eq!(Some(2000), options.max_auto_expanded_paths);
         assert_eq!(4, options.type_hints.len());
         assert_eq!(vec!["user", "id"], options.type_hints[1].path);
-        assert!(!options.type_hints[1].nullable);
-        assert!(options.type_hints[2].default.is_some());
         assert!(options.type_hints[3].inverted_index);
 
         let formatted = alter_table.to_string();
@@ -1612,7 +1608,7 @@ MODIFY COLUMN attrs JSON2 (
         let Statement::AlterTable(empty) = empty.remove(0) else {
             unreachable!()
         };
-        let AlterTableOperation::ModifyColumnType { json2_options, .. } = empty.alter_operation()
+        let AlterTableOperation::SetJsonSettings { json2_options, .. } = empty.alter_operation()
         else {
             unreachable!()
         };

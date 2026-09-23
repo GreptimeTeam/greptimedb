@@ -81,6 +81,7 @@ pub(crate) async fn reconcile_series_indexes(
     requested_bucket_width: Duration,
     now_ms: i64,
     purger: IndexFilePurger,
+    enable_range_index: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
     // Use this snapshot throughout reconciliation, even if the region version advances.
@@ -102,15 +103,16 @@ pub(crate) async fn reconcile_series_indexes(
         now_ms,
         &purger,
         &mut unpublished,
+        enable_range_index,
     )
     .await?;
     SERIES_INDEX_RECONCILE_ELAPSED
         .with_label_values(&["build"])
         .observe(build_start.elapsed().as_secs_f64());
-    // Persist both catalogs before making the new snapshot visible to readers.
+    // Persist changed catalogs before making the new snapshot visible to readers.
     let publish_result: Result<()> = async {
         if let Some(next) = next {
-            persist_index_catalogs(&store, region.region_id, &next).await?;
+            persist_index_catalogs(&store, region.region_id, &next, &stats).await?;
             publish_index_version(&region, Arc::new(next));
             unpublished.disarm();
         }
@@ -161,6 +163,7 @@ async fn build_index_version(
     now_ms: i64,
     purger: &IndexFilePurger,
     unpublished: &mut UnpublishedSeriesFiles,
+    enable_range_index: bool,
 ) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
     let mut stats = ReconcileStats::default();
     let files = version
@@ -207,7 +210,7 @@ async fn build_index_version(
     if plan.builds.is_empty()
         && plan.expired_index_ids.is_empty()
         && stats.removed_range == 0
-        && current.range_indexes.len() == visible.len()
+        && (!enable_range_index || current.range_indexes.len() == visible.len())
     {
         return Ok((None, stats));
     }
@@ -224,7 +227,8 @@ async fn build_index_version(
     for (bucket, expected) in plan.builds {
         // Complete companion indexes independently so a failed series build preserves them.
         for file in &bucket.files {
-            if !range_indexes.contains(&file.file_id().file_id())
+            if enable_range_index
+                && !range_indexes.contains(&file.file_id().file_id())
                 && let Some(file_id) =
                     build_range_index(store, region, version, file.clone()).await?
             {
@@ -239,14 +243,16 @@ async fn build_index_version(
         series_indexes.insert(expected.index_uuid, series_handle);
     }
     // Cover SSTs outside planned aggregate builds, including skipped buckets.
-    for file in files {
-        let file_id = file.file_id().file_id();
-        if range_indexes.contains(&file_id) {
-            continue;
-        }
-        if let Some(file_id) = build_range_index(store, region, version, file).await? {
-            stats.built_range += 1;
-            range_indexes.insert(file_id);
+    if enable_range_index {
+        for file in files {
+            let file_id = file.file_id().file_id();
+            if range_indexes.contains(&file_id) {
+                continue;
+            }
+            if let Some(file_id) = build_range_index(store, region, version, file).await? {
+                stats.built_range += 1;
+                range_indexes.insert(file_id);
+            }
         }
     }
     stats.removed_series = current
@@ -267,43 +273,48 @@ async fn build_index_version(
     Ok((Some(next), stats))
 }
 
-/// Writes catalogs in a stable order; the two writes are not atomic together.
+/// Writes changed catalogs in a stable order; the two writes are not atomic together.
 async fn persist_index_catalogs(
     store: &ObjectStore,
     region_id: RegionId,
     next: &SeriesIndexVersion,
+    stats: &ReconcileStats,
 ) -> Result<()> {
-    let mut range_entries = next.range_indexes.iter().copied().collect::<Vec<_>>();
-    range_entries.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
-    let mut series_entries = next
-        .series_indexes
-        .values()
-        .map(|handle| handle.entry().clone())
-        .collect::<Vec<_>>();
-    series_entries.sort_unstable_by_key(|entry| {
-        (
-            entry.bucket_start,
-            entry.bucket_end,
-            entry.min_file_sequence,
-            entry.max_file_sequence,
+    if stats.built_range + stats.removed_range > 0 {
+        let mut range_entries = next.range_indexes.iter().copied().collect::<Vec<_>>();
+        range_entries.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        store_catalog(
+            store,
+            &range_catalog_path(region_id),
+            &RangeIndexCatalog {
+                indexes: range_entries,
+            },
         )
-    });
-    store_catalog(
-        store,
-        &range_catalog_path(region_id),
-        &RangeIndexCatalog {
-            indexes: range_entries,
-        },
-    )
-    .await?;
-    store_catalog(
-        store,
-        &series_catalog_path(region_id),
-        &SeriesIndexCatalog {
-            indexes: series_entries,
-        },
-    )
-    .await?;
+        .await?;
+    }
+    if stats.built_series + stats.removed_series > 0 {
+        let mut series_entries = next
+            .series_indexes
+            .values()
+            .map(|handle| handle.entry().clone())
+            .collect::<Vec<_>>();
+        series_entries.sort_unstable_by_key(|entry| {
+            (
+                entry.bucket_start,
+                entry.bucket_end,
+                entry.min_file_sequence,
+                entry.max_file_sequence,
+            )
+        });
+        store_catalog(
+            store,
+            &series_catalog_path(region_id),
+            &SeriesIndexCatalog {
+                indexes: series_entries,
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 

@@ -413,7 +413,9 @@ pub struct TwcsOptions {
     /// Compaction time window defined when creating tables.
     #[serde(with = "humantime_serde")]
     pub time_window: Option<Duration>,
-    /// Compaction time window defined when creating tables.
+    /// Soft output SST size threshold for TWCS and strict-window compaction.
+    /// `None` or zero disables size-based splitting. With a primary key, files
+    /// split at series boundaries, so a single series may exceed the threshold.
     pub max_output_file_size: Option<ReadableSize>,
     /// Whether to use remote compaction.
     #[serde_as(as = "DisplayFromStr")]

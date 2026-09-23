@@ -19,7 +19,9 @@ use arrow_schema::extension::ExtensionType;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, Field, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::extension::json::{JSON2_REMAINDER_FIELD_NAME, Json2ExtensionType, JsonMetadata};
-use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings, JsonTypeHint};
+use datatypes::json::{
+    JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings, JsonTypeHint, TypeHintMismatchPolicy,
+};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::types::json_type::JsonNativeType;
 use datatypes::vectors::json::array::JsonArray;
@@ -260,7 +262,7 @@ fn select_dynamic_hints(
         .filter(|(path, stat)| {
             !stat.is_type_conflicted
                 // TODO(LFC): Instead of "primitive only", consider retaining stable compound types
-                // that are safe to write to Parquet, as flush does. Or better, unite the two 
+                // that are safe to write to Parquet, as flush does. Or better, unite the two
                 // selection process.
                 && stat.data_type.is_primitive()
                 && !has_ancestor_path(path)
@@ -280,8 +282,6 @@ fn select_dynamic_hints(
         .map(|(path, stat)| JsonTypeHint {
             path: path.iter().map(|x| (*x).to_owned()).collect(),
             data_type: ConcreteDataType::from_arrow_type(&stat.data_type.as_arrow_type()),
-            nullable: true,
-            default_constraint: None,
             inverted_index: false,
         })
         .collect()
@@ -329,7 +329,12 @@ pub(crate) fn rewrite_json2_batch(
         };
 
         let array = JsonArray::from(array)
-            .rewrite_to_v2(field, &plan.logical_settings, &plan.target_layout)
+            .rewrite_to_v2_with_type_hint_mismatch_policy(
+                field,
+                &plan.logical_settings,
+                &plan.target_layout,
+                TypeHintMismatchPolicy::CoerceOrNull,
+            )
             .context(ConvertValueSnafu)?;
         debug_assert_eq!(
             &json2_physical_data_type(&plan.target_layout),
@@ -372,8 +377,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["hint".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(2),
@@ -430,8 +433,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -486,8 +487,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -508,15 +507,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["source_only".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -583,8 +578,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["kind".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             Some(0),
@@ -594,15 +587,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["kind".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 JsonTypeHint {
                     path: vec!["promoted".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],

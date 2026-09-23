@@ -15,10 +15,13 @@
 use std::sync::{Arc, LazyLock};
 
 use arrow_schema::Field;
+use arrow_schema::extension::ExtensionType;
 use common_function::scalars::json::json_get::JsonGetWithType;
 use common_function::scalars::udf::create_udf;
 use datafusion_common::arrow::datatypes::DataType;
-use datafusion_common::{Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference};
+use datafusion_common::{
+    Column, DFSchema, DataFusionError, Result, ScalarValue, TableReference, plan_datafusion_err,
+};
 use datafusion_expr::expr::{BinaryExpr, ScalarFunction};
 use datafusion_expr::planner::{
     ExprPlanner, PlannerResult, RawAggregateExpr, RawBinaryExpr, RawFieldAccessExpr, RawScalarExpr,
@@ -28,7 +31,10 @@ use datafusion_expr::type_coercion::functions::{UDFCoercionExt, fields_with_udf}
 use datafusion_expr::{
     Expr, ExprSchemable, GetFieldAccess, Operator, ScalarUDF, WindowFunctionDefinition,
 };
-use datatypes::extension::json::is_json2_extension_type;
+use datatypes::extension::json::{
+    Json2ExtensionType, is_json2_extension_type, parse_legacy_json2_settings,
+};
+use datatypes::types::json_type::JsonNativeType;
 use sqlparser::ast::BinaryOperator;
 
 /// Rewrites JSON-aware SQL expressions into DataFusion expressions.
@@ -142,14 +148,19 @@ impl ExprPlanner for JsonExprPlanner {
             path.push_str(&json_path_field(name)?);
         }
 
+        let mut args = vec![
+            Expr::Column(Column::from((qualifier, field))),
+            Expr::Literal(ScalarValue::Utf8(Some(path)), None),
+        ];
+        if let Some(json_type) = json_type_hint(field, nested_names)? {
+            args.push(Expr::Literal(
+                ScalarValue::try_new_null(&json_type.as_arrow_type())?,
+                None,
+            ));
+        }
+
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
-            ScalarFunction::new_udf(
-                json_get,
-                vec![
-                    Expr::Column(Column::from((qualifier, field))),
-                    Expr::Literal(ScalarValue::Utf8(Some(path)), None),
-                ],
-            ),
+            ScalarFunction::new_udf(json_get, args),
         )))
     }
 
@@ -183,6 +194,27 @@ impl ExprPlanner for JsonExprPlanner {
         }
         Ok(PlannerResult::Original(expr))
     }
+}
+
+/// Returns the configured native type for an exact JSON2 object path.
+fn json_type_hint(field: &Field, path: &[String]) -> Result<Option<JsonNativeType>> {
+    let settings = if field.extension_type_name() == Some(Json2ExtensionType::NAME) {
+        let extension = field
+            .try_extension_type::<Json2ExtensionType>()
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?;
+        Some(extension.metadata().json_settings().clone())
+    } else {
+        parse_legacy_json2_settings(field.metadata())
+            .map_err(|e| plan_datafusion_err!("invalid JSON2 extension metadata: {e}"))?
+    };
+
+    Ok(settings.and_then(|settings| {
+        settings
+            .type_hints()
+            .iter()
+            .find(|hint| hint.path == path)
+            .map(|hint| JsonNativeType::from(&hint.data_type))
+    }))
 }
 
 /// Quotes field names containing JSONPath punctuation, preserving literal keys.
@@ -423,7 +455,9 @@ mod tests {
     use datafusion_expr::WindowFrame;
     use datafusion_functions::core::coalesce;
     use datafusion_functions::math::{abs, power};
-    use datatypes::extension::json::Json2ExtensionType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::{JsonSettings, JsonTypeHint};
+    use datatypes::prelude::ConcreteDataType;
 
     use super::*;
 
@@ -635,6 +669,39 @@ mod tests {
             ),
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_plan_compound_identifier_applies_json2_type_hint() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["payload".to_string(), "cpu".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )
+        .unwrap();
+        let field = Field::new("labels", DataType::Struct(Fields::empty()), true)
+            .with_extension_type(Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+                settings,
+            ))));
+
+        let PlannerResult::Planned(Expr::ScalarFunction(func)) = JsonExprPlanner
+            .plan_compound_identifier(
+                &field,
+                Some(&TableReference::bare("events")),
+                &["payload".to_string(), "cpu".to_string()],
+            )?
+        else {
+            unreachable!()
+        };
+
+        assert_eq!(
+            Some(DataType::Int64),
+            extract_json_get_type(&Expr::ScalarFunction(func))
+        );
         Ok(())
     }
 

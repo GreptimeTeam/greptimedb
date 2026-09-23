@@ -23,6 +23,7 @@ use api::v1::{
 };
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_grpc::precision::Precision;
+use opentelemetry_proto::tonic::common::v1::KeyValue;
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 
 use crate::error::Result;
@@ -436,23 +437,23 @@ fn write_span_to_row_inner(
     write_attributes_with_schema(
         writer,
         "span_attributes",
-        span.span_attributes,
+        span.span_attributes.take(),
         &mut row,
         row_index,
         batch_schema.as_deref_mut(),
     )?;
-    write_attributes_with_schema(
+    write_shared_attributes_with_schema(
         writer,
         "scope_attributes",
-        span.scope_attributes,
+        span.scope_attributes.as_ref(),
         &mut row,
         row_index,
         batch_schema.as_deref_mut(),
     )?;
-    write_attributes_with_schema(
+    write_shared_attributes_with_schema(
         writer,
         "resource_attributes",
-        span.resource_attributes,
+        span.resource_attributes.as_ref(),
         &mut row,
         row_index,
         batch_schema,
@@ -535,122 +536,175 @@ pub(crate) fn write_attributes(
     row: &mut Vec<Value>,
 ) -> Result<()> {
     let row_index = writer.num_rows();
-    write_attributes_with_schema(writer, prefix, attributes, row, row_index, None)
+    write_attributes_with_schema(writer, prefix, attributes.take(), row, row_index, None)
 }
 
-/// Writes flattened attributes without coercion and optionally records their actual types.
+/// Skips `resource_attributes.service.name` because it is already copied to the
+/// top level as `SERVICE_NAME_COLUMN`.
+fn skipped_attribute(prefix: &str, key: &str) -> bool {
+    prefix == "resource_attributes" && key == KEY_SERVICE_NAME
+}
+
+/// Writes flattened attributes owned by one span.
 fn write_attributes_with_schema(
     writer: &mut TableData,
     prefix: &str,
-    attributes: Attributes,
+    attributes: Vec<KeyValue>,
     row: &mut Vec<Value>,
     row_index: usize,
     mut batch_schema: Option<&mut TraceBatchSchema>,
 ) -> Result<()> {
-    for attr in attributes.take().into_iter() {
-        let key_suffix = attr.key;
-        // skip resource_attributes.service.name because its already copied to
-        // top level as `SERVICE_NAME_COLUMN`
-        if prefix == "resource_attributes" && key_suffix == KEY_SERVICE_NAME {
+    for KeyValue { key, value, .. } in attributes {
+        if skipped_attribute(prefix, &key) {
             continue;
         }
-
-        let key = format!("{}.{}", prefix, key_suffix);
-        match attr.value.and_then(|v| v.value) {
-            Some(OtlpValue::StringValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::String);
-                }
-                // Keep the raw request value here. Mixed trace types are reconciled later
-                // in the frontend once we can also see the existing table schema.
-                writer.write_field_unchecked(
-                    &key,
-                    ColumnDataType::String,
-                    Some(ValueData::StringValue(v)),
-                    row,
-                );
-            }
-            Some(OtlpValue::BoolValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Boolean);
-                }
-                // Do not coerce or promote types while building the request-local rows.
-                writer.write_field_unchecked(
-                    &key,
-                    ColumnDataType::Boolean,
-                    Some(ValueData::BoolValue(v)),
-                    row,
-                );
-            }
-            Some(OtlpValue::IntValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Int64);
-                }
-                // Preserving the original value avoids order-dependent behavior inside one batch.
-                writer.write_field_unchecked(
-                    &key,
-                    ColumnDataType::Int64,
-                    Some(ValueData::I64Value(v)),
-                    row,
-                );
-            }
-            Some(OtlpValue::DoubleValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_value_type(&key, row_index, ColumnDataType::Float64);
-                }
-                writer.write_field_unchecked(
-                    &key,
-                    ColumnDataType::Float64,
-                    Some(ValueData::F64Value(v)),
-                    row,
-                );
-            }
-            Some(OtlpValue::ArrayValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
-                }
-                writer.write_column_unchecked(
-                    row_writer::build_json_column_schema(key),
-                    Some(ValueData::BinaryValue(
-                        any_value_to_jsonb(OtlpValue::ArrayValue(v)).to_vec(),
-                    )),
-                    row,
-                );
-            }
-            Some(OtlpValue::KvlistValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
-                }
-                writer.write_column_unchecked(
-                    row_writer::build_json_column_schema(key),
-                    Some(ValueData::BinaryValue(
-                        any_value_to_jsonb(OtlpValue::KvlistValue(v)).to_vec(),
-                    )),
-                    row,
-                );
-            }
-            Some(OtlpValue::BytesValue(v)) => {
-                if let Some(batch_schema) = batch_schema.as_deref_mut() {
-                    batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Binary);
-                }
-                writer.write_field_unchecked(
-                    key,
-                    ColumnDataType::Binary,
-                    Some(ValueData::BinaryValue(v)),
-                    row,
-                );
-            }
-            // `StringValueStrindex` is profiling-signal-only and references the
-            // Profiling `ProfilesDictionary.string_table`, which is unavailable to
-            // traces. Per the OTLP spec, non-Profiling receivers must treat it as a
-            // non-fatal issue and process the value as if it were absent. Like the
-            // `None` arm, no field is written for the attribute.
-            Some(OtlpValue::StringValueStrindex(_)) => {}
-            None => {}
-        }
+        write_attribute_with_schema(
+            writer,
+            prefix,
+            &key,
+            value.and_then(|v| v.value),
+            row,
+            row_index,
+            batch_schema.as_deref_mut(),
+        );
     }
 
     Ok(())
+}
+
+/// Writes flattened attributes shared by every span of a resource or scope.
+///
+/// The column name is rebuilt from `prefix`, so keys are read in place and only
+/// values that reach a row are copied.
+fn write_shared_attributes_with_schema(
+    writer: &mut TableData,
+    prefix: &str,
+    attributes: &Attributes,
+    row: &mut Vec<Value>,
+    row_index: usize,
+    mut batch_schema: Option<&mut TraceBatchSchema>,
+) -> Result<()> {
+    for attr in attributes.get_ref() {
+        if skipped_attribute(prefix, &attr.key) {
+            continue;
+        }
+        write_attribute_with_schema(
+            writer,
+            prefix,
+            &attr.key,
+            attr.value.as_ref().and_then(|v| v.value.clone()),
+            row,
+            row_index,
+            batch_schema.as_deref_mut(),
+        );
+    }
+
+    Ok(())
+}
+
+/// Writes one flattened attribute without coercion and optionally records its actual type.
+fn write_attribute_with_schema(
+    writer: &mut TableData,
+    prefix: &str,
+    key_suffix: &str,
+    value: Option<OtlpValue>,
+    row: &mut Vec<Value>,
+    row_index: usize,
+    batch_schema: Option<&mut TraceBatchSchema>,
+) {
+    let key = format!("{}.{}", prefix, key_suffix);
+    match value {
+        Some(OtlpValue::StringValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_value_type(&key, row_index, ColumnDataType::String);
+            }
+            // Keep the raw request value here. Mixed trace types are reconciled later
+            // in the frontend once we can also see the existing table schema.
+            writer.write_field_unchecked(
+                &key,
+                ColumnDataType::String,
+                Some(ValueData::StringValue(v)),
+                row,
+            );
+        }
+        Some(OtlpValue::BoolValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_value_type(&key, row_index, ColumnDataType::Boolean);
+            }
+            // Do not coerce or promote types while building the request-local rows.
+            writer.write_field_unchecked(
+                &key,
+                ColumnDataType::Boolean,
+                Some(ValueData::BoolValue(v)),
+                row,
+            );
+        }
+        Some(OtlpValue::IntValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_value_type(&key, row_index, ColumnDataType::Int64);
+            }
+            // Preserving the original value avoids order-dependent behavior inside one batch.
+            writer.write_field_unchecked(
+                &key,
+                ColumnDataType::Int64,
+                Some(ValueData::I64Value(v)),
+                row,
+            );
+        }
+        Some(OtlpValue::DoubleValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_value_type(&key, row_index, ColumnDataType::Float64);
+            }
+            writer.write_field_unchecked(
+                &key,
+                ColumnDataType::Float64,
+                Some(ValueData::F64Value(v)),
+                row,
+            );
+        }
+        Some(OtlpValue::ArrayValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
+            }
+            writer.write_column_unchecked(
+                row_writer::build_json_column_schema(key),
+                Some(ValueData::BinaryValue(
+                    any_value_to_jsonb(OtlpValue::ArrayValue(v)).to_vec(),
+                )),
+                row,
+            );
+        }
+        Some(OtlpValue::KvlistValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Json);
+            }
+            writer.write_column_unchecked(
+                row_writer::build_json_column_schema(key),
+                Some(ValueData::BinaryValue(
+                    any_value_to_jsonb(OtlpValue::KvlistValue(v)).to_vec(),
+                )),
+                row,
+            );
+        }
+        Some(OtlpValue::BytesValue(v)) => {
+            if let Some(batch_schema) = batch_schema {
+                batch_schema.observe_binary_type(&key, row_index, TraceBinaryType::Binary);
+            }
+            writer.write_field_unchecked(
+                key,
+                ColumnDataType::Binary,
+                Some(ValueData::BinaryValue(v)),
+                row,
+            );
+        }
+        // `StringValueStrindex` is profiling-signal-only and references the
+        // Profiling `ProfilesDictionary.string_table`, which is unavailable to
+        // traces. Per the OTLP spec, non-Profiling receivers must treat it as a
+        // non-fatal issue and process the value as if it were absent. Like the
+        // `None` arm, no field is written for the attribute.
+        Some(OtlpValue::StringValueStrindex(_)) => {}
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -679,10 +733,10 @@ mod tests {
             trace_id: trace_id.to_string(),
             span_id: span_id.to_string(),
             parent_span_id: None,
-            resource_attributes: Attributes::from(vec![]),
+            resource_attributes: Attributes::from(vec![]).into(),
             scope_name: "scope".to_string(),
             scope_version: "v1".to_string(),
-            scope_attributes: Attributes::from(vec![]),
+            scope_attributes: Attributes::from(vec![]).into(),
             trace_state: String::new(),
             span_name: "op".to_string(),
             span_kind: "SPAN_KIND_SERVER".to_string(),

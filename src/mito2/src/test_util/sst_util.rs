@@ -14,7 +14,8 @@
 
 //! Utilities for testing SSTs.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use api::v1::{OpType, SemanticType};
 use arrow_schema::Schema;
@@ -28,6 +29,7 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
 use datatypes::value::ValueRef;
 use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+use object_store::layers::mock::{self, MockLayer, MockLayerBuilder, oio};
 use store_api::metadata::{
     ColumnMetadata, RegionMetadata, RegionMetadataBuilder, RegionMetadataRef,
 };
@@ -44,6 +46,73 @@ use crate::test_util::{new_batch_builder, new_noop_file_purger};
 
 /// Test region id.
 const REGION_ID: RegionId = RegionId::new(0, 0);
+
+/// Records write chunks at the object-store boundary without replacing filesystem I/O.
+#[derive(Default)]
+pub(crate) struct WriteChunkRecorder {
+    chunk_sizes: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+}
+
+impl WriteChunkRecorder {
+    pub(crate) fn layer(&self) -> MockLayer {
+        let chunk_sizes = self.chunk_sizes.clone();
+        MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _, inner| {
+                Box::new(ChunkRecordingWriter {
+                    inner,
+                    path: path.to_string(),
+                    chunk_sizes: chunk_sizes.clone(),
+                })
+            }))
+            .build()
+            .unwrap()
+    }
+
+    pub(crate) fn num_files(&self) -> usize {
+        self.chunk_sizes.lock().unwrap().len()
+    }
+
+    pub(crate) fn assert_chunks(&self, path: &str, chunk_size: usize, file_size: usize) {
+        let mut expected = vec![chunk_size; file_size / chunk_size];
+        let remainder = file_size % chunk_size;
+        if remainder > 0 {
+            expected.push(remainder);
+        }
+        assert_eq!(
+            self.chunk_sizes.lock().unwrap().get(path),
+            Some(&expected),
+            "unexpected write chunks for {path}"
+        );
+    }
+}
+
+struct ChunkRecordingWriter {
+    inner: oio::Writer,
+    path: String,
+    chunk_sizes: Arc<Mutex<HashMap<String, Vec<usize>>>>,
+}
+
+impl oio::Write for ChunkRecordingWriter {
+    async fn write(&mut self, buffer: mock::Buffer) -> mock::Result<()> {
+        let size = buffer.len();
+        self.inner.write(buffer).await?;
+        self.chunk_sizes
+            .lock()
+            .unwrap()
+            .entry(self.path.clone())
+            .or_default()
+            .push(size);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> mock::Result<mock::Metadata> {
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> mock::Result<()> {
+        self.inner.abort().await
+    }
+}
 
 /// Creates a new region metadata for testing SSTs with specified encoding.
 ///

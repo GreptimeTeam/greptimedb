@@ -2982,3 +2982,77 @@ fn scheduled_none_falls_back_to_wall_clock() {
         "Remote should contain TimestampNanosecond:\n{result_str}"
     );
 }
+
+/// Regression test for https://github.com/GreptimeTeam/greptimedb/issues/9260:
+/// every scalar subquery level must get its own MergeScan, even when nested
+/// inside another scalar subquery.
+#[test]
+fn expand_nested_scalar_subquery() {
+    init_default_ut_logging();
+    let table_source = || {
+        Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(TestTable::table_with_name(0, "t".to_string())),
+        ))) as _
+    };
+
+    // Innermost: SELECT max(t.number) FROM t
+    let innermost = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Middle: SELECT max(t.number) FROM t WHERE t.number > (<innermost>)
+    let middle = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .filter(col("number").gt(Expr::ScalarSubquery(Subquery {
+            subquery: Arc::new(innermost),
+            outer_ref_columns: vec![],
+            spans: Default::default(),
+        })))
+        .unwrap()
+        .aggregate(Vec::<Expr>::new(), vec![max(col("number"))])
+        .unwrap()
+        .build()
+        .unwrap();
+    // Outermost projection: SELECT (<middle>) AS m FROM t
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source(), None, vec![])
+        .unwrap()
+        .project(vec![
+            Expr::ScalarSubquery(Subquery {
+                subquery: Arc::new(middle),
+                outer_ref_columns: vec![],
+                spans: Default::default(),
+            })
+            .alias("m"),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+    let result_str = result.to_string();
+
+    // The main scan and both subquery levels must each be wrapped in a MergeScan.
+    let merge_scan_count = result_str
+        .matches("MergeScan [is_placeholder=false")
+        .count();
+    assert_eq!(
+        3, merge_scan_count,
+        "expected 3 MergeScan nodes (main + 2 subquery levels) in plan:\n{result_str}"
+    );
+    // No bare TableScan may remain outside a MergeScan remote input. The
+    // subquery-aware walk still visits subquery plans, but cannot see into a
+    // MergeScan's hidden remote input (`MergeScanLogicalPlan::inputs()` is
+    // empty), so any TableScan it reaches was not wrapped.
+    result
+        .apply_with_subqueries(|node| {
+            assert!(
+                !matches!(node, LogicalPlan::TableScan(_)),
+                "unwrapped TableScan in plan:\n{result_str}"
+            );
+            Ok(TreeNodeRecursion::Continue)
+        })
+        .unwrap();
+}

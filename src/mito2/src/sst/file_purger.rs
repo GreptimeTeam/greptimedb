@@ -71,15 +71,15 @@ impl fmt::Debug for LocalFilePurger {
     }
 }
 
-#[cfg(not(debug_assertions))]
+#[cfg(not(any(debug_assertions, test)))]
 /// Whether to enable GC for the file purger.
 pub fn should_enable_gc(global_gc_enabled: bool, object_store_scheme: &'static str) -> bool {
     global_gc_enabled && object_store_scheme != object_store::services::FS_SCHEME
 }
 
-#[cfg(debug_assertions)]
-/// For debug build, we may use Fs as the object store scheme,
-/// so we need to enable GC for local file system.
+#[cfg(any(debug_assertions, test))]
+/// Debug builds and unit tests use Fs to exercise object-store GC, including
+/// unit tests compiled with the release profile.
 pub fn should_enable_gc(global_gc_enabled: bool, _object_store_scheme: &'static str) -> bool {
     global_gc_enabled
 }

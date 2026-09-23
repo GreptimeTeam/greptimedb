@@ -499,5 +499,7 @@ fn dropped_region_stat(region_id: RegionId) -> RegionStat {
         query_scanned_bytes: 0,
         data_topic_latest_entry_id: 0,
         metadata_topic_latest_entry_id: 0,
+        min_timestamp: None,
+        max_timestamp: None,
     }
 }

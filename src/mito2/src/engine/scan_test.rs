@@ -1234,17 +1234,23 @@ async fn test_series_scan_with_format(flat_format: bool) {
 async fn test_two_phase_series_scan() {
     for use_index in [false, true] {
         for use_range_index in [false, true] {
-            check_two_phase_series_scan(use_index, use_range_index).await;
+            check_two_phase_series_scan(use_index, use_range_index, true).await;
         }
+        check_two_phase_series_scan(use_index, true, false).await;
     }
 }
 
-async fn check_two_phase_series_scan(use_index: bool, use_range_index: bool) {
+async fn check_two_phase_series_scan(
+    use_index: bool,
+    use_range_index: bool,
+    enable_range_index: bool,
+) {
     let mut env = TestEnv::with_prefix("test_two_phase_series_scan").await;
     let engine = env
         .create_engine(MitoConfig {
             experimental_series_scan_v2: true,
             experimental_enable_series_index: true,
+            experimental_enable_range_index: enable_range_index,
             ..Default::default()
         })
         .await;
@@ -1597,8 +1603,8 @@ async fn check_two_phase_series_scan(use_index: bool, use_range_index: bool) {
     );
 
     if use_range_index {
-        // A fresh query must read the cataloged index: missing files must not
-        // silently switch back to the primary-key path.
+        // Enabled queries must read the cataloged index; disabled queries must
+        // succeed even when that file is unavailable.
         let region = engine.find_region(region_id).unwrap();
         let version = region.series_index_version_control.current();
         let file_id = *version.range_indexes.iter().next().unwrap();
@@ -1621,8 +1627,41 @@ async fn check_two_phase_series_scan(use_index: bool, use_range_index: bool) {
             )
             .await
             .unwrap();
-        if let Ok(stream) = scanner.scan().await {
-            assert!(stream.try_collect::<Vec<_>>().await.is_err());
+        if enable_range_index {
+            if let Ok(stream) = scanner.scan().await {
+                assert!(stream.try_collect::<Vec<_>>().await.is_err());
+            }
+        } else {
+            let batches = scanner
+                .scan()
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap();
+            let mut rows = Vec::new();
+            for batch in batches {
+                let tags = batch.column_by_name("tag_0").unwrap();
+                let fields = batch
+                    .column_by_name("field_0")
+                    .unwrap()
+                    .as_primitive::<UInt64Type>();
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_primitive::<TimestampMillisecondType>();
+                for row in 0..batch.num_rows() {
+                    rows.push((
+                        datatypes::arrow_array::string_array_value_at_index(tags, row)
+                            .unwrap()
+                            .to_string(),
+                        fields.value(row),
+                        timestamps.value(row),
+                    ));
+                }
+            }
+            rows.sort();
+            assert_eq!(actual_rows, rows);
         }
     }
 }

@@ -24,9 +24,7 @@ use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::ColumnMetadata;
 use store_api::storage::ColumnId;
 
-use crate::error::{
-    FieldTypeMismatchSnafu, IndexEncodeNullSnafu, InvalidSparsePrimaryKeySnafu, Result,
-};
+use crate::error::{FieldTypeMismatchSnafu, IndexEncodeNullSnafu, Result};
 use crate::row_converter::sparse::{
     RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID, SparsePrimaryKeyView,
 };
@@ -66,34 +64,14 @@ impl IndexValueCodec {
         column_id: ColumnId,
         buffer: &'a mut Vec<u8>,
     ) -> Result<Option<&'a [u8]>> {
-        let Some(encoded) = pk.encoded_value(column_id)? else {
-            return Ok(None);
-        };
-        if encoded[0] == 0 {
-            return Ok(None);
-        }
         if matches!(
             column_id,
             RESERVED_COLUMN_ID_TABLE_ID | RESERVED_COLUMN_ID_TSID
         ) {
-            return Ok(Some(encoded));
+            return pk.encoded_value(column_id);
         }
-
-        buffer.clear();
-        // The view has checked the Option marker, bytes marker and every chunk length.
-        // Reserving once avoids growing the buffer for each 8-byte chunk.
-        buffer.reserve(encoded.len() - 2);
-        for chunk in encoded[2..].chunks_exact(9) {
-            let len = usize::from(chunk[8]).min(8);
-            buffer.extend_from_slice(&chunk[..len]);
-        }
-        std::str::from_utf8(buffer).map_err(|_| {
-            InvalidSparsePrimaryKeySnafu {
-                reason: "label is not valid UTF-8",
-            }
-            .build()
-        })?;
-        Ok(Some(buffer.as_slice()))
+        pk.label(column_id, buffer)
+            .map(|value| value.map(str::as_bytes))
     }
 
     /// Serializes a non-null `ValueRef` using the data type defined in `SortField` and writes

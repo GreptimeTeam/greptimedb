@@ -687,7 +687,7 @@ impl RegionServer {
             }
             Err(err) => {
                 crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                    .with_label_values(&[request_type])
+                    .with_label_values(&[request_type, err.status_code().as_ref()])
                     .inc_by(batch_size as u64);
                 Err(err)
             }
@@ -1640,7 +1640,7 @@ impl RegionServerInner {
             Err(err) => {
                 if matches!(region_change, RegionChange::Ingest) {
                     crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type])
+                        .with_label_values(&[request_type, err.status_code().as_ref()])
                         .inc();
                 }
                 // Removes the region status if the operation fails.

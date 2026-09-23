@@ -327,7 +327,7 @@ pub fn write_json(
     )
 }
 
-fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
+pub(crate) fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
     let extension = Json2ExtensionType::new(Arc::new(JsonMetadata::new(JsonSettings::new_v2())));
     let mut options = ColumnOptions::default();
     options.options.insert(
@@ -349,13 +349,8 @@ fn build_json2_column_schema(name: impl ToString) -> ColumnSchema {
     }
 }
 
-/// Writes a serializable value into a JSON2 field using the default v2 layout.
-pub(crate) fn write_json2(
-    table_data: &mut TableData,
-    name: impl ToString,
-    value: impl Serialize,
-    one_row: &mut Vec<Value>,
-) -> Result<()> {
+/// Encodes a JSON2 field without constructing its column schema.
+pub(crate) fn encode_json2(value: impl Serialize) -> Result<ValueData> {
     let json = serde_json::to_value(value).context(ToJsonSnafu)?;
     let value = JsonSettings::new_v2()
         .encode(json)
@@ -366,15 +361,7 @@ pub(crate) fn write_json2(
         }
         .fail();
     };
-
-    write_by_schema(
-        table_data,
-        std::iter::once((
-            build_json2_column_schema(name),
-            Some(ValueData::JsonValue(encode_json_value(*value))),
-        )),
-        one_row,
-    )
+    Ok(ValueData::JsonValue(encode_json_value(*value)))
 }
 
 pub(crate) fn write_by_schema(

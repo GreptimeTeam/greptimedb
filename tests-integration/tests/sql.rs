@@ -31,7 +31,8 @@ use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
     StorageType, setup_mysql_server, setup_mysql_server_with_slow_query_threshold,
     setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_slow_query_threshold, setup_pg_server_with_user_provider,
+    setup_pg_server_with_prom_native_histogram, setup_pg_server_with_slow_query_threshold,
+    setup_pg_server_with_user_provider,
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
 
@@ -94,6 +95,8 @@ macro_rules! sql_tests {
                 test_mysql_federated_prepare_stmt,
                 test_mysql_prepare_tql_and_show,
                 test_postgres_extended_query_row_returning_statements,
+                test_postgres_native_histogram,
+                test_postgres_struct_types,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
             );
@@ -871,6 +874,234 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
         .unwrap();
     let val: Vec<u8> = row.get("b");
     assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_native_histogram(store_type: StorageType) {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::http::StatusCode;
+    use prost::Message;
+    use servers::http::test_helpers::TestClient;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store;
+
+    let (mut guard, app, fe_pg_server) =
+        setup_pg_server_with_prom_native_histogram(store_type, "test_postgres_native_histogram")
+            .await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+    let http_client = TestClient::new(app).await;
+
+    // Ingest one integer-count and one float-count native histogram via
+    // prometheus remote-write v2.
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "pg_native_histogram_seconds"),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![
+            Histogram {
+                count: Some(Count::CountInt(8)),
+                sum: 10.0,
+                schema: 1,
+                zero_threshold: 0.001,
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                negative_spans: vec![BucketSpan {
+                    offset: -2,
+                    length: 1,
+                }],
+                negative_deltas: vec![1],
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 3,
+                }],
+                positive_deltas: vec![1, 2, -1],
+                reset_hint: 2,
+                timestamp: 3000,
+                start_timestamp: 1500,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(6.0)),
+                sum: 20.0,
+                schema: 2,
+                zero_threshold: 0.002,
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                positive_spans: vec![BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                reset_hint: 3,
+                timestamp: 4000,
+                start_timestamp: 2500,
+                ..Default::default()
+            },
+        ],
+    );
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = http_client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let rows = client
+        .simple_query(
+            "select greptime_native_histogram from pg_native_histogram_seconds order by greptime_timestamp",
+        )
+        .await
+        .unwrap();
+    let jsons: Vec<&str> = rows
+        .iter()
+        .filter_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(jsons.len(), 2);
+
+    // The struct column is encoded as a JSON object, matching the HTTP query
+    // output for the same histograms. Before the fix every row was encoded as
+    // an empty struct (`{}`).
+    let histogram: serde_json::Value = serde_json::from_str(jsons[0]).unwrap();
+    assert_eq!(
+        histogram,
+        serde_json::json!({
+            "count_f64": null,
+            "count_i64": 8,
+            "custom_values": [],
+            "negative_buckets_f64": [],
+            "negative_buckets_i64": [1],
+            "negative_span_lengths": [1],
+            "negative_span_offsets": [-2],
+            "positive_buckets_f64": [],
+            "positive_buckets_i64": [1, 3, 2],
+            "positive_span_lengths": [3],
+            "positive_span_offsets": [0],
+            "reset_hint": 2,
+            "schema": 1,
+            "start_timestamp": 1500,
+            "sum": 10.0,
+            "zero_count_f64": null,
+            "zero_count_i64": 1,
+            "zero_threshold": 0.001
+        })
+    );
+
+    let histogram: serde_json::Value = serde_json::from_str(jsons[1]).unwrap();
+    assert_eq!(
+        histogram,
+        serde_json::json!({
+            "count_f64": 6.0,
+            "count_i64": null,
+            "custom_values": [],
+            "negative_buckets_f64": [],
+            "negative_buckets_i64": [],
+            "negative_span_lengths": [],
+            "negative_span_offsets": [],
+            "positive_buckets_f64": [2.0, 3.5],
+            "positive_buckets_i64": [],
+            "positive_span_lengths": [2],
+            "positive_span_offsets": [3],
+            "reset_hint": 3,
+            "schema": 2,
+            "start_timestamp": 2500,
+            "sum": 20.0,
+            "zero_count_f64": 0.5,
+            "zero_count_i64": null,
+            "zero_threshold": 0.002
+        })
+    );
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_struct_types(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_struct_types").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    async fn query_one(client: &Client, sql: &str) -> String {
+        let messages = client.simple_query(sql).await.unwrap();
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(|v| v.to_string()),
+                _ => None,
+            })
+            .next()
+            .unwrap()
+    }
+
+    // Struct and list-of-struct columns are serialized as JSON. View-typed
+    // struct fields must not fail row extraction, and a null struct inside a
+    // list stays null instead of becoming a struct of null fields.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
+
+    // '0102' casts to its UTF-8 bytes when interpreted as BinaryView.
+    let row = query_one(&client, "SELECT struct(arrow_cast('0102', 'BinaryView'))").await;
+    assert_eq!(row, "{\"c0\":[48,49,48,50]}");
+
+    let row = query_one(&client, "SELECT struct([struct(1), NULL])").await;
+    assert_eq!(row, "{\"c0\":[{\"c0\":1},null]}");
+
+    // Top-level control: the same null element in a bare list stays null too.
+    let row = query_one(&client, "SELECT [struct(1), NULL]").await;
+    assert_eq!(row, "[{\"c0\":1},null]");
+
+    // Unsupported arrow field types surface as query errors instead of
+    // dropping the connection.
+    let error = client
+        .simple_query("SELECT struct(arrow_cast('1', 'Decimal256(38, 10)'))")
+        .await
+        .unwrap_err();
+    let message = match error.as_db_error() {
+        Some(db_error) => db_error.message().to_string(),
+        None => error.to_string(),
+    };
+    assert!(
+        message.contains("Unsupported arrow data type"),
+        "unexpected error message: {message}"
+    );
+
+    // The connection stays usable after the error.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
 
     drop(client);
     rx.await.unwrap();

@@ -333,6 +333,7 @@ fn build_new_table_info(
         }
         AlterKind::DropColumns { .. }
         | AlterKind::ModifyColumnTypes { .. }
+        | AlterKind::SetJsonSettings { .. }
         | AlterKind::SetTableOptions { .. }
         | AlterKind::UnsetTableOptions { .. }
         | AlterKind::SetAnnotations { .. }

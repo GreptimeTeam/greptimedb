@@ -35,9 +35,9 @@ use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{OptionExt, ResultExt, ensure};
 
+use crate::batcher::logical_table::RecordBatchWithTsIdx;
 use crate::error;
 use crate::error::Result;
-use crate::pending_rows_batcher::RecordBatchWithTsIdx;
 
 /// Extract timestamp, field, and tag column names from a logical region schema.
 fn unzip_logical_region_schema(

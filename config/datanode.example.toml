@@ -464,6 +464,7 @@ skip_ssl_validation = false
 # endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
+## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
 [[region_engine]]
 
 ## The Mito engine options.
@@ -500,6 +501,10 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Whether to build and query range indexes when series indexes are enabled.
+## Obsolete range-index metadata and files are still cleaned up when disabled.
+#+ experimental_enable_range_index = false
 
 ## Interval between series-index maintenance runs. Zero uses the default of 5 min.
 #+ experimental_series_index_maintenance_interval = "5m"

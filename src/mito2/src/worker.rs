@@ -622,6 +622,7 @@ impl<S: LogStore> WorkerStarter<S> {
                     purge_receiver,
                     self.config.experimental_series_index_maintenance_interval,
                     self.time_provider.clone(),
+                    self.config.experimental_enable_range_index,
                 )
             });
         let now = self.time_provider.current_time_millis();

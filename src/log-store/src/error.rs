@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::any::Any;
+use std::sync::Arc;
 
 use common_error::ext::{ErrorExt, RetryHint, retry_hint_from_io_error};
 use common_error::status_code::StatusCode;
@@ -315,6 +316,108 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display("Invalid WAL object store, {}", reason))]
+    InvalidWalObjectStore {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL region mismatch, supplied region: {}, {}",
+        region_id,
+        reason
+    ))]
+    MismatchedWalRegion {
+        region_id: RegionId,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Invalid WAL entry range, region: {}, start: {}, end: {}",
+        region_id,
+        start_entry_id,
+        end_entry_id
+    ))]
+    InvalidWalEntryRange {
+        region_id: RegionId,
+        start_entry_id: u64,
+        end_entry_id: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("WAL object sequence is exhausted, last sequence: {}", last_object_seq))]
+    WalObjectSequenceExhausted {
+        last_object_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "WAL entry positions of region {} in one object are exhausted",
+        region_id
+    ))]
+    WalEntryPositionExhausted {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("WAL object already exists with different content, path: {}", path))]
+    WalObjectConflict {
+        path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to {} WAL object, path: {}", operation, path))]
+    WalObjectStore {
+        operation: &'static str,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Invalid WAL object, path: {}", path))]
+    InvalidWalObject {
+        path: String,
+        #[snafu(source(from(Error, Box::new)))]
+        source: Box<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "Object store WAL prefix mismatch, expected: {}, actual: {}",
+        expected,
+        actual
+    ))]
+    MismatchedWalPrefix {
+        expected: String,
+        actual: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Object store WAL operation failed"))]
+    ObjectStoreWal {
+        source: Arc<Error>,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    /// Appending to the object store WAL is unsupported.
+    #[snafu(display("Object store WAL operation is not supported"))]
+    UnsupportedObjectStoreWalOperation {
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -345,7 +448,11 @@ impl ErrorExt for Error {
             | IllegalNamespace { .. }
             | MissingKey { .. }
             | MissingValue { .. }
-            | OverrideCompactedEntry { .. } => StatusCode::InvalidArguments,
+            | OverrideCompactedEntry { .. }
+            | InvalidWalObjectStore { .. }
+            | MismatchedWalPrefix { .. }
+            | MismatchedWalRegion { .. }
+            | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
             | IllegalState { .. }
@@ -360,12 +467,21 @@ impl ErrorExt for Error {
             | WaitDumpIndex { .. }
             | MetaLengthExceededLimit { .. } => StatusCode::Internal,
 
-            CorruptedWalObject { .. } => StatusCode::Unexpected,
+            CorruptedWalObject { .. }
+            | WalObjectConflict { .. }
+            | WalObjectSequenceExhausted { .. }
+            | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
+
+            UnsupportedObjectStoreWalOperation { .. } => StatusCode::Unsupported,
+            InvalidWalObject { source, .. } => source.status_code(),
+            ObjectStoreWal { source, .. } => source.status_code(),
 
             // Object store related errors
-            CreateWriter { .. } | WriteIndex { .. } | ReadIndex { .. } | Io { .. } => {
-                StatusCode::StorageUnavailable
-            }
+            CreateWriter { .. }
+            | WriteIndex { .. }
+            | ReadIndex { .. }
+            | WalObjectStore { .. }
+            | Io { .. } => StatusCode::StorageUnavailable,
             // Raft engine
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
                 StatusCode::StorageUnavailable
@@ -391,9 +507,11 @@ impl ErrorExt for Error {
         use Error::*;
 
         match self {
-            CreateWriter { error, .. } | WriteIndex { error, .. } | ReadIndex { error, .. } => {
-                retry_hint_from_opendal_error(error)
-            }
+            CreateWriter { error, .. }
+            | WriteIndex { error, .. }
+            | ReadIndex { error, .. }
+            | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
+            ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {

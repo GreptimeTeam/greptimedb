@@ -28,7 +28,10 @@ use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
+#[cfg(feature = "ai_functions")]
+use crate::scalars::ai;
 use crate::scalars::anomaly::AnomalyFunction;
+use crate::scalars::avg_calc::AvgCalcFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
@@ -215,6 +218,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     TimestampFunction::register(&function_registry);
     DateFunction::register(&function_registry);
     ExpressionFunction::register(&function_registry);
+    AvgCalcFunction::register(&function_registry);
     UddSketchCalcFunction::register(&function_registry);
     UddSketchRankFunction::register(&function_registry);
     HllCalcFunction::register(&function_registry);
@@ -224,6 +228,8 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     // Full text search function
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
+    #[cfg(feature = "ai_functions")]
+    ai::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
@@ -375,6 +381,20 @@ mod tests {
     #[test]
     fn test_uddsketch_rank_registered() {
         assert!(FUNCTION_REGISTRY.get_function("uddsketch_rank").is_some());
+    }
+
+    #[test]
+    fn test_ai_registration_matches_feature() {
+        for name in ["ai_match", "ai_choose", "ai_score"] {
+            assert_eq!(
+                FUNCTION_REGISTRY.get_function(name).is_some(),
+                cfg!(feature = "ai_functions"),
+                "{name}"
+            );
+        }
+        for name in ["jev", "jev_choice", "jev_score"] {
+            assert!(FUNCTION_REGISTRY.get_function(name).is_none(), "{name}");
+        }
     }
 
     #[test]

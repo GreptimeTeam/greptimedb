@@ -18,31 +18,45 @@ use std::fmt;
 use std::sync::Arc;
 
 use common_time::{TimeToLive, Timestamp};
+use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{FileId, RegionId};
 
-use crate::sst::file::{FileHandle, FileMeta, Level, MAX_LEVEL};
+use crate::sst::file::{FileHandle, FileMeta, FileTimeRange, Level, MAX_LEVEL};
 use crate::sst::file_purger::FilePurgerRef;
+use crate::sst::primary_key::PrimaryKeyRangeMapper;
 
 /// A version of all SSTs in a region.
 #[derive(Debug, Clone)]
 pub(crate) struct SstVersion {
     /// SST metadata organized by levels.
-    levels: LevelMetaArray,
+    levels: Arc<LevelMetaArray>,
+    primary_key_mapper: Arc<PrimaryKeyRangeMapper>,
 }
 
 pub(crate) type SstVersionRef = Arc<SstVersion>;
 
 impl SstVersion {
     /// Returns a new [SstVersion].
-    pub(crate) fn new() -> SstVersion {
+    pub(crate) fn new(metadata: RegionMetadataRef) -> SstVersion {
         SstVersion {
-            levels: new_level_meta_vec(),
+            levels: Arc::new(new_level_meta_vec()),
+            primary_key_mapper: Arc::new(PrimaryKeyRangeMapper::new(metadata)),
         }
+    }
+
+    /// Changes the target schema without copying the SST list or rebinding handles.
+    pub(crate) fn set_metadata(&mut self, metadata: RegionMetadataRef) {
+        self.primary_key_mapper = Arc::new(self.primary_key_mapper.with_metadata(metadata));
+    }
+
+    /// Shares the target schema and encoded defaults with comparisons.
+    pub(crate) fn primary_key_mapper(&self) -> Arc<PrimaryKeyRangeMapper> {
+        self.primary_key_mapper.clone()
     }
 
     /// Returns a slice to metadatas of all levels.
     pub(crate) fn levels(&self) -> &[LevelMeta] {
-        &self.levels
+        self.levels.as_ref()
     }
 
     /// Returns the current handle matching the selected file's identity in its immutable level.
@@ -65,11 +79,12 @@ impl SstVersion {
         file_purger: FilePurgerRef,
         files_to_add: impl Iterator<Item = FileMeta>,
     ) {
+        let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_add {
             let level = file.level;
             let new_index_version = file.index_version;
             // If the file already exists, then we should only replace the handle when the index is outdated.
-            self.levels[level as usize]
+            levels[level as usize]
                 .files
                 .entry(file.file_id)
                 .and_modify(|f| {
@@ -99,9 +114,10 @@ impl SstVersion {
     /// # Panics
     /// Panics if level of [FileMeta] is greater than [MAX_LEVEL].
     pub(crate) fn remove_files(&mut self, files_to_remove: impl Iterator<Item = FileMeta>) {
+        let levels = Arc::make_mut(&mut self.levels);
         for file in files_to_remove {
             let level = file.level;
-            if let Some(handle) = self.levels[level as usize].files.remove(&file.file_id) {
+            if let Some(handle) = levels[level as usize].files.remove(&file.file_id) {
                 handle.mark_deleted();
             }
         }
@@ -109,7 +125,7 @@ impl SstVersion {
 
     /// Marks all SSTs in this version as deleted.
     pub(crate) fn mark_all_deleted(&self) {
-        for level_meta in &self.levels {
+        for level_meta in self.levels.iter() {
             for file_handle in level_meta.files.values() {
                 file_handle.mark_deleted();
             }
@@ -150,6 +166,16 @@ impl SstVersion {
                     .count() as u64
             })
             .sum()
+    }
+
+    /// Returns the time range covered by every file in this version, including
+    /// files referenced from other regions after a repartition.
+    pub(crate) fn time_range(&self) -> Option<FileTimeRange> {
+        self.levels
+            .iter()
+            .flat_map(|level_meta| level_meta.files.values())
+            .map(|file_handle| file_handle.time_range())
+            .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 
     /// Returns the space occupied by SST data files owned by `region_id`.
@@ -258,6 +284,75 @@ mod tests {
     use crate::test_util::new_noop_file_purger;
 
     #[test]
+    fn time_range_spans_files_referenced_from_other_regions() {
+        let purger = new_noop_file_purger();
+        let owned = FileMeta {
+            file_id: FileId::random(),
+            region_id: RegionId::new(1, 1),
+            time_range: (
+                Timestamp::new_millisecond(200),
+                Timestamp::new_millisecond(300),
+            ),
+            ..Default::default()
+        };
+        let referenced = FileMeta {
+            file_id: FileId::random(),
+            region_id: RegionId::new(2, 1),
+            time_range: (
+                Timestamp::new_millisecond(50),
+                Timestamp::new_millisecond(100),
+            ),
+            ..Default::default()
+        };
+
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger, [owned, referenced].into_iter());
+
+        assert_eq!(
+            version.time_range(),
+            Some((
+                Timestamp::new_millisecond(50),
+                Timestamp::new_millisecond(300)
+            ))
+        );
+    }
+
+    #[test]
+    fn time_range_compares_across_units() {
+        let purger = new_noop_file_purger();
+        let seconds = FileMeta {
+            file_id: FileId::random(),
+            time_range: (Timestamp::new_second(1), Timestamp::new_second(2)),
+            ..Default::default()
+        };
+        let millis = FileMeta {
+            file_id: FileId::random(),
+            time_range: (
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2500),
+            ),
+            ..Default::default()
+        };
+
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        version.add_files(purger, [seconds, millis].into_iter());
+
+        assert_eq!(
+            version.time_range(),
+            Some((
+                Timestamp::new_millisecond(500),
+                Timestamp::new_millisecond(2500)
+            ))
+        );
+    }
+
+    #[test]
+    fn time_range_is_none_without_files() {
+        let version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
+        assert_eq!(version.time_range(), None);
+    }
+
+    #[test]
     fn test_add_files() {
         let purger = new_noop_file_purger();
 
@@ -268,7 +363,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         // files[1] is added multiple times, and that's ok.
         version.add_files(purger.clone(), files[..=1].iter().cloned());
         version.add_files(purger, files[1..].iter().cloned());
@@ -292,7 +387,7 @@ mod tests {
             },
             purger.clone(),
         );
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         version.add_files(
             purger,
             [
@@ -344,7 +439,7 @@ mod tests {
             },
         ];
 
-        let mut version = SstVersion::new();
+        let mut version = SstVersion::new(crate::test_util::memtable_util::metadata_for_test());
         version.add_files(purger, files.iter().cloned());
 
         assert_eq!(3, version.owned_num_rows(region_id));

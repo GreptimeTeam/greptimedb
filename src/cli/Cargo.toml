@@ -28,6 +28,7 @@ client = { workspace = true, features = ["testing"] }
 common-base.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
+common-datasource.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
 common-macro.workspace = true
@@ -62,6 +63,7 @@ serde_json.workspace = true
 servers.workspace = true
 session.workspace = true
 snafu.workspace = true
+sql.workspace = true
 standalone.workspace = true
 store-api.workspace = true
 table.workspace = true
@@ -74,5 +76,6 @@ uuid.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
 common-version.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 serde.workspace = true
 tempfile.workspace = true

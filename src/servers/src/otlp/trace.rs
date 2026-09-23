@@ -28,7 +28,8 @@ pub use common_catalog::consts::{
     SPAN_STATUS_CODE_COLUMN as SPAN_STATUS_CODE, TRACE_TIMESTAMP_COLUMN as TIMESTAMP_COLUMN,
 };
 pub use common_catalog::consts::{
-    PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+    PARENT_SPAN_ID_COLUMN, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_ATTRIBUTES_COLUMN,
+    SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
 };
 use pipeline::PipelineWay;
 
@@ -37,13 +38,10 @@ use crate::otlp::trace::span::TraceSpan;
 
 pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_STATUS_MESSAGE_COLUMN: &str = "span_status_message";
-pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
+pub const SPAN_LINKS_COLUMN: &str = "span_links";
 pub const SCOPE_NAME_COLUMN: &str = "scope_name";
 pub const SCOPE_VERSION_COLUMN: &str = "scope_version";
-/// Column containing instrumentation scope attributes as a JSON2 object.
-pub const SCOPE_ATTRIBUTES_COLUMN: &str = "scope_attributes";
-pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
 pub const TRACE_STATE_COLUMN: &str = "trace_state";
 
 // const keys

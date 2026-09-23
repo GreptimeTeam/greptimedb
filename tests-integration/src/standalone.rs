@@ -52,6 +52,7 @@ use frontend::frontend::Frontend;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
@@ -87,6 +88,8 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    experimental_metric_export: bool,
+    logical_batcher: Option<BatcherOptions>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -106,7 +109,23 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            experimental_metric_export: false,
+            logical_batcher: None,
         }
+    }
+
+    /// Enables experimental Metric export for the standalone test instance.
+    #[must_use]
+    pub fn with_experimental_metric_export(mut self) -> Self {
+        self.experimental_metric_export = true;
+        self
+    }
+
+    /// Configures logical-table batching for integration tests.
+    #[must_use]
+    pub fn with_logical_batcher(mut self, options: BatcherOptions) -> Self {
+        self.logical_batcher = Some(options);
+        self
     }
 
     #[must_use]
@@ -367,6 +386,11 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            experimental_metric_export: self.experimental_metric_export,
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: self.logical_batcher.clone(),
+                ..Default::default()
+            },
             // Tests cover the descriptor, so they run with it enabled.
             otlp: frontend::service_config::OtlpOptions {
                 experimental_enable_resource_info: true,

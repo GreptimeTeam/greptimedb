@@ -29,12 +29,12 @@ use crate::compaction::compactor::{CompactionRegion, CompactionVersion};
 use crate::compaction::last_non_null::inputs_precede_memtables;
 use crate::compaction::picker::{Picker, PickerOutput, get_expired_ssts};
 use crate::error::{JoinSnafu, Result};
-use crate::region::options::MergeMode;
+use crate::region::options::{CompactionOptions, MergeMode};
 use crate::sst::file::FileHandle;
 
-/// Compaction picker that splits the time range of all involved files to windows, and merges
-/// the data segments intersects with those windows of files together so that the output files
-/// never overlaps.
+/// Compaction picker that splits input files into disjoint time windows and merges the
+/// segments within each window. Outputs may be split further by the configured file size
+/// threshold, at series boundaries for regions with a primary key.
 #[derive(Clone, Debug)]
 pub struct WindowedCompactionPicker {
     compaction_time_window_seconds: Option<i64>,
@@ -145,6 +145,13 @@ impl Picker for WindowedCompactionPicker {
         let picker = self.clone();
         let region_id = compaction_region.current_version.metadata.region_id;
         let current_version = compaction_region.current_version.clone();
+        let CompactionOptions::Twcs(options) = &compaction_region.region_options.compaction;
+        // Use the same output size threshold as TWCS, including zero meaning unlimited.
+        let max_file_size = options
+            .max_output_file_size
+            .map(|size| size.as_bytes())
+            .filter(|size| *size > 0)
+            .map(|size| size as usize);
         let (outputs, expired_ssts, time_window) =
             common_runtime::spawn_blocking_compact(move || {
                 picker.pick_inner(region_id, &current_version, Timestamp::current_millis())
@@ -156,7 +163,7 @@ impl Picker for WindowedCompactionPicker {
             outputs,
             expired_ssts,
             time_window_size: time_window,
-            max_file_size: None, // todo (hl): we may need to support `max_file_size` parameter in manual compaction.
+            max_file_size,
         }))
     }
 }
@@ -303,13 +310,16 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use common_base::readable_size::ReadableSize;
     use common_time::Timestamp;
     use common_time::range::TimestampRange;
     use store_api::storage::{FileId, RegionId};
 
     use crate::compaction::compactor::CompactionVersion;
+    use crate::compaction::picker::Picker;
+    use crate::compaction::test_util::compaction_region_with_ssts;
     use crate::compaction::window::{WindowedCompactionPicker, file_time_bucket_span};
-    use crate::region::options::{MergeMode, RegionOptions};
+    use crate::region::options::{CompactionOptions, MergeMode, RegionOptions};
     use crate::sst::file::{FileMeta, Level};
     use crate::sst::file_purger::NoopFilePurger;
     use crate::sst::version::SstVersion;
@@ -322,7 +332,7 @@ mod tests {
         let metadata = metadata_for_test();
         let file_purger_ref = Arc::new(NoopFilePurger);
 
-        let mut ssts = SstVersion::new();
+        let mut ssts = SstVersion::new(metadata.clone());
 
         ssts.add_files(
             file_purger_ref,
@@ -361,6 +371,29 @@ mod tests {
                 float_field_encoding: Default::default(),
             },
             compaction_time_window: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_pick_output_file_size_threshold() {
+        let mut region = compaction_region_with_ssts(
+            [FileMeta {
+                file_id: FileId::random(),
+                time_range: (Timestamp::new_second(0), Timestamp::new_second(1)),
+                ..Default::default()
+            }],
+            Duration::from_secs(3600),
+        )
+        .await;
+        let picker = WindowedCompactionPicker::new(Some(3600));
+
+        for (size, expected) in [(None, None), (Some(0), None), (Some(1024), Some(1024))] {
+            let CompactionOptions::Twcs(options) = &mut region.region_options.compaction;
+            options.max_output_file_size = size.map(ReadableSize);
+
+            let output = picker.pick(&region).await.unwrap().unwrap();
+            assert_eq!(1, output.outputs.len());
+            assert_eq!(expected, output.max_file_size);
         }
     }
 

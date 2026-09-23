@@ -28,11 +28,11 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema as DtColumnSchema, Schema as DtSchema};
 use partition::error::Result as PartitionResult;
 use partition::partition::{PartitionRule, PartitionRuleRef, RegionMask};
-use servers::error::{self, Result};
-use servers::pending_rows_batcher::{
+use servers::batcher::logical_table::{
     PhysicalFlushCatalogProvider, PhysicalFlushNodeRequester, PhysicalFlushPartitionProvider,
     PhysicalTableMetadata, RecordBatchWithTsIdx, TableBatch, flush_batch_physical,
 };
+use servers::error::{self, Result};
 use store_api::storage::RegionId;
 use table::test_util::table_info::test_table_info;
 use tokio::runtime::Runtime;

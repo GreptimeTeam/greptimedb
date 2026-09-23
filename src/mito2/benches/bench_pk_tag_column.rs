@@ -24,6 +24,7 @@
 
 use std::hint::black_box;
 use std::sync::Arc;
+use std::time::Duration;
 
 use api::v1::SemanticType;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
@@ -35,9 +36,12 @@ use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
-use mito_codec::row_converter::SparsePrimaryKeyCodec;
+use datatypes::value::Value;
+use mito_codec::row_converter::{
+    DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField, SparsePrimaryKeyCodec,
+};
 use mito2::sst::parquet::flat_format::decode_primary_keys;
-use mito2::test_util::bench_util::tag_filter_for_bench;
+use mito2::test_util::bench_util::{pk_materializer_for_bench, tag_filter_for_bench};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
 use store_api::storage::RegionId;
@@ -95,6 +99,10 @@ fn metadata(tags: u32) -> RegionMetadataRef {
 /// Builds a sparse flat batch whose primary key dictionary holds
 /// `ROWS / rows_per_key` distinct keys with `tags` labels each.
 fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
+    input_with_label_len(tags, rows_per_key, 24)
+}
+
+fn input_with_label_len(tags: u32, rows_per_key: usize, label_len: usize) -> RecordBatch {
     let codec = SparsePrimaryKeyCodec::schemaless();
     let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
     for series in 0..ROWS / rows_per_key {
@@ -103,7 +111,14 @@ fn input(tags: u32, rows_per_key: usize) -> RecordBatch {
             .encode_internal((series / 128) as u32, series as u64, &mut key)
             .unwrap();
         let labels: Vec<_> = (0..tags)
-            .map(|id| (id, format!("tag-{id:03}-value-{series:010}")))
+            .map(|id| {
+                let mut value = format!("tag-{id:03}-value-{series:010}");
+                value.extend(std::iter::repeat_n(
+                    'x',
+                    label_len.saturating_sub(value.len()),
+                ));
+                (id, value)
+            })
             .collect();
         codec
             .encode_raw_tag_value(
@@ -203,8 +218,8 @@ fn bench_pk_tag_filters(c: &mut Criterion) {
     const TAGS: u32 = 40;
     let metadata = metadata(TAGS);
     let mut group = c.benchmark_group("pk_tag_filters");
-    for rows_per_key in [1, 32] {
-        let batch = input(TAGS, rows_per_key);
+    for (rows_per_key, label_len) in [(1, 24), (32, 24), (1, 1024), (32, 1024)] {
+        let batch = input_with_label_len(TAGS, rows_per_key, label_len);
         for predicate_count in [1, 2, 4, 8, 16, 32] {
             // Use distinct tags at the end of the key to exercise offset discovery.
             // Every row matches, so increasing the predicate count does not change selectivity.
@@ -215,7 +230,10 @@ fn bench_pk_tag_filters(c: &mut Criterion) {
             // Validate the workload outside the timed section.
             assert_eq!(filter(batch.clone()).unwrap().unwrap().num_rows(), ROWS);
             group.bench_function(
-                BenchmarkId::new(format!("{rows_per_key}rpk"), predicate_count),
+                BenchmarkId::new(
+                    format!("{rows_per_key}rpk_{label_len}bytes"),
+                    predicate_count,
+                ),
                 |b| b.iter(|| black_box(filter(black_box(batch.clone())).unwrap())),
             );
         }
@@ -223,5 +241,112 @@ fn bench_pk_tag_filters(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_pk_tag_column, bench_pk_tag_filters);
+/// Measures encoded-only Dense inputs, including the cost of discovering offsets.
+fn bench_dense_pk_tag_column(c: &mut Criterion) {
+    const TAGS: usize = 40;
+    let mut group = c.benchmark_group("dense_pk_tag_column");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    for numeric in [false, true] {
+        let ty = if numeric {
+            ConcreteDataType::uint64_datatype()
+        } else {
+            ConcreteDataType::string_datatype()
+        };
+        let codec = DensePrimaryKeyCodec::with_fields(
+            (0..TAGS)
+                .map(|id| (id as u32, SortField::new(ty.clone())))
+                .collect(),
+        );
+        let mut metadata = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        for id in 0..TAGS {
+            metadata.push_column_metadata(ColumnMetadata {
+                column_id: id as u32,
+                column_schema: ColumnSchema::new(format!("tag_{id}"), ty.clone(), true),
+                semantic_type: SemanticType::Tag,
+            });
+        }
+        metadata
+            .push_column_metadata(ColumnMetadata {
+                column_id: TAGS as u32,
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                semantic_type: SemanticType::Timestamp,
+            })
+            .primary_key((0..TAGS as u32).collect());
+        let metadata = Arc::new(metadata.build().unwrap());
+        for rows_per_key in [1, 32] {
+            let mut keys = BinaryDictionaryBuilder::<UInt32Type>::new();
+            for series in 0..ROWS / rows_per_key {
+                let values: Vec<_> = (0..TAGS)
+                    .map(|id| {
+                        if numeric {
+                            Value::UInt64((series + id) as u64)
+                        } else {
+                            Value::from(format!(
+                                "tag-{id:03}-value-{series:010}-abcdefghijklmnopqrstuvwxyz"
+                            ))
+                        }
+                    })
+                    .collect();
+                let pk = codec
+                    .encode(values.iter().map(Value::as_value_ref))
+                    .unwrap();
+                for _ in 0..rows_per_key {
+                    keys.append(&pk).unwrap();
+                }
+            }
+            let batch = RecordBatch::try_from_iter([
+                (
+                    "ts",
+                    Arc::new(TimestampMillisecondArray::from_iter_values(0..ROWS as i64))
+                        as ArrayRef,
+                ),
+                ("__primary_key", Arc::new(keys.finish()) as ArrayRef),
+                (
+                    "__sequence",
+                    Arc::new(UInt64Array::from(vec![1; ROWS])) as ArrayRef,
+                ),
+                (
+                    "__op_type",
+                    Arc::new(UInt8Array::from(vec![1; ROWS])) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            for (projection, start, count) in [
+                ("first", 0, 1),
+                ("last", 39, 1),
+                ("4last", 36, 4),
+                ("all", 0, 40),
+            ] {
+                let kind = if numeric { "numeric" } else { "string" };
+                let materialize = pk_materializer_for_bench(
+                    metadata.clone(),
+                    (start as u32..(start + count) as u32)
+                        .chain([TAGS as u32])
+                        .collect(),
+                    batch.schema(),
+                );
+                assert_eq!(materialize(batch.clone()).unwrap().num_columns(), count + 4);
+                group.bench_function(format!("{kind}_{projection}_{rows_per_key}rpk"), |b| {
+                    b.iter(|| {
+                        black_box(materialize(black_box(batch.clone())).unwrap());
+                    });
+                });
+            }
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_pk_tag_column,
+    bench_pk_tag_filters,
+    bench_dense_pk_tag_column
+);
 criterion_main!(benches);

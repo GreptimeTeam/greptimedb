@@ -134,6 +134,19 @@ services:
       - MYSQL_USER=greptimedb
       - MYSQL_PASSWORD=admin
       - MYSQL_ROOT_PASSWORD=admin
+    # Wait for authenticated TCP queries, not just the container or initialization socket.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql
+          --protocol=TCP --host=127.0.0.1
+          --user="$${MYSQL_USER}" --database="$${MYSQL_DATABASE}"
+          --execute="SELECT 1"
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
 volumes:
   minio_data:

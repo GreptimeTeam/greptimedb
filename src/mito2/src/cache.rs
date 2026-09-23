@@ -31,6 +31,8 @@ use std::sync::{Arc, RwLock, Weak};
 use bytes::Bytes;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
+use common_runtime::Runtime;
+use common_runtime::runtime::RuntimeTrait;
 use common_telemetry::warn;
 use datatypes::arrow::buffer::BooleanBuffer;
 use datatypes::arrow::record_batch::RecordBatch;
@@ -99,6 +101,10 @@ pub(crate) struct RangeResultMemoryLimiter {
     semaphore: Arc<tokio::sync::Semaphore>,
     permit_bytes: usize,
     total_permits: usize,
+    /// Number of acquisitions that found too few permits and parked. Test-only
+    /// signal to synchronize with a caller waiting inside [Self::acquire].
+    #[cfg(test)]
+    waited_acquires: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for RangeResultMemoryLimiter {
@@ -120,12 +126,20 @@ impl RangeResultMemoryLimiter {
             semaphore: Arc::new(tokio::sync::Semaphore::new(total_permits)),
             permit_bytes,
             total_permits,
+            #[cfg(test)]
+            waited_acquires: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn permit_bytes(&self) -> usize {
         self.permit_bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waited_acquires(&self) -> usize {
+        self.waited_acquires
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     #[cfg(test)]
@@ -144,6 +158,14 @@ impl RangeResultMemoryLimiter {
             }
             .fail();
         }
+        // Nothing awaits between this check and the parking below, so an observed
+        // increment means the caller is about to wait for the missing permits.
+        #[cfg(test)]
+        if self.semaphore.available_permits() < permits {
+            self.waited_acquires
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+        }
+
         self.semaphore
             .acquire_many(permits as u32)
             .await
@@ -218,7 +240,7 @@ impl SstMetaPreparation {
 }
 
 impl CompactSstMeta {
-    async fn decode(&self) -> Result<Arc<CachedSstMeta>> {
+    async fn decode(&self, runtime: &Runtime) -> Result<Arc<CachedSstMeta>> {
         let mut decoded_guard = self.decoded.lock().await;
         if let Some(decoded) = decoded_guard.upgrade() {
             return Ok(decoded);
@@ -228,33 +250,34 @@ impl CompactSstMeta {
         let decoded_size = self.decoded_size;
         let region_metadata = self.region_metadata.upgrade();
         let page_index_policy = self.page_index_policy;
-        let decoded = common_runtime::spawn_blocking_global(move || {
-            let bytes = zstd::bulk::decompress(&encoded_metadata, decoded_size).context(
-                DecompressObjectSnafu {
-                    compress_type: CompressionType::Zstd,
+        let decoded = runtime
+            .spawn_blocking(move || {
+                let bytes = zstd::bulk::decompress(&encoded_metadata, decoded_size).context(
+                    DecompressObjectSnafu {
+                        compress_type: CompressionType::Zstd,
+                        path: "cached SST metadata",
+                    },
+                )?;
+                let bytes = Bytes::from(bytes);
+                let mut reader = ParquetMetaDataReader::new()
+                    .with_column_index_policy(PageIndexPolicy::Skip)
+                    .with_offset_index_policy(page_index_policy);
+                reader.try_parse(&bytes).context(ReadParquetSnafu {
                     path: "cached SST metadata",
-                },
-            )?;
-            let bytes = Bytes::from(bytes);
-            let mut reader = ParquetMetaDataReader::new()
-                .with_column_index_policy(PageIndexPolicy::Skip)
-                .with_offset_index_policy(page_index_policy);
-            reader.try_parse(&bytes).context(ReadParquetSnafu {
-                path: "cached SST metadata",
-            })?;
-            let metadata = reader.finish().context(ReadParquetSnafu {
-                path: "cached SST metadata",
-            })?;
-            CachedSstMeta::try_new_with_page_index_policy(
-                "cached SST metadata",
-                metadata,
-                region_metadata,
-                page_index_policy,
-            )
-            .map(Arc::new)
-        })
-        .await
-        .context(JoinSnafu)??;
+                })?;
+                let metadata = reader.finish().context(ReadParquetSnafu {
+                    path: "cached SST metadata",
+                })?;
+                CachedSstMeta::try_new_with_page_index_policy(
+                    "cached SST metadata",
+                    metadata,
+                    region_metadata,
+                    page_index_policy,
+                )
+                .map(Arc::new)
+            })
+            .await
+            .context(JoinSnafu)??;
 
         *decoded_guard = Arc::downgrade(&decoded);
         Ok(decoded)
@@ -265,46 +288,50 @@ impl CompactSstMeta {
     }
 }
 
-/// Decodes SST metadata without preparing a compact cache entry.
+/// Decodes SST metadata on the given blocking runtime without preparing a compact cache entry.
 pub(crate) async fn decode_sst_meta(
     file_path: &str,
     parquet_metadata: ParquetMetaData,
     region_metadata: Option<RegionMetadataRef>,
     page_index_policy: PageIndexPolicy,
+    runtime: &Runtime,
 ) -> Result<Arc<CachedSstMeta>> {
     let file_path = file_path.to_string();
-    common_runtime::spawn_blocking_global(move || {
-        let parquet_metadata = strip_column_indexes(parquet_metadata);
-        CachedSstMeta::try_new_with_page_index_policy(
-            &file_path,
-            parquet_metadata,
-            region_metadata,
-            page_index_policy,
-        )
-        .map(Arc::new)
-    })
-    .await
-    .context(JoinSnafu)?
+    runtime
+        .spawn_blocking(move || {
+            let parquet_metadata = strip_column_indexes(parquet_metadata);
+            CachedSstMeta::try_new_with_page_index_policy(
+                &file_path,
+                parquet_metadata,
+                region_metadata,
+                page_index_policy,
+            )
+            .map(Arc::new)
+        })
+        .await
+        .context(JoinSnafu)?
 }
 
-/// Decodes SST metadata and attempts to encode both cache representations on the blocking runtime.
+/// Decodes SST metadata and attempts to encode both cache representations on the given blocking runtime.
 pub(crate) async fn prepare_sst_meta(
     file_path: &str,
     parquet_metadata: ParquetMetaData,
     region_metadata: Option<RegionMetadataRef>,
     page_index_policy: PageIndexPolicy,
+    runtime: &Runtime,
 ) -> Result<SstMetaPreparation> {
     let file_path = file_path.to_string();
-    common_runtime::spawn_blocking_global(move || {
-        prepare_sst_meta_sync(
-            &file_path,
-            parquet_metadata,
-            region_metadata,
-            page_index_policy,
-        )
-    })
-    .await
-    .context(JoinSnafu)?
+    runtime
+        .spawn_blocking(move || {
+            prepare_sst_meta_sync(
+                &file_path,
+                parquet_metadata,
+                region_metadata,
+                page_index_policy,
+            )
+        })
+        .await
+        .context(JoinSnafu)?
 }
 
 /// Synchronously prepares SST metadata. Callers must run this on a blocking runtime.
@@ -651,6 +678,16 @@ pub enum CacheStrategy {
 }
 
 impl CacheStrategy {
+    /// Returns the runtime for CPU-bound SST metadata work for this request.
+    pub(crate) fn sst_meta_runtime(&self) -> Runtime {
+        match self {
+            CacheStrategy::Compaction(_) => common_runtime::compact_runtime(),
+            CacheStrategy::EnableAll(_) | CacheStrategy::Disabled => {
+                common_runtime::global_runtime()
+            }
+        }
+    }
+
     /// Returns whether the SST metadata cache is enabled for this strategy.
     pub(crate) fn sst_meta_cache_enabled(&self) -> bool {
         match self {
@@ -671,7 +708,12 @@ impl CacheStrategy {
         match self {
             CacheStrategy::EnableAll(cache_manager) | CacheStrategy::Compaction(cache_manager) => {
                 cache_manager
-                    .get_sst_meta_data(file_id, metrics, page_index_policy)
+                    .get_sst_meta_data(
+                        file_id,
+                        metrics,
+                        page_index_policy,
+                        &self.sst_meta_runtime(),
+                    )
                     .await
             }
             CacheStrategy::Disabled => {
@@ -1037,6 +1079,7 @@ impl CacheManager {
         file_id: RegionFileId,
         metrics: &mut MetadataCacheMetrics,
         page_index_policy: PageIndexPolicy,
+        runtime: &Runtime,
     ) -> Option<Arc<CachedSstMeta>> {
         let cache_key = SstMetaKey(file_id.region_id(), file_id.file_id());
         let compact = self
@@ -1055,7 +1098,7 @@ impl CacheManager {
             }
 
             CACHE_MISS.with_label_values(&[SST_META_DECODED_TYPE]).inc();
-            match compact.decode().await {
+            match compact.decode(runtime).await {
                 Ok(decoded) => {
                     self.put_sst_meta_data(file_id, decoded.clone());
                     return Some(decoded);
@@ -1081,7 +1124,7 @@ impl CacheManager {
             let file_cache = write_cache.file_cache();
             if self.sst_meta_cache_enabled() {
                 if let Some(metadata) = file_cache
-                    .get_sst_meta_data(key, metrics, page_index_policy)
+                    .get_sst_meta_data(key, metrics, page_index_policy, runtime)
                     .await
                 {
                     metrics.file_cache_hit += 1;
@@ -1102,7 +1145,7 @@ impl CacheManager {
                     return Some(decoded);
                 }
             } else if let Some(decoded) = file_cache
-                .get_decoded_sst_meta_data(key, metrics, page_index_policy)
+                .get_decoded_sst_meta_data(key, metrics, page_index_policy, runtime)
                 .await
             {
                 metrics.file_cache_hit += 1;
@@ -1189,7 +1232,7 @@ impl CacheManager {
         let compact = self
             .get_compact_sst_meta(&key)
             .filter(|metadata| metadata.satisfies_page_index_policy(page_index_policy))?;
-        match compact.decode().await {
+        match compact.decode(&common_runtime::global_runtime()).await {
             Ok(metadata) => Some(metadata),
             Err(err) => {
                 warn!(err; "Failed to decode compact SST metadata, region_id: {}, file_id: {}", file_id.region_id(), file_id.file_id());
@@ -2124,7 +2167,12 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata, None);
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, Default::default())
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    Default::default(),
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_none()
         );
@@ -2185,14 +2233,24 @@ mod tests {
         let file_id = RegionFileId::new(region_id, FileId::random());
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, Default::default())
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    Default::default(),
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_none()
         );
         let (metadata, region_metadata) = sst_parquet_meta();
         cache.put_parquet_meta_data(file_id, metadata, None);
         let cached = cache
-            .get_sst_meta_data(file_id, &mut metrics, Default::default())
+            .get_sst_meta_data(
+                file_id,
+                &mut metrics,
+                Default::default(),
+                &common_runtime::global_runtime(),
+            )
             .await
             .unwrap();
         assert_eq!(region_metadata, cached.region_metadata());
@@ -2210,7 +2268,12 @@ mod tests {
         cache.remove_parquet_meta_data(file_id);
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, Default::default())
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    Default::default(),
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_none()
         );
@@ -2227,7 +2290,12 @@ mod tests {
         cache.put_parquet_meta_data(file_id, metadata, Some(region_metadata.clone()));
 
         let cached = cache
-            .get_sst_meta_data(file_id, &mut metrics, Default::default())
+            .get_sst_meta_data(
+                file_id,
+                &mut metrics,
+                Default::default(),
+                &common_runtime::global_runtime(),
+            )
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&region_metadata, &cached.region_metadata()));
@@ -2265,9 +2333,15 @@ mod tests {
             .set_offset_index(Some(offset_indexes))
             .build();
         let expected_rows = metadata.file_metadata().num_rows();
-        let prepared = prepare_sst_meta("test.parquet", metadata, None, PageIndexPolicy::Required)
-            .await
-            .unwrap();
+        let prepared = prepare_sst_meta(
+            "test.parquet",
+            metadata,
+            None,
+            PageIndexPolicy::Required,
+            &common_runtime::global_runtime(),
+        )
+        .await
+        .unwrap();
         let SstMetaPreparation::Prepared(prepared) = prepared else {
             panic!("valid metadata should produce a compact cache entry");
         };
@@ -2276,7 +2350,12 @@ mod tests {
         cache.put_prepared_sst_meta(file_id, prepared, false);
         let mut metrics = MetadataCacheMetrics::default();
         let cached = cache
-            .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Required)
+            .get_sst_meta_data(
+                file_id,
+                &mut metrics,
+                PageIndexPolicy::Required,
+                &common_runtime::global_runtime(),
+            )
             .await
             .unwrap();
 
@@ -2357,7 +2436,12 @@ mod tests {
         let mut metrics = MetadataCacheMetrics::default();
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_none()
         );
@@ -2377,7 +2461,12 @@ mod tests {
         let mut metrics = MetadataCacheMetrics::default();
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Optional)
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    PageIndexPolicy::Optional,
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_some()
         );
@@ -2386,7 +2475,12 @@ mod tests {
         let mut metrics = MetadataCacheMetrics::default();
         assert!(
             cache
-                .get_sst_meta_data(file_id, &mut metrics, PageIndexPolicy::Skip)
+                .get_sst_meta_data(
+                    file_id,
+                    &mut metrics,
+                    PageIndexPolicy::Skip,
+                    &common_runtime::global_runtime()
+                )
                 .await
                 .is_some()
         );

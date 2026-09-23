@@ -23,6 +23,7 @@ pub mod value;
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json};
@@ -31,7 +32,7 @@ use snafu::ResultExt;
 use crate::data_type::ConcreteDataType;
 use crate::error::{self, InvalidJson2SettingsSnafu, Result, UnsupportedJsonTypeSnafu};
 use crate::json::value::{JsonValue, JsonVariant, encode_serde_json_as_jsonb};
-use crate::schema::ColumnDefaultConstraint;
+use crate::prelude::DataType as _;
 use crate::types::json_type::{JsonNativeType, JsonObjectType};
 use crate::value::{ListValue, StructValue, Value};
 
@@ -91,10 +92,16 @@ pub struct JsonTypeHint {
     pub path: Vec<String>,
     #[serde(rename = "type")]
     pub data_type: ConcreteDataType,
-    pub nullable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_constraint: Option<ColumnDefaultConstraint>,
     pub inverted_index: bool,
+}
+
+/// Specifies how encoding handles a value that does not match its JSON2 type hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeHintMismatchPolicy {
+    /// Returns an error for a type hint mismatch.
+    Reject,
+    /// Coerces to the hint type, encoding unconvertible values as null.
+    CoerceOrNull,
 }
 
 /// Context for JSON encoding/decoding that tracks the current key path.
@@ -139,6 +146,30 @@ impl JsonSettings {
         (self.type_hints, self.max_auto_expanded_paths)
     }
 
+    /// Returns whether the settings are equivalent, ignoring type hint order.
+    pub fn equivalent(&self, other: &Self) -> bool {
+        let Self {
+            type_hints,
+            max_auto_expanded_paths,
+        } = self;
+        let Self {
+            type_hints: other_hints,
+            max_auto_expanded_paths: other_max_auto_expanded_paths,
+        } = other;
+
+        if max_auto_expanded_paths != other_max_auto_expanded_paths
+            || type_hints.len() != other_hints.len()
+        {
+            return false;
+        }
+
+        let mut hints = type_hints.iter().collect::<Vec<_>>();
+        let mut other_hints = other_hints.iter().collect::<Vec<_>>();
+        hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        other_hints.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        hints == other_hints
+    }
+
     /// Decode an encoded StructValue back into a serde_json::Value.
     pub fn decode(&self, value: Value) -> Result<Json> {
         let mut context = JsonContext {
@@ -150,6 +181,15 @@ impl JsonSettings {
 
     /// Encode a serde_json::Value into a Value::Json using current settings.
     pub fn encode(&self, json: Json) -> Result<Value> {
+        self.encode_with_type_hint_mismatch_policy(json, TypeHintMismatchPolicy::Reject)
+    }
+
+    /// Encodes a serde_json::Value using the given type hint mismatch policy.
+    pub fn encode_with_type_hint_mismatch_policy(
+        &self,
+        json: Json,
+        policy: TypeHintMismatchPolicy,
+    ) -> Result<Value> {
         if let Json::Object(object) = &json
             && object.contains_key(JSON2_REMAINDER_FIELD_NAME)
         {
@@ -164,7 +204,7 @@ impl JsonSettings {
             path: Vec::new(),
             settings: self,
         };
-        encode_json_with_context(json, &mut context).map(|v| Value::Json(Box::new(v)))
+        encode_json_with_context(json, &mut context, policy).map(|v| Value::Json(Box::new(v)))
     }
 }
 
@@ -217,20 +257,6 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
                 .fail();
             }
         };
-        let non_finite_default = match &hint.default_constraint {
-            Some(ColumnDefaultConstraint::Value(Value::Float32(value))) => !value.0.is_finite(),
-            Some(ColumnDefaultConstraint::Value(Value::Float64(value))) => !value.0.is_finite(),
-            _ => false,
-        };
-        if non_finite_default {
-            return InvalidJson2SettingsSnafu {
-                reason: format!(
-                    "JSON2 type hint default for '{}' must be finite",
-                    hint.path.join(".")
-                ),
-            }
-            .fail();
-        }
         validate_type_hint(&mut object, &hint.path, data_type)?;
     }
     Ok(())
@@ -290,50 +316,56 @@ fn with_key_context<T>(
 }
 
 /// Main encoding function with key path tracking
-fn encode_json_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+fn encode_json_with_context(
+    json: Json,
+    context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
+) -> Result<JsonValue> {
     if context.path.is_empty() && !matches!(json, Json::Object(_)) {
         return UnsupportedJsonTypeSnafu.fail();
     }
 
     match json {
-        Json::Object(json_object) => encode_json_object_with_context(json_object, context),
-        Json::Array(json_array) => encode_json_array_with_context(json_array, context),
-        _ => encode_json_value_with_context(json, context),
+        Json::Object(json_object) => encode_json_object_with_context(json_object, context, policy),
+        Json::Array(json_array) => encode_json_array_with_context(json_array, context, policy),
+        _ => encode_json_value_with_context(json, context, policy),
     }
 }
 
 fn encode_json_object_with_context<'a>(
     json_object: Map<String, Json>,
     context: &mut JsonContext<'a>,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     let mut object = BTreeMap::new();
     for (key, value) in json_object {
         let value = with_key_context(context, &key, |context| {
             if let Some(hint) = context.type_hint() {
-                encode_json_value_with_hint(value, hint, context)
+                encode_json_value_with_hint(value, hint, context, policy)
             } else {
-                encode_json_value_with_context(value, context)
+                encode_json_value_with_context(value, context, policy)
             }
         })?;
 
         object.insert(key, value.into_variant());
     }
 
-    apply_missing_type_hints(&mut object, context)?;
+    fill_missing_type_hints(&mut object, context, policy)?;
 
     Ok(JsonValue::new(JsonVariant::Object(object)))
 }
 
-fn apply_missing_type_hints(
+fn fill_missing_type_hints(
     object: &mut BTreeMap<String, JsonVariant>,
     context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<()> {
     for hint in &context.settings.type_hints {
         if hint.path.len() > context.path.len() && hint.path.starts_with(&context.path) {
             let depth = context.path.len();
             let key = &hint.path[depth];
             with_key_context(context, key, |context| {
-                insert_missing_type_hint(object, context, hint, depth)
+                insert_missing_type_hint(object, context, hint, depth, policy)
             })?;
         }
     }
@@ -345,14 +377,14 @@ fn insert_missing_type_hint(
     field_context: &mut JsonContext,
     hint: &JsonTypeHint,
     depth: usize,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<()> {
     let key = &hint.path[depth];
     let is_leaf = depth + 1 == hint.path.len();
 
     if is_leaf {
         if !object.contains_key(key) {
-            let value = encode_missing_type_hint_value(hint, field_context)?;
-            object.insert(key.clone(), value.into_variant());
+            object.insert(key.clone(), JsonValue::null().into_variant());
         }
         return Ok(());
     }
@@ -360,7 +392,11 @@ fn insert_missing_type_hint(
     match object.entry(key.clone()) {
         Entry::Occupied(mut entry) => match entry.get_mut() {
             JsonVariant::Object(child) => {
-                insert_missing_type_hint(child, field_context, hint, depth + 1)
+                insert_missing_type_hint(child, field_context, hint, depth + 1, policy)
+            }
+            _ if policy == TypeHintMismatchPolicy::CoerceOrNull => {
+                entry.insert(JsonValue::null().into_variant());
+                Ok(())
             }
             _ => error::InvalidJsonSnafu {
                 value: format!(
@@ -373,33 +409,10 @@ fn insert_missing_type_hint(
         },
         Entry::Vacant(entry) => {
             let mut child = BTreeMap::new();
-            insert_missing_type_hint(&mut child, field_context, hint, depth + 1)?;
+            insert_missing_type_hint(&mut child, field_context, hint, depth + 1, policy)?;
             entry.insert(JsonVariant::Object(child));
             Ok(())
         }
-    }
-}
-
-fn encode_missing_type_hint_value(
-    hint: &JsonTypeHint,
-    context: &mut JsonContext,
-) -> Result<JsonValue> {
-    if let Some(default_constraint) = &hint.default_constraint {
-        let value = default_constraint.create_default(&hint.data_type, hint.nullable)?;
-        let json = decode_primitive_value(value)?;
-        return encode_json_value_with_hint(json, hint, context);
-    }
-
-    if hint.nullable {
-        Ok(JsonValue::null())
-    } else {
-        error::InvalidJsonSnafu {
-            value: format!(
-                "missing non-null JSON2 type hint path {}",
-                hint.path.join(".")
-            ),
-        }
-        .fail()
     }
 }
 
@@ -407,75 +420,152 @@ fn encode_json_value_with_hint(
     json: Json,
     hint: &JsonTypeHint,
     context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     if json.is_null() {
-        return if hint.nullable {
-            Ok(JsonValue::null())
-        } else {
-            error::InvalidJsonSnafu {
-                value: format!(
-                    "JSON2 type hint path {} is not nullable",
-                    context.path.join(".")
-                ),
-            }
-            .fail()
-        };
+        return Ok(JsonValue::null());
     }
 
-    let invalid_type = || {
-        error::InvalidJsonSnafu {
+    let json = match (&hint.data_type, json) {
+        (ConcreteDataType::String(_), Json::String(value)) => {
+            return Ok(value.into());
+        }
+        (
+            ConcreteDataType::Int8(_)
+            | ConcreteDataType::Int16(_)
+            | ConcreteDataType::Int32(_)
+            | ConcreteDataType::Int64(_),
+            Json::Number(value),
+        ) => {
+            if let Some(value) = value.as_i64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
+        }
+        (
+            ConcreteDataType::UInt8(_)
+            | ConcreteDataType::UInt16(_)
+            | ConcreteDataType::UInt32(_)
+            | ConcreteDataType::UInt64(_),
+            Json::Number(value),
+        ) => {
+            if let Some(value) = value.as_u64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
+        }
+        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), Json::Number(value)) => {
+            if let Some(value) = value.as_f64() {
+                return Ok(value.into());
+            }
+            Json::Number(value)
+        }
+        (ConcreteDataType::Boolean(_), Json::Bool(value)) => {
+            return Ok(value.into());
+        }
+        (_, json) => json,
+    };
+
+    match policy {
+        TypeHintMismatchPolicy::Reject => error::InvalidJsonSnafu {
             value: format!(
                 "JSON value at {} does not match JSON2 type hint {}",
                 context.path.join("."),
                 hint.data_type
             ),
         }
-        .fail()
-    };
+        .fail(),
+        TypeHintMismatchPolicy::CoerceOrNull => {
+            let value = coerce_json_value_to_type(json, &hint.data_type);
+            let value = Json::try_from(value).map_err(|error| {
+                error::InvalidJsonSnafu {
+                    value: error.to_string(),
+                }
+                .build()
+            })?;
+            Ok(JsonValue::new(value.into()))
+        }
+    }
+}
 
-    match (&hint.data_type, json) {
-        (ConcreteDataType::String(_), Json::String(v)) => Ok(v.into()),
-        (
-            ConcreteDataType::Int8(_)
-            | ConcreteDataType::Int16(_)
-            | ConcreteDataType::Int32(_)
-            | ConcreteDataType::Int64(_),
-            Json::Number(v),
-        ) => match v.as_i64() {
-            Some(v) => Ok(v.into()),
-            None => invalid_type(),
-        },
-        (
-            ConcreteDataType::UInt8(_)
-            | ConcreteDataType::UInt16(_)
-            | ConcreteDataType::UInt32(_)
-            | ConcreteDataType::UInt64(_),
-            Json::Number(v),
-        ) => match v.as_u64() {
-            Some(v) => Ok(v.into()),
-            None => invalid_type(),
-        },
-        (ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_), Json::Number(v)) => {
-            match v.as_f64() {
-                Some(v) => Ok(v.into()),
-                None => invalid_type(),
+/// Coerces a JSON value using the same semantics as JSON2 query projection.
+/// Values that cannot be converted become null.
+pub(crate) fn coerce_json_value_to_type(value: Json, to_type: &ConcreteDataType) -> Value {
+    if value.is_null() {
+        return Value::Null;
+    }
+
+    if to_type.is_string() {
+        let value = match value {
+            Json::String(value) => value,
+            value => value.to_string(),
+        };
+        return Value::String(value.into());
+    }
+
+    if matches!(to_type, ConcreteDataType::Binary(_)) {
+        return Value::Binary(encode_serde_json_as_jsonb(value).into());
+    }
+
+    if let Some(struct_type) = to_type.as_struct() {
+        let Json::Object(mut object) = value else {
+            return Value::Null;
+        };
+        let values = struct_type
+            .fields()
+            .iter()
+            .map(|field| {
+                object
+                    .remove(field.name())
+                    .map(|value| coerce_json_value_to_type(value, field.data_type()))
+                    .unwrap_or(Value::Null)
+            })
+            .collect::<Vec<_>>();
+        return Value::Struct(StructValue::new(values, struct_type.clone()));
+    }
+
+    if let Some(list_type) = to_type.as_list() {
+        let Json::Array(values) = value else {
+            return Value::Null;
+        };
+        let item_type = list_type.item_type().clone();
+        let values = values
+            .into_iter()
+            .map(|value| coerce_json_value_to_type(value, &item_type))
+            .collect::<Vec<_>>();
+        return Value::List(ListValue::new(values, Arc::new(item_type)));
+    }
+
+    let value = match value {
+        Json::Bool(value) => Value::Boolean(value),
+        Json::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Value::Int64(value)
+            } else if let Some(value) = value.as_u64() {
+                Value::UInt64(value)
+            } else if let Some(value) = value.as_f64() {
+                Value::Float64(value.into())
+            } else {
+                Value::Null
             }
         }
-        (ConcreteDataType::Boolean(_), Json::Bool(v)) => Ok(v.into()),
-        _ => invalid_type(),
-    }
+        Json::String(value) => Value::String(value.into()),
+        Json::Array(_) | Json::Object(_) | Json::Null => Value::Null,
+    };
+    to_type.try_cast(value).unwrap_or(Value::Null)
 }
 
 fn encode_json_array_with_context<'a>(
     json_array: Vec<Json>,
     context: &mut JsonContext<'a>,
+    policy: TypeHintMismatchPolicy,
 ) -> Result<JsonValue> {
     let json_array_len = json_array.len();
     let mut items = Vec::with_capacity(json_array_len);
 
     for (index, value) in json_array.into_iter().enumerate() {
         let item_value = with_key_context(context, &index.to_string(), |context| {
-            encode_json_value_with_context(value, context)
+            encode_json_value_with_context(value, context, policy)
         })?;
         items.push(item_value);
     }
@@ -510,7 +600,11 @@ fn encode_json_array_with_context<'a>(
 }
 
 /// Helper function to encode a JSON value to a Value and determine its ConcreteDataType with context
-fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Result<JsonValue> {
+fn encode_json_value_with_context(
+    json: Json,
+    context: &mut JsonContext,
+    policy: TypeHintMismatchPolicy,
+) -> Result<JsonValue> {
     if context.path.len() >= JSON2_MAX_STRUCTURED_DEPTH
         && matches!(&json, Json::Object(_) | Json::Array(_))
     {
@@ -539,8 +633,8 @@ fn encode_json_value_with_context(json: Json, context: &mut JsonContext) -> Resu
             }
         }
         Json::String(s) => Ok(s.into()),
-        Json::Array(arr) => encode_json_array_with_context(arr, context),
-        Json::Object(obj) => encode_json_object_with_context(obj, context),
+        Json::Array(arr) => encode_json_array_with_context(arr, context, policy),
+        Json::Object(obj) => encode_json_object_with_context(obj, context, policy),
     }
 }
 
@@ -650,7 +744,51 @@ mod tests {
     }
 
     #[test]
-    fn test_json_settings_forward_compatibility()
+    fn test_json_settings_equivalent() -> Result<()> {
+        let hints = vec![
+            JsonTypeHint {
+                path: vec!["user".to_string(), "name".to_string()],
+                data_type: ConcreteDataType::string_datatype(),
+                inverted_index: false,
+            },
+            JsonTypeHint {
+                path: vec!["count".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            },
+        ];
+        let settings = JsonSettings::try_new(hints.clone(), Some(10))?;
+        let mut reversed = hints.clone();
+        reversed.reverse();
+        let reordered = JsonSettings::try_new(reversed, Some(10))?;
+        assert_ne!(settings, reordered);
+        assert!(settings.equivalent(&reordered));
+        assert!(reordered.equivalent(&settings));
+        assert!(settings.equivalent(&settings));
+        assert_eq!(hints, settings.type_hints());
+        assert!(JsonSettings::default().equivalent(&JsonSettings::default()));
+
+        for limit in [None, Some(0), Some(11)] {
+            assert!(!settings.equivalent(&JsonSettings::try_new(hints.clone(), limit)?));
+        }
+        assert!(!settings.equivalent(&JsonSettings::try_new(vec![hints[0].clone()], Some(10))?));
+
+        let mut changed = hints.clone();
+        changed[0].path = vec!["user".to_string(), "id".to_string()];
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+
+        let mut changed = hints.clone();
+        changed[0].data_type = ConcreteDataType::int64_datatype();
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+
+        let mut changed = hints;
+        changed[0].inverted_index = true;
+        assert!(!settings.equivalent(&JsonSettings::try_new(changed, Some(10))?));
+        Ok(())
+    }
+
+    #[test]
+    fn test_json_settings_deserializes_legacy_type_hint_constraints()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
         let json_str = r#"{
             "type_hints": [
@@ -687,15 +825,11 @@ mod tests {
                 JsonTypeHint {
                     path: vec!["user".to_string(), "age".to_string()],
                     data_type: ConcreteDataType::int64_datatype(),
-                    nullable: false,
-                    default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(18))),
                     inverted_index: true,
                 },
                 JsonTypeHint {
                     path: vec!["user".to_string(), "name".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -711,15 +845,11 @@ mod tests {
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: false,
-                default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(18))),
                 inverted_index: true,
             },
             JsonTypeHint {
                 path: vec!["user".to_string(), "name".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             },
         ];
@@ -758,8 +888,6 @@ mod tests {
         let hint = |path, data_type| JsonTypeHint {
             path,
             data_type,
-            nullable: true,
-            default_constraint: None,
             inverted_index: false,
         };
         assert!(
@@ -815,6 +943,104 @@ mod tests {
                 "{name}: {err:?}"
             );
         }
+    }
+
+    #[test]
+    fn test_coerce_or_null_on_type_hint_mismatch() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["kind".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )?;
+
+        let result = settings
+            .encode_with_type_hint_mismatch_policy(
+                json!({"kind": "invalid", "message": "kept"}),
+                TypeHintMismatchPolicy::CoerceOrNull,
+            )?
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(struct_field_value(&root, "kind"), &Value::Null);
+        assert_eq!(
+            struct_field_value(&root, "message"),
+            &Value::String("kept".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_coerce_or_null_converts_type_hint_values() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![
+                JsonTypeHint {
+                    path: vec!["to_string".to_string()],
+                    data_type: ConcreteDataType::string_datatype(),
+                    inverted_index: false,
+                },
+                JsonTypeHint {
+                    path: vec!["to_int".to_string()],
+                    data_type: ConcreteDataType::int64_datatype(),
+                    inverted_index: false,
+                },
+            ],
+            None,
+        )?;
+
+        let result = settings
+            .encode_with_type_hint_mismatch_policy(
+                json!({"to_string": 123, "to_int": "456", "invalid": "value"}),
+                TypeHintMismatchPolicy::CoerceOrNull,
+            )?
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(
+            struct_field_value(&root, "to_string"),
+            &Value::String("123".into())
+        );
+        assert_eq!(struct_field_value(&root, "to_int"), &Value::Int64(456));
+        assert_eq!(
+            struct_field_value(&root, "invalid"),
+            &Value::String("value".into())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn test_coerce_or_null_on_nested_type_hint_structure_mismatch() -> Result<()> {
+        let settings = JsonSettings::try_new(
+            vec![JsonTypeHint {
+                path: vec!["user".to_string(), "age".to_string()],
+                data_type: ConcreteDataType::int64_datatype(),
+                inverted_index: false,
+            }],
+            None,
+        )?;
+
+        let result = settings
+            .encode_with_type_hint_mismatch_policy(
+                json!({"user": "invalid", "message": "kept"}),
+                TypeHintMismatchPolicy::CoerceOrNull,
+            )?
+            .into_json_inner()
+            .unwrap();
+        let Value::Struct(root) = result else {
+            panic!("Expected Struct value");
+        };
+        assert_eq!(struct_field_value(&root, "user"), &Value::Null);
+        assert_eq!(
+            struct_field_value(&root, "message"),
+            &Value::String("kept".into())
+        );
+        Ok(())
     }
 
     #[test]
@@ -955,8 +1181,6 @@ mod tests {
         let type_hints = vec![JsonTypeHint {
             path: vec!["age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
-            nullable: false,
-            default_constraint: None,
             inverted_index: false,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
@@ -989,8 +1213,6 @@ mod tests {
         let type_hints = vec![JsonTypeHint {
             path: vec!["count".to_string()],
             data_type: ConcreteDataType::uint64_datatype(),
-            nullable: false,
-            default_constraint: None,
             inverted_index: false,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
@@ -1021,12 +1243,10 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_fills_missing_type_hint_with_default() -> Result<()> {
+    fn test_encode_json_fills_missing_type_hint_with_null() -> Result<()> {
         let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
-            nullable: false,
-            default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
             inverted_index: false,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
@@ -1043,7 +1263,7 @@ mod tests {
         let Value::Struct(user) = struct_field_value(&root, "user") else {
             panic!("Expected user Struct value");
         };
-        assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
+        assert_eq!(struct_field_value(user, "age"), &Value::Null);
         Ok(())
     }
 
@@ -1052,8 +1272,6 @@ mod tests {
         let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "name".to_string()],
             data_type: ConcreteDataType::string_datatype(),
-            nullable: true,
-            default_constraint: None,
             inverted_index: false,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
@@ -1075,21 +1293,15 @@ mod tests {
     }
 
     #[test]
-    fn test_encode_json_rejects_missing_non_null_type_hint() -> Result<()> {
+    fn test_encode_json_allows_missing_type_hint() -> Result<()> {
         let type_hints = vec![JsonTypeHint {
             path: vec!["user".to_string(), "age".to_string()],
             data_type: ConcreteDataType::int64_datatype(),
-            nullable: false,
-            default_constraint: None,
             inverted_index: false,
         }];
         let settings = JsonSettings::try_new(type_hints, None)?;
 
-        let err = settings.encode(json!({})).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("missing non-null JSON2 type hint path user.age")
-        );
+        settings.encode(json!({}))?;
         Ok(())
     }
 
@@ -1099,17 +1311,11 @@ mod tests {
             JsonTypeHint {
                 path: vec!["user".to_string(), "age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: false,
-                default_constraint: Some(ColumnDefaultConstraint::Value(Value::Int64(7))),
                 inverted_index: false,
             },
             JsonTypeHint {
                 path: vec!["user".to_string(), "name".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: false,
-                default_constraint: Some(ColumnDefaultConstraint::Value(Value::String(
-                    "unknown".into(),
-                ))),
                 inverted_index: false,
             },
         ];
@@ -1123,11 +1329,8 @@ mod tests {
         let Value::Struct(user) = struct_field_value(&root, "user") else {
             panic!("Expected user Struct value");
         };
-        assert_eq!(struct_field_value(user, "age"), &Value::Int64(7));
-        assert_eq!(
-            struct_field_value(user, "name"),
-            &Value::String("unknown".into())
-        );
+        assert_eq!(struct_field_value(user, "age"), &Value::Null);
+        assert_eq!(struct_field_value(user, "name"), &Value::Null);
         Ok(())
     }
 

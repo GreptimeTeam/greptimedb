@@ -1101,8 +1101,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::int64_datatype(),
-                nullable: false,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,
@@ -1118,8 +1116,6 @@ mod tests {
             vec![JsonTypeHint {
                 path: vec!["age".to_string()],
                 data_type: ConcreteDataType::string_datatype(),
-                nullable: false,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,

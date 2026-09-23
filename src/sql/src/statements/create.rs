@@ -16,30 +16,27 @@ use std::collections::HashMap;
 use std::fmt::{Display, Formatter};
 
 use common_catalog::consts::FILE_ENGINE;
-use common_sql::default_constraint::parse_column_default_constraint;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
-    ColumnDefaultConstraint, FulltextOptions, SkippingIndexOptions, VectorDistanceMetric,
-    VectorIndexEngineType, VectorIndexOptions,
+    FulltextOptions, SkippingIndexOptions, VectorDistanceMetric, VectorIndexEngineType,
+    VectorIndexOptions,
 };
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
-use sqlparser::ast::{ColumnOption, ColumnOptionDef, DataType, Expr};
+use sqlparser::ast::{ColumnOptionDef, DataType, Expr};
 use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName, Value as SqlValue};
-use crate::dialect::GreptimeDbDialect;
 use crate::error::{
     InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
     SetSkippingIndexOptionSnafu,
 };
-use crate::parser::ParserContext;
 use crate::statements::query::Query as GtQuery;
 use crate::statements::statement::Statement;
 use crate::statements::tql::Tql;
-use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type, value_to_sql_value};
+use crate::statements::{OptionMap, sql_data_type_to_concrete_data_type};
 
 const LINE_SEP: &str = ",\n";
 const COMMA_SEP: &str = ", ";
@@ -160,12 +157,30 @@ impl Display for Json2Options {
     }
 }
 
+impl Json2Options {
+    pub fn build_json_settings(&self) -> Result<JsonSettings> {
+        let type_hints = self
+            .type_hints
+            .iter()
+            .map(|hint| {
+                Ok(datatypes::json::JsonTypeHint {
+                    path: hint.path.clone(),
+                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
+                    inverted_index: hint.inverted_index,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_auto_expanded_paths = self
+            .max_auto_expanded_paths
+            .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS));
+        JsonSettings::try_new(type_hints, max_auto_expanded_paths).map_err(Into::into)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct JsonTypeHint {
     pub path: Vec<String>,
     pub data_type: DataType,
-    pub nullable: bool,
-    pub default: Option<Expr>,
     pub inverted_index: bool,
 }
 
@@ -356,26 +371,7 @@ impl ColumnExtensions {
             return Ok(None);
         };
 
-        let type_hints = options
-            .type_hints
-            .iter()
-            .map(|hint| {
-                Ok(datatypes::json::JsonTypeHint {
-                    path: hint.path.clone(),
-                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
-                    nullable: hint.nullable,
-                    default_constraint: build_json_type_hint_default_constraint(hint)?,
-                    inverted_index: hint.inverted_index,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let settings = JsonSettings::try_new(
-            type_hints,
-            options
-                .max_auto_expanded_paths
-                .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS)),
-        )?;
-        Ok(Some(settings))
+        options.build_json_settings().map(Some)
     }
 
     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {
@@ -384,15 +380,9 @@ impl ColumnExtensions {
             .into_iter()
             .map(|hint| {
                 let data_type = json_type_hint_sql_data_type(&hint.data_type)?;
-                let default = hint
-                    .default_constraint
-                    .map(|constraint| column_default_constraint_to_expr(&constraint))
-                    .transpose()?;
                 Ok(JsonTypeHint {
                     path: hint.path,
                     data_type,
-                    nullable: hint.nullable,
-                    default,
                     inverted_index: hint.inverted_index,
                 })
             })
@@ -404,38 +394,6 @@ impl ColumnExtensions {
             });
         Ok(())
     }
-}
-
-fn build_json_type_hint_default_constraint(
-    hint: &JsonTypeHint,
-) -> Result<Option<ColumnDefaultConstraint>> {
-    let Some(default) = &hint.default else {
-        return Ok(None);
-    };
-
-    let data_type = json_type_hint_concrete_data_type(&hint.data_type)?;
-    let opts = [ColumnOptionDef {
-        name: None,
-        option: ColumnOption::Default(default.clone()),
-    }];
-
-    // Use the JSON path as the column name context for default value parsing errors.
-    let json_path = hint.path.join(".");
-    let default_constraint = parse_column_default_constraint(&json_path, &data_type, &opts, None)
-        .context(crate::error::SqlCommonSnafu)?;
-
-    if let Some(constraint) = &default_constraint {
-        constraint
-            .validate(&data_type, hint.nullable)
-            .map_err(|e| {
-                InvalidSqlSnafu {
-                    msg: format!("invalid DEFAULT for JSON2 type hint '{}': {e}", json_path),
-                }
-                .build()
-            })?;
-    }
-
-    Ok(default_constraint)
 }
 
 fn json_type_hint_concrete_data_type(data_type: &DataType) -> Result<ConcreteDataType> {
@@ -483,36 +441,18 @@ fn json_type_hint_sql_data_type(data_type: &ConcreteDataType) -> Result<DataType
     Ok(sql_type)
 }
 
-fn column_default_constraint_to_expr(constraint: &ColumnDefaultConstraint) -> Result<Expr> {
-    match constraint {
-        ColumnDefaultConstraint::Value(value) => Ok(Expr::Value(value_to_sql_value(value)?.into())),
-        ColumnDefaultConstraint::Function(function) => {
-            ParserContext::parse_function(function, &GreptimeDbDialect {})
-        }
-    }
-}
-
 fn format_json_type_hint(hint: &JsonTypeHint) -> String {
     let path = hint
         .path
         .iter()
         .map(|segment| format_json_path_segment(segment))
         .join(".");
-    let nullability = if hint.nullable { " NULL" } else { " NOT NULL" };
-    let default = hint
-        .default
-        .as_ref()
-        .map(|expr| format!(" DEFAULT {expr}"))
-        .unwrap_or_default();
     let inverted_index = if hint.inverted_index {
         " INVERTED INDEX"
     } else {
         ""
     };
-    format!(
-        "{} {}{}{}{}",
-        path, hint.data_type, nullability, default, inverted_index
-    )
+    format!("{} {}{}", path, hint.data_type, inverted_index)
 }
 
 fn format_json_path_segment(segment: &str) -> String {
@@ -817,8 +757,6 @@ mod tests {
 
     use datatypes::json::{JsonSettings, JsonTypeHint as DatatypeJsonTypeHint};
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnDefaultConstraint;
-    use datatypes::value::Value;
 
     use super::*;
     use crate::dialect::GreptimeDbDialect;
@@ -995,7 +933,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "service.name" STRING,
-                "a.b"."c" INT64 NOT NULL,
+                "a.b"."c" INT64,
                 a."b.c" STRING
             ),
             ts TIMESTAMP TIME INDEX
@@ -1011,9 +949,9 @@ ENGINE=mito
                     r#"
 CREATE TABLE traces (
   log_json_data JSON2(
-    "service.name" STRING NULL,
-    "a.b"."c" BIGINT NOT NULL,
-    "a"."b.c" STRING NULL
+    "service.name" STRING,
+    "a.b"."c" BIGINT,
+    "a"."b.c" STRING
   ),
   ts TIMESTAMP NOT NULL,
   TIME INDEX (ts)
@@ -1039,7 +977,7 @@ ENGINE=mito
     fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 NOT NULL,
+                status_code INT64,
                 max_auto_expanded_paths = 1
             ),
             ts TIMESTAMP TIME INDEX
@@ -1065,7 +1003,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "1abc" STRING,
-                a."2b" INT64 NOT NULL
+                a."2b" INT64
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1080,8 +1018,8 @@ ENGINE=mito
                     r#"
 CREATE TABLE traces (
   log_json_data JSON2(
-    "1abc" STRING NULL,
-    "a"."2b" BIGINT NOT NULL
+    "1abc" STRING,
+    "a"."2b" BIGINT
   ),
   ts TIMESTAMP NOT NULL,
   TIME INDEX (ts)
@@ -1104,7 +1042,7 @@ ENGINE=mito
     }
 
     #[test]
-    fn test_json2_type_hint_default_builds_default_constraint() {
+    fn test_json2_type_hint_rejects_default() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 status_code INT64 DEFAULT -5,
@@ -1114,67 +1052,24 @@ ENGINE=mito
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
-        let result =
+        let err =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        let Statement::CreateTable(create_table) = &result[0] else {
-            unreachable!()
-        };
-        let settings = create_table.columns[0]
-            .extensions
-            .build_json_settings()
-            .unwrap()
-            .unwrap();
-        let hints = settings.type_hints();
-
-        assert_eq!(hints[0].data_type, ConcreteDataType::int64_datatype());
-        assert_eq!(
-            hints[0].default_constraint,
-            Some(ColumnDefaultConstraint::Value(Value::Int64(-5)))
-        );
-        assert_eq!(hints[1].data_type, ConcreteDataType::float64_datatype());
-        assert_eq!(
-            hints[1].default_constraint,
-            Some(ColumnDefaultConstraint::Value(Value::Float64(1.5.into())))
-        );
-        assert_eq!(hints[2].data_type, ConcreteDataType::boolean_datatype());
-        assert_eq!(
-            hints[2].default_constraint,
-            Some(ColumnDefaultConstraint::Value(Value::Boolean(false)))
-        );
-        assert_eq!(hints[3].data_type, ConcreteDataType::string_datatype());
-        assert_eq!(
-            hints[3].default_constraint,
-            Some(ColumnDefaultConstraint::Value(Value::String(
-                "unknown".into()
-            )))
-        );
+                .unwrap_err();
+        assert!(err.to_string().contains("DEFAULT is not supported"));
     }
 
     #[test]
-    fn test_json2_type_hint_not_null_default_null_is_rejected() {
+    fn test_json2_type_hint_rejects_not_null() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 status_code INT64 NOT NULL DEFAULT NULL
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
-        let result =
+        let err =
             ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
-                .unwrap();
-
-        let Statement::CreateTable(create_table) = &result[0] else {
-            unreachable!()
-        };
-        let err = create_table.columns[0]
-            .extensions
-            .build_json_settings()
-            .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("Default value should not be null for non null column")
-        );
+                .unwrap_err();
+        assert!(err.to_string().contains("NULL/NOT NULL is not supported"));
     }
 
     #[test]
@@ -1185,36 +1080,26 @@ ENGINE=mito
                 DatatypeJsonTypeHint {
                     path: vec!["i".to_string()],
                     data_type: ConcreteDataType::int32_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
                     data_type: ConcreteDataType::float32_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
                     data_type: ConcreteDataType::uint32_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["s".to_string()],
                     data_type: ConcreteDataType::string_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["b".to_string()],
                     data_type: ConcreteDataType::boolean_datatype(),
-                    nullable: true,
-                    default_constraint: None,
                     inverted_index: false,
                 },
             ],
@@ -1241,8 +1126,6 @@ ENGINE=mito
             vec![DatatypeJsonTypeHint {
                 path: vec!["u".to_string()],
                 data_type: ConcreteDataType::date_datatype(),
-                nullable: true,
-                default_constraint: None,
                 inverted_index: false,
             }],
             None,

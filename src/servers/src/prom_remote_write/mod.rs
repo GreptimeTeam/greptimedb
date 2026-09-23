@@ -77,6 +77,8 @@ pub fn decode_remote_write_request(
         // fallback to the other compression method
         try_decompress(!is_zstd, &body[..])?
     };
+    // Decompression copied the payload out, so the compressed body is no longer needed.
+    drop(body);
 
     let mut request = PROM_WRITE_REQUEST_POOL.pull(PromWriteRequest::default);
 

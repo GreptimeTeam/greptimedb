@@ -26,7 +26,6 @@ use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, UInt32Type
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::timestamp::timestamp_array_to_primitive;
-use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SparseOffsetsCache;
 use mito_codec::row_converter::sparse::SparsePrimaryKeyView;
 use object_store::ObjectStore;
@@ -603,25 +602,8 @@ fn decode_primary_key(
 
     let mut tags = Vec::with_capacity(tag_columns.len());
     for (column_id, _) in tag_columns {
-        // `encode_sparse_value` returns None for missing and null labels and
-        // validates UTF-8 for string labels.
-        let value = IndexValueCodec::encode_sparse_value(&mut view, *column_id, buf)
-            .context(DecodeSnafu)?;
-        let tag = match value {
-            None => None,
-            Some(bytes) => {
-                let value = std::str::from_utf8(bytes).map_err(|_| {
-                    InvalidRecordBatchSnafu {
-                        reason: format!(
-                            "sparse tag value of column {column_id} is not valid UTF-8"
-                        ),
-                    }
-                    .build()
-                })?;
-                Some(value.to_string())
-            }
-        };
-        tags.push(tag);
+        let value = view.label(*column_id, buf).context(DecodeSnafu)?;
+        tags.push(value.map(str::to_owned));
     }
 
     Ok(SeriesIndexRow {

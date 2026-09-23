@@ -208,7 +208,6 @@ impl QueryEngineState {
                 FUNCTION_REGISTRY.function_rewrites(),
             )),
         );
-
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));

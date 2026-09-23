@@ -27,9 +27,11 @@ use client::Output;
 use common_catalog::consts::{trace_operations_table_name, trace_services_table_name};
 use common_error::ext::BoxedError;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_query::{OutputData, OutputMeta};
 use common_telemetry::{tracing, warn};
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
 use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
+use operator::insert::{Inserter, admit_row_insert_batches, admit_write};
 use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use pipeline::{GreptimePipelineParams, PipelineWay};
 use servers::error::{self, AuthSnafu, Result as ServerResult};
@@ -122,7 +124,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.resource_info = self.otlp_resource_info;
 
         let otlp::metrics::MetricsConversion {
-            requests,
+            mut requests,
             rows,
             semantic_index,
             resource_info,
@@ -141,6 +143,10 @@ impl OpenTelemetryProtocolHandler for Instance {
 
         self.check_row_insert_permission(&requests, &ctx, PermissionReq::Action(OTLP_WRITE))
             .context(AuthSnafu)?;
+        let ctx = admit_write(rows as u64, &ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         self.cache_otlp_legacy(&input_names, &ctx, is_legacy)?;
         OTLP_METRICS_ROWS.inc_by(rows as u64);
 
@@ -160,27 +166,74 @@ impl OpenTelemetryProtocolHandler for Instance {
             Arc::new(c)
         };
 
+        let physical_table = ctx
+            .extension(PHYSICAL_TABLE_PARAM)
+            .unwrap_or(GREPTIME_PHYSICAL_TABLE)
+            .to_string();
+        let batcher = self.logical_batcher().filter(|_| {
+            ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
+        });
+        let batcher = if batcher.is_some() {
+            // Align the requests' time index unit with the physical table's
+            // before the bulk eligibility check: the OTLP encoder keeps
+            // nanosecond precision on the metric engine path, while the bulk
+            // path assumes the physical table's unit (today millisecond).
+            // Without this, nanosecond requests would silently skip the
+            // batcher, and a non-millisecond physical table must not enter
+            // the bulk path either (the eligibility check rejects its unit).
+            self.inserter
+                .align_metric_row_inserts_time_unit(&ctx, &physical_table, &mut requests)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+            if self
+                .inserter
+                .can_batch_metric_rows(&requests, &ctx, &physical_table)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?
+            {
+                batcher
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // OTLP tables have one sample field in both the legacy and physical paths.
-        let output = if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
+        let output = if let Some(batcher) = batcher {
+            let (rows, cost) = batcher
+                .submit_with(requests, ctx.clone(), |mut requests| {
+                    let ctx = ctx.clone();
+                    async move {
+                        Inserter::meter_row_inserts(&mut requests, &ctx)
+                            .await
+                            .map_err(BoxedError::new)
+                            .context(error::ExecuteGrpcQuerySnafu)
+                    }
+                })
+                .await?;
+            Output::new(
+                OutputData::AffectedRows(rows as usize),
+                OutputMeta::new_with_cost(cost as _),
+            )
+        } else if metric_ctx.is_legacy || !metric_ctx.with_metric_engine {
             self.handle_row_inserts(requests, ctx.clone(), false, true)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
+                .context(error::ExecuteGrpcQuerySnafu)?
         } else {
-            let physical_table = ctx
-                .extension(PHYSICAL_TABLE_PARAM)
-                .unwrap_or(GREPTIME_PHYSICAL_TABLE)
-                .to_string();
             self.handle_metric_row_inserts(requests, ctx.clone(), physical_table)
                 .await
                 .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)
-        }?;
+                .context(error::ExecuteGrpcQuerySnafu)?
+        };
         outcome.write_cost = output.meta.cost;
 
-        // Derived enrichment, written after the metric data is committed:
-        // failing here would make the client retry data the server already
-        // accepted, so every failure degrades to a warning instead.
+        // Derived enrichment follows the accepted metric submission, which may
+        // still be queued in asynchronous mode. Failures remain warning-only
+        // to avoid retrying metric data the server already accepted.
         if let Some(resource_info) = resource_info {
             let written = match self.check_row_insert_permission(
                 &resource_info,
@@ -239,6 +292,12 @@ impl OpenTelemetryProtocolHandler for Instance {
         let targets = trace_permission_targets(&table_name, &spans, &ctx);
         self.check_table_permission(&ctx, PermissionReq::Action(OTLP_WRITE), targets)
             .context(AuthSnafu)?;
+        // Count the external spans once, before chunking, retries, or derived tables.
+        let rows = spans.iter().map(|group| group.spans.len() as u64).sum();
+        let ctx = admit_write(rows, &ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
         self.ingest_trace_spans(&pipeline, table_name, spans, &conventions, ctx)
             .await
     }
@@ -284,11 +343,15 @@ impl OpenTelemetryProtocolHandler for Instance {
         )
         .await?;
 
-        let batches = opt_req.as_req_iter(ctx).collect::<Vec<_>>();
+        let mut batches = opt_req.as_req_iter(ctx).collect::<Vec<_>>();
         for (temp_ctx, requests) in &batches {
             self.check_row_insert_permission(requests, temp_ctx, PermissionReq::Action(OTLP_WRITE))
                 .context(AuthSnafu)?;
         }
+        admit_row_insert_batches(&mut batches)
+            .await
+            .map_err(BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
 
         let mut outputs = Vec::with_capacity(batches.len());
         for (temp_ctx, requests) in batches {

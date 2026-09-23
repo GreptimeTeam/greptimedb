@@ -10,7 +10,7 @@ CARGO_BUILD_OPTS := --locked
 IMAGE_REGISTRY ?= docker.io
 IMAGE_NAMESPACE ?= greptime
 IMAGE_TAG ?= latest
-DEV_BUILDER_IMAGE_TAG ?= 2026-03-21-7fa6f5f9-20260810091725
+DEV_BUILDER_IMAGE_TAG ?= 2026-03-21-04f07a91-20260921031255
 DEV_BUILDER_RISCV64_IMAGE_TAG ?= $(DEV_BUILDER_IMAGE_TAG)
 DEV_BUILDER_RISCV64_BASE_IMAGE ?= ubuntu:22.04
 RISCV64_TARGET ?= riscv64gc-unknown-linux-gnu
@@ -212,12 +212,12 @@ sqlness-test: ## Run sqlness test.
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
 .PHONY: fuzz
-fuzz: ## Run fuzz test ${FUZZ_TARGET}.
-	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
+fuzz: ## Run fuzz test ${FUZZ_TARGET} (requires a nightly toolchain).
+	cargo +nightly fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
 .PHONY: fuzz-ls
-fuzz-ls: ## List all fuzz targets.
-	cargo fuzz list --fuzz-dir tests-fuzz
+fuzz-ls: ## List all fuzz targets (requires a nightly toolchain).
+	cargo +nightly fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
 check: ## Cargo check all the targets.
@@ -264,6 +264,7 @@ stop-etcd: ## Stop single node etcd for testing purpose.
 run-it-in-container: start-etcd ## Run integration tests in dev-builder.
 	docker run --network=host \
 	-v ${PWD}:/greptimedb -v ${CARGO_REGISTRY_CACHE}:/root/.cargo/registry -v ${CARGO_GIT_CACHE}:/root/.cargo/git -v /tmp:/tmp \
+	-e GT_S3_BUCKET -e GT_S3_ACCESS_KEY_ID -e GT_S3_ACCESS_KEY -e GT_S3_REGION \
 	-w /greptimedb ${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-${BASE_IMAGE}:${DEV_BUILDER_IMAGE_TAG} \
 	make test sqlness-test BUILD_JOBS=${BUILD_JOBS}
 

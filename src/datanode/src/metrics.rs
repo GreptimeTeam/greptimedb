@@ -17,6 +17,7 @@ use prometheus::*;
 
 /// Region request type label.
 pub const REGION_REQUEST_TYPE: &str = "datanode_region_request_type";
+const REGION_REQUEST_CODE: &str = "code";
 
 pub const REGION_ROLE: &str = "region_role";
 pub const REGION_ID: &str = "region_id";
@@ -84,11 +85,12 @@ lazy_static! {
     )
     .unwrap();
 
-    /// Total count of failed insert requests to region server.
+    /// Total count of failed insert requests to region server, labeled with request
+    /// type and status code.
     pub static ref REGION_SERVER_INSERT_FAIL_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_datanode_region_failed_insert_count",
         "failed region server insert requests count",
-        &[REGION_REQUEST_TYPE]
+        &[REGION_REQUEST_TYPE, REGION_REQUEST_CODE]
     )
     .unwrap();
 

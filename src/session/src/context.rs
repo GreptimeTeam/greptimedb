@@ -82,9 +82,15 @@ pub struct QueryContext {
     /// Local-only write batching selection; never transported in protobuf extensions.
     #[builder(default)]
     batching_enabled: bool,
+    /// Local-only opt-in for logical metric writes, independent of ordinary-table batching.
+    #[builder(default)]
+    logical_batching_enabled: bool,
     /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
+    /// Process-local admission for one database in this request. Never sent over the wire.
+    #[builder(setter(skip))]
+    admitted_write: Option<(String, String)>,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -263,6 +269,28 @@ impl QueryContext {
         fork
     }
 
+    /// Forks a context for internal writes after admitting the complete request.
+    /// Call only after write admission succeeds for the current database.
+    pub fn with_write_admission(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.admitted_write = Some((ctx.current_catalog().to_string(), ctx.current_schema()));
+        ctx
+    }
+
+    /// Returns zero for writes covered by this request's database admission.
+    /// Usage accounting and the original protocol channel remain unchanged.
+    pub fn write_rows_to_admit(&self, catalog: &str, schema: &str, rows: u64) -> u64 {
+        if self
+            .admitted_write
+            .as_ref()
+            .is_some_and(|(c, s)| c == catalog && s == schema)
+        {
+            0
+        } else {
+            rows
+        }
+    }
+
     pub fn arc() -> QueryContextRef {
         Arc::new(
             QueryContextBuilder::default()
@@ -433,7 +461,17 @@ impl QueryContext {
         &self.configuration_parameter
     }
 
-    /// Whether the local HTTP entry point selected write batching.
+    /// Whether the local HTTP entry point selected logical-table batching.
+    pub fn logical_batching_enabled(&self) -> bool {
+        self.logical_batching_enabled
+    }
+
+    /// Sets local logical-table batching selection without adding a wire-visible extension.
+    pub fn set_logical_batching_enabled(&mut self, enabled: bool) {
+        self.logical_batching_enabled = enabled;
+    }
+
+    /// Whether the local HTTP entry point selected ordinary-table batching.
     pub fn batching_enabled(&self) -> bool {
         self.batching_enabled
     }
@@ -608,6 +646,8 @@ impl QueryContextBuilder {
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
             batching_enabled: self.batching_enabled.unwrap_or_default(),
+            admitted_write: None,
+            logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
             protocol_ctx: self.protocol_ctx.unwrap_or_default(),
@@ -789,6 +829,26 @@ mod test {
     }
 
     #[test]
+    fn test_write_admission_is_local_and_database_scoped() {
+        let ctx = QueryContext::with_channel("greptime", "public", Channel::Otlp);
+        let admitted = ctx.with_write_admission();
+        assert_eq!(ctx.write_rows_to_admit("greptime", "public", 100), 100);
+        assert_eq!(admitted.write_rows_to_admit("greptime", "public", 100), 0);
+        assert_eq!(admitted.write_rows_to_admit("greptime", "other", 100), 100);
+        assert_eq!(admitted.write_rows_to_admit("other", "public", 100), 100);
+        assert_eq!(admitted.channel(), Channel::Otlp);
+        assert_eq!(
+            admitted
+                .fork()
+                .write_rows_to_admit("greptime", "public", 100),
+            0
+        );
+        let wire: api::v1::QueryContext = admitted.into();
+        let restored = QueryContext::from(wire);
+        assert_eq!(restored.write_rows_to_admit("greptime", "public", 100), 100);
+    }
+
+    #[test]
     fn test_skip_wal_is_not_serialized_in_query_context() {
         let context = QueryContextBuilder::default().skip_wal(true).build();
         let api_context: api::v1::QueryContext = context.into();
@@ -808,7 +868,7 @@ mod test {
             current_schema: "s1".to_string(),
             timezone: "UTC".to_string(),
             extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
-            channel: Channel::Grpc as u32,
+            channel: Channel::Internal as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: HashMap::from([(1, 100)]),
                 sst_min_sequences: HashMap::from([(1, 90)]),
@@ -877,11 +937,17 @@ mod test {
     fn test_batching_selection_is_local_only() {
         let mut ctx = QueryContextBuilder::default().build();
         assert!(!ctx.batching_enabled());
+        assert!(!ctx.logical_batching_enabled());
+        ctx.set_logical_batching_enabled(true);
+        assert!(ctx.clone().logical_batching_enabled());
+        assert!(ctx.fork().logical_batching_enabled());
         ctx.set_batching_enabled(true);
         assert!(ctx.clone().batching_enabled());
         assert!(ctx.fork().batching_enabled());
         let wire: api::v1::QueryContext = ctx.into();
-        assert!(!QueryContext::from(wire).batching_enabled());
+        let restored = QueryContext::from(wire);
+        assert!(!restored.batching_enabled());
+        assert!(!restored.logical_batching_enabled());
         let ctx = QueryContextBuilder::default()
             .set_extension("batching_enabled".to_string(), "true".to_string())
             .build();

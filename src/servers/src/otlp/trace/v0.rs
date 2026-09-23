@@ -152,14 +152,14 @@ pub fn write_span_to_row(writer: &mut TableData, span: TraceSpan) -> Result<()> 
     row_writer::write_json(
         writer,
         "scope_attributes",
-        span.scope_attributes.into(),
+        span.scope_attributes.into_owned().into(),
         &mut row,
     )?;
 
     row_writer::write_json(
         writer,
         "resource_attributes",
-        span.resource_attributes.into(),
+        span.resource_attributes.into_owned().into(),
         &mut row,
     )?;
 
@@ -243,10 +243,10 @@ mod tests {
             trace_id: trace_id.to_string(),
             span_id: span_id.to_string(),
             parent_span_id: None,
-            resource_attributes: Attributes::from(vec![]),
+            resource_attributes: Attributes::from(vec![]).into(),
             scope_name: "scope".to_string(),
             scope_version: "v1".to_string(),
-            scope_attributes: Attributes::from(vec![]),
+            scope_attributes: Attributes::from(vec![]).into(),
             trace_state: String::new(),
             span_name: "op".to_string(),
             span_kind: "SPAN_KIND_SERVER".to_string(),
