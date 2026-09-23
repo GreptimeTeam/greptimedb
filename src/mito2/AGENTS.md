@@ -63,8 +63,9 @@ filtered `RecordBatch` stream.
   follower replay. Keep it backward compatible.
 - **SST/Parquet layout** (`sst/`): readers must stay compatible with existing files.
 - **Series-index disk limit**: tasks estimate usage from entry sizes in open-region snapshots
-  and skip reconciliation when the shared estimate is full. Concurrent builds may overshoot;
-  closed-region files are not counted. Series handles and the SST purger own file deletion.
+  and defer new builds when the shared estimate is full. Cleanup still prunes obsolete
+  range entries and expires series indexes to reclaim published usage. Concurrent builds may
+  overshoot; closed-region files are not counted. Series handles and the SST purger own file deletion.
 - **Series-index coverage** (`series_index/catalog.rs`): `SeriesIndexEntry` stores
   compaction-window width and SST summaries keyed by aligned start in both catalogs and Parquet footers.
 - **Request types** (`request.rs`): usually tied to proto definitions consumed by `datanode`.

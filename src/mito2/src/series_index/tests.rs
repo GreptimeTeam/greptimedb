@@ -48,7 +48,7 @@ pub(super) async fn prepare_region(env: &mut TestEnv) -> (MitoEngine, MitoRegion
     prepare_region_with_timestamps(env, &[1000, 2000, 3000, 4000]).await
 }
 
-async fn prepare_region_with_timestamps(
+pub(crate) async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
@@ -171,6 +171,7 @@ impl IndexTest {
             0,
             self.purger.clone(),
             enable_range_index,
+            true,
         )
         .await
     }

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use common_telemetry::{debug, info};
 use object_store::ObjectStore;
-use store_api::storage::RegionId;
+use store_api::storage::{FileId, RegionId};
 
 use crate::error::Result;
 use crate::metrics::{SERIES_INDEX_RECONCILE_ELAPSED, SERIES_INDEX_RECONCILE_TOTAL};
@@ -74,6 +74,7 @@ impl ReconcileStats {
 }
 
 /// Reconciles indexes for one region snapshot, persists catalogs, then atomically publishes it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn reconcile_series_indexes(
     worker_id: u32,
     store: ObjectStore,
@@ -82,6 +83,7 @@ pub(crate) async fn reconcile_series_indexes(
     now_ms: i64,
     purger: IndexFilePurger,
     enable_range_index: bool,
+    allow_builds: bool,
 ) -> Result<ReconcileStats> {
     let total_start = Instant::now();
     // Use this snapshot throughout reconciliation, even if the region version advances.
@@ -104,6 +106,7 @@ pub(crate) async fn reconcile_series_indexes(
         &purger,
         &mut unpublished,
         enable_range_index,
+        allow_builds,
     )
     .await?;
     SERIES_INDEX_RECONCILE_ELAPSED
@@ -164,6 +167,7 @@ async fn build_index_version(
     purger: &IndexFilePurger,
     unpublished: &mut UnpublishedSeriesFiles,
     enable_range_index: bool,
+    allow_builds: bool,
 ) -> Result<(Option<SeriesIndexVersion>, ReconcileStats)> {
     let mut stats = ReconcileStats::default();
     let files = version
@@ -179,29 +183,23 @@ async fn build_index_version(
         .map(|file| file.file_id().file_id())
         .collect::<HashSet<_>>();
     let current = region.series_index_version();
-    // The SST purger deletes companion range files after final handle release. Prune
-    // metadata here using the captured SST snapshot, independently of physical deletion;
-    // a later region-version change is picked up by the next reconciliation.
-    stats.removed_range = current
-        .range_indexes
-        .keys()
-        .filter(|id| !visible.contains(id))
-        .count();
-    let buckets = match version.compaction_time_window {
-        Some(window) => rounded_bucket_width(requested_bucket_width, window)
+    // Empty build inputs still let the planner expire established bucket coverage.
+    let buckets = match (allow_builds, version.compaction_time_window) {
+        (true, Some(window)) => rounded_bucket_width(requested_bucket_width, window)
             // Successful rounding guarantees the window fits in i64; subsecond windows
             // use the same one-second minimum as rounded_bucket_width.
             .map(|width| {
                 group_files_into_series_buckets(&files, width, (window.as_secs() as i64).max(1))
             })
             .unwrap_or_default(),
-        None => {
+        (true, None) => {
             debug!(
                 "Deferring series indexes without compaction window, worker: {worker_id}, region: {}",
                 region.region_id
             );
             Vec::new()
         }
+        (false, _) => Vec::new(),
     };
     let plan = plan_series_indexes(
         buckets,
@@ -211,21 +209,28 @@ async fn build_index_version(
     );
     stats.computed_buckets = plan.computed_buckets;
     stats.skipped_buckets = plan.skipped_buckets;
+    let mut next = SeriesIndexVersion {
+        range_indexes: current.range_indexes.clone(),
+        series_indexes: current.series_indexes.clone(),
+        index_buckets: plan.index_buckets,
+    };
+    (stats.removed_range, stats.removed_series) =
+        prune_index_version(&mut next, &visible, &plan.expired_index_ids);
+    if !allow_builds {
+        return Ok((stats.changed().then_some(next), stats));
+    }
+    let SeriesIndexVersion {
+        mut range_indexes,
+        mut series_indexes,
+        index_buckets,
+    } = next;
     if plan.builds.is_empty()
-        && plan.expired_index_ids.is_empty()
-        && stats.removed_range == 0
+        && !stats.changed()
         && (!enable_range_index || current.range_indexes.len() == visible.len())
     {
         return Ok((None, stats));
     }
-    let mut range_indexes = current.range_indexes.clone();
-    range_indexes.retain(|file_id, _| visible.contains(file_id));
-    let mut series_indexes = current.series_indexes.clone();
-    for id in plan
-        .expired_index_ids
-        .iter()
-        .chain(&plan.superseded_index_ids)
-    {
+    for id in &plan.superseded_index_ids {
         series_indexes.remove(id);
     }
     for (bucket, expected) in plan.builds {
@@ -271,9 +276,30 @@ async fn build_index_version(
     let next = SeriesIndexVersion {
         range_indexes,
         series_indexes,
-        index_buckets: plan.index_buckets,
+        index_buckets,
     };
     Ok((Some(next), stats))
+}
+
+/// Prunes obsolete metadata without building indexes or retiring published handles.
+/// Physical range deletion belongs to the SST purger; series handles are retired only
+/// after the cleaned catalogs and snapshot have been published successfully.
+fn prune_index_version(
+    next: &mut SeriesIndexVersion,
+    visible: &HashSet<FileId>,
+    expired_index_ids: &[FileId],
+) -> (usize, usize) {
+    let previous_range_count = next.range_indexes.len();
+    let previous_series_count = next.series_indexes.len();
+    next.range_indexes
+        .retain(|file_id, _| visible.contains(file_id));
+    for id in expired_index_ids {
+        next.series_indexes.remove(id);
+    }
+    (
+        previous_range_count - next.range_indexes.len(),
+        previous_series_count - next.series_indexes.len(),
+    )
 }
 
 /// Writes changed catalogs in a stable order; the two writes are not atomic together.
