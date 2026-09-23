@@ -828,6 +828,10 @@ impl BatchingTask {
             return Ok(None);
         }
         let plan = incremental_plan.unwrap_or_else(|| plan.clone());
+        let plan = match &self.execution {
+            Some(execution) => execution.rewrite_plan(self, plan)?,
+            None => plan,
+        };
 
         let extensions = self
             .build_flow_query_extensions(incremental_safe, coverage.is_incremental_delta())
