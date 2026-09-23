@@ -408,7 +408,6 @@ mod tests {
     async fn test_dump_and_restore() {
         common_telemetry::init_default_ut_logging();
         let (temp_dir, kv_backend, manager) = test_env("test_dump_and_restore");
-        let temp_path = temp_dir.path();
 
         for i in 0..10 {
             kv_backend
@@ -420,32 +419,16 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let dump_path = temp_path.join("snapshot");
-        manager
-            .dump(&format!(
-                "{}/metadata_snapshot",
-                &dump_path.as_path().display().to_string()
-            ))
-            .await
-            .unwrap();
+        manager.dump("snapshot/metadata_snapshot").await.unwrap();
+        let snapshot_key = "snapshot/metadata_snapshot.metadata.fb";
+        assert!(temp_dir.path().join("data").join(snapshot_key).is_file());
         // Clean up the kv backend
         kv_backend.clear();
-        let err = manager
-            .dump(&format!(
-                "{}/metadata_snapshot.metadata.fb",
-                &dump_path.as_path().display().to_string()
-            ))
-            .await
-            .unwrap_err();
+        let err = manager.dump(snapshot_key).await.unwrap_err();
         assert_matches!(err, Error::Unexpected { .. });
         assert!(err.to_string().contains("already exists"));
 
-        let restore_path = dump_path
-            .join("metadata_snapshot.metadata.fb")
-            .as_path()
-            .display()
-            .to_string();
-        manager.restore(&restore_path).await.unwrap();
+        manager.restore(snapshot_key).await.unwrap();
 
         for i in 0..10 {
             let key = format!("test_{}", i);
@@ -456,14 +439,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_restore_from_nonexistent_file() {
-        let (temp_dir, _kv_backend, manager) = test_env("test_restore_from_nonexistent_file");
-        let restore_path = temp_dir
-            .path()
-            .join("nonexistent.metadata.fb")
-            .as_path()
-            .display()
-            .to_string();
-        let err = manager.restore(&restore_path).await.unwrap_err();
+        let (_temp_dir, _kv_backend, manager) = test_env("test_restore_from_nonexistent_file");
+        let err = manager
+            .restore("nonexistent.metadata.fb")
+            .await
+            .unwrap_err();
         assert_matches!(err, Error::ReadObject { .. })
     }
 }
