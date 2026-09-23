@@ -1264,6 +1264,61 @@ pub async fn setup_pg_server_with_user_provider(
     (instance.guard, Arc::new(pg_server))
 }
 
+/// Sets up a standalone instance with both a Prometheus remote-write HTTP app
+/// (native histograms enabled) and a Postgres server attached, so native
+/// histogram data written via remote-write can be queried over the Postgres
+/// protocol.
+pub async fn setup_pg_server_with_prom_native_histogram(
+    store_type: StorageType,
+    name: &str,
+) -> (TestGuard, Router, Arc<Box<dyn Server>>) {
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
+
+    let instance = setup_standalone_instance(name, store_type).await;
+
+    // Prometheus remote-write HTTP app with native histograms enabled.
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, true)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+
+    // Postgres server on the same instance.
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
+    let mut pg_server = Box::new(PostgresServer::new(
+        instance.fe_instance().clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
+        0,
+        runtime,
+        None,
+        None,
+    ));
+
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, app, Arc::new(pg_server))
+}
+
 pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {
     let catalog_manager = instance
         .catalog_manager()
