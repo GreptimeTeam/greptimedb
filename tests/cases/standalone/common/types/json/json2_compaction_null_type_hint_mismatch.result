@@ -24,7 +24,7 @@ ADMIN FLUSH_TABLE('json2_compaction_null_type_hint_mismatch');
 
 ALTER TABLE json2_compaction_null_type_hint_mismatch
     MODIFY COLUMN attrs JSON2 (
-        kind INT64
+        kind BIGINT
     );
 
 Affected Rows: 0

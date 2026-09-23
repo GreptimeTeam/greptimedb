@@ -225,7 +225,9 @@ pub fn sql_column_def_to_grpc_column_def(
 pub fn sql_data_type_to_concrete_data_type(data_type: &SqlDataType) -> Result<ConcreteDataType> {
     match data_type {
         SqlDataType::BigInt(_) | SqlDataType::Int64 => Ok(ConcreteDataType::int64_datatype()),
-        SqlDataType::BigIntUnsigned(_) => Ok(ConcreteDataType::uint64_datatype()),
+        SqlDataType::BigIntUnsigned(_) | SqlDataType::UInt64 => {
+            Ok(ConcreteDataType::uint64_datatype())
+        }
         SqlDataType::Int(_) | SqlDataType::Integer(_) => Ok(ConcreteDataType::int32_datatype()),
         SqlDataType::IntUnsigned(_) | SqlDataType::UnsignedInteger => {
             Ok(ConcreteDataType::uint32_datatype())
@@ -422,6 +424,7 @@ mod tests {
             SqlDataType::BigIntUnsigned(None),
             ConcreteDataType::uint64_datatype(),
         );
+        check_type(SqlDataType::UInt64, ConcreteDataType::uint64_datatype());
         check_type(
             SqlDataType::IntUnsigned(None),
             ConcreteDataType::uint32_datatype(),

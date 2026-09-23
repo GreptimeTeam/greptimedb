@@ -27,9 +27,14 @@ use crate::error::{CorruptedWalObjectSnafu, Result};
 const HEADER_MAGIC: &[u8; 8] = b"GTWALOBJ";
 const TRAILER_MAGIC: &[u8; 8] = b"GTWALTRL";
 const FORMAT_VERSION: u16 = 1;
+/// Predecessor sequence recorded for an object that starts a chain. Object
+/// sequences stay below `OBJECT_SEQ_LIMIT`, so it never names an object.
+const NO_PREDECESSOR: u64 = u64::MAX;
 
-/// Length of the object header: magic, version, object sequence, writer instance.
-pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 16;
+/// Length of the object header: magic, version, object sequence, writer
+/// instance, epoch, predecessor sequence, predecessor writer instance and the
+/// CRC32 of the header.
+pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 16 + 8 + 8 + 16 + 4;
 /// Length of the fixed trailer: footer offset, footer length, footer CRC32,
 /// object CRC32 and magic.
 pub(crate) const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 8;
@@ -43,6 +48,18 @@ const FOOTER_COUNT_LEN: usize = 4;
 /// Header of a WAL object.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Header {
+    pub(crate) object_seq: u64,
+    pub(crate) writer_instance: [u8; 16],
+    /// Epoch of the store instance that wrote the object.
+    pub(crate) epoch: u64,
+    /// The object this object extends, `None` for the first object of a chain.
+    pub(crate) prev: Option<ChainLink>,
+}
+
+/// Names the object another object extends: its sequence and the writer
+/// instance recorded in its header.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ChainLink {
     pub(crate) object_seq: u64,
     pub(crate) writer_instance: [u8; 16],
 }
@@ -94,15 +111,9 @@ pub(crate) struct DecodedObject {
 }
 
 /// Encodes `records` into one object. Records are grouped into a segment per
-/// region; entry ids within a region must be unique.
+/// region; entry ids within a region must be unique. An object without records
+/// only extends the chain.
 pub(crate) fn encode_object(header: Header, records: &[Record]) -> Result<EncodedObject> {
-    ensure!(
-        !records.is_empty(),
-        CorruptedWalObjectSnafu {
-            reason: "object has no records",
-        }
-    );
-
     let mut grouped = BTreeMap::<RegionId, Vec<&Record>>::new();
     for record in records {
         grouped.entry(record.region_id).or_default().push(record);
@@ -180,7 +191,8 @@ pub(crate) fn object_len(footer: &[FooterEntry]) -> u64 {
     segments + framing as u64
 }
 
-/// Decodes the header from the first [`HEADER_LEN`] bytes of an object.
+/// Decodes and verifies the header from the first [`HEADER_LEN`] bytes of an
+/// object.
 pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
     ensure!(
         bytes.len() >= HEADER_LEN,
@@ -207,13 +219,27 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
         }
     );
     let object_seq = reader.u64("header")?;
-    let writer_instance = reader
-        .take(16, "header")?
-        .try_into()
-        .expect("writer instance has a fixed length");
+    let writer_instance = reader.instance("header")?;
+    let epoch = reader.u64("header")?;
+    let prev_object_seq = reader.u64("header")?;
+    let prev_writer_instance = reader.instance("header")?;
+    let header_crc32 = reader.u32("header")?;
+    let checksum = crc32fast::hash(&bytes[..HEADER_LEN - 4]);
+    ensure!(
+        checksum == header_crc32,
+        CorruptedWalObjectSnafu {
+            reason: checksum_mismatch("header", header_crc32, checksum),
+        }
+    );
+    let prev = (prev_object_seq != NO_PREDECESSOR).then_some(ChainLink {
+        object_seq: prev_object_seq,
+        writer_instance: prev_writer_instance,
+    });
     Ok(Header {
         object_seq,
         writer_instance,
+        epoch,
+        prev,
     })
 }
 
@@ -274,12 +300,6 @@ pub(crate) fn decode_footer(bytes: &[u8], trailer: FixedTrailer) -> Result<Vec<F
 
     let mut reader = Reader::new(bytes);
     let count = reader.u32("footer")? as usize;
-    ensure!(
-        count > 0,
-        CorruptedWalObjectSnafu {
-            reason: "object has no records",
-        }
-    );
     let expected_len = count
         .checked_mul(FOOTER_ENTRY_LEN)
         .and_then(|len| len.checked_add(4))
@@ -551,10 +571,19 @@ pub(crate) fn decode_object(bytes: &[u8]) -> Result<DecodedObject> {
 }
 
 fn encode_header(header: &Header, output: &mut BytesMut) {
+    let start = output.len();
     output.put_slice(HEADER_MAGIC);
     output.put_u16(FORMAT_VERSION);
     output.put_u64(header.object_seq);
     output.put_slice(&header.writer_instance);
+    output.put_u64(header.epoch);
+    let prev = header.prev.unwrap_or(ChainLink {
+        object_seq: NO_PREDECESSOR,
+        writer_instance: [0; 16],
+    });
+    output.put_u64(prev.object_seq);
+    output.put_slice(&prev.writer_instance);
+    output.put_u32(crc32fast::hash(&output[start..]));
 }
 
 fn encode_footer(directory: &[FooterEntry], output: &mut BytesMut) -> Result<()> {
@@ -680,6 +709,13 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    fn instance(&mut self, part: &'static str) -> Result<[u8; 16]> {
+        Ok(self
+            .take(16, part)?
+            .try_into()
+            .expect("writer instance has sixteen bytes"))
+    }
+
     fn is_empty(&self) -> bool {
         self.offset == self.bytes.len()
     }
@@ -698,6 +734,11 @@ mod tests {
         Header {
             object_seq: 42,
             writer_instance: *b"writer-instance!",
+            epoch: 5,
+            prev: Some(ChainLink {
+                object_seq: 40,
+                writer_instance: *b"previous-writer!",
+            }),
         }
     }
 
@@ -804,13 +845,23 @@ mod tests {
         bad_version[8..10].copy_from_slice(&(FORMAT_VERSION + 1).to_be_bytes());
         assert_corrupted(decode_object(&bad_version), "unsupported format version 2");
 
-        let mut bad_object_seq = encoded.bytes.to_vec();
-        bad_object_seq[10] ^= 1;
-        assert_corrupted(decode_object(&bad_object_seq), "object checksum mismatch");
+        // Every field after the version is covered by the header checksum,
+        // which recovery verifies without reading the whole object.
+        for offset in [10, 18, 34, 42, 50, HEADER_LEN - 1] {
+            let mut bad_field = encoded.bytes.to_vec();
+            bad_field[offset] ^= 1;
+            assert_corrupted(decode_header(&bad_field), "header checksum mismatch");
+        }
+    }
 
-        let mut bad_writer = encoded.bytes.to_vec();
-        bad_writer[18] ^= 1;
-        assert_corrupted(decode_object(&bad_writer), "object checksum mismatch");
+    #[test]
+    fn test_format_round_trips_the_first_object_of_a_chain() {
+        let first = Header {
+            prev: None,
+            ..header()
+        };
+        let encoded = encode_object(first.clone(), &records()).unwrap();
+        assert_eq!(first, decode_object(&encoded.bytes).unwrap().header);
     }
 
     #[test]
@@ -864,41 +915,19 @@ mod tests {
     }
 
     #[test]
-    fn test_format_rejects_empty_object() {
-        assert_corrupted(encode_object(header(), &[]), "object has no records");
-    }
-
-    #[test]
-    fn test_format_rejects_checksum_valid_empty_footer() {
-        let mut object = BytesMut::new();
-        encode_header(&header(), &mut object);
-        let footer_offset = object.len();
-        encode_footer(&[], &mut object).unwrap();
-        let footer = object[footer_offset..].to_vec();
-        let trailer = FixedTrailer {
-            footer_offset: footer_offset as u64,
-            footer_len: footer.len() as u64,
-            footer_crc32: crc32fast::hash(&footer),
-            object_crc32: 0,
-        };
-        let trailer = FixedTrailer {
-            object_crc32: object_crc32(&object, trailer),
-            ..trailer
-        };
-        encode_trailer(trailer, &mut object);
-
-        // Every structural check that recovery runs before the footer passes.
-        assert_eq!(header(), decode_header(&object).unwrap());
-        let trailer_start = object.len() - TRAILER_LEN;
-        assert_eq!(trailer, decode_trailer(&object[trailer_start..]).unwrap());
+    fn test_format_round_trips_an_object_without_records() {
+        let encoded = encode_object(header(), &[]).unwrap();
+        assert!(encoded.footer.is_empty());
         assert_eq!(
-            footer_offset..trailer_start,
-            footer_range(trailer, object.len()).unwrap()
+            MIN_OBJECT_LEN,
+            encoded.bytes.len(),
+            "an empty object is a header, an empty footer and the trailer"
         );
-        verify_segment_ranges(&[], footer_offset).unwrap();
-
-        assert_corrupted(decode_footer(&footer, trailer), "object has no records");
-        assert_corrupted(decode_object(&object), "object has no records");
+        assert_eq!(encoded.bytes.len() as u64, object_len(&encoded.footer));
+        let decoded = decode_object(&encoded.bytes).unwrap();
+        assert_eq!(header(), decoded.header);
+        assert!(decoded.records.is_empty());
+        assert!(decoded.footer.is_empty());
     }
 
     #[test]
@@ -950,12 +979,17 @@ mod tests {
     /// to field order, endianness or checksum coverage fails this test even when
     /// the encoder and the decoder change together.
     const FIXTURE_V1_HEX: &str = concat!(
-        // Header: magic, version 1, object sequence 7, writer instance.
+        // Header: magic, version 1, object sequence 7, writer instance, epoch 3,
+        // predecessor sequence 6, predecessor writer instance, header CRC32.
         "475457414c4f424a",
         "0001",
         "0000000000000007",
         "7772697465722d666978747572652d31",
-        // Segment of region 1 at offset 34: region id, entry count, then
+        "0000000000000003",
+        "0000000000000006",
+        "7772697465722d666978747572652d30",
+        "34f40691",
+        // Segment of region 1 at offset 70: region id, entry count, then
         // (entry id, payload length, payload) per entry.
         "0000000100000001",
         "00000003",
@@ -968,7 +1002,7 @@ mod tests {
         "0000000000000003",
         "00000003",
         "636363",
-        // Segment of region 2 at offset 88.
+        // Segment of region 2 at offset 124.
         "0000000200000001",
         "00000002",
         "000000000000000a",
@@ -977,28 +1011,28 @@ mod tests {
         "000000000000000b",
         "00000002",
         "7979",
-        // Footer at offset 127: entry count, then per segment region id, min and
+        // Footer at offset 163: entry count, then per segment region id, min and
         // max entry id, entry count, segment offset, length and CRC32.
         "00000002",
         "0000000100000001",
         "0000000000000001",
         "0000000000000003",
         "00000003",
-        "0000000000000022",
+        "0000000000000046",
         "0000000000000036",
         "25ac0486",
         "0000000200000001",
         "000000000000000a",
         "000000000000000b",
         "00000002",
-        "0000000000000058",
+        "000000000000007c",
         "0000000000000027",
         "65dc08ec",
         // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
-        "000000000000007f",
+        "00000000000000a3",
         "0000000000000064",
-        "8298e0f7",
-        "7a009db1",
+        "cd9b4193",
+        "29e46d97",
         "475457414c54524c",
     );
 
@@ -1032,6 +1066,11 @@ mod tests {
         let header = Header {
             object_seq: 7,
             writer_instance: *b"writer-fixture-1",
+            epoch: 3,
+            prev: Some(ChainLink {
+                object_seq: 6,
+                writer_instance: *b"writer-fixture-0",
+            }),
         };
         let footer = vec![
             FooterEntry {
@@ -1039,7 +1078,7 @@ mod tests {
                 min_entry_id: 1,
                 max_entry_id: 3,
                 entry_count: 3,
-                segment_offset: 34,
+                segment_offset: 70,
                 segment_len: 54,
                 segment_crc32: 0x25ac0486,
             },
@@ -1048,12 +1087,12 @@ mod tests {
                 min_entry_id: 10,
                 max_entry_id: 11,
                 entry_count: 2,
-                segment_offset: 88,
+                segment_offset: 124,
                 segment_len: 39,
                 segment_crc32: 0x65dc08ec,
             },
         ];
-        assert_eq!(259, fixture.len());
+        assert_eq!(295, fixture.len());
 
         let decoded = decode_object(&fixture).unwrap();
         assert_eq!(header, decoded.header);
@@ -1061,10 +1100,10 @@ mod tests {
         assert_eq!(fixture_records(), decoded.records);
         assert_eq!(
             FixedTrailer {
-                footer_offset: 127,
+                footer_offset: 163,
                 footer_len: 100,
-                footer_crc32: 0x8298e0f7,
-                object_crc32: 0x7a009db1,
+                footer_crc32: 0xcd9b4193,
+                object_crc32: 0x29e46d97,
             },
             decode_trailer(&fixture[fixture.len() - TRAILER_LEN..]).unwrap()
         );

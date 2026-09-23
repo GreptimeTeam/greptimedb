@@ -392,13 +392,15 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "WAL object {} was not created while the later object {} is durable",
-        object_seq,
-        later_object_seq
+        "WAL object {} was written by the earlier epoch {}, this store writes epoch {}",
+        path,
+        existing_epoch,
+        epoch
     ))]
-    WalObjectHistoryGap {
-        object_seq: u64,
-        later_object_seq: u64,
+    StaleWalObject {
+        path: String,
+        existing_epoch: u64,
+        epoch: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -499,7 +501,6 @@ impl ErrorExt for Error {
 
             CorruptedWalObject { .. }
             | WalObjectConflict { .. }
-            | WalObjectHistoryGap { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
             WalObjectSequenceUnsettled { .. } => StatusCode::IllegalState,
@@ -512,6 +513,7 @@ impl ErrorExt for Error {
             | WriteIndex { .. }
             | ReadIndex { .. }
             | WalObjectStore { .. }
+            | StaleWalObject { .. }
             | Io { .. } => StatusCode::StorageUnavailable,
             // Raft engine
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
@@ -547,7 +549,8 @@ impl ErrorExt for Error {
             FetchEntry { .. }
             | RaftEngine { .. }
             | AddEntryLogBatch { .. }
-            | WalObjectSequenceUnsettled { .. } => RetryHint::Retryable,
+            | WalObjectSequenceUnsettled { .. }
+            | StaleWalObject { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)

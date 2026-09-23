@@ -38,19 +38,13 @@ impl ObjectCatalog {
     /// Indexes the footer of the object `object_seq`. Objects may be inserted
     /// in any order, which lets recovery index them as it discovers them.
     /// Inserting a sequence that is already indexed is rejected, whether or not
-    /// the footer matches the indexed one.
+    /// the footer matches the indexed one. An object without segments holds no
+    /// entries but still takes its sequence.
     pub(crate) fn insert_object(
         &mut self,
         object_seq: u64,
         mut footer: Vec<FooterEntry>,
     ) -> Result<()> {
-        ensure!(
-            !footer.is_empty(),
-            CorruptedWalObjectSnafu {
-                reason: format!("object {object_seq} has an empty footer"),
-            }
-        );
-
         footer.sort_unstable_by_key(|entry| entry.region_id);
         for entries in footer.windows(2) {
             ensure!(
@@ -310,6 +304,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(5, catalog.next_object_seq().unwrap());
+
+        // An object without segments takes its sequence all the same.
+        catalog.insert_object(7, Vec::new()).unwrap();
+        assert_eq!(8, catalog.next_object_seq().unwrap());
+        assert_eq!(Some(12), catalog.region_max_entry_id(region_id));
     }
 
     #[test]
@@ -416,11 +415,6 @@ mod tests {
             ),
             "duplicate footer entries",
         );
-        assert_corrupted(
-            catalog.insert_object(1, vec![]),
-            "object 1 has an empty footer",
-        );
-
         let mut invalid = footer_entry(region_id, 2, 1);
         invalid.entry_count = 0;
         assert_corrupted(

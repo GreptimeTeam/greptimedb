@@ -65,6 +65,7 @@ catalog = { workspace = true, features = ["testing"] }
 common-catalog.workspace = true
 common-meta = { workspace = true, features = ["testing"] }
 pretty_assertions.workspace = true
+prost.workspace = true
 query.workspace = true
 session.workspace = true
 table.workspace = true

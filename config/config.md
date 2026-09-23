@@ -93,14 +93,12 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -361,14 +359,12 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
