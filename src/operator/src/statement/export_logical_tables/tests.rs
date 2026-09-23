@@ -18,6 +18,7 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{Field, Schema, UInt32Type};
 use bytes::Bytes;
+use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatch as GreptimeRecordBatch, RecordBatches};
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use table::test_util::EmptyTable;
@@ -239,16 +240,8 @@ async fn existing_outputs_are_not_overwritten() {
     )
     .await
     .unwrap_err();
-    if store.info().capability().write_with_if_not_exists {
-        assert!(matches!(err, error::Error::WriteStreamToFile {
-            source: common_datasource::error::Error::WriteObject { error, .. }, ..
-        } if error.kind() == object_store::ErrorKind::ConditionNotMatch));
-    } else {
-        assert!(matches!(
-            err,
-            error::Error::InvalidLogicalTableExport { .. }
-        ));
-    }
+    let status = common_error::ext::ErrorExt::status_code(&err);
+    assert_eq!(status, StatusCode::InvalidArguments);
     assert_eq!(
         store.read("cpu.v1.parquet").await.unwrap().to_bytes(),
         Bytes::from_static(b"keep")
