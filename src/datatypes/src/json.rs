@@ -237,19 +237,10 @@ fn validate_type_hints(type_hints: &[JsonTypeHint]) -> Result<()> {
         }
         let data_type = match &hint.data_type {
             ConcreteDataType::Boolean(_)
-            | ConcreteDataType::UInt8(_)
-            | ConcreteDataType::UInt16(_)
-            | ConcreteDataType::UInt32(_)
             | ConcreteDataType::UInt64(_)
-            | ConcreteDataType::Int8(_)
-            | ConcreteDataType::Int16(_)
-            | ConcreteDataType::Int32(_)
             | ConcreteDataType::Int64(_)
-            | ConcreteDataType::Float32(_)
             | ConcreteDataType::Float64(_)
-            | ConcreteDataType::String(_)
-            | ConcreteDataType::List(_)
-            | ConcreteDataType::Struct(_) => (&hint.data_type).into(),
+            | ConcreteDataType::String(_) => (&hint.data_type).into(),
             data_type => {
                 return InvalidJson2SettingsSnafu {
                     reason: format!("unsupported JSON2 type hint data type: {data_type}"),
