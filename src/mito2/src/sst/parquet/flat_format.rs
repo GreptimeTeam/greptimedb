@@ -412,8 +412,9 @@ impl FlatReadFormat {
             ParquetAdapter::PrimaryKeyToFlat(p) => p.convert_batch(record_batch)?,
         };
 
-        // Remove writer-only nested field metadata before schema compatibility and
-        // merging with memtables. Parquet stamps IDs on native histogram children.
+        // Normalize nested field names and metadata to the SST's region metadata
+        // before schema compatibility and merging with memtables. This removes
+        // Parquet-added field IDs; equals_datatype also permits nested name differences.
         for index in 0..batch.num_columns() {
             let array = batch.column(index);
             if !matches!(array.data_type(), ArrowDataType::Struct(_)) {
