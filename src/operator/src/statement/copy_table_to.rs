@@ -344,7 +344,10 @@ pub(crate) async fn stream_to_managed_parquet(
 
 #[cfg(test)]
 mod tests {
-    use arrow::array::{ArrayRef, BinaryArray, DictionaryArray, Int32Array, StringArray};
+    use arrow::array::{
+        ArrayRef, BinaryArray, BinaryViewArray, DictionaryArray, Int32Array, StringArray,
+        StringViewArray,
+    };
     use arrow::datatypes::Int32Type;
     use common_recordbatch::{RecordBatch, RecordBatches};
     use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -400,7 +403,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn managed_copy_preserves_dictionary_json_and_empty_schema() {
+    async fn managed_copy_preserves_dictionary_json_views_and_empty_schema() {
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "host",
@@ -411,6 +414,12 @@ mod tests {
                 true,
             ),
             ColumnSchema::new("json", ConcreteDataType::json_datatype(), true),
+            ColumnSchema::new("text_view", ConcreteDataType::utf8_view_datatype(), true),
+            ColumnSchema::new(
+                "binary_view",
+                ConcreteDataType::binary_view_datatype(),
+                true,
+            ),
         ]));
         let dictionary = DictionaryArray::<Int32Type>::new(
             Int32Array::from(vec![Some(0), None, Some(1)]),
@@ -427,6 +436,16 @@ mod tests {
                 Some(json.as_slice()),
                 None,
                 Some(json.as_slice()),
+            ])),
+            Arc::new(StringViewArray::from(vec![
+                Some("short"),
+                None,
+                Some("long view"),
+            ])),
+            Arc::new(BinaryViewArray::from(vec![
+                Some(&b"short"[..]),
+                None,
+                Some(&b"long view"[..]),
             ])),
         ];
         let batch =

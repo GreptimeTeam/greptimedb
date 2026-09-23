@@ -712,8 +712,10 @@ fn estimate_value_size(array: &dyn Array, row: usize) -> Result<usize> {
         DataType::Null => 0,
         DataType::Utf8 => array.as_string::<i32>().value(row).len(),
         DataType::LargeUtf8 => array.as_string::<i64>().value(row).len(),
+        DataType::Utf8View => array.as_string_view().value(row).len(),
         DataType::Binary => array.as_binary::<i32>().value(row).len(),
         DataType::LargeBinary => array.as_binary::<i64>().value(row).len(),
+        DataType::BinaryView => array.as_binary_view().value(row).len(),
         DataType::Struct(_) => {
             array
                 .as_struct()
