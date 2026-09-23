@@ -156,3 +156,48 @@ DROP TABLE gauge_metric;
 
 Affected Rows: 0
 
+-- A label can carry the name the cardinality check generates for its row count.
+CREATE TABLE collide_left (
+  host STRING NULL,
+  __promql_match_group_count STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, __promql_match_group_count)
+);
+
+Affected Rows: 0
+
+CREATE TABLE collide_right (
+  host STRING NULL,
+  __promql_match_group_count STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, __promql_match_group_count)
+);
+
+Affected Rows: 0
+
+INSERT INTO collide_left VALUES ('host1', 'a', 0, 10);
+
+Affected Rows: 1
+
+INSERT INTO collide_right VALUES ('host1', 'b', 0, 2);
+
+Affected Rows: 1
+
+TQL EVAL (0, 0, '5s') collide_left / on(host) collide_right;
+
++-------+---------------------+------------------------------------------------------------+
+| host  | ts                  | collide_left.greptime_value / collide_right.greptime_value |
++-------+---------------------+------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 5.0                                                        |
++-------+---------------------+------------------------------------------------------------+
+
+DROP TABLE collide_left;
+
+Affected Rows: 0
+
+DROP TABLE collide_right;
+
+Affected Rows: 0
+

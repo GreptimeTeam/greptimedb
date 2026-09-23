@@ -71,3 +71,30 @@ TQL EVAL (0, 0, '5s') counter_metric{device="eth0"} / on(host) group_left(device
 DROP TABLE counter_metric;
 
 DROP TABLE gauge_metric;
+
+-- A label can carry the name the cardinality check generates for its row count.
+CREATE TABLE collide_left (
+  host STRING NULL,
+  __promql_match_group_count STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, __promql_match_group_count)
+);
+
+CREATE TABLE collide_right (
+  host STRING NULL,
+  __promql_match_group_count STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, __promql_match_group_count)
+);
+
+INSERT INTO collide_left VALUES ('host1', 'a', 0, 10);
+
+INSERT INTO collide_right VALUES ('host1', 'b', 0, 2);
+
+TQL EVAL (0, 0, '5s') collide_left / on(host) collide_right;
+
+DROP TABLE collide_left;
+
+DROP TABLE collide_right;

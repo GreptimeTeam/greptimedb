@@ -6193,6 +6193,25 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let mut partition_by = group_exprs.clone();
         partition_by.push(time_index_expr);
+        // A label may carry the generated name, and the count column has to stay unambiguous
+        // against every column the operand already has.
+        let occupied_column_names = plan
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<HashSet<_>>();
+        let mut next_suffix = 0;
+        let count_column = loop {
+            let name = match next_suffix {
+                0 => MATCH_GROUP_COUNT_COLUMN.to_string(),
+                suffix => format!("{MATCH_GROUP_COUNT_COLUMN}_{suffix}"),
+            };
+            next_suffix += 1;
+            if !occupied_column_names.contains(name.as_str()) {
+                break name;
+            }
+        };
         let count = DfExpr::WindowFunction(Box::new(WindowFunction {
             fun: WindowFunctionDefinition::AggregateUDF(count_udaf()),
             params: WindowFunctionParams {
@@ -6205,7 +6224,7 @@ impl PromPlanner {
                 filter: None,
             },
         }))
-        .alias(MATCH_GROUP_COUNT_COLUMN);
+        .alias(count_column.as_str());
 
         let output_exprs = plan
             .schema()
@@ -6214,7 +6233,7 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         let assert_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: Arc::new(UniqueMatchGroup::scalar_udf(group_labels, violation)),
-            args: std::iter::once(col(MATCH_GROUP_COUNT_COLUMN))
+            args: std::iter::once(col(count_column.as_str()))
                 .chain(group_exprs)
                 .collect(),
         });
