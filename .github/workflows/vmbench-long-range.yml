@@ -35,10 +35,16 @@ on:
         type: string
         default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260918-545dc570@sha256:0ff03e7e690575e875bb85b3054a03486dd9359073546dc715da177153cf7a29
         required: true
-      ecs_instance_type:
-        description: ECS instance type (independent of Query Regression)
+      provider:
+        description: Cloud provider for the benchmark runner
+        type: choice
+        options: [Aliyun, AWS]
+        default: Aliyun
+        required: true
+      instance_type:
+        description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
         type: string
-        default: ecs.c9i.2xlarge
+        default: auto
         required: true
       benchmark_root:
         description: Absolute disk-backed work directory (outside the o11ybench checkout)
@@ -46,9 +52,9 @@ on:
         default: /home/runner/benchmark-data
         required: true
       system_disk_gib:
-        description: System disk GiB (20..2048)
-        type: number
-        default: 80
+        description: 'System disk GiB: auto (or 0) = 80; enter 20..2048 to override'
+        type: string
+        default: auto
         required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
@@ -78,7 +84,8 @@ env:
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
   RUNTIME_IMAGE: ${{ inputs.runtime_image }}
-  ECS_INSTANCE_TYPE: ${{ inputs.ecs_instance_type }}
+  PROVIDER: ${{ inputs.provider }}
+  REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
   BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
   JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
@@ -89,6 +96,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      instance_type: ${{ steps.runner.outputs.instance_type }}
       system_disk_gib: ${{ steps.plan.outputs.system_disk_gib }}
       runtime_image: ${{ steps.plan.outputs.runtime_image }}
       o11ybench_ref: ${{ steps.plan.outputs.o11ybench_ref }}
@@ -99,8 +107,13 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
-    - name: Test existing ECS lifecycle helpers
-      run: python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+    - name: Resolve CI runner
+      id: runner
+      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
+    - name: Test CI runner helpers
+      run: |
+        python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
+        python3 greptimedb/tests/perf/test_ci_runner_scripts.py
     - name: Validate budgets and build warm plan
       id: plan
       env:
@@ -108,11 +121,13 @@ jobs:
         RUN_VICTORIAMETRICS: ${{ inputs.run_victoriametrics }}
       run: |
         set -euo pipefail
-        [[ -n "$ECS_INSTANCE_TYPE" ]]
         [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
         [[ "$BENCHMARK_ROOT" != /tmp && "$BENCHMARK_ROOT" != /tmp/* ]]
         [[ "$BENCHMARK_ROOT" != *$'\n'* && "$BENCHMARK_ROOT" != *$'\r'* ]]
         [[ "/${BENCHMARK_ROOT#/}/" != */../* && "/${BENCHMARK_ROOT#/}/" != */./* ]]
+        if [[ "$SYSTEM_DISK_GIB" == auto || "$SYSTEM_DISK_GIB" == 0 ]]; then
+          SYSTEM_DISK_GIB=80
+        fi
         for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
           [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers'; exit 1; }
         done
@@ -159,15 +174,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
-      label: ${{ steps.ecs.outputs.label }}
-      instance_id: ${{ steps.ecs.outputs.instance_id }}
-      runner_name: ${{ steps.ecs.outputs.runner_name }}
+      label: ${{ steps.ecs.outputs.label || steps.aws.outputs.label }}
+      instance_id: ${{ steps.ecs.outputs.instance_id || steps.aws.outputs.instance_id }}
+      runner_name: ${{ steps.ecs.outputs.runner_name || steps.aws.outputs.runner_name }}
     steps:
     - uses: actions/checkout@v4
       with:
         path: greptimedb
         persist-credentials: false
     - name: Create ephemeral ECS runner
+      if: inputs.provider == 'Aliyun'
       id: ecs
       uses: ./greptimedb/.github/actions/aliyun-ecs-create
       with:
@@ -178,13 +194,35 @@ jobs:
         vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
         security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
         image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
-        instance-type: ${{ env.ECS_INSTANCE_TYPE }}
+        instance-type: ${{ needs.validate.outputs.instance_type }}
         enable-docker: 'true'
         system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
         ttl-hours: ${{ inputs.janitor_ttl_hours }}
         resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
         runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
         runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      if: inputs.provider == 'AWS'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+      if: inputs.provider == 'AWS'
+    - name: Create ephemeral EC2 runner
+      if: inputs.provider == 'AWS'
+      id: aws
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_IMAGE_ID: ${{ vars.BENCHMARK_EC2_IMAGE_ID || 'auto' }}
+        AWS_EC2_INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+        AWS_EC2_SUBNET_ID: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+        AWS_EC2_SECURITY_GROUP_ID: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+        AWS_EC2_SYSTEM_DISK_GIB: ${{ needs.validate.outputs.system_disk_gib }}
+        AWS_EC2_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-provision.py
   benchmark:
     needs:
     - validate
@@ -202,6 +240,12 @@ jobs:
       TSDG_BATCH_SIZE: '100000'
       O11YBENCH_GENERATOR_CPUS: '4'
     steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Set up benchmark dependencies
+      uses: ./greptimedb/.github/actions/setup-benchmark
     - name: Checkout matching benchmark tools
       uses: actions/checkout@v4
       with:
@@ -283,7 +327,7 @@ jobs:
     needs:
     - provision
     - benchmark
-    if: ${{ always() && needs.provision.outputs.instance_id != '' }}
+    if: ${{ always() && (needs.provision.outputs.instance_id != '' || (inputs.provider == 'AWS' && needs.provision.result != 'skipped')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -292,6 +336,7 @@ jobs:
         path: greptimedb
         persist-credentials: false
     - name: Delete ECS and unregister runner
+      if: inputs.provider == 'Aliyun'
       uses: ./greptimedb/.github/actions/aliyun-ecs-delete
       with:
         access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
@@ -300,3 +345,20 @@ jobs:
         region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
         instance-id: ${{ needs.provision.outputs.instance_id }}
         runner-name: ${{ needs.provision.outputs.runner_name }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      if: inputs.provider == 'AWS'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+      if: inputs.provider == 'AWS'
+    - name: Delete EC2 and unregister runner
+      if: inputs.provider == 'AWS'
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+        AWS_EC2_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-teardown.py
