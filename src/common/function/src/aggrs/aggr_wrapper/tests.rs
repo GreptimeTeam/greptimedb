@@ -27,6 +27,7 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::array_agg::array_agg_udaf;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
@@ -1287,6 +1288,40 @@ async fn test_udaf_correct_eval_result() {
             distinct: false,
             filter: None,
             order_by: vec![],
+            null_treatment: None,
+        },
+        // The ordering state of `array_agg` nests the ORDER BY fields in `List(Struct(..))`.
+        TestCase {
+            func: array_agg_udaf(),
+            input_schema: Arc::new(arrow_schema::Schema::new(vec![
+                Field::new("number", DataType::Float64, true),
+                Field::new(
+                    "ts",
+                    DataType::Timestamp(arrow_schema::TimeUnit::Millisecond, None),
+                    false,
+                ),
+            ])),
+            args: vec![Expr::Column(Column::new_unqualified("number"))],
+            input: vec![
+                Arc::new(Float64Array::from(vec![Some(3.), Some(1.), Some(2.)])),
+                Arc::new(TimestampMillisecondArray::from(vec![3000, 1000, 2000])),
+            ],
+            expected_output: Some(ScalarValue::List(ScalarValue::new_list_nullable(
+                &[
+                    ScalarValue::Float64(Some(1.)),
+                    ScalarValue::Float64(Some(2.)),
+                    ScalarValue::Float64(Some(3.)),
+                ],
+                &DataType::Float64,
+            ))),
+            expected_fn: None,
+            distinct: false,
+            filter: None,
+            order_by: vec![SortExpr::new(
+                Expr::Column(Column::new_unqualified("ts")),
+                true,
+                true,
+            )],
             null_treatment: None,
         },
         // TODO(discord9): udd_merge/hll_merge/geo_path/quantile_aggr tests

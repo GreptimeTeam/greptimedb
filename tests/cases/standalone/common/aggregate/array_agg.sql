@@ -54,3 +54,29 @@ DROP TABLE integers;
 DROP TABLE strings;
 
 DROP TABLE doubles;
+
+-- On partitioned tables the aggregate is split into partial state and merge
+CREATE TABLE array_agg_partitioned (
+  ts TIMESTAMP TIME INDEX,
+  k INT,
+  lat DOUBLE,
+  PRIMARY KEY(k)
+)
+PARTITION ON COLUMNS (k) (k < 10, k >= 10 AND k < 20, k >= 20);
+
+INSERT INTO array_agg_partitioned VALUES
+  (1000, 1, 1),
+  (2000, 11, 2),
+  (3000, 21, 3),
+  (4000, 2, 4),
+  (5000, 12, 5),
+  (6000, 22, 6),
+  (7000, 3, 7);
+
+SELECT array_agg(lat ORDER BY ts) FROM array_agg_partitioned;
+
+SELECT lat > 3 AS g, array_agg(lat ORDER BY ts DESC) FROM array_agg_partitioned GROUP BY g ORDER BY g;
+
+SELECT array_agg(k ORDER BY k % 10, ts DESC) FROM array_agg_partitioned;
+
+DROP TABLE array_agg_partitioned;

@@ -26,6 +26,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, StructArray};
+use arrow::compute::cast;
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
@@ -526,6 +527,7 @@ impl StateGroupsAccum {
     }
 
     fn wrap_state_arrays(&self, arrays: Vec<ArrayRef>) -> datafusion_common::Result<ArrayRef> {
+        let arrays = rename_nested_state_fields(&self.state_fields, arrays)?;
         let array_type = arrays
             .iter()
             .map(|array| array.data_type().clone())
@@ -610,6 +612,32 @@ impl GroupsAccumulator for StateGroupsAccum {
     }
 }
 
+/// Casts state arrays that only differ from the declared state fields in nested field names.
+///
+/// The declared state type is derived from logical expressions, while the accumulator names
+/// nested fields after physical expressions. For example, `array_agg(v ORDER BY ts)` declares
+/// its orderings as `List(Struct("ts": ..))` but produces `List(Struct("ts@0": ..))`.
+fn rename_nested_state_fields(
+    state_fields: &Fields,
+    arrays: Vec<ArrayRef>,
+) -> datafusion_common::Result<Vec<ArrayRef>> {
+    if arrays.len() != state_fields.len() {
+        return Ok(arrays);
+    }
+    arrays
+        .into_iter()
+        .zip(state_fields.iter())
+        .map(|(array, field)| {
+            let expected = field.data_type();
+            if array.data_type() != expected && array.data_type().equals_datatype(expected) {
+                Ok(cast(&array, expected)?)
+            } else {
+                Ok(array)
+            }
+        })
+        .collect()
+}
+
 impl StateAccum {
     pub fn new(
         inner: Box<dyn Accumulator>,
@@ -636,6 +664,7 @@ impl Accumulator for StateAccum {
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
+        let array = rename_nested_state_fields(&self.state_fields, array)?;
         let array_type = array
             .iter()
             .map(|a| a.data_type().clone())

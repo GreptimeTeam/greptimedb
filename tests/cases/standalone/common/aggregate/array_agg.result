@@ -144,3 +144,54 @@ DROP TABLE doubles;
 
 Affected Rows: 0
 
+-- On partitioned tables the aggregate is split into partial state and merge
+CREATE TABLE array_agg_partitioned (
+  ts TIMESTAMP TIME INDEX,
+  k INT,
+  lat DOUBLE,
+  PRIMARY KEY(k)
+)
+PARTITION ON COLUMNS (k) (k < 10, k >= 10 AND k < 20, k >= 20);
+
+Affected Rows: 0
+
+INSERT INTO array_agg_partitioned VALUES
+  (1000, 1, 1),
+  (2000, 11, 2),
+  (3000, 21, 3),
+  (4000, 2, 4),
+  (5000, 12, 5),
+  (6000, 22, 6),
+  (7000, 3, 7);
+
+Affected Rows: 7
+
+SELECT array_agg(lat ORDER BY ts) FROM array_agg_partitioned;
+
++-----------------------------------------------------------------------------------------+
+| array_agg(array_agg_partitioned.lat) ORDER BY [array_agg_partitioned.ts ASC NULLS LAST] |
++-----------------------------------------------------------------------------------------+
+| [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]                                                     |
++-----------------------------------------------------------------------------------------+
+
+SELECT lat > 3 AS g, array_agg(lat ORDER BY ts DESC) FROM array_agg_partitioned GROUP BY g ORDER BY g;
+
++-------+-------------------------------------------------------------------------------------------+
+| g     | array_agg(array_agg_partitioned.lat) ORDER BY [array_agg_partitioned.ts DESC NULLS FIRST] |
++-------+-------------------------------------------------------------------------------------------+
+| false | [3.0, 2.0, 1.0]                                                                           |
+| true  | [7.0, 6.0, 5.0, 4.0]                                                                      |
++-------+-------------------------------------------------------------------------------------------+
+
+SELECT array_agg(k ORDER BY k % 10, ts DESC) FROM array_agg_partitioned;
+
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| array_agg(array_agg_partitioned.k) ORDER BY [array_agg_partitioned.k % Int64(10) ASC NULLS LAST, array_agg_partitioned.ts DESC NULLS FIRST] |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+| [21, 11, 1, 22, 12, 2, 3]                                                                                                                   |
++---------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE array_agg_partitioned;
+
+Affected Rows: 0
+
