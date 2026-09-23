@@ -1,0 +1,23 @@
+.github/scripts/ci-slash.py
+  s_d4896e4c642f16::t_00cc24d3c33fe7 16,32,72
+.github/workflows/ci-slash.yml
+  s_d4896e4c642f16::t_8de23d48ff698c 48
+.github/workflows/rust.yml
+  s_d4896e4c642f16::t_8c2b2b59effd2e 175
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "51e8e85c802ec4f7f0bd9108f4035f18e49144a9",
+  "prompts": {},
+  "sessions": {
+    "s_d4896e4c642f16": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0c2b4-6796-7cd1-8617-ab49903c2216",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
