@@ -231,11 +231,13 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
-## Ordinary-table batching for opted-in HTTP ingestion protocols.
+## Ordinary-table batching for opted-in ingestion protocols.
 ## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
 ## queue admission without waiting for storage; later failures cannot be returned to the client.
 ## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
 ## OTLP logs, traces and ordinary metrics use this batcher.
+## MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.
+## Single-connection writes and INSERT SELECT may incur additional flush waits.
 [pending_rows_batcher]
 # protocols = [
 #     "influxdb",
@@ -246,6 +248,8 @@ default_merge_mode = "last_non_null"
 #     "splunk",
 #     "elasticsearch",
 #     "http_sql",
+#     "mysql",
+#     "postgres",
 #     "prom",
 # ]
 ## Flush interval measured from the first pending submission. Zero disables batching.

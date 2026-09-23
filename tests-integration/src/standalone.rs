@@ -90,6 +90,7 @@ pub struct GreptimeDbStandaloneBuilder {
     auto_create_table: bool,
     experimental_metric_export: bool,
     logical_batcher: Option<BatcherOptions>,
+    table_batcher: BatcherOptions,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -111,6 +112,7 @@ impl GreptimeDbStandaloneBuilder {
             auto_create_table: true,
             experimental_metric_export: false,
             logical_batcher: None,
+            table_batcher: BatcherOptions::default(),
         }
     }
 
@@ -118,6 +120,13 @@ impl GreptimeDbStandaloneBuilder {
     #[must_use]
     pub fn with_experimental_metric_export(mut self) -> Self {
         self.experimental_metric_export = true;
+        self
+    }
+
+    /// Configures ordinary-table batching for protocol integration tests.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
         self
     }
 
@@ -389,7 +398,7 @@ impl GreptimeDbStandaloneBuilder {
             experimental_metric_export: self.experimental_metric_export,
             pending_rows_batcher: PendingRowsBatcherOptions {
                 logical_table: self.logical_batcher.clone(),
-                ..Default::default()
+                table: self.table_batcher.clone(),
             },
             // Tests cover the descriptor, so they run with it enabled.
             otlp: frontend::service_config::OtlpOptions {

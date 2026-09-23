@@ -50,8 +50,8 @@ use partition::manager::PartitionRuleManager;
 use pipeline::pipeline_operator::PipelineOperator;
 use query::QueryEngineFactory;
 use query::region_query::RegionQueryHandlerFactoryRef;
+use servers::batcher::BatchingProtocol;
 use servers::batcher::table::TablePendingRowsBatcher;
-use servers::http::BatchingProtocol;
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::{self, DataFusionSnafu, ExternalSnafu, Result};

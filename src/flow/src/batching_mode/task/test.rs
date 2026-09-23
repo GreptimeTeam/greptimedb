@@ -143,6 +143,99 @@ impl crate::BatchingExecution for RetainingExecution {
     }
 }
 
+/// Records the completed plan handed to it by the task.
+#[derive(Default)]
+struct PlanRecordingExecution {
+    plans: std::sync::Mutex<Vec<LogicalPlan>>,
+}
+
+#[async_trait::async_trait]
+impl crate::BatchingExecution for PlanRecordingExecution {
+    async fn execute_once(
+        self: Arc<Self>,
+        _guard: BatchingExecutionGuard,
+        _task: &BatchingTask,
+        _engine: &QueryEngineRef,
+        _frontend: &Arc<FrontendClient>,
+        _max_window_cnt: Option<usize>,
+    ) -> ExecuteOnceOutcome {
+        ExecuteOnceOutcome {
+            new_query: None,
+            result: Ok(None),
+        }
+    }
+
+    fn rewrite_plan(&self, _task: &BatchingTask, plan: LogicalPlan) -> crate::Result<LogicalPlan> {
+        self.plans.lock().unwrap().push(plan.clone());
+        Ok(plan)
+    }
+}
+
+#[tokio::test]
+async fn test_execution_hook_receives_the_completed_incremental_plan() {
+    let sink_table = "hook_sink";
+    let query = "SELECT max(number) AS number, ts FROM numbers_with_ts GROUP BY ts";
+    let TestTaskParts {
+        task, query_engine, ..
+    } = new_test_task_engine_and_plan_with_query(query, sink_table).await;
+    register_auto_created_aggregate_sink(&query_engine, sink_table);
+
+    let ctx = task.state.read().unwrap().query_ctx.clone();
+    let plan = sql_to_df_plan(ctx, query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let (sink, _) = get_table_info_df_schema(
+        query_engine.engine_state().catalog_manager().clone(),
+        [
+            "greptime".to_string(),
+            "public".to_string(),
+            sink_table.to_string(),
+        ],
+    )
+    .await
+    .unwrap();
+    let table_provider = Arc::new(DfTableProviderAdapter::new(sink));
+    let table_source = Arc::new(DefaultTableSource::new(table_provider));
+    let dml_plan = LogicalPlan::Dml(DmlStatement::new(
+        datafusion_common::TableReference::bare("test"),
+        table_source,
+        WriteOp::Insert(datafusion_expr::dml::InsertOp::Append),
+        Arc::new(plan),
+    ));
+
+    task.state
+        .write()
+        .unwrap()
+        .advance_checkpoints(HashMap::from([(1_u64, 10_u64)]));
+
+    let execution = Arc::new(PlanRecordingExecution::default());
+    let task = task.with_execution(Some(execution.clone()));
+    let (frontend_client, _handler) =
+        FrontendClient::from_empty_grpc_handler(QueryOptions::default());
+    let frontend = Arc::new(frontend_client);
+    let dirty_restore = DirtyRestore::Unscoped(dirty_range(10, 15));
+
+    let _ = task
+        .execute_plan_unlocked(
+            &query_engine,
+            &frontend,
+            &dml_plan,
+            &dirty_restore,
+            &QueryCoverage::IncrementalDelta,
+        )
+        .await;
+
+    let recorded = execution.plans.lock().unwrap();
+    let plan = recorded
+        .first()
+        .expect("the execution hook must see the plan that is dispatched");
+    let plan_text = plan.to_string();
+    assert!(
+        plan_text.contains("Left Join"),
+        "the hook must receive the completed delta-sink merge plan, got:\n{plan_text}"
+    );
+}
+
 #[tokio::test]
 async fn test_execution_delegate_dispatch_is_serialized() {
     let TestTaskParts {

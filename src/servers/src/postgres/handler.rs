@@ -59,6 +59,14 @@ use crate::postgres::utils::convert_err;
 use crate::postgres::{PostgresServerHandlerInner, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
+impl PostgresServerHandlerInner {
+    fn new_query_context(&self) -> QueryContextRef {
+        let mut ctx = self.session.new_query_context();
+        Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
+        ctx
+    }
+}
+
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
@@ -68,7 +76,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
@@ -425,7 +433,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])

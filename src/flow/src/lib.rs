@@ -48,7 +48,10 @@ pub use batching_mode::task::{
     QueryCoverage, TaskArgs,
 };
 pub use batching_mode::time_window::{TimeWindowExpr, find_time_window_expr};
-pub use batching_mode::utils::sql_to_df_plan;
+pub use batching_mode::utils::{
+    IncrementalAggregateAnalysis, IncrementalAggregateMergeColumn, IncrementalAggregateMergeOp,
+    analyze_incremental_aggregate_plan, sql_to_df_plan,
+};
 pub(crate) use engine::{CreateFlowArgs, FlowId, TableName};
 pub use error::{Error, Result};
 pub use server::{FlownodeBuilder, FlownodeInstance, FlownodeServer, FlownodeServiceBuilder};

@@ -514,8 +514,7 @@ WITH(
             ExponentialHistogram, ExponentialHistogramDataPoint, exponential_histogram_data_point,
         };
         use prost::Message;
-        use servers::batcher::pending_rows_batch_sync_enabled;
-        use servers::http::BatchingProtocol;
+        use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
         use servers::http::test_helpers::TestClient;
         use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
