@@ -691,6 +691,12 @@ pub(crate) fn map_writer_error(
         common_datasource::error::Error::ParquetWriterResource { reason } => {
             LogicalTableExportResourceSnafu { reason }.build()
         }
+        common_datasource::error::Error::WriteObject { error, .. }
+            if error.kind() == object_store::ErrorKind::ConditionNotMatch =>
+        {
+            let reason = format!("output already exists: {path}");
+            InvalidLogicalTableExportSnafu { reason }.build()
+        }
         source => error::WriteStreamToFileSnafu { path }.into_error(source),
     }
 }
