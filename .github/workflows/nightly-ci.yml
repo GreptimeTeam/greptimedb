@@ -52,6 +52,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: 09c915b584804b85a28bc8ceda247d5d52061f79
+      - name: Record tested source and runner identity
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          whoami
+          id
+          echo 'features: dashboard'
       - uses: ./.github/actions/setup-cyborg
       - uses: arduino/setup-protoc@v3
         with:
@@ -82,6 +90,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: 09c915b584804b85a28bc8ceda247d5d52061f79
+      - name: Record tested source and runner identity
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          whoami
+          id
+          echo 'features: dashboard'
       - uses: ./.github/actions/setup-cyborg
       - uses: arduino/setup-protoc@v3
         with:
@@ -153,6 +169,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: 09c915b584804b85a28bc8ceda247d5d52061f79
+      - name: Record tested source and runner identity
+        shell: bash
+        run: |
+          git rev-parse HEAD
+          whoami
+          id
+          echo 'features: dashboard'
       - uses: ./.github/actions/setup-cyborg
       - name: Report CI status
         id: report-ci-status
