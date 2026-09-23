@@ -1451,17 +1451,23 @@ fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> 
     else {
         return Ok(());
     };
-    let Some(source_unit) = timestamp_unit_from_datatype(rows.schema[ts_index].datatype) else {
+    let Some(source_unit) = ColumnDataType::try_from(rows.schema[ts_index].datatype)
+        .ok()
+        .and_then(api::helper::timestamp_unit)
+    else {
         return Ok(());
     };
     if source_unit == target_unit {
         return Ok(());
     }
 
-    rows.schema[ts_index].datatype = column_datatype_from_time_unit(target_unit) as i32;
+    rows.schema[ts_index].datatype = api::helper::timestamp_datatype(target_unit) as i32;
     // Timestamp columns never carry a datatype extension.
     rows.schema[ts_index].datatype_extension = None;
 
+    // Note: the schema is rewritten before the rows are converted, so an
+    // overflow error mid-batch leaves this request half-converted. That is
+    // harmless: the error aborts the whole insert request.
     for row in &mut rows.rows {
         let Some(value) = row.values.get_mut(ts_index) else {
             continue;
@@ -1473,27 +1479,6 @@ fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> 
             convert_timestamp_value_data(value_data, source_unit, target_unit, ts_index)?;
     }
     Ok(())
-}
-
-fn timestamp_unit_from_datatype(datatype: i32) -> Option<TimeUnit> {
-    ColumnDataType::try_from(datatype)
-        .ok()
-        .and_then(|datatype| match datatype {
-            ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
-            ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
-            ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
-            ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
-            _ => None,
-        })
-}
-
-fn column_datatype_from_time_unit(unit: TimeUnit) -> ColumnDataType {
-    match unit {
-        TimeUnit::Second => ColumnDataType::TimestampSecond,
-        TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
-        TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
-        TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
-    }
 }
 
 fn convert_timestamp_value_data(
@@ -1516,12 +1501,7 @@ fn convert_timestamp_value_data(
             timestamp.value()
         ),
     })?;
-    Ok(Some(match target_unit {
-        TimeUnit::Second => ValueData::TimestampSecondValue(converted.value()),
-        TimeUnit::Millisecond => ValueData::TimestampMillisecondValue(converted.value()),
-        TimeUnit::Microsecond => ValueData::TimestampMicrosecondValue(converted.value()),
-        TimeUnit::Nanosecond => ValueData::TimestampNanosecondValue(converted.value()),
-    }))
+    Ok(api::helper::to_grpc_value(datatypes::value::Value::Timestamp(converted)).value_data)
 }
 
 fn table_is_native_histogram(table: &TableRef) -> bool {

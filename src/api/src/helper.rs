@@ -87,6 +87,28 @@ impl ColumnDataTypeWrapper {
     }
 }
 
+/// Returns the time unit if `datatype` is a timestamp type.
+pub fn timestamp_unit(datatype: ColumnDataType) -> Option<TimeUnit> {
+    match datatype {
+        ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
+        ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
+        ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
+        ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
+        _ => None,
+    }
+}
+
+/// Returns the timestamp [ColumnDataType] for the given time unit.
+/// This is the inverse of [timestamp_unit].
+pub fn timestamp_datatype(unit: TimeUnit) -> ColumnDataType {
+    match unit {
+        TimeUnit::Second => ColumnDataType::TimestampSecond,
+        TimeUnit::Millisecond => ColumnDataType::TimestampMillisecond,
+        TimeUnit::Microsecond => ColumnDataType::TimestampMicrosecond,
+        TimeUnit::Nanosecond => ColumnDataType::TimestampNanosecond,
+    }
+}
+
 impl From<ColumnDataTypeWrapper> for ConcreteDataType {
     fn from(datatype_wrapper: ColumnDataTypeWrapper) -> Self {
         match datatype_wrapper.datatype {
@@ -1214,6 +1236,21 @@ mod tests {
 
     use super::*;
     use crate::v1::Column;
+
+    #[test]
+    fn test_timestamp_unit_roundtrip() {
+        for unit in [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ] {
+            assert_eq!(timestamp_unit(timestamp_datatype(unit)), Some(unit));
+        }
+        // Non-timestamp types have no time unit.
+        assert_eq!(timestamp_unit(ColumnDataType::String), None);
+        assert_eq!(timestamp_unit(ColumnDataType::Datetime), None);
+    }
 
     #[test]
     fn test_values_with_capacity() {
