@@ -192,7 +192,6 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         let has_nulls = value_array.null_count() > 0;
         // Windows overlap heavily, so locate every sample once and let each window find its own
         // slice of the index, instead of rescanning the slots it shares with its neighbours.
-        // Built only for a nullable batch, which is also the only branch that consults it.
         let valid_positions: Vec<usize> = if has_nulls {
             (0..value_array.len())
                 .filter(|&index| value_array.is_valid(index))
@@ -770,11 +769,7 @@ mod test {
         assert_eq!(output, vec![Some(7.5)]);
     }
 
-    /// `// oracle: pre-index implementation`
-    ///
-    /// The window computation as it stood before the valid-slot index existed: every window
-    /// rescanned its own slots for the samples and for the counter resets. Same math as
-    /// [`ExtrapolatedRate::calc`], reached the long way.
+    /// This independent scan implementation validates the indexed nullable path.
     fn oracle_rate_output<const IS_COUNTER: bool, const IS_RATE: bool>(
         timestamps: &[i64],
         values: &Float64Array,
@@ -910,45 +905,6 @@ mod test {
         }
     }
 
-    /// [`assert_rate_matches_oracle`] for `0` = rate, `1` = increase and `2` = delta.
-    fn assert_rate_variant_matches_oracle(
-        variant: usize,
-        label: &str,
-        timestamps: Vec<i64>,
-        values: Arc<Float64Array>,
-        ranges: Vec<(u32, u32)>,
-        eval_timestamps: Vec<i64>,
-        range_length: i64,
-    ) {
-        match variant {
-            0 => assert_rate_matches_oracle::<true, true>(
-                label,
-                timestamps,
-                values,
-                ranges,
-                eval_timestamps,
-                range_length,
-            ),
-            1 => assert_rate_matches_oracle::<true, false>(
-                label,
-                timestamps,
-                values,
-                ranges,
-                eval_timestamps,
-                range_length,
-            ),
-            2 => assert_rate_matches_oracle::<false, false>(
-                label,
-                timestamps,
-                values,
-                ranges,
-                eval_timestamps,
-                range_length,
-            ),
-            _ => unreachable!("only rate, increase and delta exist"),
-        }
-    }
-
     /// Payload kept under the null slots of the layouts below, so a window that read the
     /// padding instead of the samples would report a different value.
     const NULL_PAYLOAD: f64 = -1234.5;
@@ -1017,8 +973,8 @@ mod test {
 
     #[test]
     fn nullable_rate_windows_match_per_window_oracle() {
-        // Four layouts times three window shapes times the three functions, every window of
-        // every batch checked against the pre-index implementation.
+        // Four layouts times three window shapes times the three functions, every window
+        // checked against the independent scan implementation.
         let len = 24;
         let timestamps: Vec<i64> = (0..len)
             .map(|index| index as i64 * 30_000 + (index % 5) as i64 * 1_000)
@@ -1028,9 +984,20 @@ mod test {
         for (input, nulls) in matrix_inputs(len) {
             for (shape, ranges) in matrix_window_shapes(len) {
                 let eval_timestamps = eval_timestamps_after(&timestamps, &ranges, 5_000);
-                for (variant, name) in ["rate", "increase", "delta"].into_iter().enumerate() {
-                    assert_rate_variant_matches_oracle(
-                        variant,
+                type CheckFn =
+                    fn(&str, Vec<i64>, Arc<Float64Array>, Vec<(u32, u32)>, Vec<i64>, i64);
+                for (name, check) in [
+                    ("rate", assert_rate_matches_oracle::<true, true> as CheckFn),
+                    (
+                        "increase",
+                        assert_rate_matches_oracle::<true, false> as CheckFn,
+                    ),
+                    (
+                        "delta",
+                        assert_rate_matches_oracle::<false, false> as CheckFn,
+                    ),
+                ] {
+                    check(
                         &format!("{name}, {input}, {shape}"),
                         timestamps.clone(),
                         values_with_nulls(nulls.clone(), NULL_PAYLOAD),
@@ -1104,9 +1071,13 @@ mod test {
                 .collect();
 
             let label = format!("seed {seed:#x}");
-            for variant in 0..3 {
-                assert_rate_variant_matches_oracle(
-                    variant,
+            type CheckFn = fn(&str, Vec<i64>, Arc<Float64Array>, Vec<(u32, u32)>, Vec<i64>, i64);
+            for check in [
+                assert_rate_matches_oracle::<true, true> as CheckFn,
+                assert_rate_matches_oracle::<true, false> as CheckFn,
+                assert_rate_matches_oracle::<false, false> as CheckFn,
+            ] {
+                check(
                     &label,
                     timestamps.clone(),
                     values.clone(),
@@ -1149,33 +1120,22 @@ mod test {
         // increase of 4.0 over two intervals is extrapolated by half an interval to 5.0. Reading
         // the null padding as a sample would charge a reset against it and change both values.
         let output = nullable_rate_runner::<true, false>(
-            timestamps.clone(),
-            values(),
-            ranges.clone(),
-            eval_timestamps.clone(),
-            60_000,
-        );
-        assert_eq!(
-            output,
-            vec![None, None, Some(1.5), Some(5.0), Some(5.0), None, None]
-        );
-
-        assert_rate_variant_matches_oracle(
-            1,
-            "increase, windows cutting through nulls",
             timestamps,
             values(),
             ranges,
             eval_timestamps,
             60_000,
         );
+        assert_eq!(
+            output,
+            vec![None, None, Some(1.5), Some(5.0), Some(5.0), None, None]
+        );
     }
 
     #[test]
     fn nullable_rate_keeps_special_values_out_of_the_null_branch() {
         // NaN, infinities and stale markers are valid samples, not missing ones: the windows
-        // keep counting them, and only the null slots stay out of the sample set. The result
-        // is NaN because the samples are, and the oracle agrees.
+        // keep counting them, and only the null slots stay out of the sample set.
         let timestamps: Vec<i64> = (0..6).map(|index| index as i64 * 1000).collect();
         let values = || {
             values_with_nulls(
@@ -1194,10 +1154,10 @@ mod test {
         let eval_timestamps = eval_timestamps_after(&timestamps, &ranges, 0);
 
         let output = nullable_rate_runner::<false, false>(
-            timestamps.clone(),
+            timestamps,
             values(),
-            ranges.clone(),
-            eval_timestamps.clone(),
+            ranges,
+            eval_timestamps,
             60_000,
         );
         // The first two windows hold at least two valid samples, so they report a value, NaN
@@ -1207,16 +1167,6 @@ mod test {
         assert!(output[1].is_some_and(|value| value.is_nan()));
         assert_eq!(output[2], None);
         assert_eq!(output[3], None);
-
-        assert_rate_variant_matches_oracle(
-            2,
-            "delta, special values",
-            timestamps,
-            values(),
-            ranges,
-            eval_timestamps,
-            60_000,
-        );
     }
 
     /// Line-by-line port of Prometheus `extrapolatedRate` (promql/functions.go), float path

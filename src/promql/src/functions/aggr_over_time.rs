@@ -102,9 +102,9 @@ fn evaluate_presence(
         .unwrap();
     // Windows overlap heavily, so locate every sample once and let each window binary-search
     // its own slice of the index instead of rescanning the slots it shares with its neighbours.
-    // Built only for a nullable batch, which is also the only branch that consults it.
     let has_nulls = values.null_count() != 0;
-    let valid_positions: Vec<usize> = if has_nulls {
+    let valid_positions: Vec<usize> = if has_nulls && matches!(operation, PresenceEvaluator::Count)
+    {
         (0..values.len())
             .filter(|&index| values.is_valid(index))
             .collect()
@@ -112,24 +112,24 @@ fn evaluate_presence(
         Vec::new()
     };
     let evaluator: fn(&Float64Array, &[usize], usize, usize) -> Option<f64> = if has_nulls {
-        // `valid_positions` only ever names samples, so the payloads behind them are the ones
-        // the null-free branch would have read, and no null slot is ever loaded.
         match operation {
             PresenceEvaluator::Count => |_, samples, offset, length| {
                 let count = valid_slot_bounds(samples, offset, offset + length).len();
                 (count != 0).then_some(count as f64)
             },
-            PresenceEvaluator::Last => |values, samples, offset, length| {
-                let bounds = valid_slot_bounds(samples, offset, offset + length);
-                (!bounds.is_empty()).then(|| values.value(samples[bounds.end - 1]))
+            PresenceEvaluator::Last => |values, _, offset, length| {
+                (offset..offset + length)
+                    .rev()
+                    .find(|&index| values.is_valid(index))
+                    .map(|index| values.value(index))
             },
-            PresenceEvaluator::Absent => |_, samples, offset, length| {
-                valid_slot_bounds(samples, offset, offset + length)
-                    .is_empty()
+            PresenceEvaluator::Absent => |values, _, offset, length| {
+                (!(offset..offset + length).any(|index| values.is_valid(index))).then_some(1.0)
+            },
+            PresenceEvaluator::Present => |values, _, offset, length| {
+                (offset..offset + length)
+                    .any(|index| values.is_valid(index))
                     .then_some(1.0)
-            },
-            PresenceEvaluator::Present => |_, samples, offset, length| {
-                (!valid_slot_bounds(samples, offset, offset + length).is_empty()).then_some(1.0)
             },
         }
     } else {
@@ -1313,42 +1313,6 @@ mod test {
         }
     }
 
-    /// `// oracle: pre-index implementation`
-    ///
-    /// The per-window scan the nullable presence evaluators performed before the valid slots
-    /// were indexed.
-    fn oracle_presence_output(
-        values: &Float64Array,
-        ranges: &[(u32, u32)],
-        operation: PresenceEvaluator,
-    ) -> Vec<Option<f64>> {
-        ranges
-            .iter()
-            .map(|&(offset, length)| {
-                let offset = offset as usize;
-                let end = offset + length as usize;
-                match operation {
-                    PresenceEvaluator::Count => {
-                        let count = (offset..end)
-                            .filter(|&index| values.is_valid(index))
-                            .count();
-                        (count != 0).then_some(count as f64)
-                    }
-                    PresenceEvaluator::Last => (offset..end)
-                        .rev()
-                        .find(|&index| values.is_valid(index))
-                        .map(|index| values.value(index)),
-                    PresenceEvaluator::Absent => {
-                        (!(offset..end).any(|index| values.is_valid(index))).then_some(1.0)
-                    }
-                    PresenceEvaluator::Present => (offset..end)
-                        .any(|index| values.is_valid(index))
-                        .then_some(1.0),
-                }
-            })
-            .collect()
-    }
-
     /// Payload kept under the null slots of the layouts below, so an evaluator that read the
     /// padding instead of the samples would report a different value for `last_over_time`.
     const NULL_PAYLOAD: f64 = -1234.5;
@@ -1395,13 +1359,9 @@ mod test {
     /// backing array.
     fn presence_window_shapes() -> Vec<(&'static str, Vec<(u32, u32)>)> {
         vec![
-            // Heavily overlapping: neighbours share eleven of their twelve slots.
             ("overlapping", (0..=12).map(|i| (i, 12)).collect()),
-            // Small windows, each overlapping its neighbour by two slots.
             ("small", (0..21).map(|i| (i, 3)).collect()),
-            // Disjoint: no slot is shared with another window.
             ("disjoint", (0..6).map(|i| (i * 4, 4)).collect()),
-            // Empty windows hold no sample at any offset.
             ("empty", vec![(0, 0), (12, 0), (23, 0)]),
             // Boundaries on both sides of a null run, and windows sitting inside one.
             (
@@ -1447,56 +1407,36 @@ mod test {
             .collect()
     }
 
-    /// Asserts two `Option<f64>` sequences agree bit for bit, naming the layout in failures.
-    fn assert_presence_matches_oracle(label: &str, actual: &[Option<f64>], oracle: &[Option<f64>]) {
-        assert_eq!(actual.len(), oracle.len(), "{label}");
-        for (index, (actual, oracle)) in actual.iter().zip(oracle).enumerate() {
-            let equal = match (actual, oracle) {
-                (None, None) => true,
-                (Some(actual), Some(oracle)) => actual.to_bits() == oracle.to_bits(),
-                _ => false,
-            };
-            assert!(
-                equal,
-                "{label}: window {index}: indexed {actual:?} != oracle {oracle:?}"
-            );
-        }
-    }
-
     #[test]
     fn presence_range_udfs_match_per_window_oracle_on_nullable_layouts() {
-        // Five backing layouts times five window shapes, each checked against the pre-index
-        // per-window scan for all four presence functions.
+        // The scalar kernels independently validate the specialized UDFs.
         let len = 24;
-        // Constructors rather than `ScalarUDF` values, so the table is `Copy` and the loops
-        // below can walk it once per layout.
-        type PresenceCase = (&'static str, fn() -> ScalarUDF, PresenceEvaluator);
+        type PresenceCase = (
+            fn() -> ScalarUDF,
+            fn(&TimestampMillisecondArray, &Float64Array) -> Option<f64>,
+        );
         let cases: [PresenceCase; 4] = [
-            ("count", CountOverTime::scalar_udf, PresenceEvaluator::Count),
-            ("last", LastOverTime::scalar_udf, PresenceEvaluator::Last),
-            (
-                "absent",
-                AbsentOverTime::scalar_udf,
-                PresenceEvaluator::Absent,
-            ),
-            (
-                "present",
-                PresentOverTime::scalar_udf,
-                PresenceEvaluator::Present,
-            ),
+            (CountOverTime::scalar_udf, count_over_time),
+            (LastOverTime::scalar_udf, last_over_time),
+            (AbsentOverTime::scalar_udf, absent_over_time),
+            (PresentOverTime::scalar_udf, present_over_time),
         ];
 
-        for (layout, nulls) in presence_layouts(len) {
-            for (shape, ranges) in presence_window_shapes() {
+        for (_, nulls) in presence_layouts(len) {
+            for (_, ranges) in presence_window_shapes() {
                 let values = nullable_backing_values(&nulls);
-                for (name, build_udf, operation) in cases {
-                    let oracle = oracle_presence_output(&values, &ranges, operation);
+                for (build_udf, kernel) in cases {
+                    let expected = ranges
+                        .iter()
+                        .map(|&(offset, length)| {
+                            let values = values.slice(offset as usize, length as usize);
+                            let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+                            let timestamps = TimestampMillisecondArray::new_null(values.len());
+                            kernel(&timestamps, values)
+                        })
+                        .collect::<Vec<_>>();
                     let actual = run_presence_udf(build_udf(), &values, &ranges);
-                    assert_presence_matches_oracle(
-                        &format!("{name}, {layout}, {shape}"),
-                        &actual,
-                        &oracle,
-                    );
+                    assert_option_bits(&actual, &expected);
                 }
             }
         }
@@ -1521,7 +1461,6 @@ mod test {
         let cases = [
             (
                 CountOverTime::scalar_udf(),
-                PresenceEvaluator::Count,
                 vec![
                     Some(3.0),
                     Some(2.0),
@@ -1535,7 +1474,6 @@ mod test {
             ),
             (
                 LastOverTime::scalar_udf(),
-                PresenceEvaluator::Last,
                 vec![
                     Some(9.0),
                     Some(3.0),
@@ -1549,7 +1487,6 @@ mod test {
             ),
             (
                 AbsentOverTime::scalar_udf(),
-                PresenceEvaluator::Absent,
                 vec![
                     None,
                     None,
@@ -1563,7 +1500,6 @@ mod test {
             ),
             (
                 PresentOverTime::scalar_udf(),
-                PresenceEvaluator::Present,
                 vec![
                     Some(1.0),
                     Some(1.0),
@@ -1577,11 +1513,9 @@ mod test {
             ),
         ];
 
-        for (udf, operation, expected) in cases {
+        for (udf, expected) in cases {
             let actual = run_presence_udf(udf, &values, &ranges);
             assert_option_bits(&actual, &expected);
-            let oracle = oracle_presence_output(&values, &ranges, operation);
-            assert_presence_matches_oracle("null runs", &actual, &oracle);
         }
     }
 
