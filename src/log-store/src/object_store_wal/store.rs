@@ -37,8 +37,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{
     CorruptedWalObjectSnafu, Error, InvalidProviderSnafu, InvalidWalObjectSnafu,
     InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu, MismatchedWalRegionSnafu,
-    ObjectStoreWalSnafu, Result, UnsupportedObjectStoreWalOperationSnafu,
-    WalObjectSequenceExhaustedSnafu,
+    ObjectStoreWalSnafu, Result, UnconfirmedWalEpochStartSnafu,
+    UnsupportedObjectStoreWalOperationSnafu, WalObjectSequenceExhaustedSnafu,
 };
 use crate::object_store_wal::batch::OBJECT_SEQ_LIMIT;
 use crate::object_store_wal::catalog::ObjectCatalog;
@@ -596,7 +596,10 @@ fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
 /// has a lower epoch and never ends a chain, so the start object moves past
 /// it. An object of an equal or later epoch belongs to another writer of the
 /// prefix, and the conflict fails the open, as does a create whose outcome is
-/// unknown: the next open counts the object in either case.
+/// unknown: the next open counts the object in either case. So does a create
+/// that finds the same bytes present: another open that recovered the same
+/// objects writes an identical start object, so this open cannot claim the
+/// epoch even if the object is its own.
 async fn start_epoch(
     io: &dyn WalObjectIo,
     mut object_seq: u64,
@@ -619,7 +622,14 @@ async fn start_epoch(
             .put_if_absent(object_seq, encode_object(header, &[])?.bytes)
             .await
         {
-            Ok(_) => return Ok(ChainLink { object_seq, epoch }),
+            Ok(PutResult::Created) => return Ok(ChainLink { object_seq, epoch }),
+            Ok(PutResult::AlreadyPresent) => {
+                return UnconfirmedWalEpochStartSnafu {
+                    path: io.object_path(object_seq),
+                    epoch,
+                }
+                .fail();
+            }
             Err(error @ Error::WalObjectConflict { .. }) => {
                 let head = io.get_range(object_seq, 0, HEADER_LEN as u64).await?;
                 let existing = decode_header(&head).with_context(|_| InvalidWalObjectSnafu {
@@ -2132,6 +2142,51 @@ mod tests {
                 );
                 assert_eq!(vec![0, 1], object_seqs(&fixtures).await);
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_open_fails_when_its_start_object_is_already_present() {
+        // On an empty prefix and after object 0 of epoch 1, another open that
+        // recovered the same objects wrote the very start object this open
+        // writes.
+        for present in [false, true] {
+            let object_store = memory_store();
+            let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+            let (start_seq, epoch, tip) = if present {
+                put_fixture(&fixtures, 0, &[]).await;
+                (1, 2, Some((0, 1)))
+            } else {
+                (0, 1, None)
+            };
+            let same = encode_object(chain_header(start_seq, epoch, tip), &[])
+                .unwrap()
+                .bytes;
+            let io = Arc::new(RacingIo {
+                inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
+                late: Mutex::new(Some((start_seq, same))),
+            });
+            let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, Error::UnconfirmedWalEpochStart { epoch: actual, path, .. }
+                    if *actual == epoch && path == &fixtures.object_path(start_seq)),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+
+            // The next open counts that object and starts a later epoch.
+            open(object_store, &eager()).await.stop().await.unwrap();
+            let start = decode_header(&fixtures.get(start_seq + 1).await.unwrap()).unwrap();
+            assert_eq!(epoch + 1, start.epoch);
+            assert_eq!(
+                Some(ChainLink {
+                    object_seq: start_seq,
+                    epoch,
+                }),
+                start.prev
+            );
         }
     }
 
