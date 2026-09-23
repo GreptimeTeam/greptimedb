@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#[cfg(unix)]
+use std::str::FromStr;
+
 use common_error::ext::BoxedError;
 use common_meta::election::ElectionRef;
 use common_meta::election::rds::postgres::{ElectionPgClient, PgElection};
@@ -20,10 +23,13 @@ use common_meta::kv_backend::rds::PgStore;
 use common_meta::kv_backend::rds::postgres::{
     TlsMode as PgTlsMode, TlsOption as PgTlsOption, create_postgres_tls_connector,
 };
+use common_telemetry::warn;
 use deadpool_postgres::{Config, Runtime};
 use servers::tls::TlsOption;
 use snafu::{OptionExt, ResultExt};
 use tokio_postgres::NoTls;
+#[cfg(unix)]
+use tokio_postgres::config::Host;
 
 use crate::error::{self, Result};
 
@@ -60,21 +66,50 @@ pub async fn create_postgres_pool(
     })?;
     cfg.url = Some(postgres_url.clone());
 
-    let pool = if let Some(tls_config) = tls_config {
-        let pg_tls_config = convert_tls_option(&tls_config);
-        let tls_connector =
-            create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
-                source: BoxedError::new(e),
-                location: snafu::Location::new(file!(), line!(), 0),
-            })?;
-        cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
-            .context(error::CreatePostgresPoolSnafu)?
-    } else {
-        cfg.create_pool(Some(Runtime::Tokio1), NoTls)
-            .context(error::CreatePostgresPoolSnafu)?
+    let is_unix_socket = is_unix_socket_url(postgres_url);
+    if is_unix_socket
+        && matches!(tls_config.as_ref(), Some(t) if t.mode != servers::tls::TlsMode::Disable)
+    {
+        warn!(
+            "TLS is not supported for Unix domain socket PostgreSQL connections, falling back to NoTls"
+        );
+    }
+
+    let pool = match tls_config {
+        Some(tls_config)
+            if tls_config.mode != servers::tls::TlsMode::Disable && !is_unix_socket =>
+        {
+            let pg_tls_config = convert_tls_option(&tls_config);
+            let tls_connector =
+                create_postgres_tls_connector(&pg_tls_config).map_err(|e| error::Error::Other {
+                    source: BoxedError::new(e),
+                    location: snafu::Location::new(file!(), line!(), 0),
+                })?;
+            cfg.create_pool(Some(Runtime::Tokio1), tls_connector)
+                .context(error::CreatePostgresPoolSnafu)?
+        }
+        _ => cfg
+            .create_pool(Some(Runtime::Tokio1), NoTls)
+            .context(error::CreatePostgresPoolSnafu)?,
     };
 
     Ok(pool)
+}
+
+#[cfg(unix)]
+fn is_unix_socket_url(url: &str) -> bool {
+    tokio_postgres::Config::from_str(url)
+        .map(|cfg| {
+            cfg.get_hosts()
+                .iter()
+                .any(|host| matches!(host, Host::Unix(_)))
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_unix_socket_url(_: &str) -> bool {
+    false
 }
 
 /// Builds a Postgres-backed metadata [`KvBackendRef`].
@@ -149,4 +184,50 @@ pub async fn build_postgres_election(
     )
     .await
     .context(error::KvBackendSnafu)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_unix_socket_url;
+
+    #[test]
+    fn detects_postgres_unix_socket_url() {
+        #[cfg(unix)]
+        {
+            // libpq keyword-value form (issue #7734)
+            assert!(is_unix_socket_url(
+                "host=/var/run/postgresql dbname=greptime user=greptime password=secret"
+            ));
+            // standard postgres URL with percent-encoded unix socket directory
+            assert!(is_unix_socket_url(
+                "postgresql://user:pw@%2Fvar%2Frun%2Fpostgresql/mydb"
+            ));
+            // postgres URL with socket dir in query param
+            assert!(is_unix_socket_url(
+                "postgresql:///mydb?host=%2Fvar%2Frun%2Fpostgresql"
+            ));
+            assert!(is_unix_socket_url(
+                "postgresql://user:secret@/mydb?host=%2Fvar%2Frun%2Fpostgresql"
+            ));
+
+            // TCP URLs should not be classified as unix socket
+            assert!(!is_unix_socket_url(
+                "postgresql://user:pw@localhost:5432/mydb"
+            ));
+            assert!(!is_unix_socket_url("postgresql://user@localhost/db"));
+            assert!(!is_unix_socket_url(
+                "host=127.0.0.1 port=5432 dbname=greptime user=greptime password=secret"
+            ));
+        }
+
+        #[cfg(not(unix))]
+        {
+            assert!(!is_unix_socket_url(
+                "host=/var/run/postgresql dbname=greptime user=greptime password=secret"
+            ));
+            assert!(!is_unix_socket_url(
+                "postgresql://user:pw@localhost:5432/mydb"
+            ));
+        }
+    }
 }
