@@ -27,7 +27,7 @@ use snafu::{Snafu, ensure};
 use store_api::storage::ColumnId;
 
 /// Identifies a column or a typed JSON object path within a column.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum IndexTarget {
     ColumnId(ColumnId),
     JsonPath {

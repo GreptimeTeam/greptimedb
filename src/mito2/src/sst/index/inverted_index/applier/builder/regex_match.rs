@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use datafusion_common::ScalarValue;
 use datafusion_expr::Expr as DfExpr;
 use index::inverted_index::search::predicate::{Predicate, RegexMatchPredicate};
 
@@ -22,23 +21,23 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 impl InvertedIndexApplierBuilder<'_> {
     /// Collects a regex match expression in the form of `column ~ pattern`.
     pub(crate) fn collect_regex_match(&mut self, column: &DfExpr, pattern: &DfExpr) -> Result<()> {
-        let Some(column_name) = Self::column_name(column) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(column)? else {
             return Ok(());
         };
         if !data_type.is_string() {
             return Ok(());
         }
-        let DfExpr::Literal(ScalarValue::Utf8(Some(pattern)), _) = pattern else {
+        let Some(pattern) = Self::nonnull_lit(pattern)
+            .and_then(|value| value.try_as_str())
+            .flatten()
+        else {
             return Ok(());
         };
 
         let predicate = Predicate::RegexMatch(RegexMatchPredicate {
-            pattern: pattern.clone(),
+            pattern: pattern.to_owned(),
         });
-        self.add_predicate(column_id, predicate);
+        self.add_predicate(target, predicate);
         Ok(())
     }
 }
@@ -74,7 +73,10 @@ mod tests {
             .collect_regex_match(&tag_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -102,7 +104,10 @@ mod tests {
             .collect_regex_match(&field_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(3))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

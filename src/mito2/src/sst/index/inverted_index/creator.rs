@@ -507,7 +507,7 @@ impl InvertedIndexer {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use api::v1::SemanticType;
     use datafusion_expr::{Expr as DfExpr, Operator, binary_expr, col, lit};
@@ -516,6 +516,7 @@ mod tests {
     use datatypes::value::ValueRef;
     use datatypes::vectors::{UInt8Vector, UInt64Vector};
     use futures::future::BoxFuture;
+    use index::inverted_index::search::predicate::{InListPredicate, Predicate};
     use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt};
     use object_store::ObjectStore;
     use object_store::services::Memory;
@@ -753,8 +754,9 @@ mod tests {
             }
             // JSON paths must not be advertised as ordinary column indexes.
             assert_eq!(creator.column_ids().count(), 0);
+            let store = mock_object_store();
             let manager = factory.build(
-                mock_object_store(),
+                store.clone(),
                 RegionFilePathFactory::new("table0".into(), PathType::Bare),
             );
             let index_id = RegionIndexId::new(RegionFileId::new(metadata.region_id, file_id), 0);
@@ -795,6 +797,64 @@ mod tests {
             // The value 2 belongs to a null parent and must not enter the FST.
             assert_eq!(fst.len(), 1);
             assert!(meta.null_bitmap_size > 0);
+            // A typed target can prune; absent or differently typed targets must keep all rows.
+            for (query_target, value, expected) in [
+                (target.clone(), 2, vec![]),
+                (target.clone(), 1, vec![0, 1]),
+                (
+                    IndexTarget::json_path(
+                        4,
+                        vec!["missing".into()],
+                        ConcreteDataType::int64_datatype(),
+                    )
+                    .unwrap(),
+                    2,
+                    vec![0, 1],
+                ),
+                (
+                    IndexTarget::json_path(
+                        4,
+                        vec!["value".into()],
+                        ConcreteDataType::uint64_datatype(),
+                    )
+                    .unwrap(),
+                    2,
+                    vec![0, 1],
+                ),
+            ] {
+                use crate::sst::index::inverted_index::applier::InvertedIndexApplier;
+                let mut bytes = Vec::new();
+                IndexValueCodec::encode_nonnull_value(
+                    ValueRef::Int64(value),
+                    &SortField::new(ConcreteDataType::int64_datatype()),
+                    &mut bytes,
+                )
+                .unwrap();
+                let predicates = BTreeMap::from([(
+                    query_target,
+                    vec![Predicate::InList(InListPredicate {
+                        list: BTreeSet::from([bytes]),
+                    })],
+                )]);
+                let applier = InvertedIndexApplier::new(
+                    "table0".into(),
+                    PathType::Bare,
+                    store.clone(),
+                    factory.clone(),
+                    predicates,
+                    BTreeMap::new(),
+                )
+                .unwrap();
+                let plan = applier.plan_for_sst(&metadata).unwrap().unwrap();
+                let output = applier
+                    .apply(index_id, None, &plan.index_applier, None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    output.matched_segment_ids.iter_ones().collect::<Vec<_>>(),
+                    expected
+                );
+            }
         }
     }
 

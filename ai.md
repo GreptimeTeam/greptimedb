@@ -207,6 +207,10 @@ JSON2 的物理字符串可使用 `Utf8View`，与 hint 声明的 `String` 共�
 
 每个 applier builder 按 `IndexTarget` 收集谓词。JSON 目标从当前 hint 定义获取 `data_type`，将其同时用于谓词值编码和 target key 生成。打开 blob 时，以 creator 产出的同一 target key 查找；若旧 SST 上同一路径的索引类型不同，则无法匹配该 key，回退扫描，不使用旧类型索引裁剪。普通列仍在键旁保留预期具体类型，并沿用与 SST `RegionMetadata` 比较类型的现有检查，不改变既有列键。
 
+第三阶段的倒排查询识别根列上的 `json_get` 精确对象路径，复用其现有路径解析。只接受返回类型与最新 hint 一致的访问（字符串允许不同 Arrow 布局）；优化器将 cast 合并为第三个类型参数时也遵守此检查。默认返回字符串的 `json_get` 不能直接使用数值 hint 的索引，改变值语义的转换回退扫描。
+
+倒排谓词及结果缓存使用完整 `IndexTarget`，区分根列、路径和类型。同一 target 的 OR 等值可合并，不同 target 的 OR 不裁剪。含 JSON target 的查询对 blob 内缺失目标采用 Ignore 策略，继续应用其余可用目标；全部缺失时保留全部候选段。纯普通列查询保留既有缺失目标策略。
+
 全文请求 map 也改为以 `IndexTarget` 为键。它在发起 blob 查找前必须确认解析的目标启用了全文选项，避免将未建索引 JSON 路径上的 `matches` 谓词当成已索引。
 
 未知 target 编码、blob 缺失、类型不匹配和目标解析失败均遵循现有保守行为：放弃该 SST 上的索引并正常扫描，绝不能丢弃行。
