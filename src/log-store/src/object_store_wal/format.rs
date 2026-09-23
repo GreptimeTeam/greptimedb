@@ -31,10 +31,9 @@ const FORMAT_VERSION: u16 = 1;
 /// sequences stay below `OBJECT_SEQ_LIMIT`, so it never names an object.
 const NO_PREDECESSOR: u64 = u64::MAX;
 
-/// Length of the object header: magic, version, object sequence, writer
-/// instance, epoch, predecessor sequence, predecessor writer instance and the
-/// CRC32 of the header.
-pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 16 + 8 + 8 + 16 + 4;
+/// Length of the object header: magic, version, object sequence, epoch,
+/// predecessor sequence, predecessor epoch and the CRC32 of the header.
+pub(crate) const HEADER_LEN: usize = 8 + 2 + 8 + 8 + 8 + 8 + 4;
 /// Length of the fixed trailer: footer offset, footer length, footer CRC32,
 /// object CRC32 and magic.
 pub(crate) const TRAILER_LEN: usize = 8 + 8 + 4 + 4 + 8;
@@ -49,19 +48,20 @@ const FOOTER_COUNT_LEN: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) object_seq: u64,
-    pub(crate) writer_instance: [u8; 16],
-    /// Epoch of the store instance that wrote the object.
+    /// Epoch of the store instance that wrote the object. Every open of a
+    /// store starts an epoch above every present object, so the epoch also
+    /// identifies the instance.
     pub(crate) epoch: u64,
     /// The object this object extends, `None` for the first object of a chain.
     pub(crate) prev: Option<ChainLink>,
 }
 
-/// Names the object another object extends: its sequence and the writer
-/// instance recorded in its header.
+/// Names the object another object extends: its sequence and the epoch
+/// recorded in its header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ChainLink {
     pub(crate) object_seq: u64,
-    pub(crate) writer_instance: [u8; 16],
+    pub(crate) epoch: u64,
 }
 
 /// A single WAL entry inside an object.
@@ -219,10 +219,9 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
         }
     );
     let object_seq = reader.u64("header")?;
-    let writer_instance = reader.instance("header")?;
     let epoch = reader.u64("header")?;
     let prev_object_seq = reader.u64("header")?;
-    let prev_writer_instance = reader.instance("header")?;
+    let prev_epoch = reader.u64("header")?;
     let header_crc32 = reader.u32("header")?;
     let checksum = crc32fast::hash(&bytes[..HEADER_LEN - 4]);
     ensure!(
@@ -233,11 +232,10 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<Header> {
     );
     let prev = (prev_object_seq != NO_PREDECESSOR).then_some(ChainLink {
         object_seq: prev_object_seq,
-        writer_instance: prev_writer_instance,
+        epoch: prev_epoch,
     });
     Ok(Header {
         object_seq,
-        writer_instance,
         epoch,
         prev,
     })
@@ -575,14 +573,13 @@ fn encode_header(header: &Header, output: &mut BytesMut) {
     output.put_slice(HEADER_MAGIC);
     output.put_u16(FORMAT_VERSION);
     output.put_u64(header.object_seq);
-    output.put_slice(&header.writer_instance);
     output.put_u64(header.epoch);
     let prev = header.prev.unwrap_or(ChainLink {
         object_seq: NO_PREDECESSOR,
-        writer_instance: [0; 16],
+        epoch: 0,
     });
     output.put_u64(prev.object_seq);
-    output.put_slice(&prev.writer_instance);
+    output.put_u64(prev.epoch);
     output.put_u32(crc32fast::hash(&output[start..]));
 }
 
@@ -709,13 +706,6 @@ impl<'a> Reader<'a> {
         ))
     }
 
-    fn instance(&mut self, part: &'static str) -> Result<[u8; 16]> {
-        Ok(self
-            .take(16, part)?
-            .try_into()
-            .expect("writer instance has sixteen bytes"))
-    }
-
     fn is_empty(&self) -> bool {
         self.offset == self.bytes.len()
     }
@@ -733,11 +723,10 @@ mod tests {
     fn header() -> Header {
         Header {
             object_seq: 42,
-            writer_instance: *b"writer-instance!",
             epoch: 5,
             prev: Some(ChainLink {
                 object_seq: 40,
-                writer_instance: *b"previous-writer!",
+                epoch: 4,
             }),
         }
     }
@@ -847,7 +836,7 @@ mod tests {
 
         // Every field after the version is covered by the header checksum,
         // which recovery verifies without reading the whole object.
-        for offset in [10, 18, 34, 42, 50, HEADER_LEN - 1] {
+        for offset in [10, 18, 26, 34, HEADER_LEN - 1] {
             let mut bad_field = encoded.bytes.to_vec();
             bad_field[offset] ^= 1;
             assert_corrupted(decode_header(&bad_field), "header checksum mismatch");
@@ -979,17 +968,16 @@ mod tests {
     /// to field order, endianness or checksum coverage fails this test even when
     /// the encoder and the decoder change together.
     const FIXTURE_V1_HEX: &str = concat!(
-        // Header: magic, version 1, object sequence 7, writer instance, epoch 3,
-        // predecessor sequence 6, predecessor writer instance, header CRC32.
+        // Header: magic, version 1, object sequence 7, epoch 3, predecessor
+        // sequence 6, predecessor epoch 2, header CRC32.
         "475457414c4f424a",
         "0001",
         "0000000000000007",
-        "7772697465722d666978747572652d31",
         "0000000000000003",
         "0000000000000006",
-        "7772697465722d666978747572652d30",
-        "34f40691",
-        // Segment of region 1 at offset 70: region id, entry count, then
+        "0000000000000002",
+        "1ca121b1",
+        // Segment of region 1 at offset 46: region id, entry count, then
         // (entry id, payload length, payload) per entry.
         "0000000100000001",
         "00000003",
@@ -1002,7 +990,7 @@ mod tests {
         "0000000000000003",
         "00000003",
         "636363",
-        // Segment of region 2 at offset 124.
+        // Segment of region 2 at offset 100.
         "0000000200000001",
         "00000002",
         "000000000000000a",
@@ -1011,28 +999,28 @@ mod tests {
         "000000000000000b",
         "00000002",
         "7979",
-        // Footer at offset 163: entry count, then per segment region id, min and
+        // Footer at offset 139: entry count, then per segment region id, min and
         // max entry id, entry count, segment offset, length and CRC32.
         "00000002",
         "0000000100000001",
         "0000000000000001",
         "0000000000000003",
         "00000003",
-        "0000000000000046",
+        "000000000000002e",
         "0000000000000036",
         "25ac0486",
         "0000000200000001",
         "000000000000000a",
         "000000000000000b",
         "00000002",
-        "000000000000007c",
+        "0000000000000064",
         "0000000000000027",
         "65dc08ec",
         // Trailer: footer offset, footer length, footer CRC32, object CRC32, magic.
-        "00000000000000a3",
+        "000000000000008b",
         "0000000000000064",
-        "cd9b4193",
-        "29e46d97",
+        "6b97e3e4",
+        "631bb7d1",
         "475457414c54524c",
     );
 
@@ -1065,11 +1053,10 @@ mod tests {
         let fixture = fixture_bytes();
         let header = Header {
             object_seq: 7,
-            writer_instance: *b"writer-fixture-1",
             epoch: 3,
             prev: Some(ChainLink {
                 object_seq: 6,
-                writer_instance: *b"writer-fixture-0",
+                epoch: 2,
             }),
         };
         let footer = vec![
@@ -1078,7 +1065,7 @@ mod tests {
                 min_entry_id: 1,
                 max_entry_id: 3,
                 entry_count: 3,
-                segment_offset: 70,
+                segment_offset: 46,
                 segment_len: 54,
                 segment_crc32: 0x25ac0486,
             },
@@ -1087,12 +1074,12 @@ mod tests {
                 min_entry_id: 10,
                 max_entry_id: 11,
                 entry_count: 2,
-                segment_offset: 124,
+                segment_offset: 100,
                 segment_len: 39,
                 segment_crc32: 0x65dc08ec,
             },
         ];
-        assert_eq!(295, fixture.len());
+        assert_eq!(271, fixture.len());
 
         let decoded = decode_object(&fixture).unwrap();
         assert_eq!(header, decoded.header);
@@ -1100,10 +1087,10 @@ mod tests {
         assert_eq!(fixture_records(), decoded.records);
         assert_eq!(
             FixedTrailer {
-                footer_offset: 163,
+                footer_offset: 139,
                 footer_len: 100,
-                footer_crc32: 0xcd9b4193,
-                object_crc32: 0x29e46d97,
+                footer_crc32: 0x6b97e3e4,
+                object_crc32: 0x631bb7d1,
             },
             decode_trailer(&fixture[fixture.len() - TRAILER_LEN..]).unwrap()
         );
