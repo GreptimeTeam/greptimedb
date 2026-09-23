@@ -52,9 +52,9 @@ on:
         default: /home/runner/benchmark-data
         required: true
       system_disk_gib:
-        description: System disk GiB (20..2048, default 500)
-        type: number
-        default: 500
+        description: 'System disk GiB: auto (or 0) = 80; enter 20..2048 to override'
+        type: string
+        default: auto
         required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
@@ -125,6 +125,9 @@ jobs:
         [[ "$BENCHMARK_ROOT" != /tmp && "$BENCHMARK_ROOT" != /tmp/* ]]
         [[ "$BENCHMARK_ROOT" != *$'\n'* && "$BENCHMARK_ROOT" != *$'\r'* ]]
         [[ "/${BENCHMARK_ROOT#/}/" != */../* && "/${BENCHMARK_ROOT#/}/" != */./* ]]
+        if [[ "$SYSTEM_DISK_GIB" == auto || "$SYSTEM_DISK_GIB" == 0 ]]; then
+          SYSTEM_DISK_GIB=80
+        fi
         for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
           [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers'; exit 1; }
         done

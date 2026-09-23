@@ -17,8 +17,10 @@ The current region is Singapore (`ap-southeast-1`). By default the script select
 the newest available Canonical Ubuntu 24.04 amd64 server AMI in that region
 (owner `099720109477`) and logs its ID. Set `BENCHMARK_EC2_IMAGE_ID` to pin a
 prepared Ubuntu AMI. Existing build CI's `EC2_RUNNER_LINUX_AMD64_IMAGE_ID` is
-unaffected. Both benchmark workflows default to 500 GiB for both providers;
-explicit disk overrides must be at least the selected AMI's root snapshot size.
+unaffected. Both workflows default `system_disk_gib` to `auto` (also accepting
+`0`): agent observability uses S=80, P=100, M=500 GiB, and long-range uses 80 GiB.
+These defaults are the same for both providers. Explicit values from 20 to 2048
+GiB override them and must be at least the selected AMI's root snapshot size.
 The official 24.04 image does not have the old custom AMI's 500 GiB minimum.
 
 AWS user data registers a fresh ephemeral runner. Git, curl, tar, and sudo are

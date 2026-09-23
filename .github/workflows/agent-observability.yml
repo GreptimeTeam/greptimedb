@@ -62,9 +62,9 @@ on:
         default: auto
         required: true
       system_disk_gib:
-        description: System disk GiB (default 500; 0 uses default)
-        type: number
-        default: 500
+        description: 'System disk GiB: auto (or 0) = S 80, P 100, M 500; enter 20..2048 to override'
+        type: string
+        default: auto
         required: true
       benchmark_timeout_minutes:
         description: Benchmark job timeout in minutes (1..360)
@@ -137,10 +137,14 @@ jobs:
           set -euo pipefail
           # Validate cloud lifecycle budgets before provisioning; runtime owns workload validation.
           case "$PROFILE" in
-            S|P|M) ;;
+            S) auto_disk_gib=80 ;;
+            P) auto_disk_gib=100 ;;
+            M) auto_disk_gib=500 ;;
             *) echo "Unknown dataset: $PROFILE" >&2; exit 1 ;;
           esac
-          [[ "$SYSTEM_DISK_GIB" != 0 ]] || SYSTEM_DISK_GIB=500
+          if [[ "$SYSTEM_DISK_GIB" == auto || "$SYSTEM_DISK_GIB" == 0 ]]; then
+            SYSTEM_DISK_GIB=$auto_disk_gib
+          fi
           for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
             [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers' >&2; exit 1; }
           done
