@@ -45,4 +45,13 @@ select sum(val) from t;
 explain analyze
 select sum(val) from t group by idc;
 
+insert into t values
+    (1000, 1, '1000-x', 'a'),
+    (1000, 2, '1000-y', 'a'),
+    (1000, 3, '2000-x', 'a'),
+    (1000, 4, '2000-y', 'a');
+
+-- group keys derived from the partition column span regions
+select substr(host, 6, 1) as g, count(*), sum(val) from t group by g order by g;
+
 drop table t;

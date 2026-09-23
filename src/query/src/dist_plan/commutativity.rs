@@ -348,26 +348,34 @@ impl Categorizer {
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
     ///
-    /// So only if all partition columns show up in `exprs`, return true.
+    /// So only if every partition column is itself one of `exprs`, return true.
     /// Otherwise return false.
     ///
+    /// An expression that only references a partition column, like `substr(host, 3, 1)`,
+    /// `k % 2` or a grouping set, doesn't count: it can put rows from different partitions
+    /// into the same group.
     fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
-        let mut ref_cols = HashSet::new();
-        for expr in exprs {
-            expr.add_column_refs(&mut ref_cols);
-        }
-        let ref_cols = ref_cols
-            .into_iter()
-            .map(|c| c.name.clone())
+        let group_cols = exprs
+            .iter()
+            .filter_map(|expr| {
+                let mut expr = expr;
+                while let Expr::Alias(alias) = expr {
+                    expr = &alias.expr;
+                }
+                match expr {
+                    Expr::Column(column) => Some(column.name.clone()),
+                    _ => None,
+                }
+            })
             .collect::<HashSet<_>>();
         for all_alias in partition_cols.values() {
             let all_alias = all_alias
                 .iter()
                 .map(|c| c.name.clone())
                 .collect::<HashSet<_>>();
-            // check if ref columns intersect with all alias of partition columns
+            // check if group columns intersect with all alias of partition columns
             // is empty, if it's empty, not all partition columns show up in `exprs`
-            if ref_cols.intersection(&all_alias).count() == 0 {
+            if group_cols.intersection(&all_alias).count() == 0 {
                 return false;
             }
         }
