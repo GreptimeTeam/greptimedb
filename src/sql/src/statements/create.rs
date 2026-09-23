@@ -933,7 +933,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "service.name" STRING,
-                "a.b"."c" INT64,
+                "a.b"."c" BIGINT,
                 a."b.c" STRING
             ),
             ts TIMESTAMP TIME INDEX
@@ -977,7 +977,7 @@ ENGINE=mito
     fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64,
+                status_code BIGINT,
                 max_auto_expanded_paths = 1
             ),
             ts TIMESTAMP TIME INDEX
@@ -1003,7 +1003,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "1abc" STRING,
-                a."2b" INT64
+                a."2b" BIGINT
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1045,8 +1045,8 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_default() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 DEFAULT -5,
-                duration FLOAT64 DEFAULT +1.5,
+                status_code BIGINT DEFAULT -5,
+                duration DOUBLE DEFAULT +1.5,
                 error BOOLEAN DEFAULT false,
                 message STRING DEFAULT 'unknown'
             ),
@@ -1062,7 +1062,7 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_not_null() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 NOT NULL DEFAULT NULL
+                status_code BIGINT NOT NULL DEFAULT NULL
             ),
             ts TIMESTAMP TIME INDEX
         )"#;

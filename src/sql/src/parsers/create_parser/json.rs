@@ -25,7 +25,6 @@ use crate::dialect::GreptimeDbDialect;
 use crate::error::{InvalidSqlSnafu, Result, SyntaxSnafu};
 use crate::parsers::create_parser::{INVERTED, SKIPPING};
 use crate::statements::create::{Json2Options, JsonTypeHint};
-use crate::statements::transform::type_alias::get_type_by_alias;
 
 const JSON2_TYPE_NAME: &str = "JSON2";
 const MAX_AUTO_EXPANDED_PATHS: &str = "max_auto_expanded_paths";
@@ -155,7 +154,7 @@ fn parse_json2_type_hint(parser: &mut Parser<'_>) -> Result<JsonTypeHint> {
         }
     );
     let data_type = parser.parse_data_type().context(SyntaxSnafu)?;
-    let data_type = normalize_json2_type_hint_type(data_type)?;
+    let data_type = validate_json2_type_hint_type(data_type)?;
 
     let mut inverted_index = false;
 
@@ -238,35 +237,20 @@ fn parse_json2_path(parser: &mut Parser<'_>) -> Result<Vec<String>> {
     Ok(path)
 }
 
-fn normalize_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
-    let data_type = get_type_by_alias(&data_type).unwrap_or(data_type);
-    let normalized = match data_type {
-        DataType::String(_) | DataType::Text | DataType::Varchar(_) | DataType::Char(_) => {
-            DataType::String(None)
+fn validate_json2_type_hint_type(data_type: DataType) -> Result<DataType> {
+    match data_type {
+        DataType::String(None)
+        | DataType::BigInt(None)
+        | DataType::BigIntUnsigned(None)
+        | DataType::Double(ExactNumberInfo::None)
+        | DataType::Boolean => Ok(data_type),
+        _ => InvalidSqlSnafu {
+            msg: format!(
+                "unsupported JSON2 type hint data type: {data_type}; supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN"
+            ),
         }
-        DataType::TinyInt(_)
-        | DataType::SmallInt(_)
-        | DataType::Int(_)
-        | DataType::Integer(_)
-        | DataType::BigInt(_) => DataType::BigInt(None),
-        DataType::TinyIntUnsigned(_)
-        | DataType::SmallIntUnsigned(_)
-        | DataType::IntUnsigned(_)
-        | DataType::UnsignedInteger
-        | DataType::BigIntUnsigned(_) => DataType::BigIntUnsigned(None),
-        DataType::Float(_) | DataType::Real | DataType::Double(_) => {
-            DataType::Double(ExactNumberInfo::None)
-        }
-        DataType::Boolean => DataType::Boolean,
-        _ => {
-            return InvalidSqlSnafu {
-                msg: format!("unsupported JSON2 type hint data type: {data_type}"),
-            }
-            .fail();
-        }
-    };
-
-    Ok(normalized)
+        .fail(),
+    }
 }
 
 fn ensure_no_path_conflict(hints: &[JsonTypeHint], path: &[String]) -> Result<()> {
@@ -330,7 +314,7 @@ CREATE TABLE traces (
     log_json_data JSON2 (
         "service.name" STRING INVERTED INDEX,
         http.method STRING,
-        status_code INT64,
+        status_code BIGINT,
         comment STRING,
     ),
     ts TIMESTAMP TIME INDEX,
@@ -463,40 +447,76 @@ CREATE TABLE traces (
     }
 
     #[test]
-    fn test_parse_json2_type_hint_normalizes_numeric_types() {
-        let column = parse_json2_column(
-            r#"
-CREATE TABLE traces (
-    log_json_data JSON2 (
-        tinyint_value TINYINT,
-        smallint_value SMALLINT,
-        int_value INT,
-        integer_value INTEGER,
-        bigint_value BIGINT,
-        int64_value INT64,
-        tinyuint_value TINYINT UNSIGNED,
-        smalluint_value SMALLINT UNSIGNED,
-        uint_value INT UNSIGNED,
-        uint64_value UINT64,
-        float_value FLOAT,
-        real_value REAL,
-        double_value DOUBLE,
-        float64_value FLOAT64
-    ),
-    ts TIMESTAMP TIME INDEX,
-)"#,
-        );
+    fn test_parse_json2_type_hint_supported_types() {
+        for (sql_type, expected) in [
+            ("STRING", DataType::String(None)),
+            ("BIGINT", DataType::BigInt(None)),
+            ("BIGINT UNSIGNED", DataType::BigIntUnsigned(None)),
+            ("DOUBLE", DataType::Double(ExactNumberInfo::None)),
+            ("BOOLEAN", DataType::Boolean),
+        ] {
+            for sql_type in [sql_type.to_string(), sql_type.to_lowercase()] {
+                let column = parse_json2_column(&format!(
+                    "CREATE TABLE traces (j JSON2 (value {sql_type}), ts TIMESTAMP TIME INDEX)"
+                ));
+                let options = column.extensions.json2_options.unwrap();
+                let settings = options.build_json_settings().unwrap();
+                assert_eq!(settings.type_hints().len(), 1);
+                let hints = options.type_hints;
+                assert_eq!(hints[0].data_type, expected);
+            }
+        }
+    }
 
-        let hints = column.extensions.json2_options.unwrap().type_hints;
-        assert_eq!(hints.len(), 14);
-        for hint in hints.iter().take(6) {
-            assert_eq!(hint.data_type, DataType::BigInt(None));
-        }
-        for hint in hints.iter().skip(6).take(4) {
-            assert_eq!(hint.data_type, DataType::BigIntUnsigned(None));
-        }
-        for hint in hints.iter().skip(10) {
-            assert_eq!(hint.data_type, DataType::Double(ExactNumberInfo::None));
+    #[test]
+    fn test_parse_json2_type_hint_rejects_unsupported_types() {
+        for sql_type in [
+            "INT8",
+            "INT16",
+            "INT32",
+            "INT64",
+            "TINYINT",
+            "SMALLINT",
+            "INT",
+            "INTEGER",
+            "UINT8",
+            "UINT16",
+            "UINT32",
+            "UINT64",
+            "TINYINT UNSIGNED",
+            "SMALLINT UNSIGNED",
+            "INT UNSIGNED",
+            "FLOAT",
+            "REAL",
+            "FLOAT32",
+            "FLOAT64",
+            "TEXT",
+            "VARCHAR(10)",
+            "CHAR(10)",
+            "TIMESTAMP",
+            "DECIMAL(10, 2)",
+            "STRING(10)",
+            "BIGINT(10)",
+        ] {
+            for sql in [
+                format!(
+                    "CREATE TABLE traces (j JSON2 (value {sql_type}), ts TIMESTAMP TIME INDEX)"
+                ),
+                format!("ALTER TABLE traces MODIFY COLUMN j JSON2 (value {sql_type})"),
+            ] {
+                let err = ParserContext::create_with_dialect(
+                    &sql,
+                    &GreptimeDbDialect {},
+                    ParseOptions::default(),
+                )
+                .unwrap_err();
+                assert!(
+                    err.to_string().contains(
+                        "supported types: STRING, BIGINT, BIGINT UNSIGNED, DOUBLE, BOOLEAN"
+                    ),
+                    "{sql}: {err}"
+                );
+            }
         }
     }
 
@@ -504,7 +524,7 @@ CREATE TABLE traces (
     fn test_parse_json2_type_hint_rejects_default() {
         for default in ["-5", "abs(-1)"] {
             let sql = format!(
-                "CREATE TABLE traces (log_json_data JSON2 (status_code INT64 DEFAULT {default}), ts TIMESTAMP TIME INDEX)"
+                "CREATE TABLE traces (log_json_data JSON2 (status_code BIGINT DEFAULT {default}), ts TIMESTAMP TIME INDEX)"
             );
             let err = ParserContext::create_with_dialect(
                 &sql,
@@ -521,7 +541,7 @@ CREATE TABLE traces (
         let result = ParserContext::create_with_dialect(
             r#"
 CREATE TABLE traces (
-    log_json_data JSON2 (a.b STRING, a.b INT64),
+    log_json_data JSON2 (a.b STRING, a.b BIGINT),
     ts TIMESTAMP TIME INDEX,
 )"#,
             &GreptimeDbDialect {},
@@ -537,7 +557,7 @@ CREATE TABLE traces (
         let result = ParserContext::create_with_dialect(
             r#"
 CREATE TABLE traces (
-    log_json_data JSON2 (a STRING, a.b INT64),
+    log_json_data JSON2 (a STRING, a.b BIGINT),
     ts TIMESTAMP TIME INDEX,
 )"#,
             &GreptimeDbDialect {},
