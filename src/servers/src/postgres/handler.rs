@@ -82,6 +82,10 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         let parsed_query = self.query_parser.compatibility_parser.parse(query);
 
         let query = if let Ok(statements) = &parsed_query {
+            // Comments, whitespace and empty statements also require EmptyQueryResponse.
+            if statements.is_empty() {
+                return Ok(vec![Response::EmptyQuery]);
+            }
             statements
                 .iter()
                 .map(|s| s.to_string())
@@ -335,6 +339,9 @@ impl QueryParser for DefaultQueryParser {
 
         let parsed_statements = self.compatibility_parser.parse(sql);
         let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
+            if statements.is_empty() {
+                return Ok(None);
+            }
             let first_stmt = statements.remove(0);
             let format = check_copy_to_stdout(&first_stmt);
             (first_stmt.to_string(), format)

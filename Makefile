@@ -212,12 +212,12 @@ sqlness-test: ## Run sqlness test.
 RUNS ?= 1
 FUZZ_TARGET ?= fuzz_alter_table
 .PHONY: fuzz
-fuzz: ## Run fuzz test ${FUZZ_TARGET}.
-	cargo fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
+fuzz: ## Run fuzz test ${FUZZ_TARGET} (requires a nightly toolchain).
+	cargo +nightly fuzz run ${FUZZ_TARGET} --fuzz-dir tests-fuzz -D -s none -- -runs=${RUNS}
 
 .PHONY: fuzz-ls
-fuzz-ls: ## List all fuzz targets.
-	cargo fuzz list --fuzz-dir tests-fuzz
+fuzz-ls: ## List all fuzz targets (requires a nightly toolchain).
+	cargo +nightly fuzz list --fuzz-dir tests-fuzz
 
 .PHONY: check
 check: ## Cargo check all the targets.

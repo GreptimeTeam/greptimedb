@@ -1,0 +1,181 @@
+CREATE TABLE matching_groups_left (
+  host STRING NULL,
+  "zone" STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, "zone")
+);
+
+Affected Rows: 0
+
+CREATE TABLE matching_groups_right (
+  host STRING NULL,
+  "zone" STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, "zone")
+);
+
+Affected Rows: 0
+
+INSERT INTO matching_groups_left VALUES
+  ('x', 'a', 0, 12), ('x', 'b', 0, 24), ('y', 'a', 0, 36),
+  ('', 'a', 0, 48), (NULL, 'a', 0, 60);
+
+Affected Rows: 5
+
+INSERT INTO matching_groups_right VALUES
+  ('x', 'a', 0, 2), ('x', 'b', 0, 4), ('y', 'a', 0, 100),
+  ('', 'a', 0, 8), (NULL, 'a', 0, 10);
+
+Affected Rows: 5
+
+-- The result labels are the right operand's tag set rather than what the modifier implies
+-- (#9207), so `zone` is absent wherever the right side aggregates it away and rows differing
+-- only by it are indistinguishable.
+-- Filtering whole ranking partitions preserves the aggregate and scalar arithmetic.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') (8 * matching_groups_left{host="x"}) / on(host) group_left topk by(host)(1, max by(host)(matching_groups_right));
+
++------+---------------------+--------------------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.Float64(8) * greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+---------------------+--------------------------------------------------------------------------------------------------------------------+
+| x    | 1970-01-01T00:00:00 | 24.0                                                                                                               |
+| x    | 1970-01-01T00:00:00 | 48.0                                                                                                               |
++------+---------------------+--------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') sum by(host)(matching_groups_left) / on(host) group_right() (matching_groups_right{host="x"} * 2);
+
++------+------+---------------------+-------------------------------------------------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.sum(matching_groups_left.greptime_value) / matching_groups_right.greptime_value * Float64(2) |
++------+------+---------------------+-------------------------------------------------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 9.0                                                                                                               |
+| x    | b    | 1970-01-01T00:00:00 | 4.5                                                                                                               |
++------+------+---------------------+-------------------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host!="y"} / on(host) group_left max by(host)(matching_groups_right);
+
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+| x    | 1970-01-01T00:00:00 | 3.0                                                                                                   |
+| x    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host=~"x|y"} / on(host) group_left max by(host)(matching_groups_right);
+
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+| x    | 1970-01-01T00:00:00 | 3.0                                                                                                   |
+| x    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+| y    | 1970-01-01T00:00:00 | 0.36                                                                                                  |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host=""} / on(host) group_left max by(host)(matching_groups_right);
+
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host!~"x|y"} / on(host) group_left max by(host)(matching_groups_right);
+
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | 1970-01-01T00:00:00 | 6.0                                                                                                   |
++------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+-- bottomk partitions by host when zone is excluded from grouping.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') bottomk without(zone)(1, matching_groups_left) / on(host,zone) matching_groups_right{host="x"};
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
+-- A matcher can leave a global ranking operand without changing its candidates.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') topk(1, matching_groups_left{host="x"}) / on(host,zone) matching_groups_right;
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | b    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left / on(host,zone) bottomk(1, matching_groups_right{host="x"});
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
+-- The global winner is host y. Pushing host=x below either topk would change the result.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk(1, max by(host)(matching_groups_right));
+
++------+----+-------------------------------------------------------------------------------------------------------+
+| host | ts | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+----+-------------------------------------------------------------------------------------------------------+
++------+----+-------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk by(host)(1, topk(1, max by(host)(matching_groups_right)));
+
++------+----+-------------------------------------------------------------------------------------------------------+
+| host | ts | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+----+-------------------------------------------------------------------------------------------------------+
++------+----+-------------------------------------------------------------------------------------------------------+
+
+-- Both one-sides carry two series per `host`. Prometheus rejects this with "many-to-many
+-- matching not allowed: matching labels must be unique on one side"; GreptimeDB has no
+-- cardinality check (#9209) and returns the cross product. The rewrite leaves these operands
+-- alone, so the recorded output is the unchanged baseline.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left matching_groups_right;
+
++------+------+---------------------+----------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.greptime_value |
++------+------+---------------------+----------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 12.0                                                                       |
+| x    | a    | 1970-01-01T00:00:00 | 6.0                                                                        |
+| x    | b    | 1970-01-01T00:00:00 | 3.0                                                                        |
+| x    | b    | 1970-01-01T00:00:00 | 6.0                                                                        |
++------+------+---------------------+----------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left max by(host,zone)(matching_groups_right);
+
++------+------+---------------------+-------------------------------------------------------------------------------------------------------+
+| host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
++------+------+---------------------+-------------------------------------------------------------------------------------------------------+
+| x    | a    | 1970-01-01T00:00:00 | 12.0                                                                                                  |
+| x    | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+| x    | b    | 1970-01-01T00:00:00 | 3.0                                                                                                   |
+| x    | b    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
++------+------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+DROP TABLE matching_groups_left;
+
+Affected Rows: 0
+
+DROP TABLE matching_groups_right;
+
+Affected Rows: 0
+

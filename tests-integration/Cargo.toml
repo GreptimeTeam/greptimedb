@@ -65,7 +65,7 @@ hyper-util = { workspace = true, features = ["tokio"] }
 log-query = { workspace = true }
 loki-proto.workspace = true
 meta-client.workspace = true
-meta-srv.workspace = true
+meta-srv = { workspace = true, features = ["mock"] }
 mito2.workspace = true
 object-store.workspace = true
 operator.workspace = true
@@ -111,7 +111,6 @@ hex.workspace = true
 http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
-meta-srv = { workspace = true, features = ["mock"] }
 mito2 = { workspace = true, features = ["test", "test-shared-fs-region-migration"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",

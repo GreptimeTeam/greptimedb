@@ -17,6 +17,7 @@ use snafu::{OptionExt, ensure};
 use store_api::storage::ColumnId;
 
 use crate::error::{InvalidSparsePrimaryKeySnafu, Result};
+use crate::row_converter::encoded_string_len;
 use crate::row_converter::sparse::{
     COLUMN_ID_ENCODE_SIZE, RESERVED_COLUMN_ID_TABLE_ID, RESERVED_COLUMN_ID_TSID,
     SparseOffsetsCache, TABLE_ID_VALUE_OFFSET, TAGS_START_OFFSET, TSID_VALUE_OFFSET,
@@ -141,45 +142,13 @@ impl<'a, 'b> SparsePrimaryKeyView<'a, 'b> {
 /// Finds the end of an Option<String> without allocating or reading its payload.
 /// Unlike memcomparable's skip_bytes, all advances are checked for truncated input.
 fn encoded_label(bytes: &[u8]) -> Result<&[u8]> {
-    match bytes.first() {
-        Some(0) => return Ok(&bytes[..1]),
-        Some(1) => {}
-        _ => {
-            return InvalidSparsePrimaryKeySnafu {
-                reason: "invalid label null marker",
-            }
-            .fail();
+    let len = encoded_string_len(bytes).map_err(|error| {
+        InvalidSparsePrimaryKeySnafu {
+            reason: error.to_string(),
         }
-    }
-    match bytes.get(1) {
-        Some(0) => return Ok(&bytes[..2]),
-        Some(1) => {}
-        _ => {
-            return InvalidSparsePrimaryKeySnafu {
-                reason: "invalid label bytes marker",
-            }
-            .fail();
-        }
-    }
-    let mut end = 2;
-    loop {
-        let chunk = bytes
-            .get(end..end + 9)
-            .context(InvalidSparsePrimaryKeySnafu {
-                reason: "truncated label chunk",
-            })?;
-        end += 9;
-        match chunk[8] {
-            1..=8 => return Ok(&bytes[..end]),
-            9 => {}
-            _ => {
-                return InvalidSparsePrimaryKeySnafu {
-                    reason: "invalid label chunk length",
-                }
-                .fail();
-            }
-        }
-    }
+        .build()
+    })?;
+    Ok(&bytes[..len])
 }
 
 #[cfg(test)]
