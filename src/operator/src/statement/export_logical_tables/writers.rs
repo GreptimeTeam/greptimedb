@@ -35,13 +35,16 @@ const PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) struct ExportWriteBudget {
     writers: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    max_writers: usize,
 }
 
 impl ExportWriteBudget {
     pub(crate) fn new(parallelism: usize) -> Arc<Self> {
+        let max_writers = parallelism.max(1);
         Arc::new(Self {
-            writers: Arc::new(Semaphore::new(parallelism.max(1))),
+            writers: Arc::new(Semaphore::new(max_writers)),
             bytes: Arc::new(Semaphore::new(PAYLOAD_BYTES)),
+            max_writers,
         })
     }
 
@@ -145,10 +148,8 @@ impl TableWriters {
     ) -> Result<()> {
         // EOF must precede acquiring the next slot, including when P is one.
         self.close_input();
-        while let Some(Some(result)) = self.tasks.next().now_or_never() {
-            result.context(error::JoinTaskSnafu)??;
-        }
         let permit = self.budget.writer(token).await?;
+        self.reap_for_admission(token).await?;
         let writer = ActiveWriter::open(table, store, limits).await?;
         let (sender, receiver) = mpsc::channel(2);
         self.current = Some((id, sender));
@@ -162,6 +163,22 @@ impl TableWriters {
             }
             result
         }));
+        Ok(())
+    }
+
+    async fn reap_for_admission(&mut self, token: &CancellationToken) -> Result<()> {
+        while let Some(Some(result)) = self.tasks.next().now_or_never() {
+            result.context(error::JoinTaskSnafu)??;
+        }
+        // A worker can release its permit before its JoinHandle becomes ready.
+        while self.tasks.len() > self.budget.max_writers {
+            let result = tokio::select! {
+                biased;
+                _ = token.cancelled() => return error::LogicalTableExportCancelledSnafu.fail(),
+                result = self.tasks.next() => result.expect("writer task queue is not empty"),
+            };
+            result.context(error::JoinTaskSnafu)??;
+        }
         Ok(())
     }
 
@@ -247,4 +264,47 @@ async fn run_writer(
         }
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::oneshot;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn released_permit_does_not_hide_pending_join_handles() {
+        for parallelism in [1, 4] {
+            let budget = ExportWriteBudget::new(parallelism);
+            let token = CancellationToken::new();
+            let mut writers = TableWriters::new(budget.clone());
+            let mut resume = Vec::new();
+            for _ in 0..=parallelism {
+                let permit = budget.writer(&token).await.unwrap();
+                let (released_tx, released_rx) = oneshot::channel();
+                let (resume_tx, resume_rx) = oneshot::channel();
+                writers.tasks.push(common_runtime::spawn_global(async move {
+                    drop(permit);
+                    released_tx.send(()).unwrap();
+                    resume_rx.await.unwrap();
+                    Ok(())
+                }));
+                released_rx.await.unwrap();
+                resume.push(resume_tx);
+            }
+            assert_eq!(budget.available().0, parallelism);
+
+            let mut reap = Box::pin(writers.reap_for_admission(&token));
+            assert!(reap.as_mut().now_or_never().is_none());
+            resume.pop().unwrap().send(()).unwrap();
+            reap.await.unwrap();
+            assert_eq!(writers.pending_tasks(), parallelism);
+
+            for tx in resume {
+                tx.send(()).unwrap();
+            }
+            writers.drain(Ok(()), &token).await.unwrap();
+            assert_eq!(budget.available().0, parallelism);
+        }
+    }
 }
