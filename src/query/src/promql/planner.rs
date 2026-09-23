@@ -62,6 +62,7 @@ use datafusion_expr::{
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
+use futures::StreamExt;
 use itertools::Itertools;
 use once_cell::sync::Lazy;
 use promql::extension_plan::{
@@ -97,7 +98,7 @@ use regex::{self, Regex};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::{
     DATA_SCHEMA_TABLE_ID_COLUMN_NAME, DATA_SCHEMA_TSID_COLUMN_NAME, LOGICAL_TABLE_METADATA_KEY,
-    METRIC_ENGINE_NAME, is_metric_engine_internal_column,
+    METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY, is_metric_engine_internal_column,
 };
 use table::table::adapter::DfTableProviderAdapter;
 
@@ -112,9 +113,10 @@ use crate::promql::error::{
     MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
     Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
     UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    UnsupportedMatcherOpSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
-    ZeroRangeSelectorSnafu,
+    UnsupportedMatcherOpSnafu, UnsupportedMetricUnionSnafu, UnsupportedVectorMatchSnafu,
+    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
+use crate::promql::query_context_metric_names;
 use crate::query_engine::QueryEngineState;
 
 /// `time()` function in PromQL.
@@ -158,8 +160,35 @@ const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
+/// The maximum number of candidate metric tables one metric name union plans.
+///
+/// Kept in sync with the protocol layer's `MAX_METRICS_NUM`, which bounds the candidate set it
+/// resolves and authorizes; the catalog fallback of SQL and TQL applies the same bound so a
+/// broad matcher cannot build an unbounded number of union branches.
+const MAX_METRIC_NAME_UNION_CANDIDATES: usize = 1024;
+
 /// Interval 1 hour in millisecond
 const INTERVAL_1H: i64 = 60 * 60 * 1000;
+
+/// Returns whether `data_type` is one of the numeric types the PromQL planner widens to `Float64`.
+///
+/// Shared by [`PromPlanner::union_field_type`] and [`PromPlanner::or_operator`] so both decide
+/// numeric-ness the same way.
+fn is_numeric_arrow_type(data_type: &ArrowDataType) -> bool {
+    matches!(
+        data_type,
+        ArrowDataType::Int8
+            | ArrowDataType::Int16
+            | ArrowDataType::Int32
+            | ArrowDataType::Int64
+            | ArrowDataType::UInt8
+            | ArrowDataType::UInt16
+            | ArrowDataType::UInt32
+            | ArrowDataType::UInt64
+            | ArrowDataType::Float32
+            | ArrowDataType::Float64
+    )
+}
 
 #[derive(Default, Debug, Clone)]
 struct PromPlannerContext {
@@ -196,6 +225,18 @@ struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+    /// Metric table names resolved by the caller for a non-equality `__name__` matcher.
+    ///
+    /// The caller (protocol layer) discovers, filters and authorizes these tables before
+    /// planning; the planner only scans them. The list is consumed by the first selector that
+    /// needs it, so it never applies to a separate selector of the same query.
+    metric_names: Option<Vec<String>>,
+    /// Authorized metric names consumed for the selector currently being planned.
+    ///
+    /// Matching-filter propagation can re-plan that selector after another operand is planned.
+    /// Retain its candidates so the re-plan never falls back to catalog enumeration and widens
+    /// authorization.
+    selector_metric_names: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -392,6 +433,9 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
+        self.selector_metric_names = None;
+        // `metric_names` is query scoped, not selector scoped: a query may plan a selector with
+        // an equality matcher before the selector that consumes the resolved metric tables.
     }
 
     /// Reset table name and schema to empty
@@ -416,6 +460,47 @@ pub struct PromPlanner {
 
 type BinaryFieldPair<'a> = (&'a String, &'a String);
 
+/// How a selector is planned, decided by [`PromPlanner::preprocess_label_matchers`].
+enum SelectorPlanMode {
+    /// The usual selector on a single metric table.
+    SingleTable(Matchers),
+    /// A `__name__` non-equality matcher whose candidate metric tables were resolved by the
+    /// caller. Every candidate is scanned and the branches are combined with `UNION ALL`.
+    MetricNameUnion {
+        matchers: Matchers,
+        metric_names: Vec<String>,
+    },
+}
+
+/// Result of planning a metric name union selector.
+enum UnionSelectorPlan {
+    /// The combined plan of every candidate metric table.
+    Union(LogicalPlan),
+    /// The candidates observe an empty metric, so the selector has no rows at all.
+    Empty(LogicalPlan),
+}
+
+/// One scanned candidate metric table of a metric name union, with the schema it exposes.
+struct UnionBranchScan {
+    metric_name: String,
+    field_columns: Vec<String>,
+    tag_columns: Vec<String>,
+    time_index_column: String,
+    plan: LogicalPlan,
+}
+
+impl UnionBranchScan {
+    /// Returns the type of a label column, or `None` when this branch has no such label.
+    fn optional_column_type(&self, column: &str) -> Option<ArrowDataType> {
+        self.plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| field.name() == column)
+            .map(|field| field.data_type().clone())
+    }
+}
+
 impl PromPlanner {
     pub async fn stmt_to_plan(
         table_provider: DfTableSourceProvider,
@@ -437,6 +522,7 @@ impl PromPlanner {
             ctx: PromPlannerContext::from_eval_stmt(stmt),
             promql_annotations,
         };
+        planner.ctx.metric_names = query_context_metric_names(planner.table_provider.query_ctx());
 
         let plan = planner
             .prom_expr_to_plan(&stmt.expr, query_engine_state)
@@ -636,6 +722,11 @@ impl PromPlanner {
                 .labels
                 .iter()
                 .filter(|label| !is_metric_engine_internal_column(label.as_str()))
+                // A grouping label the input's label set does not carry is empty for every
+                // series, so it needs no physical column. Re-adding it from a lower plan node
+                // would group by a label the query already dropped — `count by(__name__)`
+                // over an arithmetic expression must report one group, not one per metric.
+                .filter(|label| self.ctx.tag_columns.contains(*label))
                 .cloned()
                 .collect(),
             Some(LabelModifier::Exclude(labels)) => {
@@ -643,6 +734,7 @@ impl PromPlanner {
                 for label in &labels.labels {
                     let _ = all_tags.remove(label);
                 }
+                let _ = all_tags.remove(METRIC_NAME);
                 all_tags
             }
         };
@@ -856,7 +948,7 @@ impl PromPlanner {
 
         if self.all_field_columns_are_native_histograms(input.schema()) {
             let promql_annotations = self.promql_annotations.clone();
-            let input = self.projection_for_each_field_column(input, |col| {
+            let input = self.projection_for_each_field_column(input, false, |col| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramDrop::float_null_udf(
                         format!(
@@ -960,7 +1052,8 @@ impl PromPlanner {
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
         let input_schema = input.schema().clone();
-        self.projection_for_each_field_column(input, |col| {
+        // Negation is an arithmetic operation: it drops the metric name.
+        self.projection_for_each_field_column(input, true, |col| {
             if Self::field_column_is_native_histogram(&input_schema, col) {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramNeg::scalar_udf()),
@@ -1258,7 +1351,10 @@ impl PromPlanner {
         self.ctx = base_ctx.clone();
 
         let schema = input.schema();
-        let non_field_exprs = base_ctx
+        self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
+        self.ctx.field_columns = field_exprs.names;
+        let non_field_exprs = self
+            .ctx
             .tag_columns
             .iter()
             .chain(base_ctx.time_index_column.iter())
@@ -1272,7 +1368,6 @@ impl PromPlanner {
             .into_iter()
             .map(Ok);
 
-        self.ctx.field_columns = field_exprs.names;
         let field_exprs = field_exprs
             .exprs
             .into_iter()
@@ -1424,8 +1519,11 @@ impl PromPlanner {
                 if is_comparison_op && !should_return_bool {
                     self.filter_on_field_column(input, bin_expr_builder)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(input, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        input,
+                        !is_comparison_op || should_return_bool,
+                        bin_expr_builder,
+                    )?;
                     self.filter_binary_projection(
                         projected,
                         has_native_histogram,
@@ -1491,8 +1589,11 @@ impl PromPlanner {
                 if is_comparison_op && !should_return_bool {
                     self.filter_on_field_column(input, bin_expr_builder)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(input, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        input,
+                        !is_comparison_op || should_return_bool,
+                        bin_expr_builder,
+                    )?;
                     self.filter_binary_projection(
                         projected,
                         has_native_histogram,
@@ -1534,6 +1635,13 @@ impl PromPlanner {
                     // re-planned context keeps the matchers the operand was written with.
                     if rewritten.lhs.as_ref() != lhs.as_ref() {
                         let selectors = std::mem::take(&mut left_context.selector_matcher);
+                        // Replanning a selector must retain exactly the candidates authorized
+                        // for its original scan; catalog enumeration could include denied
+                        // tables. A plain selector consumed no candidates, so its re-plan
+                        // leaves the pending query-scoped set for the selectors after it.
+                        if let Some(candidates) = left_context.selector_metric_names.clone() {
+                            self.ctx.metric_names = Some(candidates);
+                        }
                         left_input = self
                             .prom_expr_to_plan(&rewritten.lhs, query_engine_state)
                             .await?;
@@ -1542,6 +1650,10 @@ impl PromPlanner {
                     }
                     if rewritten.rhs.as_ref() != rhs.as_ref() {
                         let selectors = std::mem::take(&mut right_context.selector_matcher);
+                        // See the left-hand re-plan above.
+                        if let Some(candidates) = right_context.selector_metric_names.clone() {
+                            self.ctx.metric_names = Some(candidates);
+                        }
                         right_input = self
                             .prom_expr_to_plan(&rewritten.rhs, query_engine_state)
                             .await?;
@@ -1778,8 +1890,11 @@ impl PromPlanner {
                     project_context.field_columns = project_field_columns;
                     self.project_binary_join_side(filtered, project_table_ref, &project_context)
                 } else {
-                    let projected =
-                        self.projection_for_each_field_column(join_plan, bin_expr_builder)?;
+                    let projected = self.projection_for_each_field_column(
+                        join_plan,
+                        !is_comparison_op || should_return_bool,
+                        bin_expr_builder,
+                    )?;
                     let preserve_any_value = Self::field_columns_are_alternative_samples(
                         projected.schema(),
                         &self.ctx.field_columns,
@@ -1980,18 +2095,35 @@ impl PromPlanner {
             matchers,
             at: _,
         } = vector_selector;
-        let matchers = self.preprocess_label_matchers(matchers, name)?;
-        if let Some(empty_plan) = self.setup_context().await? {
-            return Ok(empty_plan);
-        }
+        let mode = self.preprocess_label_matchers(matchers, name).await?;
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         };
-        let normalize = self
-            .selector_to_series_normalize_plan(offset, matchers, false)
-            .await?;
+        let normalize = match mode {
+            SelectorPlanMode::SingleTable(matchers) => {
+                if let Some(empty_plan) = self.setup_context().await? {
+                    return Ok(empty_plan);
+                }
+                self.selector_to_series_normalize_plan(offset, matchers, false)
+                    .await?
+            }
+            SelectorPlanMode::MetricNameUnion {
+                matchers,
+                metric_names,
+            } => {
+                match self
+                    .selector_union_to_series_normalize_plan(offset, matchers, metric_names, false)
+                    .await?
+                {
+                    UnionSelectorPlan::Union(plan) => plan,
+                    // Nothing to manipulate: an empty metric needs no instant manipulation,
+                    // exactly like the single-table path for a missing table.
+                    UnionSelectorPlan::Empty(plan) => return Ok(plan),
+                }
+            }
+        };
         let time_index_column =
             self.ctx
                 .time_index_column
@@ -2127,6 +2259,8 @@ impl PromPlanner {
     ) -> Result<LogicalPlan> {
         let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
+        // `timestamp()` computes new sample values, so it drops the metric name.
+        self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
         project_exprs.push(time_expr);
@@ -2150,7 +2284,7 @@ impl PromPlanner {
             matchers,
             ..
         } = vs;
-        let matchers = self.preprocess_label_matchers(matchers, name)?;
+        let mode = self.preprocess_label_matchers(matchers, name).await?;
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
@@ -2162,11 +2296,24 @@ impl PromPlanner {
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
-        let normalize = match self.setup_context().await? {
-            Some(empty_plan) => empty_plan,
-            None => {
-                self.selector_to_series_normalize_plan(offset, matchers, true)
+        let normalize = match mode {
+            SelectorPlanMode::SingleTable(matchers) => match self.setup_context().await? {
+                Some(empty_plan) => empty_plan,
+                None => {
+                    self.selector_to_series_normalize_plan(offset, matchers, true)
+                        .await?
+                }
+            },
+            SelectorPlanMode::MetricNameUnion {
+                matchers,
+                metric_names,
+            } => {
+                match self
+                    .selector_union_to_series_normalize_plan(offset, matchers, metric_names, true)
                     .await?
+                {
+                    UnionSelectorPlan::Union(plan) | UnionSelectorPlan::Empty(plan) => plan,
+                }
             }
         };
         let manipulate = RangeManipulate::new(
@@ -2243,6 +2390,11 @@ impl PromPlanner {
             query_engine_state,
         )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
+        // A materialized metric name follows the function's semantics: only the functions that
+        // do not compute new sample values keep it.
+        if !Self::call_keeps_metric_name(func.name) {
+            self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
+        }
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
         if let Some(tsid_col) =
             Self::optional_tsid_projection(input.schema(), None, self.ctx.use_tsid)
@@ -2353,7 +2505,8 @@ impl PromPlanner {
     }
 
     /// Extract metric name from `__name__` matcher and set it into [PromPlannerContext].
-    /// Returns a new [Matchers] that doesn't contain metric name matcher.
+    /// Returns the matchers without the metric name matcher and how the selector must be
+    /// planned.
     ///
     /// Each call to this function means new selector is started. Thus, the context will be reset
     /// at first.
@@ -2361,17 +2514,21 @@ impl PromPlanner {
     /// Name rule:
     /// - if `name` is some, then the matchers MUST NOT contain `__name__` matcher.
     /// - if `name` is none, then the matchers MAY contain NONE OR MULTIPLE `__name__` matchers.
+    /// - a non-equality `__name__` matcher names no single table, so such a selector is planned
+    ///   as a union of the metric tables whose name it matches.
     #[allow(clippy::mutable_key_type)]
-    fn preprocess_label_matchers(
+    async fn preprocess_label_matchers(
         &mut self,
         label_matchers: &Matchers,
         name: &Option<String>,
-    ) -> Result<Matchers> {
+    ) -> Result<SelectorPlanMode> {
         self.ctx.reset();
 
         let metric_name;
+        let name_matchers;
         if let Some(name) = name.clone() {
             metric_name = Some(name);
+            name_matchers = Vec::new();
             ensure!(
                 label_matchers.find_matchers(METRIC_NAME).is_empty(),
                 MultipleMetricMatchersSnafu
@@ -2380,17 +2537,18 @@ impl PromPlanner {
             let mut matches = label_matchers.find_matchers(METRIC_NAME);
             ensure!(!matches.is_empty(), NoMetricMatcherSnafu);
             ensure!(matches.len() == 1, MultipleMetricMatchersSnafu);
-            ensure!(
-                matches[0].op == MatchOp::Equal,
-                UnsupportedMatcherOpSnafu {
-                    matcher_op: matches[0].op.to_string(),
-                    matcher: METRIC_NAME
-                }
-            );
-            metric_name = matches.pop().map(|m| m.value);
+            let matcher = matches
+                .pop()
+                .expect("matchers holds one metric name matcher");
+            metric_name = (matcher.op == MatchOp::Equal).then(|| matcher.value.clone());
+            name_matchers = if metric_name.is_none() {
+                vec![matcher]
+            } else {
+                Vec::new()
+            };
         }
 
-        self.ctx.table_name = metric_name;
+        self.ctx.table_name = metric_name.clone();
 
         // Deduplicate in place instead of through a `HashSet`: the scan filter is built in
         // this order, and a hashed order makes the plan of one query vary between runs.
@@ -2419,14 +2577,29 @@ impl PromPlanner {
             }
         }
 
-        Ok(Matchers::new(matchers))
+        let matchers = Matchers::new(matchers);
+        if metric_name.is_some() {
+            return Ok(SelectorPlanMode::SingleTable(matchers));
+        }
+
+        let metric_names = self.candidate_metric_names(&name_matchers).await?;
+        Ok(SelectorPlanMode::MetricNameUnion {
+            matchers,
+            metric_names,
+        })
     }
 
-    async fn selector_to_series_normalize_plan(
+    /// Builds the scan part of a selector: the table scan (including the metric engine physical
+    /// table rewrite), the label and time index filters, and the optional `__field__`
+    /// projection.
+    ///
+    /// The metric name union path calls this once per candidate table, so it must not add
+    /// ordering or series splitting nodes: combining the branches destroys any per-branch
+    /// ordering.
+    async fn selector_scan_plan(
         &mut self,
         offset: &Option<Offset>,
-        label_matchers: Matchers,
-        is_range_selector: bool,
+        label_matchers: &Matchers,
     ) -> Result<LogicalPlan> {
         // make table scan plan
         let table_ref = self.table_ref()?;
@@ -2434,11 +2607,7 @@ impl PromPlanner {
         let table_schema = table_scan.schema();
 
         // make filter exprs
-        let offset_duration = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
+        let offset_duration = Self::offset_duration(offset);
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
         if let Some(time_index_filter) =
             self.build_time_index_filter(offset_duration, table_schema)?
@@ -2536,6 +2705,27 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
+        Ok(table_scan)
+    }
+
+    /// Returns the offset of a selector in milliseconds.
+    fn offset_duration(offset: &Option<Offset>) -> Millisecond {
+        match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        }
+    }
+
+    async fn selector_to_series_normalize_plan(
+        &mut self,
+        offset: &Option<Offset>,
+        label_matchers: Matchers,
+        is_range_selector: bool,
+    ) -> Result<LogicalPlan> {
+        let table_scan = self.selector_scan_plan(offset, &label_matchers).await?;
+        let offset_duration = Self::offset_duration(offset);
+
         // make sort plan
         let series_key_columns = if self.ctx.use_tsid {
             vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
@@ -2564,7 +2754,7 @@ impl PromPlanner {
                 .time_index_column
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu {
-                    table: table_ref.to_string(),
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
                 })?;
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
@@ -2584,7 +2774,7 @@ impl PromPlanner {
                 .time_index_column
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu {
-                    table: table_ref.to_quoted_string(),
+                    table: self.ctx.table_name.clone().unwrap_or_default(),
                 })?,
             is_range_selector,
             series_key_columns,
@@ -2595,6 +2785,460 @@ impl PromPlanner {
         });
 
         Ok(logical_plan)
+    }
+
+    /// Returns the metric tables whose name matches every `__name__` matcher of a selector.
+    ///
+    /// Protocol layers that can filter and authorize metric tables resolve them and record them
+    /// in the query context, and those resolved tables are used as they are. Callers that do not
+    /// (SQL and TQL) fall back to enumerating the metric tables of the selected schema, which
+    /// keeps every PromQL entry point consistent. Authorization for those callers happens before
+    /// planning, where a selector without a statically resolvable table is checked as unresolved.
+    async fn candidate_metric_names(&mut self, name_matchers: &[Matcher]) -> Result<Vec<String>> {
+        if let Some(metric_names) = self.ctx.metric_names.take() {
+            // Preserve the authorized set on this selector only. A matching-filter re-plan
+            // restores it explicitly, while a separate selector still falls back to its own
+            // catalog discovery as before.
+            self.ctx.selector_metric_names = Some(metric_names.clone());
+            return Ok(metric_names
+                .into_iter()
+                .filter(|name| name_matchers.iter().all(|matcher| matcher.is_match(name)))
+                .collect());
+        }
+
+        let query_ctx = self.table_provider.query_ctx().clone();
+        let catalog = query_ctx.current_catalog().to_string();
+        let schema = self
+            .ctx
+            .schema_name
+            .clone()
+            .unwrap_or_else(|| query_ctx.current_schema());
+
+        let mut metric_names = Vec::new();
+        // Metric tables are enumerated in one catalog traversal, then filtered by name before the
+        // metric engine check, so a schema with many non-metric tables stays cheap.
+        let mut tables =
+            self.table_provider
+                .catalog_manager()
+                .tables(&catalog, &schema, Some(&query_ctx));
+        while let Some(table) = tables.next().await {
+            let table = table.context(CatalogSnafu)?;
+            let info = table.table_info();
+            let name = &info.name;
+            if !name_matchers.iter().all(|matcher| matcher.is_match(name)) {
+                continue;
+            }
+            // Physical metric tables are internal; PromQL queries user-visible logical tables.
+            // Keep in sync with `metric_name_matchers_to_plan` in `src/servers/src/prometheus.rs`
+            // (protocol layer), which filters the same metric engine and logical/physical flags.
+            if info.meta.engine != METRIC_ENGINE_NAME
+                || !info
+                    .meta
+                    .options
+                    .extra_options
+                    .contains_key(LOGICAL_TABLE_METADATA_KEY)
+                || info
+                    .meta
+                    .options
+                    .extra_options
+                    .contains_key(PHYSICAL_TABLE_METADATA_KEY)
+            {
+                continue;
+            }
+            metric_names.push(name.clone());
+            ensure!(
+                metric_names.len() <= MAX_METRIC_NAME_UNION_CANDIDATES,
+                UnsupportedMetricUnionSnafu {
+                    reason: format!(
+                        "the {METRIC_NAME} matcher matches more than \
+                         {MAX_METRIC_NAME_UNION_CANDIDATES} metric tables"
+                    ),
+                }
+            );
+        }
+        metric_names.sort_unstable();
+        metric_names.dedup();
+
+        Ok(metric_names)
+    }
+
+    /// Builds the scan of one candidate metric table of a metric name union.
+    ///
+    /// Returns `None` when the candidate table does not exist, which mirrors how the
+    /// single-table path treats a missing table: the selector observes an empty metric.
+    ///
+    /// Caller contract: this method mutates `self.ctx` in place and is only correct when `self.ctx`
+    /// starts from the query scoped state, so the caller must rebuild it (see the
+    /// `self.ctx = query_context.clone()` reset in
+    /// [`PromPlanner::selector_union_to_series_normalize_plan`]) before each call.
+    async fn union_branch_scan(
+        &mut self,
+        metric_name: &str,
+        offset: &Option<Offset>,
+        label_matchers: &Matchers,
+    ) -> Result<Option<UnionBranchScan>> {
+        self.ctx.table_name = Some(metric_name.to_string());
+        if self.setup_context().await?.is_some() {
+            return Ok(None);
+        }
+
+        // The union materializes the metric name as a constant column, so a table must not
+        // already carry a column with that name.
+        ensure!(
+            !self
+                .ctx
+                .tag_columns
+                .iter()
+                .chain(self.ctx.field_columns.iter())
+                .chain(self.ctx.time_index_column.iter())
+                .any(|column| column == METRIC_NAME),
+            UnsupportedMetricUnionSnafu {
+                reason: format!("table {metric_name} already has a {METRIC_NAME} column"),
+            }
+        );
+
+        let plan = self.selector_scan_plan(offset, label_matchers).await?;
+
+        let time_index_column =
+            self.ctx
+                .time_index_column
+                .clone()
+                .with_context(|| TimeIndexNotFoundSnafu {
+                    table: metric_name.to_string(),
+                })?;
+        Ok(Some(UnionBranchScan {
+            metric_name: metric_name.to_string(),
+            field_columns: self.ctx.field_columns.clone(),
+            tag_columns: self.ctx.tag_columns.clone(),
+            time_index_column,
+            plan,
+        }))
+    }
+
+    /// Plans a selector whose `__name__` matcher is not an equality matcher.
+    ///
+    /// Every candidate metric table is scanned separately and the branches are combined with
+    /// `UNION ALL`, so an enclosing aggregation, ranking or binary operator observes a single
+    /// input with global semantics instead of one input per metric table.
+    ///
+    /// The branches are aligned to a common schema (the union of their labels, with missing
+    /// labels filled with NULL and a common type per column), and the series ordering that the
+    /// single-table path provides is re-established on the combined plan: series are keyed by
+    /// the union of the branch labels plus the metric name.
+    async fn selector_union_to_series_normalize_plan(
+        &mut self,
+        offset: &Option<Offset>,
+        label_matchers: Matchers,
+        metric_names: Vec<String>,
+        is_range_selector: bool,
+    ) -> Result<UnionSelectorPlan> {
+        let offset_duration = Self::offset_duration(offset);
+        // Query scoped state: every branch derives its own table scoped context from it.
+        let query_context = self.ctx.clone();
+
+        let mut branches = Vec::with_capacity(metric_names.len());
+        for metric_name in &metric_names {
+            self.ctx = query_context.clone();
+            if let Some(branch) = self
+                .union_branch_scan(metric_name, offset, &label_matchers)
+                .await?
+            {
+                branches.push(branch);
+            }
+        }
+
+        if branches.is_empty() {
+            // Either the matcher resolved to no metric table or every candidate disappeared
+            // after metric name resolution: both observe an empty metric.
+            self.ctx = query_context;
+            return Ok(UnionSelectorPlan::Empty(
+                self.setup_context_for_empty_metric()?,
+            ));
+        }
+
+        // Field columns are addressed by name by every enclosing operator, so the branches must
+        // expose the same value columns.
+        let field_columns = branches[0].field_columns.clone();
+        ensure!(
+            branches
+                .iter()
+                .all(|branch| branch.field_columns == field_columns),
+            UnsupportedMetricUnionSnafu {
+                reason: format!(
+                    "candidate metric tables have different value columns: {}",
+                    branches
+                        .iter()
+                        .map(|b| b.field_columns.join(", "))
+                        .join(" | ")
+                ),
+            }
+        );
+        let field_types = field_columns
+            .iter()
+            .map(|field| Self::union_field_type(field, &branches))
+            .collect::<Result<Vec<_>>>()?;
+
+        // The sort, the series splitting and the manipulators all refer to the time index by
+        // name, so every branch must expose the same column. Candidate metric tables may store
+        // that column at different precisions (a millisecond table next to a `timestamp(9)`
+        // one), so the branches are cast to a common unit below instead of being rejected.
+        let time_index_column = branches[0].time_index_column.clone();
+        ensure!(
+            branches
+                .iter()
+                .all(|branch| branch.time_index_column == time_index_column),
+            UnsupportedMetricUnionSnafu {
+                reason: format!(
+                    "candidate metric tables have different time index columns: {}",
+                    branches
+                        .iter()
+                        .map(|b| format!(
+                            "{} ({:?})",
+                            b.time_index_column,
+                            b.optional_column_type(&b.time_index_column)
+                        ))
+                        .join(", ")
+                ),
+            }
+        );
+        let time_index_type = Self::union_time_index_type(&time_index_column, &branches)?;
+
+        // A branch that lacks a label contributes NULL for it; labels may have different types
+        // in different tables (for example a dictionary encoded label in one table and a plain
+        // string in another), so a common label type is picked per label. The padded NULLs are
+        // what makes vector matching treat an absent label as an empty one instead of comparing
+        // the two operands' label sets as a whole (see `binary_join_key_columns`).
+        let mut label_union = BTreeSet::new();
+        for branch in &branches {
+            label_union.extend(branch.tag_columns.iter().cloned());
+        }
+        let label_union = label_union.into_iter().collect::<Vec<_>>();
+        let mut label_types = HashMap::with_capacity(label_union.len());
+        for label in &label_union {
+            let mut target = None;
+            for branch in &branches {
+                let Some(data_type) = branch.optional_column_type(label) else {
+                    continue;
+                };
+                let Some(common) = Self::common_label_data_type(target.as_ref(), Some(&data_type))
+                else {
+                    return UnsupportedMetricUnionSnafu {
+                        reason: format!(
+                            "label column {label} is not a string in every candidate metric table"
+                        ),
+                    }
+                    .fail();
+                };
+                target = Some(common);
+            }
+            let target = target.with_context(|| UnexpectedPlanExprSnafu {
+                desc: format!("label column {label} is missing in every union branch"),
+            })?;
+            let _ = label_types.insert(label.clone(), target);
+        }
+
+        // Align every branch to the common schema, then combine them with `UNION ALL`.
+        let mut combined: Option<LogicalPlan> = None;
+        for branch in branches {
+            let mut exprs = Vec::with_capacity(field_columns.len() + label_union.len() + 2);
+            for (field, target_type) in field_columns.iter().zip(&field_types) {
+                let column = DfExpr::Column(Column::new_unqualified(field.clone()));
+                let branch_type = branch
+                    .optional_column_type(field)
+                    .with_context(|| ColumnNotFoundSnafu { col: field.clone() })?;
+                exprs.push(if &branch_type == target_type {
+                    column
+                } else {
+                    DfExpr::Cast(Cast::new(Box::new(column), target_type.clone()))
+                        .alias(field.clone())
+                });
+            }
+            for label in &label_union {
+                let target_type = &label_types[label];
+                exprs.push(match branch.optional_column_type(label) {
+                    Some(data_type) if &data_type == target_type => {
+                        DfExpr::Column(Column::new_unqualified(label.clone()))
+                    }
+                    Some(_) => DfExpr::Cast(Cast::new(
+                        Box::new(DfExpr::Column(Column::new_unqualified(label.clone()))),
+                        target_type.clone(),
+                    ))
+                    .alias(label.clone()),
+                    None => DfExpr::Literal(
+                        Self::string_scalar_value(target_type, None)
+                            .expect("label type is a string"),
+                        None,
+                    )
+                    .alias(label.clone()),
+                });
+            }
+            exprs.push(lit(branch.metric_name.clone()).alias(METRIC_NAME));
+            let time_index = DfExpr::Column(Column::new_unqualified(time_index_column.clone()));
+            exprs.push(
+                if branch.optional_column_type(&time_index_column).as_ref()
+                    == Some(&time_index_type)
+                {
+                    time_index
+                } else {
+                    DfExpr::Cast(Cast::new(Box::new(time_index), time_index_type.clone()))
+                        .alias(time_index_column.clone())
+                },
+            );
+
+            let branch_plan = LogicalPlanBuilder::from(branch.plan)
+                .project(exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)?;
+            combined = Some(match combined {
+                None => branch_plan,
+                Some(combined) => LogicalPlanBuilder::from(combined)
+                    .union(branch_plan)
+                    .context(DataFusionPlanningSnafu)?
+                    .build()
+                    .context(DataFusionPlanningSnafu)?,
+            });
+        }
+        let combined = combined.with_context(|| UnexpectedPlanExprSnafu {
+            desc: "metric name union has no branches".to_string(),
+        })?;
+
+        // Re-establish the series ordering that the single-table path provides.
+        let mut series_key_columns = label_union;
+        series_key_columns.push(METRIC_NAME.to_string());
+        let mut sort_exprs = series_key_columns
+            .iter()
+            .map(|column| DfExpr::Column(Column::new_unqualified(column.clone())).sort(true, true))
+            .collect::<Vec<_>>();
+        sort_exprs.push(
+            DfExpr::Column(Column::new_unqualified(time_index_column.clone())).sort(true, true),
+        );
+        let sort_plan = LogicalPlanBuilder::from(combined)
+            .sort(sort_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        let divide_plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesDivide::new(
+                series_key_columns.clone(),
+                time_index_column.clone(),
+                sort_plan,
+            )),
+        });
+
+        // The combined plan is not a table, but it keeps the query scoped planner state: the
+        // metric name is part of the label set, so aggregations like `by (__name__)` and binary
+        // matching see it.
+        self.ctx.table_name = Some(String::new());
+        self.ctx.time_index_column = Some(time_index_column.clone());
+        self.ctx.field_columns = field_columns;
+        self.ctx.tag_columns = series_key_columns.clone();
+        self.ctx.use_tsid = false;
+
+        if !is_range_selector && offset_duration == 0 {
+            return Ok(UnionSelectorPlan::Union(divide_plan));
+        }
+        let series_normalize = SeriesNormalize::new(
+            offset_duration,
+            time_index_column,
+            is_range_selector,
+            series_key_columns,
+            divide_plan,
+        );
+
+        Ok(UnionSelectorPlan::Union(LogicalPlan::Extension(
+            Extension {
+                node: Arc::new(series_normalize),
+            },
+        )))
+    }
+
+    /// Returns the common type of one value column across the union branches.
+    ///
+    /// Branches must expose the same value columns; differing numeric types are widened to
+    /// `Float64`, while equal types are retained.
+    ///
+    /// Widening `Int64`/`UInt64` to `Float64` loses precision for magnitudes above 2^53. That is
+    /// intended and consistent with the Prometheus data model (every sample is a float64) and with
+    /// [`PromPlanner::or_operator`], which widens numeric fields the same way: a value observable
+    /// through the union is the same value a single-table selector observes.
+    fn union_field_type(field: &str, branches: &[UnionBranchScan]) -> Result<ArrowDataType> {
+        let mut target: Option<ArrowDataType> = None;
+        for branch in branches {
+            let data_type =
+                branch
+                    .optional_column_type(field)
+                    .with_context(|| ColumnNotFoundSnafu {
+                        col: field.to_string(),
+                    })?;
+            target = Some(match target {
+                None => data_type,
+                Some(current) if current == data_type => current,
+                Some(current)
+                    if is_numeric_arrow_type(&current) && is_numeric_arrow_type(&data_type) =>
+                {
+                    ArrowDataType::Float64
+                }
+                Some(current) => {
+                    return UnsupportedMetricUnionSnafu {
+                        reason: format!(
+                            "value column {field} has incompatible types {current:?} and {data_type:?} in candidate metric tables"
+                        ),
+                    }
+                    .fail();
+                }
+            });
+        }
+        target.with_context(|| UnexpectedPlanExprSnafu {
+            desc: format!("value column {field} is missing in every union branch"),
+        })
+    }
+
+    /// Returns the common type of the time index column across the union branches.
+    ///
+    /// Every branch must expose the column under the same name. Their precisions may differ, and
+    /// `UNION ALL` needs one type, so all branches are aligned to the finest candidate unit
+    /// (Second < Millisecond < Microsecond < Nanosecond). Widening is the lossless direction: the
+    /// native tick count of a coarser unit is exactly representable in a finer one, while
+    /// narrowing would truncate (and could collapse) samples of the finer table. A cast between
+    /// timestamp units only rescales the tick count per row, so the ordering the sort and the
+    /// series splitting rely on is preserved, and the manipulators keep deriving their
+    /// millisecond payloads from the native ticks of the (now common) unit. GreptimeDB time
+    /// indexes are timezone-less, and a timezone is Arrow display metadata anyway, so the common
+    /// type carries none. Aligning to the query's own unit instead would reject the finer
+    /// candidate or silently truncate its sub-unit samples, which is why the finest branch wins.
+    ///
+    /// The cast is a no-op for a single candidate (the common unit is its own unit). It can
+    /// overflow the finer unit's `i64` range for a far-future coarser sample; the cast then
+    /// reports an error rather than truncating the timestamp.
+    fn union_time_index_type(
+        time_index_column: &str,
+        branches: &[UnionBranchScan],
+    ) -> Result<ArrowDataType> {
+        let mut unit: Option<ArrowTimeUnit> = None;
+        for branch in branches {
+            let data_type = branch
+                .optional_column_type(time_index_column)
+                .with_context(|| ColumnNotFoundSnafu {
+                    col: time_index_column.to_string(),
+                })?;
+            let ArrowDataType::Timestamp(branch_unit, _) = &data_type else {
+                return UnsupportedMetricUnionSnafu {
+                    reason: format!(
+                        "time index column {time_index_column} is not a timestamp in candidate metric tables"
+                    ),
+                }
+                .fail();
+            };
+            unit = Some(match unit {
+                Some(current) => current.max(*branch_unit),
+                None => *branch_unit,
+            });
+        }
+        let unit = unit.with_context(|| UnexpectedPlanExprSnafu {
+            desc: format!("time index column {time_index_column} is missing in every union branch"),
+        })?;
+        Ok(ArrowDataType::Timestamp(unit, None))
     }
 
     /// Convert [LabelModifier] to [Column] exprs for aggregation.
@@ -2664,9 +3308,11 @@ impl PromPlanner {
                     .map(|f| f.name())
                     .collect::<BTreeSet<_>>();
 
-                // Exclude metric engine internal columns (not PromQL labels) from the implicit
-                // "without" label set.
-                all_fields.retain(|col| !is_metric_engine_internal_column(col.as_str()));
+                // Exclude metric engine internal columns and the metric name from the implicit
+                // "without" label set. PromQL always removes the metric name for `without`.
+                all_fields.retain(|col| {
+                    !is_metric_engine_internal_column(col.as_str()) && col.as_str() != METRIC_NAME
+                });
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
@@ -4440,6 +5086,26 @@ impl PromPlanner {
         Ok(result)
     }
 
+    /// Whether a function call keeps the metric name of its input series.
+    ///
+    /// Prometheus drops the name from every function that computes new sample values (`abs` and
+    /// the other math functions, `rate` and the other range functions, `timestamp`, ...), and
+    /// keeps it in the functions that only reorder series or rewrite labels, plus
+    /// `last_over_time`. A `__name__` label materialized by a metric name union has to follow
+    /// the same rule, otherwise it would survive operations that drop the name.
+    fn call_keeps_metric_name(name: &str) -> bool {
+        matches!(
+            name,
+            "sort"
+                | "sort_desc"
+                | "sort_by_label"
+                | "sort_by_label_desc"
+                | "label_replace"
+                | "label_join"
+                | "last_over_time"
+        )
+    }
+
     fn create_field_column_exprs(&self) -> Result<Vec<DfExpr>> {
         let mut result = Vec::with_capacity(self.ctx.field_columns.len());
         for field in &self.ctx.field_columns {
@@ -5051,6 +5717,11 @@ impl PromPlanner {
         // stable series identifier anymore. HistogramFold must not treat it as a label column.
         let input_plan = self.strip_tsid_column(input_plan)?;
         self.ctx.use_tsid = false;
+        // The helpers compute new sample values, so they drop the metric name (see
+        // `call_keeps_metric_name`). The fold still groups by it, which is what Prometheus
+        // does: it folds the buckets of each metric separately and reports the result without
+        // the name.
+        self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
 
         if let Some((float_field, histogram_field)) =
             Self::alternative_sample_columns(input_plan.schema(), &self.ctx.field_columns)
@@ -5108,9 +5779,28 @@ impl PromPlanner {
             input_plan,
         )
         .context(DataFusionPlanningSnafu)?;
-        Ok(LogicalPlan::Extension(Extension {
+        let folded = LogicalPlan::Extension(Extension {
             node: Arc::new(fold),
-        }))
+        });
+        // The fold derives its output schema from its input, so a `__name__` column of a metric
+        // name union survives it. It is not a label of the folded series, so it is projected
+        // away here — the same drop the tag columns above already record for the context.
+        let schema = folded.schema().clone();
+        if schema.index_of_column_by_name(None, METRIC_NAME).is_some() {
+            let project_exprs = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .filter(|(_, field)| field.name() != METRIC_NAME)
+                .map(|(index, _)| DfExpr::Column(Column::from(schema.qualified_field(index))))
+                .collect::<Vec<_>>();
+            return LogicalPlanBuilder::from(folded)
+                .project(project_exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu);
+        }
+        Ok(folded)
     }
 
     fn create_native_histogram_expr(
@@ -5938,12 +6628,37 @@ impl PromPlanner {
                         let _ = left_tag_columns.remove(label);
                         let _ = right_tag_columns.remove(label);
                     }
+                    // `ignoring` keeps PromQL's default of not matching on the metric name.
+                    let _ = left_tag_columns.remove(METRIC_NAME);
+                    let _ = right_tag_columns.remove(METRIC_NAME);
                 }
             }
+        } else if !use_tsid_join && !only_join_time_index {
+            // The metric name is not a default vector-matching label. An explicit
+            // `on(__name__)` is handled by the Include branch above.
+            let _ = left_tag_columns.remove(METRIC_NAME);
+            let _ = right_tag_columns.remove(METRIC_NAME);
         }
 
-        let force_empty_join =
-            !use_tsid_join && !only_join_time_index && left_tag_columns != right_tag_columns;
+        // A label the other operand does not carry at all is absent for every series of that
+        // operand, so the two sides can never match and the join is empty by construction. A
+        // nullable label is different: an operand may omit it on some of its series, which is
+        // what a metric name union does when it pads the labels a candidate table lacks. Those
+        // two operands compare their label sets per row instead, so the join is aligned below
+        // rather than rejected.
+        let rejects_join =
+            |mine: &BTreeSet<String>, mine_schema: &DFSchemaRef, theirs: &BTreeSet<String>| {
+                mine.difference(theirs).any(|column| {
+                    mine_schema
+                        .field_with_unqualified_name(column)
+                        .map(|field| !field.is_nullable())
+                        .unwrap_or(true)
+                })
+            };
+        let force_empty_join = !use_tsid_join
+            && !only_join_time_index
+            && (rejects_join(&left_tag_columns, left_schema, &right_tag_columns)
+                || rejects_join(&right_tag_columns, right_schema, &left_tag_columns));
         if force_empty_join {
             let common_tag_columns = left_tag_columns
                 .intersection(&right_tag_columns)
@@ -5951,9 +6666,103 @@ impl PromPlanner {
                 .collect::<BTreeSet<_>>();
             left_tag_columns = common_tag_columns.clone();
             right_tag_columns = common_tag_columns;
+        } else {
+            // Join on every label either operand carries; the caller pads the missing column with
+            // NULL on the side that lacks it.
+            let all_tag_columns = left_tag_columns
+                .union(&right_tag_columns)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            left_tag_columns = all_tag_columns.clone();
+            right_tag_columns = all_tag_columns;
         }
 
         Ok((left_tag_columns, right_tag_columns, force_empty_join))
+    }
+
+    /// Aligns the join keys of both operands so the join compares them per row.
+    ///
+    /// A key one side does not carry is absent for every series of that operand — the empty label
+    /// value in PromQL terms — so it is projected as a NULL on that side. A key both sides carry
+    /// in different encodings is cast to a common type, the same unification a metric name union
+    /// applies to its branches: a union exposes its labels as plain strings while a single-table
+    /// operand may still carry them dictionary encoded.
+    fn align_join_key_columns(
+        left: LogicalPlan,
+        right: LogicalPlan,
+        left_keys: &BTreeSet<String>,
+        right_keys: &BTreeSet<String>,
+    ) -> Result<(LogicalPlan, LogicalPlan)> {
+        let key_type = |plan: &LogicalPlan, key: &str| {
+            plan.schema()
+                .field_with_unqualified_name(key)
+                .ok()
+                .map(|field| field.data_type().clone())
+        };
+        let mut common_types = HashMap::with_capacity(left_keys.len() + right_keys.len());
+        for key in left_keys.union(right_keys) {
+            let left_type = key_type(&left, key);
+            let right_type = key_type(&right, key);
+            // `common_label_data_type` decodes a dictionary to its value type, so a key only one
+            // side carries is aligned to the plain type as well.
+            let Some(common) =
+                Self::common_label_data_type(left_type.as_ref(), right_type.as_ref())
+            else {
+                // Not a string label in some candidate: leave the key as it is and let the join
+                // report the mismatch.
+                continue;
+            };
+            if left_type.as_ref() != Some(&common) || right_type.as_ref() != Some(&common) {
+                let _ = common_types.insert(key.clone(), common);
+            }
+        }
+
+        let align = |plan: LogicalPlan| {
+            if common_types.is_empty() {
+                return Ok(plan);
+            }
+            let schema = plan.schema().clone();
+            let mut exprs = Vec::with_capacity(schema.fields().len() + common_types.len());
+            for index in 0..schema.fields().len() {
+                let (qualifier, field) = schema.qualified_field(index);
+                let field_name = field.name().as_str();
+                let expected_type = field.data_type().clone();
+                // Keep the field's qualifier and name as they are: a cast reports its input's
+                // qualified name as its own, which would flatten `t.job` into a column literally
+                // named `t.job` once the caller aliases this plan.
+                let column = || DfExpr::Column(Column::new(qualifier.cloned(), field_name));
+                let expr = match common_types.get(field_name) {
+                    Some(common) if &expected_type != common => {
+                        DfExpr::Cast(Cast::new(Box::new(column()), common.clone()))
+                            .alias(field_name)
+                    }
+                    _ => column(),
+                };
+                exprs.push(expr);
+            }
+            for (key, common) in &common_types {
+                if schema.index_of_column_by_name(None, key).is_some() {
+                    continue;
+                }
+                exprs.push(
+                    DfExpr::Literal(
+                        ScalarValue::try_from(common).context(DataFusionPlanningSnafu)?,
+                        None,
+                    )
+                    .alias(key),
+                );
+            }
+
+            LogicalPlanBuilder::from(plan)
+                .project(exprs)
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu)
+        };
+
+        let left = align(left)?;
+        let right = align(right)?;
+        Ok((left, right))
     }
 
     fn binary_modifier_preserves_tsid_join_key(
@@ -6048,6 +6857,11 @@ impl PromPlanner {
         } else {
             (left, right)
         };
+
+        // Label keys are aligned before the time index joins them: the time index is present on
+        // both sides by construction, and its name is a property of each operand's table.
+        let (left, right) =
+            Self::align_join_key_columns(left, right, &left_tag_columns, &right_tag_columns)?;
 
         // push time index column if it exists
         if let (Some(left_time_index_column), Some(right_time_index_column)) =
@@ -6259,6 +7073,16 @@ impl PromPlanner {
         matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
     }
 
+    /// Whether the vector matching modifier explicitly matches on the metric name, i.e.
+    /// `on(__name__)`. Every other matching mode — the default and `ignoring(...)` — excludes
+    /// the metric name from the matching labels.
+    fn on_matches_metric_name(modifier: &Option<BinModifier>) -> bool {
+        matches!(
+            modifier.as_ref().and_then(|modifier| modifier.matching.as_ref()),
+            Some(LabelModifier::Include(on)) if on.labels.iter().any(|label| label == METRIC_NAME)
+        )
+    }
+
     /// Build a set operator (AND/OR/UNLESS)
     fn set_op_on_non_field_columns(
         &mut self,
@@ -6353,6 +7177,14 @@ impl PromPlanner {
                     }
                 }
             }
+        }
+        // The metric name is not a matching label of a set operator unless `on(__name__)` names
+        // it: the default and `ignoring(...)` matching both exclude it, so a `__name__` label
+        // materialized by a metric name union does not make the matching label sets
+        // incomparable.
+        if !Self::on_matches_metric_name(modifier) {
+            let _ = left_tag_col_set.remove(METRIC_NAME);
+            let _ = right_tag_col_set.remove(METRIC_NAME);
         }
         ensure!(
             left_tag_col_set == right_tag_col_set,
@@ -6596,21 +7428,6 @@ impl PromPlanner {
                     table: right_qualifier_string.clone(),
                 })?;
         let native_histogram_type = Self::native_histogram_arrow_type();
-        let is_numeric = |data_type: &ArrowDataType| {
-            matches!(
-                data_type,
-                ArrowDataType::Int8
-                    | ArrowDataType::Int16
-                    | ArrowDataType::Int32
-                    | ArrowDataType::Int64
-                    | ArrowDataType::UInt8
-                    | ArrowDataType::UInt16
-                    | ArrowDataType::UInt32
-                    | ArrowDataType::UInt64
-                    | ArrowDataType::Float32
-                    | ArrowDataType::Float64
-            )
-        };
         let left_fields = left_context
             .field_columns
             .iter()
@@ -6644,7 +7461,7 @@ impl PromPlanner {
         let right_field_col = &right_field.0;
         let fields_are_samples = |fields: &[(String, Option<TableReference>, ArrowDataType)]| {
             fields.iter().all(|(_, _, data_type)| {
-                is_numeric(data_type) || data_type == &native_histogram_type
+                is_numeric_arrow_type(data_type) || data_type == &native_histogram_type
             })
         };
         let mixed_sample_types = if left_has_alternative_samples || right_has_alternative_samples {
@@ -6666,8 +7483,8 @@ impl PromPlanner {
             }
             true
         } else {
-            (left_field.2 == native_histogram_type && is_numeric(&right_field.2))
-                || (right_field.2 == native_histogram_type && is_numeric(&left_field.2))
+            (left_field.2 == native_histogram_type && is_numeric_arrow_type(&right_field.2))
+                || (right_field.2 == native_histogram_type && is_numeric_arrow_type(&left_field.2))
         };
         let target_field_type = if mixed_sample_types {
             // Mixed vectors use the existing response representation: one nullable float column
@@ -6675,7 +7492,7 @@ impl PromPlanner {
             ArrowDataType::Float64
         } else if left_field.2 == right_field.2 {
             left_field.2.clone()
-        } else if is_numeric(&left_field.2) && is_numeric(&right_field.2) {
+        } else if is_numeric_arrow_type(&left_field.2) && is_numeric_arrow_type(&right_field.2) {
             ArrowDataType::Float64
         } else {
             return UnexpectedPlanExprSnafu {
@@ -6830,7 +7647,7 @@ impl PromPlanner {
             if output_col == &mixed_float_field_col {
                 if let Some((name, qualifier, data_type)) = fields
                     .iter()
-                    .find(|(_, _, data_type)| is_numeric(data_type))
+                    .find(|(_, _, data_type)| is_numeric_arrow_type(data_type))
                 {
                     let expr = DfExpr::Column(Column::new(qualifier.clone(), name));
                     if data_type == &ArrowDataType::Float64 {
@@ -6942,6 +7759,12 @@ impl PromPlanner {
         } else {
             all_tags.iter().cloned().collect()
         };
+        // The metric name is not a matching label of a set operator unless `on(__name__)` names
+        // it; the default and `ignoring(...)` matching both exclude it. The output keeps the
+        // column either way, so `or` still reports each side's own name.
+        if !Self::on_matches_metric_name(modifier) {
+            match_columns.retain(|column| column != METRIC_NAME);
+        }
         // sort to ensure the generated plan is not volatile
         match_columns.sort_unstable();
         match_columns.dedup();
@@ -7116,11 +7939,16 @@ impl PromPlanner {
     fn projection_for_each_field_column<F>(
         &mut self,
         input: LogicalPlan,
+        drop_metric_name: bool,
         name_to_expr: F,
     ) -> Result<LogicalPlan>
     where
         F: FnMut(&String) -> Result<DfExpr>,
     {
+        if drop_metric_name {
+            self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
+        }
+
         // Keep the generated float/histogram lane names while an element-wise operation
         // preserves both sample types, so downstream operators still recognize the pair.
         let preserve_field_names =
@@ -7339,7 +8167,8 @@ mod test {
     use common_query::test_util::DummyDecoder;
     use common_recordbatch::RecordBatch as GreptimeRecordBatch;
     use datafusion::arrow::array::{
-        Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+        Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
     };
     use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -8171,6 +9000,14 @@ mod test {
             || plan.inputs().into_iter().any(contains_histogram_fold)
     }
 
+    fn find_histogram_fold(plan: &LogicalPlan) -> Option<&HistogramFold> {
+        if let LogicalPlan::Extension(Extension { node }) = plan
+            && let Some(fold) = node.as_any().downcast_ref::<HistogramFold>()
+        {
+            return Some(fold);
+        }
+        plan.inputs().into_iter().find_map(find_histogram_fold)
+    }
     async fn build_set_op_context_table_provider() -> DfTableSourceProvider {
         build_test_table_provider_with_distinct_tags(&[
             ("bucket_metric", &["job", "le"]),
@@ -14583,5 +15420,1294 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         let (_, batches) = execute(plan, &state).await;
         let sample_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
         assert_eq!(sample_count, 2);
+    }
+
+    /// One value column of a union test table.
+    struct UnionField {
+        name: &'static str,
+        data_type: ConcreteDataType,
+        array: Arc<dyn Array>,
+    }
+
+    fn float_field(name: &'static str, values: &[f64]) -> UnionField {
+        UnionField {
+            name,
+            data_type: ConcreteDataType::float64_datatype(),
+            array: Arc::new(Float64Array::from(values.to_vec())),
+        }
+    }
+
+    fn string_field(name: &'static str, values: &[&str]) -> UnionField {
+        UnionField {
+            name,
+            data_type: ConcreteDataType::string_datatype(),
+            array: Arc::new(StringArray::from(values.to_vec())),
+        }
+    }
+
+    /// Builds a table with the given primary key (`tag`) columns and value columns.
+    fn union_metric_table(
+        name: &str,
+        table_id: u32,
+        tags: &[(&str, Option<&str>)],
+        timestamps: &[i64],
+        fields: &[UnionField],
+    ) -> table::TableRef {
+        union_metric_table_with_time_unit(
+            name,
+            table_id,
+            tags,
+            timestamps,
+            fields,
+            ArrowTimeUnit::Millisecond,
+            "timestamp",
+        )
+    }
+
+    /// Like [`union_metric_table`], with an explicit time index unit: a real deployment can hold
+    /// a `timestamp(9)` metric table next to a millisecond one.
+    fn union_metric_table_with_time_unit(
+        name: &str,
+        table_id: u32,
+        tags: &[(&str, Option<&str>)],
+        timestamps: &[i64],
+        fields: &[UnionField],
+        unit: ArrowTimeUnit,
+        time_index_name: &str,
+    ) -> table::TableRef {
+        let mut columns = tags
+            .iter()
+            .map(|(tag, _)| {
+                ColumnSchema::new(
+                    (*tag).to_string(),
+                    ConcreteDataType::string_datatype(),
+                    true,
+                )
+            })
+            .collect::<Vec<_>>();
+        let time_index_index = columns.len();
+        columns.push(
+            ColumnSchema::new(
+                time_index_name.to_string(),
+                ConcreteDataType::from_arrow_time_unit(&unit),
+                false,
+            )
+            .with_time_index(true),
+        );
+        for field in fields {
+            columns.push(ColumnSchema::new(
+                field.name.to_string(),
+                field.data_type.clone(),
+                true,
+            ));
+        }
+        let schema = Arc::new(Schema::new(columns));
+
+        let mut arrays: Vec<Arc<dyn Array>> = tags
+            .iter()
+            .map(|(_, value)| {
+                Arc::new(StringArray::from(vec![*value; timestamps.len()])) as Arc<dyn Array>
+            })
+            .collect();
+        arrays.push(match unit {
+            ArrowTimeUnit::Second => {
+                Arc::new(TimestampSecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Millisecond => {
+                Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Microsecond => {
+                Arc::new(TimestampMicrosecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+            ArrowTimeUnit::Nanosecond => {
+                Arc::new(TimestampNanosecondArray::from(timestamps.to_vec())) as Arc<dyn Array>
+            }
+        });
+        arrays.extend(fields.iter().map(|field| field.array.clone()));
+
+        let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            name,
+            GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+            table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let value_indices =
+            (time_index_index + 1..time_index_index + 1 + fields.len()).collect::<Vec<_>>();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices((0..tags.len()).collect())
+            .value_indices(value_indices)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        Arc::new(Table::new(
+            info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ))
+    }
+
+    fn register_tables(
+        catalog: &Arc<MemoryCatalogManager>,
+        tables: Vec<table::TableRef>,
+    ) -> DfTableSourceProvider {
+        for table in tables {
+            let info = table.table_info();
+            catalog
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: info.name.clone(),
+                    table_id: info.ident.table_id,
+                    table,
+                })
+                .unwrap();
+        }
+        DfTableSourceProvider::new(
+            catalog.clone(),
+            false,
+            QueryContext::arc(),
+            DummyDecoder::arc(),
+            false,
+        )
+    }
+
+    /// A metric table provider whose tables have different labels and values, so a per-table
+    /// (instead of global) aggregation is visible in the result.
+    fn build_union_metric_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_alpha",
+                    3_001,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_beta",
+                    3_002,
+                    &[("instance", Some("host"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    /// A provider whose candidate tables store the time index at different precisions: `m_ms` is
+    /// millisecond based, `m_ns` is a `timestamp(9)` table. Both hold the same instant, `m_ms` as
+    /// `1_000` native ticks and `m_ns` as `1_000_000_000` of them.
+    fn build_union_mixed_precision_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table_with_time_unit(
+                    "m_ms",
+                    3_008,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                    ArrowTimeUnit::Millisecond,
+                    "timestamp",
+                ),
+                union_metric_table_with_time_unit(
+                    "m_ns",
+                    3_009,
+                    &[("job", Some("api"))],
+                    &[1_000_000_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                    ArrowTimeUnit::Nanosecond,
+                    "timestamp",
+                ),
+            ],
+        )
+    }
+
+    /// A metric engine provider: both logical tables live on one physical table, which is what a
+    /// real Prometheus deployment looks like.
+    fn build_union_engine_table_provider() -> DfTableSourceProvider {
+        let catalog = MemoryCatalogManager::with_default_setup();
+        let physical_name = "union_phy";
+        let physical_table_id = 3_100;
+
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("job".to_string(), ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "instance".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ];
+        let tag_count = columns.len() - 2;
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let primary_key_indices = (0..2 + tag_count).collect::<Vec<_>>();
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices(primary_key_indices)
+            .value_indices(vec![(2 + tag_count + 1) as usize])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(datafusion::arrow::array::UInt32Array::from(vec![
+                    3_101u32, 3_102,
+                ])) as Arc<dyn Array>,
+                Arc::new(datafusion::arrow::array::UInt64Array::from(vec![11u64, 22])),
+                Arc::new(StringArray::from(vec![Some("api"), None])),
+                Arc::new(StringArray::from(vec![None, Some("host")])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            physical_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, physical_batch),
+            physical_table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let physical_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        let physical = Arc::new(Table::new(
+            physical_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+
+        let logical_table = |name: &str, table_id: u32, tag: &str| {
+            let columns = vec![
+                ColumnSchema::new(tag.to_string(), ConcreteDataType::string_datatype(), true),
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    greptime_value().to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+            ];
+            let mut options = table::requests::TableOptions::default();
+            options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_name.to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices(vec![0])
+                .value_indices(vec![2])
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .options(options)
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let info = TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap();
+            EmptyTable::from_table_info(&info)
+        };
+
+        register_tables(
+            &catalog,
+            vec![
+                physical,
+                logical_table("me_api", 3_101, "job"),
+                logical_table("me_host", 3_102, "instance"),
+            ],
+        )
+    }
+
+    /// Plans a query whose `__name__` matcher was resolved to `metric_names` by the caller.
+    async fn plan_union_query(
+        table_provider: DfTableSourceProvider,
+        metric_names: &[&str],
+        query: &str,
+    ) -> Result<LogicalPlan> {
+        let mut eval_stmt = build_eval_stmt(query);
+        eval_stmt.end = UNIX_EPOCH.checked_add(Duration::from_secs(1)).unwrap();
+        eval_stmt.interval = Duration::from_secs(1);
+        eval_stmt.lookback_delta = Duration::from_secs(1);
+
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        planner.ctx.metric_names = Some(
+            metric_names
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
+        );
+        planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+    }
+
+    async fn execute_union_query(
+        table_provider: DfTableSourceProvider,
+        metric_names: &[&str],
+        query: &str,
+    ) -> Vec<RecordBatch> {
+        let plan = plan_union_query(table_provider, metric_names, query)
+            .await
+            .unwrap();
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        batches
+    }
+
+    /// Returns the value of every row of the result, in plan order.
+    ///
+    /// Every numeric column is read, widened to `Float64`: aggregations like `count` emit an
+    /// integer value column, while a selector emits `Float64`. Non-numeric columns (labels and
+    /// the time index) are skipped.
+    fn float_values(batches: &[RecordBatch]) -> Vec<f64> {
+        batches
+            .iter()
+            .flat_map(|batch| {
+                (0..batch.num_columns()).flat_map(move |index| {
+                    let column = batch.column(index);
+                    let is_numeric = matches!(
+                        column.data_type(),
+                        ArrowDataType::Int8
+                            | ArrowDataType::Int16
+                            | ArrowDataType::Int32
+                            | ArrowDataType::Int64
+                            | ArrowDataType::UInt8
+                            | ArrowDataType::UInt16
+                            | ArrowDataType::UInt32
+                            | ArrowDataType::UInt64
+                            | ArrowDataType::Float16
+                            | ArrowDataType::Float32
+                            | ArrowDataType::Float64
+                    );
+                    if !is_numeric {
+                        return Vec::new();
+                    }
+                    datafusion::arrow::compute::cast(column, &ArrowDataType::Float64)
+                        .ok()
+                        .and_then(|values| {
+                            values
+                                .as_any()
+                                .downcast_ref::<Float64Array>()
+                                .map(|array| array.iter().flatten().collect::<Vec<_>>())
+                        })
+                        .unwrap_or_default()
+                })
+            })
+            .collect()
+    }
+
+    /// Two classic histogram metric tables: each carries an `le` label, which is what
+    /// `histogram_quantile` folds over.
+    fn build_union_classic_histogram_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_hist_one",
+                    3_020,
+                    &[("job", Some("api")), ("le", Some("0.5"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_hist_two",
+                    3_021,
+                    &[("job", Some("api")), ("le", Some("0.5"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_histogram_helpers_drop_metric_name() {
+        // `histogram_quantile` folds the buckets of each metric separately — the metric name
+        // stays a grouping key of the fold — but reports the folded series without the name,
+        // because it computes new sample values.
+        let plan = plan_union_query(
+            build_union_classic_histogram_table_provider(),
+            &["m_hist_one", "m_hist_two"],
+            r#"histogram_quantile(0.5, {__name__=~"m_hist_.*"})"#,
+        )
+        .await
+        .unwrap();
+        // The classic histogram path is a `HistogramFold` that derives its output schema from
+        // its input, so the name reaches the fold and is dropped above it.
+        assert!(contains_histogram_fold(&plan), "{}", plan.display_indent());
+        assert!(
+            datafusion_expr::UserDefinedLogicalNodeCore::schema(
+                find_histogram_fold(&plan).unwrap()
+            )
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME),
+            "{}",
+            plan.display_indent()
+        );
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .all(|field| field.name() != METRIC_NAME),
+            "{:?}",
+            plan.schema()
+        );
+
+        // Grouping by the dropped name reports one group for every folded metric, so the group
+        // key stays out of the output as well.
+        let plan = plan_union_query(
+            build_union_classic_histogram_table_provider(),
+            &["m_hist_one", "m_hist_two"],
+            r#"count by(__name__) (histogram_quantile(0.5, {__name__=~"m_hist_.*"}))"#,
+        )
+        .await
+        .unwrap();
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .all(|field| field.name() != METRIC_NAME),
+            "{:?}",
+            plan.schema()
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_plan_shape_fills_missing_labels() {
+        let plan = plan_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"{__name__=~"m_.*"}"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+
+        // One branch per candidate metric table, combined with UNION ALL.
+        assert_eq!(plan_str.matches("TableScan: m_").count(), 2, "{plan_str}");
+        assert!(plan_str.contains("Union"), "{plan_str}");
+        // The metric name is a constant column of each branch.
+        assert!(
+            plan_str.contains("Utf8(\"m_alpha\") AS __name__"),
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("Utf8(\"m_beta\") AS __name__"),
+            "{plan_str}"
+        );
+        // A label missing from a branch is filled with NULL.
+        assert!(plan_str.contains("Utf8(NULL) AS job"), "{plan_str}");
+        assert!(plan_str.contains("Utf8(NULL) AS instance"), "{plan_str}");
+        // The series key of the combined plan is the union of the branch labels plus the metric
+        // name, so one series never mixes two metric tables.
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["instance", "job", "__name__"]"#),
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_aggregates_globally() {
+        // `sum` without `by` drops the metric name and aggregates every candidate table.
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"sum({__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+
+        // `topk` ranks series across every candidate table, not within one table.
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"topk(1, {__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+
+        // The metric name stays an addressable label for explicit `by` modifiers.
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"sum by(__name__) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![1.0, 2.0]);
+
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"count by(__name__) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0, 1.0]);
+        let mut names = batches
+            .iter()
+            .flat_map(|batch| {
+                batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .position(|field| field.name() == METRIC_NAME)
+                    .map(|index| {
+                        batch
+                            .column(index)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap()
+                            .iter()
+                            .flatten()
+                            .map(|name| name.to_string())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>();
+        // One group per metric table; the group order is not part of the result contract.
+        names.sort();
+        assert_eq!(names, vec!["m_alpha".to_string(), "m_beta".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_scans_the_shared_physical_table() {
+        let plan = plan_union_query(
+            build_union_engine_table_provider(),
+            &["me_api", "me_host"],
+            r#"{__name__=~"me_.*"}"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+
+        // Metric engine logical tables are rewritten to their physical table, one branch and one
+        // `__table_id` filter per candidate.
+        assert_eq!(
+            plan_str.matches("TableScan: union_phy").count(),
+            2,
+            "{plan_str}"
+        );
+        assert!(plan_str.contains("UInt32(3101)"), "{plan_str}");
+        assert!(plan_str.contains("UInt32(3102)"), "{plan_str}");
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        // `SeriesDivide` requires its input to be partitioned by the series key, so the branches
+        // are hash repartitioned and each partition is sorted on its own. Every series stays
+        // contiguous and time ordered, but the order of series across partitions is not part of
+        // the plan's contract.
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![1.0, 2.0]);
+
+        let batches = execute_union_query(
+            build_union_engine_table_provider(),
+            &["me_api", "me_host"],
+            r#"sum({__name__=~"me_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_aligns_mixed_time_index_precisions() {
+        // Candidate metric tables may store the time index at different precisions, which is what
+        // a `timestamp(9)` table next to a millisecond one looks like. The union used to reject
+        // such candidates; the branches are aligned to the finest unit instead.
+        let eval_stmt = build_eval_stmt(r#"{__name__=~"m_.*"}"#);
+        let mut planner = PromPlanner {
+            table_provider: build_union_mixed_precision_table_provider(),
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        let plan = match planner
+            .selector_union_to_series_normalize_plan(
+                &None,
+                Matchers::new(vec![]),
+                vec!["m_ms".to_string(), "m_ns".to_string()],
+                false,
+            )
+            .await
+            .unwrap()
+        {
+            UnionSelectorPlan::Union(plan) => plan,
+            UnionSelectorPlan::Empty(_) => panic!("expected a union plan"),
+        };
+
+        // Only the millisecond branch needs a cast: the nanosecond branch already has the common
+        // unit, and every branch ends up with the same time index type.
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("CAST(m_ms.timestamp AS Timestamp(ns)) AS timestamp"),
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan.schema()
+                .field_with_name(None, "timestamp")
+                .unwrap()
+                .data_type(),
+            &ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, None),
+            "{plan_str}"
+        );
+
+        // The cast rescales the native tick count, so a millisecond sample keeps its instant:
+        // both branches report the very same timestamp.
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        let mut samples = Vec::new();
+        for batch in &batches {
+            let names = batch
+                .column(batch.schema().index_of(METRIC_NAME).unwrap())
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let timestamps = batch
+                .column(batch.schema().index_of("timestamp").unwrap())
+                .as_any()
+                .downcast_ref::<TimestampNanosecondArray>()
+                .unwrap();
+            samples.extend(
+                (0..batch.num_rows())
+                    .map(|index| (names.value(index).to_string(), timestamps.value(index))),
+            );
+        }
+        samples.sort();
+        assert_eq!(
+            samples,
+            vec![
+                ("m_ms".to_string(), 1_000_000_000),
+                ("m_ns".to_string(), 1_000_000_000),
+            ]
+        );
+
+        // The enclosing manipulators see the aligned column, so every candidate is aggregated.
+        let batches = execute_union_query(
+            build_union_mixed_precision_table_provider(),
+            &["m_ms", "m_ns"],
+            r#"sum by(__name__) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![1.0, 2.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_rejects_a_conflicting_name_column() {
+        // A table that already has a `__name__` column cannot expose the metric name as a label.
+        let table = union_metric_table(
+            "m_named",
+            3_003,
+            &[(METRIC_NAME, Some("m_named")), ("job", Some("api"))],
+            &[1_000],
+            &[float_field(greptime_value(), &[1.0])],
+        );
+        let table_provider =
+            register_tables(&MemoryCatalogManager::with_default_setup(), vec![table]);
+
+        // `{__name__!="none"}` alone is not a valid PromQL selector: at least one matcher must
+        // not match the empty string, so the selector carries a second, non-empty matcher.
+        let err = plan_union_query(
+            table_provider,
+            &["m_named"],
+            r#"{__name__!="none",job="api"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(err.to_string().contains(METRIC_NAME), "{err}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_rejects_conflicting_value_types() {
+        let table_provider = register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_float",
+                    3_004,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_text",
+                    3_005,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[string_field(greptime_value(), &["not a number"])],
+                ),
+            ],
+        );
+
+        let err = plan_union_query(
+            table_provider,
+            &["m_float", "m_text"],
+            r#"{__name__=~"m_.*"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(err.to_string().contains(greptime_value()), "{err}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_rejects_conflicting_value_column_names() {
+        let table_provider = register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_value",
+                    3_006,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_value_other",
+                    3_007,
+                    &[("job", Some("api"))],
+                    &[1_000],
+                    &[float_field("other_value", &[1.0])],
+                ),
+            ],
+        );
+
+        let err = plan_union_query(
+            table_provider,
+            &["m_value", "m_value_other"],
+            r#"{__name__=~"m_.*"}"#,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(err.to_string().contains("other_value"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_without_resolved_candidates_is_empty() {
+        // No candidate was resolved (an empty candidate list): the selector observes an empty
+        // metric and no table is scanned.
+        let plan = plan_union_query(
+            build_union_metric_table_provider(),
+            &[],
+            r#"{__name__=~"m_.*"}"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("EmptyMetric"), "{plan_str}");
+        // `EmptyMetric` carries a placeholder `dummy` input for its schema; no candidate metric
+        // table and no union branch is planned.
+        assert!(!plan_str.contains("TableScan: m_"), "{plan_str}");
+        assert!(!plan_str.contains("Union"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_enumerates_metric_tables_without_resolved_candidates() {
+        // A caller that cannot resolve and authorize metric tables (SQL, TQL) leaves the
+        // extension unset; the planner then enumerates the metric tables of the selected schema
+        // itself so every PromQL entry point behaves the same.
+        let eval_stmt = build_eval_stmt(r#"{__name__=~"me_.*"}"#);
+        let mut planner = PromPlanner {
+            table_provider: build_union_engine_table_provider(),
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        let plan = planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str.matches("TableScan: union_phy").count(),
+            2,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("Utf8(\"me_api\") AS __name__"),
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("Utf8(\"me_host\") AS __name__"),
+            "{plan_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_consumes_candidates_once() {
+        // Candidates are consumed by the selector that triggered discovery. A distinct selector
+        // in the same query must not silently reuse them.
+        let eval_stmt = build_eval_stmt(r#"{__name__=~"me_.*"} or {__name__=~"me_.*"}"#);
+        let mut planner = PromPlanner {
+            table_provider: build_union_engine_table_provider(),
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        planner.ctx.metric_names = Some(vec!["me_api".to_string()]);
+
+        let plan = planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str.matches("TableScan: union_phy").count(),
+            3,
+            "{plan_str}"
+        );
+        assert_eq!(plan_str.matches("UInt32(3101)").count(), 2, "{plan_str}");
+    }
+
+    fn build_metric_name_label_test_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_one",
+                    3_010,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_two",
+                    3_011,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+                union_metric_table(
+                    "http_requests_get",
+                    3_012,
+                    &[("method", Some("GET")), ("path", Some("/metrics"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "http_requests_post",
+                    3_013,
+                    &[("method", Some("POST")), ("path", Some("/metrics"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_replanned_selector_keeps_authorized_candidates() {
+        // Filter propagation re-plans the left selector with `job="api"`. The protocol would
+        // have authorized only `me_api`; the re-plan must not enumerate `me_host` from catalog.
+        let plan = plan_union_query(
+            build_union_engine_table_provider(),
+            &["me_api"],
+            r#"sum by(job) ({__name__=~"me_.*"}) / on(job) me_api{job="api"}"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("UInt32(3101)"), "{plan_str}");
+        assert!(!plan_str.contains("UInt32(3102)"), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_plain_selector_replan_keeps_pending_candidates() {
+        // The inner `/` re-plans one of its operands — a plain selector — before the regex
+        // selector of the outer `+` is planned. The re-plan must leave the query-scoped
+        // candidates pending: the protocol authorized only `me_api`, so falling back to catalog
+        // enumeration would scan the denied `me_host` table.
+        for query in [
+            // The left operand gains `job="api"` and is re-planned.
+            r#"(me_api / on(job) me_api{job="api"}) + on(job) sum by(job) ({__name__=~"me_.*"})"#,
+            // The right operand gains `job="api"` and is re-planned.
+            r#"(me_api{job="api"} / on(job) me_api) + on(job) sum by(job) ({__name__=~"me_.*"})"#,
+        ] {
+            let plan = plan_union_query(build_union_engine_table_provider(), &["me_api"], query)
+                .await
+                .unwrap();
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(plan_str.contains("UInt32(3101)"), "{query}: {plan_str}");
+            assert!(!plan_str.contains("UInt32(3102)"), "{query}: {plan_str}");
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_default_join_ignores_metric_name() {
+        let table_provider = build_test_table_provider_with_fields(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+            &[],
+        )
+        .await;
+        let planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let schema = scan(&source(
+            "regex_selector",
+            false,
+            1,
+            vec![("host", Some("a")), (METRIC_NAME, Some("cpu_user"))],
+            DirectOrValue::Float64(1.0),
+        ))
+        .schema()
+        .clone();
+
+        // A regex selector materializes `__name__`, while an exact-name selector does not.
+        // Both still default-match on `host` only.
+        let regex_context = direct_or_context("regex_selector", &["host", METRIC_NAME], "v");
+        let exact_context = direct_or_context("exact_selector", &["host"], "v");
+        for right_context in [exact_context, regex_context.clone()] {
+            let (left_keys, right_keys, force_empty_join) = planner
+                .binary_join_key_columns(
+                    &schema,
+                    &schema,
+                    &regex_context,
+                    &right_context,
+                    false,
+                    &None,
+                )
+                .unwrap();
+            assert_eq!(left_keys, BTreeSet::from(["host".to_string()]));
+            assert_eq!(right_keys, BTreeSet::from(["host".to_string()]));
+            assert!(!force_empty_join);
+        }
+
+        // `ignoring(...)` also keeps metric-name exclusion implicit.
+        let modifier = or_modifier(r#"lhs / ignoring(host) rhs"#);
+        let (left_keys, right_keys, force_empty_join) = planner
+            .binary_join_key_columns(
+                &schema,
+                &schema,
+                &regex_context,
+                &regex_context,
+                false,
+                &modifier,
+            )
+            .unwrap();
+        assert!(left_keys.is_empty());
+        assert!(right_keys.is_empty());
+        assert!(!force_empty_join);
+
+        // Explicit `on(__name__)` remains an opt-in join key.
+        let modifier = or_modifier(r#"lhs / on(__name__) rhs"#);
+        let (left_keys, right_keys, force_empty_join) = planner
+            .binary_join_key_columns(
+                &schema,
+                &schema,
+                &regex_context,
+                &regex_context,
+                false,
+                &modifier,
+            )
+            .unwrap();
+        assert_eq!(left_keys, BTreeSet::from([METRIC_NAME.to_string()]));
+        assert_eq!(right_keys, BTreeSet::from([METRIC_NAME.to_string()]));
+        assert!(!force_empty_join);
+    }
+
+    /// Two single-label metric tables with two samples each, so a range function produces a
+    /// value over the union.
+    fn build_union_rate_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_rate_one",
+                    3_030,
+                    &[("host", Some("a"))],
+                    &[0, 1_000],
+                    &[float_field(greptime_value(), &[1.0, 2.0])],
+                ),
+                union_metric_table(
+                    "m_rate_two",
+                    3_031,
+                    &[("host", Some("b"))],
+                    &[0, 1_000],
+                    &[float_field(greptime_value(), &[3.0, 4.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_range_functions_drop_metric_name() {
+        // `rate` computes new sample values, so the union's materialized name is dropped from
+        // the output: grouping by it reports one group instead of one per metric table.
+        let batches = execute_union_query(
+            build_union_rate_table_provider(),
+            &["m_rate_one", "m_rate_two"],
+            r#"count by(__name__) (rate({__name__=~"m_rate_.*"}[5m]))"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+
+        // `last_over_time` only picks an existing sample, so the name survives it: the two
+        // metric names form two groups at each of the two steps, each holding one series.
+        let batches = execute_union_query(
+            build_union_rate_table_provider(),
+            &["m_rate_one", "m_rate_two"],
+            r#"count by(__name__) (last_over_time({__name__=~"m_rate_.*"}[5m]))"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0, 1.0, 1.0, 1.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_join_matches_heterogeneous_label_sets() {
+        // `m_alpha` carries `job`, `m_beta` carries `instance`; the union pads each branch with
+        // NULL for the other label. Vector matching compares label sets per series, so the
+        // `m_alpha` row matches the exact-name operand and the `m_beta` row does not.
+        let batches = execute_union_query(
+            build_union_metric_table_provider(),
+            &["m_alpha", "m_beta"],
+            r#"{__name__=~"m_.*"} + m_alpha"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_without_drops_metric_name() {
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"sum without(host) ({__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_arithmetic_drops_metric_name() {
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["http_requests_get", "http_requests_post"],
+            r#"count by(__name__) ({__name__=~"http_requests_.*"} * 2)"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+
+        // Grouping by a label the arithmetic keeps still separates the series of each metric.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["http_requests_get", "http_requests_post"],
+            r#"sum by(method) ({__name__=~"http_requests_.*"} * 2)"#,
+        )
+        .await;
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![2.0, 4.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_functions_follow_the_metric_name_rule() {
+        // `abs` computes new sample values, so it drops the materialized metric name like
+        // arithmetic does: `by(__name__)` then reports one group instead of one per metric.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"count by(__name__) (abs({__name__=~"m_.*"}))"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+
+        // `sort` only reorders series, so the name survives it.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"count by(__name__) (sort({__name__=~"m_.*"}))"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0, 1.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_bool_comparison_drops_metric_name() {
+        // A `bool` comparison returns computed samples, so it drops the name.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"count by(__name__) ({__name__=~"m_.*"} > bool 0)"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![2.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+
+        // A filtering comparison keeps the left-hand side, name included.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"{__name__=~"m_.*"} > 0"#,
+        )
+        .await;
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_unary_negation_drops_metric_name() {
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"-({__name__=~"m_.*"})"#,
+        )
+        .await;
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+        let mut values = float_values(&batches);
+        values.sort_by(f64::total_cmp);
+        assert_eq!(values, vec![-2.0, -1.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_set_operators_ignore_metric_name() {
+        // Set operators match on the labels without the metric name, so a union operand and an
+        // exact-name operand are comparable, and the right-hand side of `or` deduplicates
+        // against the left instead of being kept as a second series.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one"],
+            r#"{__name__=~"m_one"} and m_one"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
+        );
+
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one"],
+            r#"{__name__=~"m_one"} or m_one"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0]);
+
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one"],
+            r#"{__name__=~"m_one"} unless m_one"#,
+        )
+        .await;
+        assert!(float_values(&batches).is_empty());
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_rejects_metric_name_time_index() {
+        let table_provider = register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![union_metric_table_with_time_unit(
+                "m_time_name",
+                3_014,
+                &[("host", Some("a"))],
+                &[1_000],
+                &[float_field(greptime_value(), &[1.0])],
+                ArrowTimeUnit::Millisecond,
+                METRIC_NAME,
+            )],
+        );
+
+        let err = plan_union_query(table_provider, &["m_time_name"], r#"{__name__=~"m_.*"}"#)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status_code(), StatusCode::Unsupported);
+        assert!(err.to_string().contains(METRIC_NAME), "{err}");
     }
 }

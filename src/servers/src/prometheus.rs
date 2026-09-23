@@ -48,6 +48,8 @@ pub fn metric_name_matchers_to_plan(
     // Must be metric engine
     conditions.push(col(TABLE_ENGINE).eq(lit("metric")));
     // Physical metric tables are internal. PromQL queries user-visible logical tables.
+    // Keep in sync with `candidate_metric_names` in `src/query/src/promql/planner.rs` (query
+    // layer), which filters the same metric engine and logical/physical flags over catalog tables.
     conditions.push(
         regexp_match(
             col(CREATE_OPTIONS),

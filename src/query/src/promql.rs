@@ -22,6 +22,46 @@ use promql::extension_plan::{
     Absent, EmptyMetric, HistogramFold, InstantManipulate, RangeManipulate, ScalarCalculate,
     SeriesDivide, SeriesNormalize, UnionDistinctOn,
 };
+use serde::{Deserialize, Serialize};
+use session::context::QueryContextRef;
+use session::hints::PROMQL_METRIC_NAMES_EXTENSION_KEY;
+
+/// Metric tables resolved by the protocol layer for a PromQL `__name__` non-equality matcher.
+///
+/// Stored in the query context extension [`PROMQL_METRIC_NAMES_EXTENSION_KEY`], which is a
+/// reserved key: it can only be set by the database itself, never by a client request. The
+/// tables were already filtered and authorized by the caller, so both the planner and the
+/// run-time permission check can rely on them without widening the caller's access.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricNameCandidates {
+    /// Schema the metric tables were resolved in. It may differ from the current schema when
+    /// the selector carries a `__schema__`/`__database__` matcher.
+    pub schema: String,
+    /// Resolved metric table names.
+    pub metric_names: Vec<String>,
+}
+
+/// Encodes resolved metric tables for the query context extension.
+pub fn encode_metric_name_candidates(candidates: &MetricNameCandidates) -> String {
+    // `MetricNameCandidates` contains only strings and vectors, which always serialize to JSON.
+    serde_json::to_string(candidates).expect("metric name candidates serialize")
+}
+
+/// Returns the metric tables resolved for this query, if the caller resolved any.
+///
+/// `None` means nothing was resolved for this query, while an empty `metric_names` means the
+/// matcher resolved to zero metric tables.
+pub fn query_context_metric_name_candidates(
+    query_ctx: &QueryContextRef,
+) -> Option<MetricNameCandidates> {
+    let value = query_ctx.extension(PROMQL_METRIC_NAMES_EXTENSION_KEY)?;
+    serde_json::from_str(value).ok()
+}
+
+/// Returns the metric table names resolved for this query, if any.
+pub fn query_context_metric_names(query_ctx: &QueryContextRef) -> Option<Vec<String>> {
+    query_context_metric_name_candidates(query_ctx).map(|candidates| candidates.metric_names)
+}
 
 /// Returns true if the plan contains PromQL-specific extension plan nodes.
 pub fn plan_contains_promql_extension(plan: &LogicalPlan) -> bool {
@@ -59,6 +99,7 @@ mod tests {
 
     use datafusion_common::DFSchema;
     use datafusion_expr::{EmptyRelation, Extension, LogicalPlanBuilder, col};
+    use session::context::{QueryContext, QueryContextBuilder};
 
     use super::*;
 
@@ -104,5 +145,49 @@ mod tests {
         LogicalPlan::Extension(Extension {
             node: Arc::new(empty_metric),
         })
+    }
+
+    #[test]
+    fn metric_names_extension_round_trips() {
+        let candidates = MetricNameCandidates {
+            schema: "public".to_string(),
+            metric_names: vec!["cpu_user".to_string(), "cpu\"system\"".to_string()],
+        };
+
+        let context_with = |value: String| {
+            let mut query_ctx = QueryContextBuilder::default().build();
+            query_ctx.set_extension(PROMQL_METRIC_NAMES_EXTENSION_KEY, value);
+            Arc::new(query_ctx) as QueryContextRef
+        };
+
+        let encoded = encode_metric_name_candidates(&candidates);
+        let query_ctx = context_with(encoded);
+        assert_eq!(
+            query_context_metric_name_candidates(&query_ctx),
+            Some(candidates.clone())
+        );
+        assert_eq!(
+            query_context_metric_names(&query_ctx),
+            Some(candidates.metric_names)
+        );
+
+        assert_eq!(
+            query_context_metric_names(&QueryContext::arc()),
+            None,
+            "an absent extension means nothing was resolved"
+        );
+        assert_eq!(
+            query_context_metric_names(&context_with("not json".to_string())),
+            None,
+            "a malformed extension must be ignored"
+        );
+
+        // An empty candidate set is different from an absent one: the caller resolved the
+        // matcher to zero metric tables.
+        let empty = context_with(encode_metric_name_candidates(&MetricNameCandidates {
+            schema: "public".to_string(),
+            metric_names: Vec::new(),
+        }));
+        assert_eq!(query_context_metric_names(&empty), Some(Vec::new()));
     }
 }

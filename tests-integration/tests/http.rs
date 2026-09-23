@@ -69,7 +69,9 @@ use servers::http::header::constants::{
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
-use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    Column, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
+};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
@@ -158,6 +160,7 @@ macro_rules! http_tests {
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
                 test_prometheus_label_replace_response,
+                test_prometheus_metric_name_union,
                 test_prom_http_api,
                 test_config_api,
                 test_dashboard_api,
@@ -1001,6 +1004,154 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
                 },
                 "value": [0.0, "1.1"]
             }]
+        }))
+        .unwrap()
+    );
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "prometheus_metric_name_union").await;
+    let client = TestClient::new(app).await;
+
+    // Metric tables with different labels and clearly different values, so a per-metric
+    // (instead of global) evaluation of an enclosing operator is visible in the result. `union_c`
+    // is a `timestamp(9)` table, so the candidates of a `__name__` regex mix time index
+    // precisions and the union has to align them.
+    for sql in [
+        "CREATE TABLE union_phy (ts timestamp time index, val double) engine=metric with ('physical_metric_table' = '')",
+        "CREATE TABLE union_phy_ns (ts timestamp(9) time index, val double) engine=metric with ('physical_metric_table' = '')",
+        "CREATE TABLE union_a (ts timestamp time index, val double, host string primary key) engine=metric with (on_physical_table = 'union_phy')",
+        "CREATE TABLE union_b (ts timestamp time index, val double, idc string primary key) engine=metric with (on_physical_table = 'union_phy')",
+        "CREATE TABLE union_c (ts timestamp(9) time index, val double, host string primary key) engine=metric with (on_physical_table = 'union_phy_ns')",
+        "INSERT INTO union_a(host, val, ts) VALUES ('h1', 1.0, 0)",
+        "INSERT INTO union_b(idc, val, ts) VALUES ('i1', 5.0, 0)",
+        "INSERT INTO union_c(host, val, ts) VALUES ('h1', 3.0, 0)",
+    ] {
+        let res = client
+            .get(&format!("/v1/sql?sql={}", encode(sql)))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "{sql}: {:?}",
+            res.text().await
+        );
+    }
+
+    let range_query = |query: &str| {
+        client.get(&format!(
+            "/v1/prometheus/api/v1/query_range?query={}&start=0&end=600&step=600",
+            encode(query)
+        ))
+    };
+
+    // A bare selector over a `__name__` regex returns one series per metric table, each labelled
+    // with its own metric name. `union_c` is a `timestamp(9)` table, so the candidate set mixes
+    // time index precisions: every branch is aligned to the finest one, and a millisecond sample
+    // keeps its instant through that cast (all three rows sit at ts=0).
+    let res = range_query(r#"{__name__=~"union_.*"}"#).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    let PromQueryResult::Matrix(mut series) = data.result else {
+        panic!("expected a matrix")
+    };
+    series.sort_by(|left, right| left.metric.cmp(&right.metric));
+    // Sample values arrive as their Prometheus wire strings, so the expectation is built from
+    // JSON just like the response is.
+    assert_eq!(
+        serde_json::to_value(PromQueryResult::Matrix(series)).unwrap(),
+        json!([
+            {
+                "metric": {"__name__": "union_a", "host": "h1"},
+                "values": [[0.0, "1.0"]]
+            },
+            {
+                "metric": {"__name__": "union_b", "idc": "i1"},
+                "values": [[0.0, "5.0"]]
+            },
+            {
+                "metric": {"__name__": "union_c", "host": "h1"},
+                "values": [[0.0, "3.0"]]
+            }
+        ])
+    );
+
+    // `sum` aggregates once across every matched metric table, including the nanosecond one:
+    // per-metric evaluation would only ever report one of the values.
+    let res = range_query(r#"sum({__name__=~"union_.*"})"#).send().await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    assert_eq!(
+        data.result,
+        serde_json::from_value::<PromQueryResult>(json!([
+            {"metric": {}, "values": [[0.0, "9.0"]]}
+        ]))
+        .unwrap()
+    );
+
+    // `topk` ranks series across every matched metric table, so the globally largest series wins.
+    let res = range_query(r#"topk(1, {__name__=~"union_.*"})"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    assert_eq!(
+        data.result,
+        serde_json::from_value::<PromQueryResult>(json!([
+            {"metric": {"__name__": "union_b", "idc": "i1"}, "values": [[0.0, "5.0"]]}
+        ]))
+        .unwrap()
+    );
+
+    // The metric name keeps working as a grouping label.
+    let res = range_query(r#"count by(__name__) ({__name__=~"union_.*"})"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    let PromQueryResult::Matrix(mut series) = data.result else {
+        panic!("expected a matrix")
+    };
+    series.sort_by(|left, right| left.metric.cmp(&right.metric));
+    assert_eq!(
+        serde_json::to_value(PromQueryResult::Matrix(series)).unwrap(),
+        json!([
+            {"metric": {"__name__": "union_a"}, "values": [[0.0, "1.0"]]},
+            {"metric": {"__name__": "union_b"}, "values": [[0.0, "1.0"]]},
+            {"metric": {"__name__": "union_c"}, "values": [[0.0, "1.0"]]}
+        ])
+    );
+
+    // A matcher that resolves to no metric table reports an empty result instead of an error.
+    let res = range_query(r#"{__name__=~"nonexistent_metric_.*"}"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": []
         }))
         .unwrap()
     );
