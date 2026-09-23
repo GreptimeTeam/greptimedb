@@ -416,15 +416,9 @@ pub async fn instant_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        if metric_names.is_empty() {
-            let result_type = promql_expr.value_type();
-
-            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
-                result_type: result_type.to_string(),
-                ..Default::default()
-            }));
-        }
-
+        // An empty candidate set is still authorized and executed: the selector may be part of a
+        // larger expression whose result is non-empty (for example `absent()` or `or vector(0)`),
+        // and only the query engine can evaluate the expression as a whole.
         let query_ctx = try_call_return_response!(
             authorize_metric_name_union(&handler, metric_names, &schema, &query_ctx).await
         );
@@ -532,13 +526,9 @@ pub async fn range_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        if metric_names.is_empty() {
-            return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
-                result_type: ValueType::Matrix.to_string(),
-                ..Default::default()
-            }));
-        }
-
+        // An empty candidate set is still authorized and executed: the selector may be part of a
+        // larger expression whose result is non-empty (for example `absent()` or `or vector(0)`),
+        // and only the query engine can evaluate the expression as a whole.
         let query_ctx = try_call_return_response!(
             authorize_metric_name_union(&handler, metric_names, &schema, &query_ctx).await
         );
@@ -3012,6 +3002,133 @@ mod tests {
             *handler.queries.lock().unwrap(),
             vec![r#"{__name__=~"cpu_.*"}"#.to_string()]
         );
+    }
+
+    /// An empty raw candidate set must not be answered without running the query: the discovery
+    /// selector can be part of a larger expression (`absent()` / `or vector(0)`) whose result is
+    /// non-empty. Both endpoints must still authorize the empty union, hand it to the planner as
+    /// `Some(empty)`, and execute the full expression exactly once.
+    #[tokio::test]
+    async fn empty_metric_name_union_is_authorized_and_executed() {
+        let query = r#"absent({__name__=~"missing_.*"}) or vector(0)"#;
+
+        let (handler, handler_ref) = new_test_handler(Vec::new(), None);
+        let response = instant_query(
+            State(handler_ref),
+            Query(InstantQuery {
+                query: Some(query.to_string()),
+                time: Some("0".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        // `Some(empty)` is not `None`: the planner must see that the matcher resolved to zero
+        // metric tables instead of scanning every table.
+        assert_eq!(
+            *handler.metric_name_candidates.lock().unwrap(),
+            vec![Some(Vec::<String>::new())]
+        );
+        assert_eq!(*handler.queries.lock().unwrap(), vec![query.to_string()]);
+
+        let (handler, handler_ref) = new_test_handler(Vec::new(), None);
+        let response = range_query(
+            State(handler_ref),
+            Query(RangeQuery {
+                query: Some(query.to_string()),
+                start: Some("0".to_string()),
+                end: Some("1".to_string()),
+                step: Some("1s".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(RangeQuery::default()),
+        )
+        .await;
+
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            *handler.metric_name_candidates.lock().unwrap(),
+            vec![Some(Vec::<String>::new())]
+        );
+        assert_eq!(*handler.queries.lock().unwrap(), vec![query.to_string()]);
+    }
+
+    /// Executing an empty metric name union must not bypass the permission check: a denied
+    /// operation is still reported and no query is executed at either endpoint. There is no
+    /// candidate table left to deny once the raw set is empty, so the operation permission check
+    /// is the denial the mock can exercise here.
+    #[tokio::test]
+    async fn empty_metric_name_union_still_checks_permissions() {
+        let query = r#"absent({__name__=~"missing_.*"}) or vector(0)"#;
+        let handler = Arc::new(TestPrometheusHandler {
+            catalog_manager: MemoryCatalogManager::new(),
+            deny_operation: true,
+            denied_table: None,
+            metric_names: Vec::new(),
+            label_metric_names: Vec::new(),
+            label_lookups: Mutex::new(Vec::new()),
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+            metric_name_candidates: Mutex::new(Vec::new()),
+        });
+        let handler_ref: PrometheusHandlerRef = handler.clone();
+
+        let response = instant_query(
+            State(handler_ref.clone()),
+            Query(InstantQuery {
+                query: Some(query.to_string()),
+                time: Some("0".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await;
+        assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
+
+        let response = range_query(
+            State(handler_ref),
+            Query(RangeQuery {
+                query: Some(query.to_string()),
+                start: Some("0".to_string()),
+                end: Some("1".to_string()),
+                step: Some("1s".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(RangeQuery::default()),
+        )
+        .await;
+        assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
+
+        // Neither denied query was executed.
+        assert!(handler.queries.lock().unwrap().is_empty());
     }
 
     #[test]

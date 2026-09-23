@@ -107,14 +107,14 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
-    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu,
-    Result, SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu,
-    UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu,
-    UnsupportedMatcherOpSnafu, UnsupportedMetricUnionSnafu, UnsupportedVectorMatchSnafu,
-    ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
+    FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
+    InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, PromqlPlanNodeSnafu, Result, SameLabelSetSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
+    UnsupportedMetricUnionSnafu, UnsupportedVectorMatchSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::promql::query_context_metric_names;
 use crate::query_engine::QueryEngineState;
@@ -1694,6 +1694,31 @@ impl PromPlanner {
 
                 // set op has "special" join semantics
                 if Self::is_token_a_set_op(*op) {
+                    // A metric name union materializes `__name__` as a label column, while a
+                    // selector that names one metric table carries no such column at all. A set
+                    // operator reports each operand's own labels — and `on(__name__)` compares
+                    // the name — so every operand written as a selector is extended with its own
+                    // constant name whenever its own labels do not carry the column yet,
+                    // independently of the other operand: a union that observed an empty metric
+                    // materializes no name at all, and the exact selector beside it must still
+                    // report its printed name. Only a selector written directly, possibly
+                    // parenthesized, may be extended: a derived expression keeps the context's
+                    // table name, but its labels are not that table's labels.
+                    for (expr, input, context) in [
+                        (lhs, &mut left_input, &mut left_context),
+                        (rhs, &mut right_input, &mut right_context),
+                    ] {
+                        if context
+                            .tag_columns
+                            .iter()
+                            .any(|column| column == METRIC_NAME)
+                        {
+                            continue;
+                        }
+                        if let Some(name) = Self::direct_selector_metric_name(expr) {
+                            *input = Self::extend_with_metric_name(input, &name, context)?;
+                        }
+                    }
                     return self.set_op_on_non_field_columns(
                         left_input,
                         right_input,
@@ -1911,6 +1936,39 @@ impl PromPlanner {
                             ),
                         };
                     project_context.field_columns = project_field_columns;
+                    // PromQL derives the result labels of a binary operation from the left-hand
+                    // operand's labels and, for one-to-one matching with an explicit `on(...)`,
+                    // keeps exactly the labels `on` names (see `resultMetric` in Prometheus). A
+                    // metric name a metric name union materialized is a label like any other
+                    // there, so a filtering comparison reports it only when `on` names it; the
+                    // default and `ignoring(...)` matching leave the operand's labels alone, and
+                    // the many-to-one/one-to-many cardinalities never apply this reduction.
+                    let one_to_one_on_labels = modifier.as_ref().and_then(|modifier| {
+                        match (&modifier.card, &modifier.matching) {
+                            (
+                                VectorMatchCardinality::OneToOne,
+                                Some(LabelModifier::Include(on)),
+                            ) => Some(on),
+                            _ => None,
+                        }
+                    });
+                    if let Some(on_labels) = one_to_one_on_labels
+                        && lhs.value_type() == ValueType::Vector
+                        && rhs.value_type() == ValueType::Vector
+                    {
+                        let retained_before = project_context.tag_columns.len();
+                        project_context
+                            .tag_columns
+                            .retain(|column| on_labels.labels.iter().any(|label| label == column));
+                        // `__tsid` identifies the labels a sample was read with. As soon as the
+                        // reduction drops a label the reported sample is no longer that series, so
+                        // a downstream join keyed on the tsid would match on the labels before the
+                        // comparison and drop rows the reduced labels still match. Keeping the tsid
+                        // is only sound while the label set is untouched.
+                        if project_context.tag_columns.len() < retained_before {
+                            project_context.use_tsid = false;
+                        }
+                    }
                     self.project_binary_join_side(filtered, project_table_ref, &project_context)
                 } else {
                     let projected = self.projection_for_each_field_column(
@@ -7147,6 +7205,55 @@ impl PromPlanner {
         matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
     }
 
+    /// The metric name of an operand written as a selector that names one metric table.
+    ///
+    /// Only a `VectorSelector` — possibly wrapped in parentheses — names a table directly: the
+    /// name in front of the matchers, or a single equality `__name__` matcher. A derived
+    /// expression keeps the name of its input table in the planner context, but its labels are
+    /// not that table's labels, so it must never be extended with a name of its own.
+    fn direct_selector_metric_name(expr: &PromExpr) -> Option<String> {
+        match expr {
+            PromExpr::Paren(ParenExpr { expr }) => Self::direct_selector_metric_name(expr),
+            PromExpr::VectorSelector(selector) => {
+                if let Some(name) = &selector.name {
+                    return Some(name.clone());
+                }
+                let mut matchers = selector.matchers.find_matchers(METRIC_NAME);
+                match matchers.pop() {
+                    Some(matcher) if matchers.is_empty() && matcher.op == MatchOp::Equal => {
+                        Some(matcher.value)
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Extends an operand with its own constant metric name.
+    ///
+    /// The name is added as one of the operand's label columns (in the plan and in `context`),
+    /// so its visible labels and values stay exactly as the selector produced them.
+    fn extend_with_metric_name(
+        plan: &LogicalPlan,
+        name: &str,
+        context: &mut PromPlannerContext,
+    ) -> Result<LogicalPlan> {
+        let visible = plan.schema().iter().map(|(qualifier, field)| {
+            DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+        });
+        context.tag_columns.push(METRIC_NAME.to_string());
+        LogicalPlanBuilder::from(plan.clone())
+            .project(
+                visible
+                    .chain([lit(name).alias(METRIC_NAME)])
+                    .collect::<Vec<_>>(),
+            )
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
     /// Whether the vector matching modifier explicitly matches on the metric name, i.e.
     /// `on(__name__)`. Every other matching mode — the default and `ignoring(...)` — excludes
     /// the metric name from the matching labels.
@@ -7206,11 +7313,7 @@ impl PromPlanner {
         let visible_left_schema = left.schema().clone();
         let mut left_context = left_context;
         let mut right_context = right_context;
-        let added_marker_to_left = if Self::only_temporality_match_label_mismatches(
-            &left_context,
-            &right_context,
-            modifier,
-        ) {
+        if Self::only_temporality_match_label_mismatches(&left_context, &right_context, modifier) {
             let aligned = Self::align_temporality_match_column(
                 left,
                 right,
@@ -7219,10 +7322,7 @@ impl PromPlanner {
             )?;
             left = aligned.0;
             right = aligned.1;
-            aligned.2
-        } else {
-            false
-        };
+        }
 
         let mut left_tag_col_set = left_context
             .tag_columns
@@ -7260,13 +7360,34 @@ impl PromPlanner {
             let _ = left_tag_col_set.remove(METRIC_NAME);
             let _ = right_tag_col_set.remove(METRIC_NAME);
         }
-        ensure!(
-            left_tag_col_set == right_tag_col_set,
-            CombineTableColumnMismatchSnafu {
-                left: left_tag_col_set.iter().cloned().collect::<Vec<_>>(),
-                right: right_tag_col_set.iter().cloned().collect::<Vec<_>>(),
+        // A label one operand does not carry at all is absent for every series of that operand,
+        // which PromQL reads as the empty string, so the operands are matched on every label
+        // either of them matches on, each label compared per row (see
+        // `normalize_join_key_columns`). A label that is not a string on the operand that carries
+        // it has no empty value to compare against, though, so such a pair can never match: the
+        // label is left out of the keys and the join is rejected by an always-false predicate —
+        // AND then reports no series and UNLESS keeps every left series, exactly as a comparison
+        // that never holds does, instead of dropping rows a shared key would have matched.
+        let mut join_key_set = left_tag_col_set
+            .union(&right_tag_col_set)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut force_empty_join = false;
+        for (mine, mine_schema, theirs) in [
+            (&left_tag_col_set, left.schema(), &right_tag_col_set),
+            (&right_tag_col_set, right.schema(), &left_tag_col_set),
+        ] {
+            for label in mine.difference(theirs) {
+                let comparable = mine_schema
+                    .field_with_unqualified_name(label)
+                    .map(|field| Self::string_value_data_type(field.data_type()).is_some())
+                    .unwrap_or(false);
+                if !comparable {
+                    force_empty_join = true;
+                    let _ = join_key_set.remove(label);
+                }
             }
-        );
+        }
 
         let left_time_index = left_context.time_index_column.clone().unwrap();
         let right_time_index = right_context.time_index_column.clone().unwrap();
@@ -7293,10 +7414,22 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        let join_keys = left_tag_col_set
-            .into_iter()
-            .chain([left_time_index])
-            .collect::<Vec<_>>();
+        // All set operations in PromQL are "distinct". The join keys compare the normalized value
+        // of each label, and both key lists end with the time index column, so the pairs line up:
+        // the right-hand time index was aliased to the left-hand name above when they differed.
+        let left = LogicalPlanBuilder::from(left)
+            .distinct()
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        let (left, right, left_join_keys, right_join_keys) = Self::normalize_join_key_columns(
+            left,
+            right,
+            &join_key_set,
+            &join_key_set,
+            Some(&left_time_index),
+            Some(&left_time_index),
+        )?;
 
         ensure!(
             left_context.field_columns.len() == 1
@@ -7309,29 +7442,24 @@ impl PromPlanner {
             }
         );
         // Generate join plan.
-        // All set operations in PromQL are "distinct"
         let result = match op.id() {
             token::T_LAND => LogicalPlanBuilder::from(left)
-                .distinct()
-                .context(DataFusionPlanningSnafu)?
                 .join_detailed(
                     right,
                     JoinType::LeftSemi,
-                    (join_keys.clone(), join_keys),
-                    None,
+                    (left_join_keys, right_join_keys),
+                    force_empty_join.then_some(lit(false)),
                     NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu),
             token::T_LUNLESS => LogicalPlanBuilder::from(left)
-                .distinct()
-                .context(DataFusionPlanningSnafu)?
                 .join_detailed(
                     right,
                     JoinType::LeftAnti,
-                    (join_keys.clone(), join_keys),
-                    None,
+                    (left_join_keys, right_join_keys),
+                    force_empty_join.then_some(lit(false)),
                     NullEquality::NullEqualsNull,
                 )
                 .context(DataFusionPlanningSnafu)?
@@ -7344,17 +7472,18 @@ impl PromPlanner {
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }?;
-        let result = if added_marker_to_left {
-            LogicalPlanBuilder::from(result)
-                .project(visible_left_schema.iter().map(|(qualifier, field)| {
-                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-                }))
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu)?
-        } else {
-            result
-        };
+        // The normalized match keys are an implementation detail of the comparison, and a
+        // temporality marker was only added for it: the operator reports the left operand's own
+        // labels, name and values, in its own order, so every column past them is projected away
+        // here.
+        let project_exprs = (0..visible_left_schema.fields().len())
+            .map(|index| DfExpr::Column(Column::from(result.schema().qualified_field(index))))
+            .collect::<Vec<_>>();
+        let result = LogicalPlanBuilder::from(result)
+            .project(project_exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
         // markers are decoded.
@@ -8242,7 +8371,8 @@ mod test {
     use common_recordbatch::RecordBatch as GreptimeRecordBatch;
     use datafusion::arrow::array::{
         Array, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
-        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+        TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt32Array,
+        UInt64Array,
     };
     use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
     use datafusion::arrow::record_batch::RecordBatch;
@@ -8982,29 +9112,21 @@ mod test {
         .await
     }
 
+    /// The two histogram `or` tests below fall back to a directly projected `normal_metric`
+    /// operand, whose schema is exactly the table's tag columns, time index, value field, and the
+    /// `__name__` label the set operator added.
     fn assert_normal_metric_schema(plan: &LogicalPlan) {
         let fields = plan.schema().fields();
-        assert_eq!(fields.len(), 4, "{fields:?}");
-        assert!(
-            fields.iter().any(|field| field.name() == "pod"),
-            "{fields:?}"
-        );
-        assert!(
-            fields.iter().any(|field| field.name() == "instance"),
-            "{fields:?}"
-        );
-        assert!(
-            fields
-                .iter()
-                .any(|field| field.name() == greptime_timestamp()),
-            "{fields:?}"
-        );
-        assert!(
-            fields.iter().any(|field| {
-                field.name() == greptime_value() && field.data_type() == &ArrowDataType::Float64
-            }),
-            "{fields:?}"
-        );
+        assert_eq!(fields.len(), 5, "{fields:?}");
+        assert_eq!(fields[0].name(), "pod", "{fields:?}");
+        assert_eq!(fields[0].data_type(), &ArrowDataType::Utf8, "{fields:?}");
+        assert_eq!(fields[1].name(), "instance", "{fields:?}");
+        assert_eq!(fields[1].data_type(), &ArrowDataType::Utf8, "{fields:?}");
+        assert_eq!(fields[2].name(), greptime_timestamp(), "{fields:?}");
+        assert_eq!(fields[3].name(), greptime_value(), "{fields:?}");
+        assert_eq!(fields[3].data_type(), &ArrowDataType::Float64, "{fields:?}");
+        assert_eq!(fields[4].name(), METRIC_NAME, "{fields:?}");
+        assert_eq!(fields[4].data_type(), &ArrowDataType::Utf8, "{fields:?}");
     }
 
     async fn build_test_table_provider_with_distinct_tags(
@@ -10987,6 +11109,233 @@ mod test {
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME),
             "{plan_str}"
         );
+        assert!(planner.ctx.use_tsid, "{plan_str}");
+    }
+
+    /// A metric engine provider for a filtered comparison whose left operand carries a label the
+    /// right one does not: `cmp_a` has `job` and `instance` (one series, `__tsid` 11), `cmp_b` has
+    /// `job` alone (one series, `__tsid` 22). Both samples sit at timestamp 0.
+    fn build_filtered_comparison_engine_table_provider() -> DfTableSourceProvider {
+        let catalog = MemoryCatalogManager::with_default_setup();
+        let physical_name = "cmp_phy";
+        let physical_table_id = 4_200;
+
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new("job".to_string(), ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "instance".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ];
+        let tag_count = columns.len() - 2;
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices((0..2 + tag_count).collect::<Vec<_>>())
+            .value_indices(vec![2 + tag_count + 1])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(UInt32Array::from(vec![4_201u32, 4_202])) as Arc<dyn Array>,
+                Arc::new(UInt64Array::from(vec![11u64, 22])),
+                Arc::new(StringArray::from(vec![Some("api"), Some("api")])),
+                Arc::new(StringArray::from(vec![Some("i1"), None])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 0])),
+                Arc::new(Float64Array::from(vec![10.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            physical_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, physical_batch),
+            physical_table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let physical_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        let physical = Arc::new(Table::new(
+            physical_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+
+        let logical_table = |name: &str, table_id: u32, tags: &[&str]| {
+            let mut columns = tags
+                .iter()
+                .map(|tag| {
+                    ColumnSchema::new(
+                        (*tag).to_string(),
+                        ConcreteDataType::string_datatype(),
+                        true,
+                    )
+                })
+                .collect::<Vec<_>>();
+            columns.push(
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let mut options = table::requests::TableOptions::default();
+            options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_name.to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices((0..tags.len()).collect())
+                .value_indices(vec![tags.len() + 1])
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .options(options)
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let info = TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap();
+            EmptyTable::from_table_info(&info)
+        };
+
+        register_tables(
+            &catalog,
+            vec![
+                physical,
+                logical_table("cmp_a", 4_201, &["job", "instance"]),
+                logical_table("cmp_b", 4_202, &["job"]),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn filtered_comparison_reduced_labels_drop_the_result_tsid() {
+        // `cmp_a` has `job` and `instance` with `__tsid` 11 while `cmp_b` has `job` alone with
+        // `__tsid` 22. `cmp_a >= on(job) cmp_b` keeps the left sample (10) and reduces its labels
+        // to `job` alone, so the projected series is no longer the one `__tsid` 11 identifies:
+        // the outer default join must match on `job` and report 10 + 3. Joining on the stale
+        // `__tsid` instead drops the row and reports nothing.
+        let query = r#"(cmp_a >= on(job) cmp_b) + cmp_b"#;
+
+        let plan = plan_union_query(
+            build_filtered_comparison_engine_table_provider(),
+            &["cmp_a", "cmp_b"],
+            query,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        // The reduced side lost `instance`, so it is no longer identified by its tsid and the
+        // outer join must fall back to the label keys.
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(13.0, vec![("job".to_string(), "api".to_string())])]
+        );
+        // The reduced label set is the whole label set: no `instance` and no metric name.
+        for batch in &batches {
+            assert!(batch.schema().index_of("instance").is_err());
+            assert!(batch.schema().index_of(METRIC_NAME).is_err());
+        }
+        // Both samples sit at timestamp 0, the only evaluation step they fall in.
+        let timestamps = batches
+            .iter()
+            .flat_map(|batch| {
+                let index = batch.schema().index_of("timestamp").unwrap();
+                batch
+                    .column(index)
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(timestamps, vec![0]);
+    }
+
+    #[tokio::test]
+    async fn filtered_comparison_on_every_label_keeps_the_result_tsid() {
+        // `on(tag_0, tag_1)` names every label both operands carry, so the comparison removes
+        // nothing: the reduced sample is still the series its tsid identifies and the tsid stays
+        // available to the outer default join, exactly like a filtering comparison without `on`.
+        let eval_stmt =
+            build_eval_stmt("(some_metric >= on(tag_0, tag_1) some_alt_metric) + some_alt_metric");
+
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let mut planner = PromPlanner {
+            table_provider,
+            ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
+            promql_annotations: None,
+        };
+        let plan = planner
+            .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
+            .await
+            .unwrap();
+
+        let plan_str = plan.display_indent_schema().to_string();
+        // One tsid join for the comparison, one for the outer default join.
+        assert_eq!(plan_str.matches("__tsid =").count(), 2, "{plan_str}");
+        assert!(!plan_str.contains("tag_0 ="), "{plan_str}");
+        assert!(!plan_str.contains("tag_1 ="), "{plan_str}");
         assert!(planner.ctx.use_tsid, "{plan_str}");
     }
 
@@ -16872,19 +17221,6 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 .iter()
                 .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
         );
-
-        // A filtering comparison keeps the left-hand side, name included.
-        let batches = execute_union_query(
-            build_metric_name_label_test_provider(),
-            &["m_one", "m_two"],
-            r#"{__name__=~"m_.*"} > 0"#,
-        )
-        .await;
-        assert!(
-            batches
-                .iter()
-                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
-        );
     }
 
     #[tokio::test]
@@ -16909,35 +17245,524 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     async fn metric_name_union_set_operators_ignore_metric_name() {
         // Set operators match on the labels without the metric name, so a union operand and an
         // exact-name operand are comparable, and the right-hand side of `or` deduplicates
-        // against the left instead of being kept as a second series.
+        // against the left instead of being kept as a second series. A bare metric name and an
+        // equality `__name__` matcher spell the same exact selector, so both are checked.
+        for query in [
+            r#"{__name__=~"m_one"} and m_one"#,
+            r#"{__name__=~"m_one"} and {__name__="m_one"}"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_label_test_provider(), &["m_one"], query)
+                    .await;
+            assert_eq!(float_values(&batches), vec![1.0], "{query}");
+            assert!(
+                batches
+                    .iter()
+                    .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok()),
+                "{query}"
+            );
+        }
+
+        for query in [
+            r#"{__name__=~"m_one"} or m_one"#,
+            r#"{__name__=~"m_one"} or {__name__="m_one"}"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_label_test_provider(), &["m_one"], query)
+                    .await;
+            assert_eq!(float_values(&batches), vec![1.0], "{query}");
+        }
+
+        for query in [
+            r#"{__name__=~"m_one"} unless m_one"#,
+            r#"{__name__=~"m_one"} unless {__name__="m_one"}"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_label_test_provider(), &["m_one"], query)
+                    .await;
+            assert!(float_values(&batches).is_empty(), "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_or_reports_each_sides_metric_name() {
+        // The union pads `instance` on `m_alpha` and `job` on `m_beta` with NULL, while the exact
+        // selector of `m_alpha` carries no `instance` column at all. `or` reports each operand's
+        // own labels: the name a metric name union materialized on the right, and the name the
+        // exact selector was given at the set-operator boundary on the left. The right-hand
+        // `m_alpha` series is deduplicated against the left one, `m_beta` is kept. The
+        // parenthesized form is planned the same way.
+        let rows = vec![
+            (
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_alpha".to_string()),
+                    ("job".to_string(), "api".to_string()),
+                ],
+            ),
+            (
+                2.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_beta".to_string()),
+                    ("instance".to_string(), "host".to_string()),
+                ],
+            ),
+        ];
+        for query in [
+            r#"m_alpha or {__name__=~"m_.*"}"#,
+            r#"(m_alpha) or ({__name__=~"m_.*"})"#,
+            r#"{__name__=~"m_.*"} or m_alpha"#,
+            r#"({__name__=~"m_.*"}) or (m_alpha)"#,
+        ] {
+            let batches = execute_union_query(
+                build_union_metric_table_provider(),
+                &["m_alpha", "m_beta"],
+                query,
+            )
+            .await;
+            assert_eq!(labeled_values(&batches), rows, "{query}");
+        }
+
+        // `m_one` and `m_two` share `host`, so a default `or` — which does not match on the metric
+        // name — deduplicates the whole right-hand side, and the surviving `m_one` still reports
+        // its own name.
         let batches = execute_union_query(
             build_metric_name_label_test_provider(),
-            &["m_one"],
-            r#"{__name__=~"m_one"} and m_one"#,
+            &["m_one", "m_two"],
+            r#"m_one or {__name__=~"m_.*"}"#,
         )
         .await;
-        assert_eq!(float_values(&batches), vec![1.0]);
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_one".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ]
+            )]
+        );
+
+        // `on(__name__)` matches on the name alone, so only the equal name is deduplicated: the
+        // exact selector's own name has to reach the comparison, and `m_two` survives despite the
+        // shared `host`. Both directions report each side's own name, also parenthesized or
+        // spelled as an equality `__name__` matcher.
+        let both_named = vec![
+            (
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_one".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+            (
+                2.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_two".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+        ];
+        for query in [
+            r#"m_one or on(__name__) {__name__=~"m_.*"}"#,
+            r#"{__name__="m_one"} or on(__name__) {__name__=~"m_.*"}"#,
+            r#"{__name__=~"m_.*"} or on(__name__) m_one"#,
+            r#"{__name__=~"m_.*"} or on(__name__) {__name__="m_one"}"#,
+            r#"(m_one) or on(__name__) ({__name__=~"m_.*"})"#,
+            r#"({__name__=~"m_.*"}) or on(__name__) (m_one)"#,
+        ] {
+            let batches = execute_union_query(
+                build_metric_name_label_test_provider(),
+                &["m_one", "m_two"],
+                query,
+            )
+            .await;
+            assert_eq!(labeled_values(&batches), both_named, "{query}");
+        }
+
+        // A derived expression is not a selector, so it must not be extended with a metric name
+        // of its own: `m_one * 2` drops the name, `on(__name__)` then compares the empty name
+        // against the union's names and matches nothing, and the whole right-hand side survives
+        // beside the computed left series.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &["m_one", "m_two"],
+            r#"(m_one * 2) or on(__name__) {__name__=~"m_.*"}"#,
+        )
+        .await;
+        let mut rows = labeled_values(&batches);
+        rows.sort_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+        });
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    1.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_one".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+                (
+                    2.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_two".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+                (2.0, vec![("host".to_string(), "a".to_string())]),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_empty_candidate_or_keeps_the_exact_name() {
+        // An empty candidate list is what makes the regex selector observe an empty metric: the
+        // union is planned as an empty metric and materializes no `__name__` column at all. The
+        // exact selector beside it must still be extended with its own printed name — its
+        // materialization does not depend on the other operand — so the `or` result reports that
+        // name exactly as it does beside a non-empty metric name union.
+        let plan = plan_union_query(
+            build_metric_name_label_test_provider(),
+            &[],
+            r#"{__name__=~"missing_.*"} or m_one"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("EmptyMetric"), "{plan_str}");
+
+        let expected = vec![(
+            1.0,
+            vec![
+                (METRIC_NAME.to_string(), "m_one".to_string()),
+                ("host".to_string(), "a".to_string()),
+            ],
+        )];
+        for query in [
+            r#"{__name__=~"missing_.*"} or m_one"#,
+            r#"{__name__=~"missing_.*"} or {__name__="m_one"}"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_label_test_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_empty_candidate_or_leaves_a_derived_operand_unnamed() {
+        // The extension applies only to an operand written as a selector: arithmetic and
+        // functions compute new samples, so they must not be given a name of their own, exactly
+        // as they are not beside a non-empty union.
+        let unnamed_host = vec![(2.0, vec![("host".to_string(), "a".to_string())])];
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            &[],
+            r#"{__name__=~"missing_.*"} or (m_one * 2)"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), unnamed_host);
         assert!(
             batches
                 .iter()
-                .all(|batch| batch.schema().index_of(METRIC_NAME).is_ok())
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
         );
 
         let batches = execute_union_query(
             build_metric_name_label_test_provider(),
-            &["m_one"],
-            r#"{__name__=~"m_one"} or m_one"#,
+            &[],
+            r#"{__name__=~"missing_.*"} or abs(m_one)"#,
         )
         .await;
-        assert_eq!(float_values(&batches), vec![1.0]);
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+        );
+    }
 
+    #[tokio::test]
+    async fn metric_name_union_or_deduplicates_exact_selectors_on_their_own_labels() {
+        // Two exact selectors with different printed names. The default matching excludes the
+        // metric name, so the shared `host` deduplicates the right-hand side and the surviving
+        // left series reports its own name — the ordinary `or` result.
+        let left_only = vec![(
+            1.0,
+            vec![
+                (METRIC_NAME.to_string(), "m_one".to_string()),
+                ("host".to_string(), "a".to_string()),
+            ],
+        )];
+        for query in [
+            r#"m_one or m_two"#,
+            r#"{__name__="m_one"} or {__name__="m_two"}"#,
+        ] {
+            let batches = execute_union_query(
+                build_metric_name_label_test_provider(),
+                &["m_one", "m_two"],
+                query,
+            )
+            .await;
+            assert_eq!(labeled_values(&batches), left_only, "{query}");
+        }
+
+        // `on(__name__)` matches on the name alone: the names differ, so both series survive and
+        // each reports its own name.
+        let both = vec![
+            (
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_one".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+            (
+                2.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_two".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+        ];
+        for query in [
+            r#"m_one or on(__name__) m_two"#,
+            r#"{__name__="m_one"} or on(__name__) {__name__="m_two"}"#,
+        ] {
+            let batches = execute_union_query(
+                build_metric_name_label_test_provider(),
+                &["m_one", "m_two"],
+                query,
+            )
+            .await;
+            assert_eq!(labeled_values(&batches), both, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_and_unless_match_per_row_labels() {
+        // The union pads the labels a candidate table lacks with NULL (`m_union_a` carries no `y`,
+        // `m_union_b` no `x`), while `m_exact` carries `y` and has no `x` column at all. `and` and
+        // `unless` compare the matching labels per row, so a padded NULL and an absent column both
+        // read as the empty string, and neither operator reports a label mismatch.
+        let candidates = &["m_union_a", "m_union_b", "m_union_c"];
         let batches = execute_union_query(
-            build_metric_name_label_test_provider(),
-            &["m_one"],
-            r#"{__name__=~"m_one"} unless m_one"#,
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} and m_exact"#,
+        )
+        .await;
+        // `m_union_a` (job="api", x="", `y` padded NULL) matches `m_exact` (job="api", y="", no
+        // `x` column), and the surviving row is the left one, metric name included.
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_union_a".to_string()),
+                    ("job".to_string(), "api".to_string()),
+                    ("x".to_string(), String::new()),
+                ]
+            )]
+        );
+
+        // `unless` keeps every left series that has no match: the `y` of `m_union_b` is not empty
+        // and `m_union_c` has another `job`.
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} unless m_exact"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![
+                (
+                    4.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_union_b".to_string()),
+                        ("job".to_string(), "api".to_string()),
+                        ("y".to_string(), "2".to_string()),
+                    ]
+                ),
+                (
+                    7.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_union_c".to_string()),
+                        ("job".to_string(), "other".to_string()),
+                        ("x".to_string(), String::new()),
+                    ]
+                ),
+            ]
+        );
+        // The normalized keys are an implementation detail of the comparison, so neither the plan
+        // nor the result reports one as a series label.
+        let plan = plan_union_query(
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} and m_exact"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains(MATCH_KEY_COLUMN_PREFIX), "{plan_str}");
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with(MATCH_KEY_COLUMN_PREFIX)),
+            "{plan_str}"
+        );
+
+        // `m_null_label` stores no `y` at all while `m_empty_label` stores the empty string for
+        // it; both carry job="api". `and` matches the two series — a NULL and an empty label are
+        // the same value — and reports the left one with its own labels, metric name included,
+        // `unless` keeps none.
+        let (empty_set_plan, batches) = plan_and_execute_query(
+            build_null_and_empty_label_table_provider(),
+            "m_null_label and m_empty_label",
+        )
+        .await;
+        assert!(
+            !empty_set_plan
+                .display_indent_schema()
+                .to_string()
+                .contains("Boolean(false)"),
+            "{empty_set_plan}"
+        );
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                4.0,
+                vec![
+                    (METRIC_NAME.to_string(), "m_null_label".to_string()),
+                    ("job".to_string(), "api".to_string()),
+                ]
+            )]
+        );
+        let (_, batches) = plan_and_execute_query(
+            build_null_and_empty_label_table_provider(),
+            "m_null_label unless m_empty_label",
         )
         .await;
         assert!(float_values(&batches).is_empty());
+
+        // `left_shard_job` carries the integer label `shard`, which `right_job` does not carry at
+        // all: a non-string label has no empty value to compare against, so the two operands share
+        // no series. `and` reports none, while `unless` keeps every left series instead of
+        // dropping them on the shared `job`. Both fall back to a join on the shared `job` alone,
+        // rejected by an always-false predicate instead of by a `shard` key the right-hand side
+        // does not have. Only the plans are asserted, because the fixture's non-string tag also
+        // reaches the selector's own `PromSeriesDivide`, which compares string tags (or a single
+        // UInt64 tsid) and cannot execute this table: the executed string NULL/'' cases above
+        // cover the user-visible behavior of the two operators.
+        let plan = plan_query(
+            build_non_string_label_table_provider(),
+            "left_shard_job and right_job",
+        )
+        .await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("LeftSemi Join"), "{plan_str}");
+        assert!(plan_str.contains("Boolean(false)"), "{plan_str}");
+        assert!(!plan_str.contains(".shard ="), "{plan_str}");
+
+        let plan = plan_query(
+            build_non_string_label_table_provider(),
+            "left_shard_job unless right_job",
+        )
+        .await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("LeftAnti Join"), "{plan_str}");
+        assert!(plan_str.contains("Boolean(false)"), "{plan_str}");
+        assert!(!plan_str.contains(".shard ="), "{plan_str}");
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_comparison_reports_the_matching_labels() {
+        // A filtering comparison reports the labels PromQL keeps of its left-hand operand: with
+        // one-to-one matching and an explicit `on(...)` exactly those `on` names, so a metric name
+        // a union materialized is reported when `on(__name__)` names it and dropped when `on`
+        // does not, and every tag `on` leaves out is dropped as well.
+        let candidates = &["m_one", "m_two"];
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            candidates,
+            r#"{__name__=~"m_.*"} > on(host) m_one"#,
+        )
+        .await;
+        // Only `m_two` is greater than `m_one`, and `on(host)` keeps only `host`.
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(2.0, vec![("host".to_string(), "a".to_string())])]
+        );
+
+        // `on(__name__)` names the metric name alone, so each series keeps its own name and only
+        // its name — the tags `on` does not name are dropped. Both operands are resolved metric
+        // name unions, so the comparison matches on the name alone.
+        let batches = execute_union_query(
+            build_union_engine_table_provider(),
+            &["me_api", "me_host"],
+            r#"{__name__=~"me_.*"} >= on(__name__) {__name__=~"me_.*"}"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![
+                (1.0, vec![(METRIC_NAME.to_string(), "me_api".to_string())]),
+                (2.0, vec![(METRIC_NAME.to_string(), "me_host".to_string())]),
+            ]
+        );
+
+        // The default and `ignoring(...)` matching leave the operand's labels as they are and a
+        // grouping modifier does not apply the one-to-one reduction, so the name survives them.
+        for query in [
+            r#"{__name__=~"m_.*"} > m_one"#,
+            r#"{__name__=~"m_.*"} > ignoring(host) m_one"#,
+            r#"{__name__=~"m_.*"} > on(host) group_left m_one"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_label_test_provider(), candidates, query)
+                    .await;
+            assert_eq!(
+                labeled_values(&batches),
+                vec![(
+                    2.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_two".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                )],
+                "{query}"
+            );
+        }
+
+        // A scalar comparison keeps the whole left-hand side, name included.
+        let batches = execute_union_query(
+            build_metric_name_label_test_provider(),
+            candidates,
+            r#"{__name__=~"m_.*"} > 0"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![
+                (
+                    1.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_one".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+                (
+                    2.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "m_two".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -16962,20 +17787,24 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         assert!(err.to_string().contains(METRIC_NAME), "{err}");
     }
 
-    /// Plans and executes `query` over a one-second evaluation window, so a fixture only needs one
-    /// sample per series. The plan is the raw one, before optimizer rules rewrite it.
-    async fn plan_and_execute_query(
-        table_provider: DfTableSourceProvider,
-        query: &str,
-    ) -> (LogicalPlan, Vec<RecordBatch>) {
+    /// Plans `query` over a one-second evaluation window, so a fixture only needs one sample per
+    /// series. The plan is the raw one, before optimizer rules rewrite it.
+    async fn plan_query(table_provider: DfTableSourceProvider, query: &str) -> LogicalPlan {
         let mut eval_stmt = build_eval_stmt(query);
         eval_stmt.end = UNIX_EPOCH.checked_add(Duration::from_secs(1)).unwrap();
         eval_stmt.interval = Duration::from_secs(1);
         eval_stmt.lookback_delta = Duration::from_secs(1);
-        let plan =
-            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
-                .await
-                .unwrap();
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap()
+    }
+
+    /// Plans and executes `query` over a one-second evaluation window.
+    async fn plan_and_execute_query(
+        table_provider: DfTableSourceProvider,
+        query: &str,
+    ) -> (LogicalPlan, Vec<RecordBatch>) {
+        let plan = plan_query(table_provider, query).await;
         let (_, batches) = execute(plan.clone(), &build_query_engine_state()).await;
         (plan, batches)
     }

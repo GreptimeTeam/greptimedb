@@ -1049,6 +1049,12 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
             encode(query)
         ))
     };
+    let instant_query = |query: &str| {
+        client.get(&format!(
+            "/v1/prometheus/api/v1/query?query={}&time=0",
+            encode(query)
+        ))
+    };
 
     // A bare selector over a `__name__` regex returns one series per metric table, each labelled
     // with its own metric name. `union_c` is a `timestamp(9)` table, so the candidate set mixes
@@ -1081,6 +1087,41 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
             {
                 "metric": {"__name__": "union_c", "host": "h1"},
                 "values": [[0.0, "3.0"]]
+            }
+        ])
+    );
+
+    // `or` keeps `union_a` only once even though both sides resolve it: the regex selector and
+    // the bare `union_a` selector match the same series, and each branch keeps the metric name
+    // of its own metric table instead of a duplicated or merged series.
+    let res = client
+        .get(&format!(
+            "/v1/prometheus/api/v1/query?query={}&time=0",
+            encode(r#"{__name__=~"union_[ab]"} or union_a"#)
+        ))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    assert_eq!(data.result_type, "vector");
+    let PromQueryResult::Vector(mut vector) = data.result else {
+        panic!("expected a vector")
+    };
+    vector.sort_by(|left, right| left.metric.cmp(&right.metric));
+    assert_eq!(
+        serde_json::to_value(PromQueryResult::Vector(vector)).unwrap(),
+        json!([
+            {
+                "metric": {"__name__": "union_a", "host": "h1"},
+                "value": [0.0, "1.0"]
+            },
+            {
+                "metric": {"__name__": "union_b", "idc": "i1"},
+                "value": [0.0, "5.0"]
             }
         ])
     );
@@ -1118,6 +1159,30 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
         .unwrap()
     );
 
+    // A comparison with `bool` keeps the series but drops the metric name, so the per-metric
+    // evaluation is visible in the labels: `union_a` (1.0 > 2 is false) reports 0 for `host=h1`
+    // and `union_b` (5.0 > 2 is true) reports 1 for `idc=i1`, both without a `__name__` label.
+    let res = range_query(r#"{__name__=~"union_[ab]"} > bool 2"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    let PrometheusResponse::PromData(data) = body.data else {
+        panic!("expected prom data")
+    };
+    let PromQueryResult::Matrix(mut series) = data.result else {
+        panic!("expected a matrix")
+    };
+    series.sort_by(|left, right| left.metric.cmp(&right.metric));
+    assert_eq!(
+        serde_json::to_value(PromQueryResult::Matrix(series)).unwrap(),
+        json!([
+            {"metric": {"host": "h1"}, "values": [[0.0, "0.0"]]},
+            {"metric": {"idc": "i1"}, "values": [[0.0, "1.0"]]}
+        ])
+    );
+
     // The metric name keeps working as a grouping label.
     let res = range_query(r#"count by(__name__) ({__name__=~"union_.*"})"#)
         .send()
@@ -1139,6 +1204,114 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
             {"metric": {"__name__": "union_c"}, "values": [[0.0, "1.0"]]}
         ])
     );
+
+    // An empty `__name__` discovery must not discard the enclosing expression: the union of zero
+    // candidate tables is still authorized and executed, so `absent` reports its synthetic 1 and
+    // `or vector(1)` falls back to the right operand instead of answering an empty result. The
+    // two expressions are evaluated at time=0 and over the range start=0/end=600/step=600, which
+    // evaluates at t=0 and t=600, and neither result carries a metric name.
+    for query in [
+        r#"absent({__name__=~"missing_union_.*"})"#,
+        r#"{__name__=~"missing_union_.*"} or vector(1)"#,
+    ] {
+        let res = instant_query(query).send().await;
+        assert_eq!(res.status(), StatusCode::OK, "{query}");
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success", "{query}");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "vector",
+                "result": [{"metric": {}, "value": [0.0, "1.0"]}]
+            }))
+            .unwrap(),
+            "{query}"
+        );
+    }
+
+    for query in [
+        r#"absent({__name__=~"missing_union_.*"})"#,
+        r#"{__name__=~"missing_union_.*"} or vector(1)"#,
+    ] {
+        let res = range_query(query).send().await;
+        assert_eq!(res.status(), StatusCode::OK, "{query}");
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success", "{query}");
+        let PrometheusResponse::PromData(data) = body.data else {
+            panic!("expected prom data")
+        };
+        assert_eq!(
+            data.result,
+            serde_json::from_value::<PromQueryResult>(json!([
+                {"metric": {}, "values": [[0.0, "1.0"], [600.0, "1.0"]]}
+            ]))
+            .unwrap(),
+            "{query}"
+        );
+    }
+
+    // The bare selector over the same regex is still empty: the empty union contributes no
+    // series of its own.
+    let res = instant_query(r#"{__name__=~"missing_union_.*"}"#)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": []
+        }))
+        .unwrap()
+    );
+
+    // The `or` fallback preserves the right operand's own identity instead of inheriting the
+    // empty left union: `union_a` keeps its metric name and labels, while an arithmetic operand
+    // drops the name and reports the computed value. Both are evaluated at time=0 and over the
+    // range start=0/end=600/step=600, whose second step (t=600) lies outside the 5m lookback of
+    // the only sample, so the range result holds the t=0 sample alone.
+    for (query, metric, value) in [
+        (
+            r#"{__name__=~"missing_union_.*"} or union_a"#,
+            json!({"__name__": "union_a", "host": "h1"}),
+            "1.0",
+        ),
+        (
+            r#"{__name__=~"missing_union_.*"} or (union_a * 2)"#,
+            json!({"host": "h1"}),
+            "2.0",
+        ),
+    ] {
+        let res = instant_query(query).send().await;
+        assert_eq!(res.status(), StatusCode::OK, "{query}");
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success", "{query}");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "vector",
+                "result": [{"metric": metric, "value": [0.0, value]}]
+            }))
+            .unwrap(),
+            "{query}"
+        );
+
+        let res = range_query(query).send().await;
+        assert_eq!(res.status(), StatusCode::OK, "{query}");
+        let body = res.json::<PrometheusJsonResponse>().await;
+        assert_eq!(body.status, "success", "{query}");
+        assert_eq!(
+            body.data,
+            serde_json::from_value::<PrometheusResponse>(json!({
+                "resultType": "matrix",
+                "result": [{"metric": metric, "values": [[0.0, value]]}]
+            }))
+            .unwrap(),
+            "{query}"
+        );
+    }
 
     // A matcher that resolves to no metric table reports an empty result instead of an error.
     let res = range_query(r#"{__name__=~"nonexistent_metric_.*"}"#)

@@ -73,6 +73,41 @@ TQL EVAL (0, 0, '1s') {__name__!="metric_name_regex_b", __schema__="metric_name_
 -- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} + {__name__="metric_name_regex_a", __schema__="metric_name_regex"};
 
+-- A set operator matches on the labels without the metric name, so the exact-name operand matches
+-- the union's own `_a` series: `or` reports two rows, each labelled with the name it carries.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} or metric_name_regex_a{__schema__="metric_name_regex"};
+
+-- The operand order changes nothing: the exact-name operand reports its own name as well, and the
+-- union's `_b` row is appended.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') metric_name_regex_a{__schema__="metric_name_regex"} or {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"};
+
+-- `and` keeps the left-hand series that the other operand matches on every label, where a label a
+-- series does not carry is the empty value: only the union's `_a` row survives, name included.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} and metric_name_regex_a{__schema__="metric_name_regex"};
+
+-- `unless` removes that series instead and leaves the union's `_b` row.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} unless metric_name_regex_a{__schema__="metric_name_regex"};
+
+-- `on(__name__)` makes the name a matching label, so the exact-name operand de-duplicates against
+-- the union's row of the same name instead of being appended as a second `_b` series.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} or on(__name__) metric_name_regex_b{__schema__="metric_name_regex"};
+
+-- A filtering comparison keeps the left-hand samples whose labels match: `on(host)` compares `host`
+-- alone and the union's `_b` row carries the empty `host`, so only `_a` survives. Prometheus drops
+-- the metric name of a comparison that matches `on(...)`, so `_a` is reported without a name.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} >= on(host) metric_name_regex_a{__schema__="metric_name_regex"};
+
+-- A scalar comparison filters the union without matching against another series, so every sample
+-- that satisfies it is kept, name included.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} > 0;
+
 -- Candidate metric tables may store their time index at different precisions: `_c` is a
 -- `timestamp(9)` table next to the millisecond `_a`/`_b`. The union aligns every branch to the
 -- finest candidate unit, so a millisecond sample keeps its instant through the cast.
