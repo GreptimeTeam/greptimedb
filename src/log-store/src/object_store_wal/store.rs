@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use async_stream::try_stream;
 use bytes::Bytes;
+use common_telemetry::info;
 use common_wal::config::object_store::ObjectStoreWalConfig;
 use futures::future::BoxFuture;
 use futures::stream::FuturesUnordered;
@@ -150,11 +151,15 @@ impl ObjectStoreLogStore {
             tip,
             max_epoch,
         } = recover(io.as_ref()).await?;
-        let writer_instance = uuid::Uuid::new_v4().into_bytes();
         let epoch = max_epoch.checked_add(1).context(CorruptedWalObjectSnafu {
             reason: "an object carries the largest epoch, no later epoch fits",
         })?;
-        let start = start_epoch(io.as_ref(), next_object_seq, tip, writer_instance, epoch).await?;
+        let start = start_epoch(io.as_ref(), next_object_seq, tip, epoch).await?;
+        // The epoch identifies this instance in every object it writes.
+        info!(
+            "Opened object store WAL under {prefix} at epoch {epoch}, start object {}",
+            start.object_seq
+        );
         catalog
             .insert_object(start.object_seq, Vec::new())
             .with_context(|_| InvalidWalObjectSnafu {
@@ -191,7 +196,6 @@ impl ObjectStoreLogStore {
                 .object_seq
                 .checked_add(1)
                 .filter(|next_object_seq| *next_object_seq < OBJECT_SEQ_LIMIT),
-            writer_instance,
             epoch,
             last_indexed: start,
             flush_interval: config.flush_interval,
@@ -670,7 +674,6 @@ struct Actor {
     /// exhausted. The open batch assigns its entry ids from it. It is above
     /// every sealed batch and never moves back while the store runs.
     next_object_seq: Option<u64>,
-    writer_instance: [u8; 16],
     /// Epoch of this instance, carried by every object it writes.
     epoch: u64,
     /// The last indexed object, which is the start object until a batch is
@@ -815,14 +818,13 @@ impl Actor {
         let (entries, _) = self.open_batch.seal();
         let header = Header {
             object_seq,
-            writer_instance: self.writer_instance,
             epoch: self.epoch,
             prev: Some(
                 self.sealed
                     .back()
                     .map_or(self.last_indexed, |batch| ChainLink {
                         object_seq: batch.object_seq,
-                        writer_instance: self.writer_instance,
+                        epoch: self.epoch,
                     }),
             ),
         };
@@ -970,7 +972,7 @@ impl Actor {
         };
         self.last_indexed = ChainLink {
             object_seq: batch.object_seq,
-            writer_instance: self.writer_instance,
+            epoch: self.epoch,
         };
         for waiter in batch.waiters {
             let _ = waiter.response.send(Ok(AppendBatchResponse {
@@ -1244,7 +1246,7 @@ fn finish_recovery(objects: Vec<FetchedObject>) -> Result<Recovered> {
     );
     let tip = chain.last().map(|object_seq| ChainLink {
         object_seq: *object_seq,
-        writer_instance: headers[object_seq].writer_instance,
+        epoch: headers[object_seq].epoch,
     });
     let max_epoch = headers
         .values()
@@ -1289,7 +1291,9 @@ fn finish_recovery(objects: Vec<FetchedObject>) -> Result<Recovered> {
 ///
 /// An object is complete when every link on its chain holds: the chain starts
 /// at an object without a predecessor, and every other link names a present
-/// object that carries the writer instance the link records. A create that
+/// object that carries the epoch the link records. Only one instance writes
+/// under an epoch, so the epoch tells an object of the linking instance from
+/// another object under the same sequence. A create that
 /// was reported as failed may still leave its object, but every object
 /// written after that failure links past it, and every instance writes under
 /// an epoch above every object present when it opened, so neither such an
@@ -1303,9 +1307,7 @@ fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
             None => true,
             Some(link) if link.object_seq >= object_seq => false,
             Some(link) => match headers.get(&link.object_seq) {
-                Some(prev) => {
-                    prev.writer_instance == link.writer_instance && complete[&link.object_seq]
-                }
+                Some(prev) => prev.epoch == link.epoch && complete[&link.object_seq],
                 None => false,
             },
         };
@@ -1340,7 +1342,6 @@ async fn start_epoch(
     io: &dyn WalObjectIo,
     mut object_seq: u64,
     tip: Option<ChainLink>,
-    writer_instance: [u8; 16],
     epoch: u64,
 ) -> Result<ChainLink> {
     loop {
@@ -1352,7 +1353,6 @@ async fn start_epoch(
         );
         let header = Header {
             object_seq,
-            writer_instance,
             epoch,
             prev: tip,
         };
@@ -1360,12 +1360,7 @@ async fn start_epoch(
             .put_if_absent(object_seq, encode_object(header, &[])?.bytes)
             .await
         {
-            Ok(_) => {
-                return Ok(ChainLink {
-                    object_seq,
-                    writer_instance,
-                });
-            }
+            Ok(_) => return Ok(ChainLink { object_seq, epoch }),
             Err(error @ Error::WalObjectConflict { .. }) => {
                 if epoch_of(io, object_seq).await? >= epoch {
                     return Err(error);
@@ -1909,9 +1904,6 @@ mod tests {
         put_fixture(&io, object_seq, records).await;
     }
 
-    /// Writer instance of the objects tests write without a store.
-    const FIXTURE_WRITER: [u8; 16] = *b"fixture-writer!!";
-
     /// The header of a fixture object at `object_seq`, which extends the
     /// present object right below it under the epoch of that object, so the
     /// fixtures a test writes in sequence order form one chain.
@@ -1930,11 +1922,10 @@ mod tests {
         };
         Header {
             object_seq,
-            writer_instance: FIXTURE_WRITER,
             epoch: prev.as_ref().map_or(1, |prev| prev.epoch),
             prev: prev.map(|prev| ChainLink {
                 object_seq: prev.object_seq,
-                writer_instance: prev.writer_instance,
+                epoch: prev.epoch,
             }),
         }
     }
@@ -1950,13 +1941,12 @@ mod tests {
         io.put_if_absent(object_seq, encoded.bytes).await.unwrap();
     }
 
-    /// Puts an object of another writer instance with `epoch` under
-    /// `object_seq`. A store opened on an empty prefix writes epoch 1.
+    /// Puts an object of another writer with `epoch` under `object_seq`. A
+    /// store opened on an empty prefix writes epoch 1.
     async fn put_foreign(object_store: &ObjectStore, object_seq: u64, epoch: u64) {
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         let header = Header {
             object_seq,
-            writer_instance: *b"foreign-writer-0",
             epoch,
             prev: None,
         };
@@ -3248,7 +3238,7 @@ mod tests {
         assert_eq!(
             Some(ChainLink {
                 object_seq: 0,
-                writer_instance: store_writer_instance(&io).await,
+                epoch: 1,
             }),
             header.prev
         );
@@ -3262,13 +3252,6 @@ mod tests {
             expected_entries(region_id, &[(id(3, 1), "a1")]),
             read_entries(&store, region_id, 1).await
         );
-    }
-
-    /// The writer instance of the store that wrote the start object 0.
-    async fn store_writer_instance(io: &ParkedIo) -> [u8; 16] {
-        decode_header(&io.get(0).await.unwrap())
-            .unwrap()
-            .writer_instance
     }
 
     #[tokio::test]
@@ -3865,15 +3848,11 @@ mod tests {
     /// until the test releases them, counting how many are in flight. A
     /// release of false fails the operation with a transient error before it
     /// reaches the object store.
-    fn chain_header(object_seq: u64, writer: u8, epoch: u64, prev: Option<(u64, u8)>) -> Header {
+    fn chain_header(object_seq: u64, epoch: u64, prev: Option<(u64, u64)>) -> Header {
         Header {
             object_seq,
-            writer_instance: [writer; 16],
             epoch,
-            prev: prev.map(|(object_seq, writer)| ChainLink {
-                object_seq,
-                writer_instance: [writer; 16],
-            }),
+            prev: prev.map(|(object_seq, epoch)| ChainLink { object_seq, epoch }),
         }
     }
 
@@ -3888,24 +3867,23 @@ mod tests {
 
     #[test]
     fn test_store_selects_the_chain_of_the_latest_complete_object() {
-        let (a, b) = (1, 2);
         assert!(chain_of(&[]).is_empty());
         // A linear chain is replayed whole.
         assert_eq!(
             vec![0, 1, 2],
             chain_of(&[
-                chain_header(0, a, 1, None),
-                chain_header(1, a, 1, Some((0, a))),
-                chain_header(2, a, 1, Some((1, a))),
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(2, 1, Some((1, 1))),
             ])
         );
         // Object 1 was reported as failed and object 2 links past it.
         assert_eq!(
             vec![0, 2],
             chain_of(&[
-                chain_header(0, a, 1, None),
-                chain_header(1, a, 1, Some((0, a))),
-                chain_header(2, a, 1, Some((0, a))),
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(2, 1, Some((0, 1))),
             ])
         );
         // Object 3 extends object 2, which never landed, so object 1 is the
@@ -3913,27 +3891,25 @@ mod tests {
         assert_eq!(
             vec![0, 1],
             chain_of(&[
-                chain_header(0, a, 1, None),
-                chain_header(1, a, 1, Some((0, a))),
-                chain_header(3, a, 1, Some((2, a))),
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(3, 1, Some((2, 1))),
             ])
         );
-        // Object 1 names a predecessor its writer never wrote at sequence 0.
+        // Object 1 links to an object of epoch 2 at sequence 0, where an
+        // object of epoch 1 is.
         assert_eq!(
             vec![0],
-            chain_of(&[
-                chain_header(0, a, 1, None),
-                chain_header(1, b, 2, Some((0, b))),
-            ])
+            chain_of(&[chain_header(0, 1, None), chain_header(1, 2, Some((0, 2))),])
         );
         // Instance A left object 2 behind after instance B, a later epoch,
         // acknowledged object 1: the later epoch ends the chain.
         assert_eq!(
             vec![0, 1],
             chain_of(&[
-                chain_header(0, a, 1, None),
-                chain_header(1, b, 2, Some((0, a))),
-                chain_header(2, a, 1, Some((0, a))),
+                chain_header(0, 1, None),
+                chain_header(1, 2, Some((0, 1))),
+                chain_header(2, 1, Some((0, 1))),
             ])
         );
         // A missing predecessor breaks the link, whether or not it lies below
@@ -3941,28 +3917,25 @@ mod tests {
         // change which links hold.
         assert!(
             chain_of(&[
-                chain_header(3, a, 1, Some((2, a))),
-                chain_header(4, a, 1, Some((3, a))),
+                chain_header(3, 1, Some((2, 1))),
+                chain_header(4, 1, Some((3, 1))),
             ])
             .is_empty()
         );
         assert!(
             chain_of(&[
-                chain_header(2, a, 1, Some((1, a))),
-                chain_header(4, b, 2, Some((3, a))),
-                chain_header(5, b, 2, Some((4, b))),
+                chain_header(2, 1, Some((1, 1))),
+                chain_header(4, 2, Some((3, 1))),
+                chain_header(5, 2, Some((4, 2))),
             ])
             .is_empty()
         );
         assert_eq!(
             vec![1],
-            chain_of(&[
-                chain_header(1, a, 1, None),
-                chain_header(3, a, 1, Some((2, a))),
-            ])
+            chain_of(&[chain_header(1, 1, None), chain_header(3, 1, Some((2, 1))),])
         );
         // A predecessor at or above the object itself never holds.
-        assert!(chain_of(&[chain_header(5, a, 1, Some((5, a)))]).is_empty());
+        assert!(chain_of(&[chain_header(5, 1, Some((5, 1)))]).is_empty());
     }
 
     #[tokio::test]
@@ -4011,7 +3984,7 @@ mod tests {
         let orphan = Header {
             prev: Some(ChainLink {
                 object_seq: 1,
-                writer_instance: FIXTURE_WRITER,
+                epoch: 1,
             }),
             ..fixture_header(&io, 2).await
         };
@@ -4026,7 +3999,7 @@ mod tests {
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         // Object 1 extends object 0, which is gone.
-        put_header(&io, chain_header(1, 1, 1, Some((0, 1))), &[]).await;
+        put_header(&io, chain_header(1, 1, Some((0, 1))), &[]).await;
         let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
             .await
             .unwrap_err();
@@ -4047,19 +4020,18 @@ mod tests {
             entry_id,
             payload: Bytes::from_static(data.as_bytes()),
         };
-        let (a, b) = (1, 2);
-        put_header(&io, chain_header(0, a, 1, None), &[record(1, "a")]).await;
+        put_header(&io, chain_header(0, 1, None), &[record(1, "a")]).await;
         // Instance B acknowledged object 1 before the create instance A issued
         // for object 2 landed.
         put_header(
             &io,
-            chain_header(1, b, 2, Some((0, a))),
+            chain_header(1, 2, Some((0, 1))),
             &[record(id(1, 1), "b")],
         )
         .await;
         put_header(
             &io,
-            chain_header(2, a, 1, Some((0, a))),
+            chain_header(2, 1, Some((0, 1))),
             &[record(id(2, 1), "late")],
         )
         .await;
@@ -4075,7 +4047,7 @@ mod tests {
         assert_eq!(
             Some(ChainLink {
                 object_seq: 1,
-                writer_instance: [b; 16],
+                epoch: 2,
             }),
             start.prev
         );
@@ -4101,7 +4073,7 @@ mod tests {
             put_fixture(&fixtures, 0, &[]).await;
             // An object lands at the sequence of the start object after
             // recovery listed the prefix.
-            let late = encode_object(chain_header(1, 9, epoch, None), &[])
+            let late = encode_object(chain_header(1, epoch, None), &[])
                 .unwrap()
                 .bytes;
             let io = Arc::new(RacingIo {
