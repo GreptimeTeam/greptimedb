@@ -142,6 +142,7 @@ impl BareCommand {
         // environments use different Kafka topic prefixes, so the environments
         // themselves can still run concurrently.
         if self.setup_etcd
+            || !self.store_addrs.is_empty()
             || self.setup_pg.is_some()
             || self.setup_mysql.is_some()
             || self.kafka_wal_broker_endpoints.is_some()
@@ -281,6 +282,10 @@ mod tests {
         assert_eq!(parallelism("4", &["--setup-pg"]), env_only);
         assert_eq!(parallelism("4", &["--setup-mysql"]), env_only);
         assert_eq!(parallelism("4", &["--setup-etcd"]), env_only);
+        assert_eq!(
+            parallelism("4", &["--store-addrs", "127.0.0.1:2379"]),
+            env_only
+        );
         assert_eq!(
             parallelism("4", &["-w", "kafka", "-k", "127.0.0.1:9092"]),
             env_only
