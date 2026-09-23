@@ -28,6 +28,9 @@ use crate::scalars::vector::impl_conv::{
 };
 
 /// Aggregates by multiplying elements across the same dimension, returns a vector.
+///
+/// The result is NULL if any input vector is NULL, so the partial state carries a
+/// `has_null` flag: a NULL `product` alone can't tell a NULL input from an empty partition.
 #[derive(Debug, Default)]
 pub struct VectorProduct {
     product: Option<OVector<f32, Dyn>>,
@@ -49,20 +52,23 @@ impl VectorProduct {
             signature,
             DataType::Binary,
             Arc::new(Self::accumulator),
-            vec![Arc::new(Field::new("x", DataType::Binary, true))],
+            vec![
+                Arc::new(Field::new("product", DataType::Binary, true)),
+                Arc::new(Field::new("has_null", DataType::Boolean, true)),
+            ],
         );
         AggregateUDF::from(udaf)
     }
 
     fn accumulator(args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
-        if args.schema.fields().len() != 1 {
+        if args.exprs.len() != 1 {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "expect creating `VEC_PRODUCT` with only one input field, actual {}",
-                args.schema.fields().len()
+                args.exprs.len()
             )));
         }
 
-        let t = args.schema.field(0).data_type();
+        let t = args.expr_fields[0].data_type();
         if !matches!(t, DataType::Utf8 | DataType::LargeUtf8 | DataType::Binary) {
             return Err(datafusion_common::DataFusionError::Internal(format!(
                 "unexpected input datatype {t} when creating `VEC_PRODUCT`"
@@ -72,13 +78,33 @@ impl VectorProduct {
         Ok(Box::new(VectorProduct::default()))
     }
 
-    fn inner(&mut self, len: usize) -> &mut OVector<f32, Dyn> {
-        self.product.get_or_insert_with(|| {
-            OVector::from_iterator_generic(Dyn(len), Const::<1>, (0..len).map(|_| 1.0))
-        })
+    fn mul(&mut self, vector: &[f32]) {
+        let vector = DVectorView::from_slice(vector, vector.len());
+        let product = self.product.get_or_insert_with(|| {
+            OVector::from_iterator_generic(
+                Dyn(vector.len()),
+                Const::<1>,
+                (0..vector.len()).map(|_| 1.0),
+            )
+        });
+        *product = product.component_mul(&vector);
     }
 
-    fn update(&mut self, values: &[ArrayRef], is_update: bool) -> Result<()> {
+    fn set_null(&mut self) {
+        self.has_null = true;
+        self.product = None;
+    }
+}
+
+impl Accumulator for VectorProduct {
+    fn state(&mut self) -> Result<Vec<ScalarValue>> {
+        Ok(vec![
+            self.evaluate()?,
+            ScalarValue::Boolean(Some(self.has_null)),
+        ])
+    }
+
+    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
         if values.is_empty() || self.has_null {
             return Ok(());
         };
@@ -112,33 +138,34 @@ impl VectorProduct {
             }
         };
         if vectors.len() != values[0].len() {
-            if is_update {
-                self.has_null = true;
-                self.product = None;
-            }
+            self.set_null();
             return Ok(());
         }
 
-        vectors.iter().for_each(|v| {
-            let v = DVectorView::from_slice(v, v.len());
-            let inner = self.inner(v.len());
-            *inner = inner.component_mul(&v);
-        });
+        vectors.iter().for_each(|v| self.mul(v));
         Ok(())
-    }
-}
-
-impl Accumulator for VectorProduct {
-    fn state(&mut self) -> Result<Vec<ScalarValue>> {
-        self.evaluate().map(|v| vec![v])
-    }
-
-    fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        self.update(values, true)
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        self.update(states, false)
+        let [products, has_nulls] = states else {
+            return Err(datafusion_common::DataFusionError::Internal(format!(
+                "expect 2 states for `VEC_PRODUCT`, actual {}",
+                states.len()
+            )));
+        };
+        if self.has_null {
+            return Ok(());
+        }
+        if has_nulls.as_boolean().true_count() > 0 {
+            self.set_null();
+            return Ok(());
+        }
+
+        // A NULL product without `has_null` comes from a partition without input rows.
+        for b in products.as_binary::<i32>().iter().flatten() {
+            self.mul(&binlit_as_veclit(b)?);
+        }
+        Ok(())
     }
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
@@ -224,5 +251,43 @@ mod tests {
             ScalarValue::Binary(Some(veclit_to_binlit(&[1.0, 16.0, 81.0]))),
             vec_product.evaluate().unwrap()
         );
+    }
+
+    #[test]
+    fn test_merge_batch() {
+        let partial = |v: Option<&str>| {
+            let mut acc = VectorProduct::default();
+            let v: ArrayRef = Arc::new(StringArray::from(vec![v]));
+            acc.update_batch(&[v]).unwrap();
+            acc.state().unwrap()
+        };
+        let states = |states: Vec<Vec<ScalarValue>>| -> Vec<ArrayRef> {
+            (0..2)
+                .map(|i| ScalarValue::iter_to_array(states.iter().map(|s| s[i].clone())).unwrap())
+                .collect()
+        };
+
+        // An empty partition in the middle of the batch must not stop the merge.
+        let mut merged = VectorProduct::default();
+        merged
+            .merge_batch(&states(vec![
+                partial(Some("[1.0,2.0]")),
+                VectorProduct::default().state().unwrap(),
+                partial(Some("[3.0,4.0]")),
+            ]))
+            .unwrap();
+        assert_eq!(
+            ScalarValue::Binary(Some(veclit_to_binlit(&[3.0, 8.0]))),
+            merged.evaluate().unwrap()
+        );
+
+        // A NULL input in any partition makes the result NULL.
+        merged
+            .merge_batch(&states(vec![partial(Some("[1.0,2.0]")), partial(None)]))
+            .unwrap();
+        merged
+            .merge_batch(&states(vec![partial(Some("[3.0,4.0]"))]))
+            .unwrap();
+        assert_eq!(ScalarValue::Binary(None), merged.evaluate().unwrap());
     }
 }
