@@ -1453,9 +1453,14 @@ async fn metric_export_v2_cli_resume_roundtrip() {
 }
 
 #[tokio::test]
-#[ignore = "requires GT_S3_* credentials and an S3-compatible test bucket"]
 async fn metric_export_v2_cli_s3_resume_roundtrip() {
-    metric_export_v2_cli_roundtrip(true).await;
+    // The CLI takes an explicit `--s3-endpoint`, so this only runs against an
+    // S3-compatible endpoint (MinIO in CI), not against bucket+region alone.
+    if std::env::var("GT_S3_ENDPOINT_URL").is_ok_and(|e| !e.is_empty())
+        && std::env::var("GT_S3_BUCKET").is_ok_and(|b| !b.is_empty())
+    {
+        metric_export_v2_cli_roundtrip(true).await;
+    }
 }
 
 async fn metric_export_v2_cli_roundtrip(s3: bool) {

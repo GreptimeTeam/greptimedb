@@ -183,6 +183,10 @@ jobs:
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
           large-page-size: ${{ inputs.large-page-size }}
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -217,6 +221,10 @@ jobs:
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
           large-page-size: ${{ inputs.large-page-size }}
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub

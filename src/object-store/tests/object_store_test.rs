@@ -284,12 +284,20 @@ async fn test_s3_backend() -> Result<()> {
 
         let root = uuid::Uuid::new_v4().to_string();
 
-        let builder = S3::default()
+        let mut builder = S3::default()
             .root(&root)
             .access_key_id(&env::var("GT_S3_ACCESS_KEY_ID")?)
             .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
             .region(&env::var("GT_S3_REGION")?)
             .bucket(&bucket);
+
+        // Honors an S3-compatible endpoint (MinIO in CI) so the test does not
+        // fall back to resolving the bucket against real AWS.
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL")
+            && !endpoint.is_empty()
+        {
+            builder = builder.endpoint(&endpoint);
+        }
 
         let store = ObjectStore::new(builder).unwrap();
         let store = object_store::util::with_instrument_layers(store, false);

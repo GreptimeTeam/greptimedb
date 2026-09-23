@@ -31,6 +31,7 @@ use client::{Client, Database};
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+use common_event_recorder::EventRecorderOptions;
 #[cfg(test)]
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
@@ -328,6 +329,18 @@ impl StorageType {
     }
 }
 
+/// Event recorder options for tests.
+///
+/// The production flush interval is 5s, and the event tests interleave "run a
+/// DDL, wait for its event, run the next DDL", so each barrier costs a full
+/// window. A short interval removes that wait without changing what is asserted.
+pub fn test_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
 fn s3_test_config() -> S3Config {
     S3Config {
         connection: S3Connection {
@@ -363,7 +376,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
             let azblob_config = AzblobConfig {
@@ -381,7 +394,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
             let oss_config = OssConfig {
@@ -398,32 +411,57 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
 
-            if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
+            // The datanode wipes `<cache_path>/cache/object/read` on startup, so a
+            // path shared between concurrently running tests lets a starting test
+            // delete the read cache of a running one.
+            let cache_dir = if *store_type == StorageType::S3WithCache {
+                let dir = create_temp_dir("gt_s3_read_cache");
+                s3_config.cache.cache_path = dir.path().to_string_lossy().to_string();
+                Some(dir)
             } else {
                 s3_config.cache.enable_read_cache = false;
-            }
+                None
+            };
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
+            (
+                config,
+                TempDirGuard {
+                    remote: Some(TempFolder::new(&store, "/")),
+                    local_cache: cache_dir,
+                },
+            )
         }
-        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
+        StorageType::File => (
+            ObjectStoreConfig::File(FileConfig {}),
+            TempDirGuard::default(),
+        ),
     }
 }
 
-pub enum TempDirGuard {
-    None,
-    S3(TempFolder),
-    Oss(TempFolder),
-    Azblob(TempFolder),
-    Gcs(TempFolder),
+#[derive(Default)]
+pub struct TempDirGuard {
+    /// Prefix to wipe from the remote object store, absent for the file backend.
+    remote: Option<TempFolder>,
+    /// Local read cache directory. Only held so it is removed when the guard drops.
+    #[allow(dead_code)]
+    local_cache: Option<TempDir>,
+}
+
+impl TempDirGuard {
+    fn remote(folder: TempFolder) -> Self {
+        Self {
+            remote: Some(folder),
+            local_cache: None,
+        }
+    }
 }
 
 pub struct TestGuard {
@@ -446,11 +484,7 @@ pub struct StorageGuard(pub TempDirGuard);
 impl TestGuard {
     pub async fn remove_all(&mut self) {
         for storage_guard in self.storage_guards.iter_mut() {
-            if let TempDirGuard::S3(guard)
-            | TempDirGuard::Oss(guard)
-            | TempDirGuard::Azblob(guard)
-            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
-            {
+            if let Some(guard) = &mut storage_guard.0.remote {
                 guard.remove_all().await.unwrap()
             }
         }
@@ -465,11 +499,8 @@ impl Drop for TestGuard {
         common_runtime::spawn_global(async move {
             let mut errors = vec![];
             for guard in guards {
-                if let TempDirGuard::S3(guard)
-                | TempDirGuard::Oss(guard)
-                | TempDirGuard::Azblob(guard)
-                | TempDirGuard::Gcs(guard) = guard.0
-                    && let Err(e) = guard.remove_all().await
+                if let Some(remote) = guard.0.remote
+                    && let Err(e) = remote.remove_all().await
                 {
                     errors.push(e);
                 }
