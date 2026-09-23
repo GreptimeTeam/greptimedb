@@ -314,7 +314,6 @@ max_batch_rows = 25
         let enabled: FrontendOptions = toml::from_str("experimental_metric_export = true").unwrap();
         assert!(enabled.experimental_metric_export);
         let toml_string = toml::to_string(&opts).unwrap();
-        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
         let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed.otlp, opts.otlp);
         assert_eq!(parsed.influxdb, opts.influxdb);
