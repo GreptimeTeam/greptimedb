@@ -157,6 +157,11 @@ const OR_FLOAT_FIELD_PREFIX: &str = "__promql_or_float_";
 const OR_HISTOGRAM_FIELD_PREFIX: &str = "__promql_or_histogram_";
 const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
 
+/// Prefix of the internal join key columns holding the normalized value of a matching label.
+/// Kept distinct from the direct-OR internal key prefix (`__promql_or_match_`) so a plan can be
+/// checked for leaked OR keys independently.
+const MATCH_KEY_COLUMN_PREFIX: &str = "__promql_key_";
+
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
@@ -1156,10 +1161,28 @@ impl PromPlanner {
         }
 
         let first_tags = leaves[0].ctx.tag_columns.iter().collect::<BTreeSet<_>>();
+        // The island joins the raw label columns, while PromQL reads a NULL label as the empty
+        // string. A leaf whose matching labels can be NULL therefore needs the normalized keys of
+        // the regular binary path and is left to it. `__tsid` identifies a series, so a TSID join
+        // is unaffected.
+        let labels_are_non_nullable = leaves.iter().all(|leaf| {
+            leaf.ctx.tag_columns.iter().all(|tag| {
+                leaf.plan
+                    .schema()
+                    .field_with_unqualified_name(tag)
+                    .map(|field| !field.is_nullable())
+                    .unwrap_or(true)
+            })
+        });
 
         leaves.iter().skip(1).all(|leaf| {
-            (Self::plan_has_tsid_column(&leaves[0].plan) && Self::plan_has_tsid_column(&leaf.plan))
-                || leaf.ctx.tag_columns.iter().collect::<BTreeSet<_>>() == first_tags
+            let tsid_join = Self::plan_has_tsid_column(&leaves[0].plan)
+                && Self::plan_has_tsid_column(&leaf.plan)
+                && leaves[0].ctx.use_tsid
+                && leaf.ctx.use_tsid;
+            tsid_join
+                || (leaf.ctx.tag_columns.iter().collect::<BTreeSet<_>>() == first_tags
+                    && labels_are_non_nullable)
         })
     }
 
@@ -6640,129 +6663,192 @@ impl PromPlanner {
             let _ = right_tag_columns.remove(METRIC_NAME);
         }
 
-        // A label the other operand does not carry at all is absent for every series of that
-        // operand, so the two sides can never match and the join is empty by construction. A
-        // nullable label is different: an operand may omit it on some of its series, which is
-        // what a metric name union does when it pads the labels a candidate table lacks. Those
-        // two operands compare their label sets per row instead, so the join is aligned below
-        // rather than rejected.
-        let rejects_join =
+        // A label one operand does not carry at all is absent for every series of that operand,
+        // which PromQL reads as the empty string, so `normalize_join_key_columns` compares it per
+        // row like any other label — the padding a metric name union applies to a candidate table
+        // is a NULL for the same reason. A non-string label has no empty string to compare
+        // against, though, so a key that only one operand carries at all and that is not a string
+        // there can never match: the join is empty by construction. Joining such a key would name
+        // a column the other operand does not have, so it is left out — only the labels both
+        // operands carry are keyed — and the caller forces the join empty, which keeps the result
+        // schema.
+        let missing_key_is_not_a_string =
             |mine: &BTreeSet<String>, mine_schema: &DFSchemaRef, theirs: &BTreeSet<String>| {
                 mine.difference(theirs).any(|column| {
                     mine_schema
                         .field_with_unqualified_name(column)
-                        .map(|field| !field.is_nullable())
+                        .map(|field| Self::string_value_data_type(field.data_type()).is_none())
                         .unwrap_or(true)
                 })
             };
         let force_empty_join = !use_tsid_join
             && !only_join_time_index
-            && (rejects_join(&left_tag_columns, left_schema, &right_tag_columns)
-                || rejects_join(&right_tag_columns, right_schema, &left_tag_columns));
-        if force_empty_join {
-            let common_tag_columns = left_tag_columns
+            && (missing_key_is_not_a_string(&left_tag_columns, left_schema, &right_tag_columns)
+                || missing_key_is_not_a_string(
+                    &right_tag_columns,
+                    right_schema,
+                    &left_tag_columns,
+                ));
+        let tag_columns = if force_empty_join {
+            left_tag_columns
                 .intersection(&right_tag_columns)
                 .cloned()
-                .collect::<BTreeSet<_>>();
-            left_tag_columns = common_tag_columns.clone();
-            right_tag_columns = common_tag_columns;
+                .collect::<BTreeSet<_>>()
         } else {
             // Join on every label either operand carries; the caller pads the missing column with
             // NULL on the side that lacks it.
-            let all_tag_columns = left_tag_columns
+            left_tag_columns
                 .union(&right_tag_columns)
                 .cloned()
-                .collect::<BTreeSet<_>>();
-            left_tag_columns = all_tag_columns.clone();
-            right_tag_columns = all_tag_columns;
-        }
-
-        Ok((left_tag_columns, right_tag_columns, force_empty_join))
+                .collect::<BTreeSet<_>>()
+        };
+        Ok((tag_columns.clone(), tag_columns, force_empty_join))
     }
 
-    /// Aligns the join keys of both operands so the join compares them per row.
+    /// Normalizes the join keys of both operands so the join compares them per row.
     ///
-    /// A key one side does not carry is absent for every series of that operand — the empty label
-    /// value in PromQL terms — so it is projected as a NULL on that side. A key both sides carry
-    /// in different encodings is cast to a common type, the same unification a metric name union
-    /// applies to its branches: a union exposes its labels as plain strings while a single-table
-    /// operand may still carry them dictionary encoded.
-    fn align_join_key_columns(
+    /// PromQL reads a label a series does not carry as the empty string, so a missing label, a
+    /// `NULL` and `''` are one and the same value, and whether two series match depends on their
+    /// label values rather than on their label sets as a whole. Every key that can hold a `NULL` —
+    /// or that one operand does not carry at all — is therefore replaced on both sides by
+    /// [`Self::normalized_match_key_expr`], the expression the direct-OR path builds its match keys
+    /// with: the label cast to the common string type of the two operands with `NULL` coalesced to
+    /// `''`, or that same empty value where the operand has no such column. A key both operands
+    /// carry as a non-nullable column of the same type already compares by value and is joined as
+    /// it is. The visible label columns are left alone, so a `NULL` that a metric name union padded
+    /// stays `NULL` in the result; only the returned key columns carry the normalized value. The
+    /// time index is joined as it is: it is present on both sides by construction and its name is
+    /// a property of each operand's table. A key the join cannot compare at all, one operand
+    /// lacking a non-string label of the other, is left out by
+    /// [`Self::binary_join_key_columns`] together with an always-false predicate.
+    fn normalize_join_key_columns(
         left: LogicalPlan,
         right: LogicalPlan,
         left_keys: &BTreeSet<String>,
         right_keys: &BTreeSet<String>,
-    ) -> Result<(LogicalPlan, LogicalPlan)> {
-        let key_type = |plan: &LogicalPlan, key: &str| {
+        left_time_index_column: Option<&String>,
+        right_time_index_column: Option<&String>,
+    ) -> Result<(LogicalPlan, LogicalPlan, Vec<Column>, Vec<Column>)> {
+        let key_field = |plan: &LogicalPlan, key: &str| {
             plan.schema()
-                .field_with_unqualified_name(key)
-                .ok()
-                .map(|field| field.data_type().clone())
+                .iter()
+                .find(|(_, field)| field.name().as_str() == key)
+                .map(|(qualifier, field)| {
+                    (
+                        qualifier.cloned(),
+                        field.data_type().clone(),
+                        field.is_nullable(),
+                    )
+                })
         };
-        let mut common_types = HashMap::with_capacity(left_keys.len() + right_keys.len());
+        let mut left_exprs = Vec::new();
+        let mut right_exprs = Vec::new();
+        // The internal column of every key that needs normalizing, by key name.
+        let mut internal_names = HashMap::new();
+        // An internal key must not shadow a column of either operand: a user label can be named
+        // like one.
+        let mut occupied_names = left
+            .schema()
+            .fields()
+            .iter()
+            .chain(right.schema().fields().iter())
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        let mut next_internal_column = 0;
+
         for key in left_keys.union(right_keys) {
-            let left_type = key_type(&left, key);
-            let right_type = key_type(&right, key);
-            // `common_label_data_type` decodes a dictionary to its value type, so a key only one
-            // side carries is aligned to the plain type as well.
-            let Some(common) =
-                Self::common_label_data_type(left_type.as_ref(), right_type.as_ref())
-            else {
-                // Not a string label in some candidate: leave the key as it is and let the join
-                // report the mismatch.
+            let left_field = key_field(&left, key);
+            let right_field = key_field(&right, key);
+            let needs_normalizing = !matches!(
+                (&left_field, &right_field),
+                (Some((_, left_type, false)), Some((_, right_type, false)))
+                    if left_type == right_type
+            );
+            // The common type is decoded to its plain string form — like the direct-OR match
+            // keys, which compare decoded values — and a key that is not a string in some operand
+            // is left to the join's own mismatch report.
+            let value_type = Self::common_label_data_type(
+                left_field.as_ref().map(|(_, data_type, _)| data_type),
+                right_field.as_ref().map(|(_, data_type, _)| data_type),
+            )
+            .as_ref()
+            .and_then(|data_type| Self::string_value_data_type(data_type).cloned())
+            .filter(|_| needs_normalizing);
+            let Some(value_type) = value_type else {
+                // Both sides already carry one non-nullable value per row, so the key columns
+                // compare by value as they are.
                 continue;
             };
-            if left_type.as_ref() != Some(&common) || right_type.as_ref() != Some(&common) {
-                let _ = common_types.insert(key.clone(), common);
-            }
+            let internal_name = loop {
+                let name = format!("{MATCH_KEY_COLUMN_PREFIX}{next_internal_column}");
+                next_internal_column += 1;
+                if occupied_names.insert(name.clone()) {
+                    break name;
+                }
+            };
+            let field_type = |field: Option<(Option<TableReference>, ArrowDataType, bool)>| {
+                field.map(|(qualifier, data_type, _)| (qualifier, data_type))
+            };
+            left_exprs.push(Self::normalized_match_key_expr(
+                key,
+                field_type(left_field),
+                &value_type,
+                &internal_name,
+            ));
+            right_exprs.push(Self::normalized_match_key_expr(
+                key,
+                field_type(right_field),
+                &value_type,
+                &internal_name,
+            ));
+            let _ = internal_names.insert(key.clone(), internal_name);
         }
 
-        let align = |plan: LogicalPlan| {
-            if common_types.is_empty() {
-                return Ok(plan);
+        // Keep every field's qualifier and name: the caller aliases these plans, and a field
+        // reported under its qualified name would become a column literally named like it.
+        let with_match_keys = |plan: &LogicalPlan, exprs: Vec<DfExpr>| -> Result<LogicalPlan> {
+            if exprs.is_empty() {
+                return Ok(plan.clone());
             }
-            let schema = plan.schema().clone();
-            let mut exprs = Vec::with_capacity(schema.fields().len() + common_types.len());
-            for index in 0..schema.fields().len() {
-                let (qualifier, field) = schema.qualified_field(index);
-                let field_name = field.name().as_str();
-                let expected_type = field.data_type().clone();
-                // Keep the field's qualifier and name as they are: a cast reports its input's
-                // qualified name as its own, which would flatten `t.job` into a column literally
-                // named `t.job` once the caller aliases this plan.
-                let column = || DfExpr::Column(Column::new(qualifier.cloned(), field_name));
-                let expr = match common_types.get(field_name) {
-                    Some(common) if &expected_type != common => {
-                        DfExpr::Cast(Cast::new(Box::new(column()), common.clone()))
-                            .alias(field_name)
-                    }
-                    _ => column(),
-                };
-                exprs.push(expr);
-            }
-            for (key, common) in &common_types {
-                if schema.index_of_column_by_name(None, key).is_some() {
-                    continue;
-                }
-                exprs.push(
-                    DfExpr::Literal(
-                        ScalarValue::try_from(common).context(DataFusionPlanningSnafu)?,
-                        None,
-                    )
-                    .alias(key),
-                );
-            }
-
-            LogicalPlanBuilder::from(plan)
-                .project(exprs)
+            let visible = plan.schema().iter().map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            });
+            LogicalPlanBuilder::from(plan.clone())
+                .project(visible.chain(exprs).collect::<Vec<_>>())
                 .context(DataFusionPlanningSnafu)?
                 .build()
                 .context(DataFusionPlanningSnafu)
         };
+        // Both sides carry the same label keys, so iterating a `BTreeSet` pairs them positionally.
+        // The time index columns are appended afterwards: the two operands may name theirs
+        // differently, and sorting them together with the labels would misalign the pairs.
+        let join_keys = |keys: &BTreeSet<String>, time_index_column: Option<&String>| {
+            let mut columns = keys
+                .iter()
+                .map(|key| match internal_names.get(key) {
+                    Some(internal_name) => Column::from_name(internal_name.clone()),
+                    None => Column::from_name(key.clone()),
+                })
+                .collect::<Vec<_>>();
+            if let Some(time_index_column) = time_index_column {
+                columns.push(Column::from_name(time_index_column.clone()));
+            }
+            columns
+        };
 
-        let left = align(left)?;
-        let right = align(right)?;
-        Ok((left, right))
+        // The time index joins both sides only when both operands name one, as before.
+        let (left_time_index_column, right_time_index_column) =
+            match (left_time_index_column, right_time_index_column) {
+                (Some(left), Some(right)) => (Some(left), Some(right)),
+                _ => (None, None),
+            };
+
+        Ok((
+            with_match_keys(&left, left_exprs)?,
+            with_match_keys(&right, right_exprs)?,
+            join_keys(left_keys, left_time_index_column),
+            join_keys(right_keys, right_time_index_column),
+        ))
     }
 
     fn binary_modifier_preserves_tsid_join_key(
@@ -6858,18 +6944,15 @@ impl PromPlanner {
             (left, right)
         };
 
-        // Label keys are aligned before the time index joins them: the time index is present on
-        // both sides by construction, and its name is a property of each operand's table.
-        let (left, right) =
-            Self::align_join_key_columns(left, right, &left_tag_columns, &right_tag_columns)?;
-
-        // push time index column if it exists
-        if let (Some(left_time_index_column), Some(right_time_index_column)) =
-            (left_time_index_column, right_time_index_column)
-        {
-            left_tag_columns.insert(left_time_index_column);
-            right_tag_columns.insert(right_time_index_column);
-        }
+        // The labels are normalized so the join compares them per row; the time index joins them.
+        let (left, right, left_join_keys, right_join_keys) = Self::normalize_join_key_columns(
+            left,
+            right,
+            &left_tag_columns,
+            &right_tag_columns,
+            left_time_index_column.as_ref(),
+            right_time_index_column.as_ref(),
+        )?;
 
         let right = LogicalPlanBuilder::from(right)
             .alias(right_table_ref)
@@ -6884,16 +6967,7 @@ impl PromPlanner {
             .join_detailed(
                 right,
                 JoinType::Inner,
-                (
-                    left_tag_columns
-                        .into_iter()
-                        .map(Column::from_name)
-                        .collect::<Vec<_>>(),
-                    right_tag_columns
-                        .into_iter()
-                        .map(Column::from_name)
-                        .collect::<Vec<_>>(),
-                ),
+                (left_join_keys, right_join_keys),
                 force_empty_join.then_some(lit(false)),
                 NullEquality::NullEqualsNull,
             )
@@ -10184,7 +10258,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn timestamp_binary_join_rejects_default_matching_on_mismatched_labels() {
+    async fn timestamp_binary_join_matches_missing_labels_as_empty_string() {
+        // `timestamp(left_host_job)` carries `tag_0` and `tag_1`, `right_by_job` only `tag_0`.
+        // PromQL reads the label `right_by_job` does not carry as the empty string, so the two
+        // operands are matched per row on every label instead of being rejected as a whole.
         let eval_stmt = build_eval_stmt("timestamp(left_host_job) / right_by_job");
 
         let table_provider = build_test_table_provider_with_tsid_tag_fields(&[
@@ -10206,10 +10283,18 @@ mod test {
                 .unwrap();
         let plan_str = plan.display_indent_schema().to_string();
 
+        assert!(plan_str.contains("Inner Join:"), "{plan_str}");
+        // `tag_0` exists on both sides and needs no normalizing; the absent `tag_1` is the empty
+        // string on the right and compared per row.
         assert!(
-            plan_str.contains("Boolean(false)") || plan_str.contains("false"),
+            plan_str.contains("left_host_job.tag_0 = right_by_job.tag_0"),
             "{plan_str}"
         );
+        assert!(
+            plan_str.contains(MATCH_KEY_COLUMN_PREFIX) && plan_str.contains(r#"Utf8("")"#),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("Boolean(false)"), "{plan_str}");
     }
 
     #[tokio::test]
@@ -15848,6 +15933,38 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             .collect()
     }
 
+    /// The user-visible rows of a union query result, sorted by value: every numeric value column
+    /// and the non-NULL label columns of each row, read by label name.
+    fn labeled_values(batches: &[RecordBatch]) -> Vec<(f64, Vec<(String, String)>)> {
+        let mut rows = Vec::new();
+        for batch in batches {
+            for row in 0..batch.num_rows() {
+                let mut value = None;
+                let mut labels = Vec::new();
+                for (index, column) in batch.columns().iter().enumerate() {
+                    let name = batch.schema().field(index).name().to_string();
+                    match column.data_type() {
+                        ArrowDataType::Utf8 => {
+                            let values = column.as_any().downcast_ref::<StringArray>().unwrap();
+                            if !values.is_null(row) {
+                                labels.push((name, values.value(row).to_string()));
+                            }
+                        }
+                        ArrowDataType::Float64 => {
+                            let values = column.as_any().downcast_ref::<Float64Array>().unwrap();
+                            value = (!values.is_null(row)).then(|| values.value(row));
+                        }
+                        _ => {}
+                    }
+                }
+                labels.sort();
+                rows.push((value.unwrap(), labels));
+            }
+        }
+        rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+        rows
+    }
+
     /// Two classic histogram metric tables: each carries an `le` label, which is what
     /// `histogram_quantile` folds over.
     fn build_union_classic_histogram_table_provider() -> DfTableSourceProvider {
@@ -16520,7 +16637,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     #[tokio::test]
     async fn metric_name_union_join_matches_heterogeneous_label_sets() {
         // `m_alpha` carries `job`, `m_beta` carries `instance`; the union pads each branch with
-        // NULL for the other label. Vector matching compares label sets per series, so the
+        // NULL for the other label. Vector matching compares label values per series, so the
         // `m_alpha` row matches the exact-name operand and the `m_beta` row does not.
         let batches = execute_union_query(
             build_union_metric_table_provider(),
@@ -16529,6 +16646,140 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         )
         .await;
         assert_eq!(float_values(&batches), vec![2.0]);
+        // The surviving row is the `m_alpha` series: the arithmetic result carries the labels of
+        // its right-hand operand, and no padded or internal label leaks into it.
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(2.0, vec![("job".to_string(), "api".to_string())])]
+        );
+    }
+
+    /// The union operand pads the labels a candidate table lacks with NULL, while `m_exact` stores
+    /// an explicit empty string for `y` and carries no `x` column at all.
+    fn build_union_empty_label_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_union_a",
+                    3_003,
+                    &[("job", Some("api")), ("x", Some(""))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "m_union_b",
+                    3_004,
+                    &[("job", Some("api")), ("y", Some("2"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[4.0])],
+                ),
+                union_metric_table(
+                    "m_union_c",
+                    3_005,
+                    &[("job", Some("other")), ("x", Some(""))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[7.0])],
+                ),
+                union_metric_table(
+                    "m_exact",
+                    3_006,
+                    &[("job", Some("api")), ("y", Some(""))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_join_reads_a_missing_label_as_empty_string() {
+        let query = r#"{__name__=~"m_union_.*"} + m_exact"#;
+        let candidates = &["m_union_a", "m_union_b", "m_union_c"];
+        let plan = plan_union_query(build_union_empty_label_table_provider(), candidates, query)
+            .await
+            .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        // The join is not rejected: the union branch that lacks `y` pads it with NULL and is
+        // matched through the empty string.
+        assert!(plan_str.contains(MATCH_KEY_COLUMN_PREFIX), "{plan_str}");
+        assert!(!plan_str.contains("Boolean(false)"), "{plan_str}");
+
+        let batches =
+            execute_union_query(build_union_empty_label_table_provider(), candidates, query).await;
+        // `m_union_a` (job="api", x="", y padded NULL) matches `m_exact` (job="api", y=""): a NULL
+        // is the empty label value there, and `m_exact` has no `x` column at all. `m_union_b`
+        // (y="2") does not match the empty `y` of `m_exact`, and `m_union_c` has another `job`.
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                3.0,
+                vec![
+                    ("job".to_string(), "api".to_string()),
+                    ("y".to_string(), String::new())
+                ]
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_join_reads_an_empty_label_as_missing() {
+        // The same match seen from the other side: the label is an explicit empty string on the
+        // union branch and absent on the exact-name operand.
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            &["m_union_c"],
+            r#"{__name__=~"m_union_.*"} + m_exact"#,
+        )
+        .await;
+        // `m_union_c` has job="other", so only a different label value kept them apart.
+        assert!(float_values(&batches).is_empty());
+
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            &["m_union_a"],
+            r#"{__name__=~"m_union_.*"} + on(x) m_exact"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+    }
+
+    #[tokio::test]
+    async fn metric_name_union_join_honors_on_and_ignoring() {
+        let candidates = &["m_union_a", "m_union_b", "m_union_c"];
+        let sorted_values = |batches: &[RecordBatch]| {
+            let mut values = float_values(batches);
+            values.sort_by(f64::total_cmp);
+            values
+        };
+
+        // `on(job)` matches on `job` alone, so `m_union_b` (y="2") matches as well: 4.0 + 2.0.
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} + on(job) m_exact"#,
+        )
+        .await;
+        assert_eq!(sorted_values(&batches), vec![3.0, 6.0]);
+
+        // `on(x, y)` matches `m_union_a` and `m_union_c` on the empty `x` and the padded `y`,
+        // regardless of their `job`: 1.0 + 2.0 and 7.0 + 2.0.
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} + on(x, y) m_exact"#,
+        )
+        .await;
+        assert_eq!(sorted_values(&batches), vec![3.0, 9.0]);
+
+        // `ignoring(job)` selects the same matching labels as `on(x, y)`.
+        let batches = execute_union_query(
+            build_union_empty_label_table_provider(),
+            candidates,
+            r#"{__name__=~"m_union_.*"} + ignoring(job) m_exact"#,
+        )
+        .await;
+        assert_eq!(sorted_values(&batches), vec![3.0, 9.0]);
     }
 
     #[tokio::test]
@@ -16709,5 +16960,223 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             .unwrap_err();
         assert_eq!(err.status_code(), StatusCode::Unsupported);
         assert!(err.to_string().contains(METRIC_NAME), "{err}");
+    }
+
+    /// Plans and executes `query` over a one-second evaluation window, so a fixture only needs one
+    /// sample per series. The plan is the raw one, before optimizer rules rewrite it.
+    async fn plan_and_execute_query(
+        table_provider: DfTableSourceProvider,
+        query: &str,
+    ) -> (LogicalPlan, Vec<RecordBatch>) {
+        let mut eval_stmt = build_eval_stmt(query);
+        eval_stmt.end = UNIX_EPOCH.checked_add(Duration::from_secs(1)).unwrap();
+        eval_stmt.interval = Duration::from_secs(1);
+        eval_stmt.lookback_delta = Duration::from_secs(1);
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let (_, batches) = execute(plan.clone(), &build_query_engine_state()).await;
+        (plan, batches)
+    }
+
+    /// An ordinary (non metric engine) metric table with the non-nullable label `job` and, when
+    /// `shard` is set, a non-nullable integer label of that name.
+    fn non_string_label_metric_table(
+        name: &str,
+        table_id: u32,
+        shard: Option<i64>,
+    ) -> table::TableRef {
+        let mut columns = vec![ColumnSchema::new(
+            "job".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        )];
+        let mut arrays: Vec<Arc<dyn Array>> = vec![Arc::new(StringArray::from(vec!["api"]))];
+        if let Some(shard) = shard {
+            columns.push(ColumnSchema::new(
+                "shard".to_string(),
+                ConcreteDataType::int64_datatype(),
+                false,
+            ));
+            arrays.push(Arc::new(Int64Array::from(vec![shard])));
+        }
+        let tag_count = columns.len();
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        arrays.push(Arc::new(TimestampMillisecondArray::from(vec![1_000])));
+        arrays.push(Arc::new(Float64Array::from(vec![1.0])));
+        let schema = Arc::new(Schema::new(columns));
+        let batch = RecordBatch::try_new(schema.arrow_schema().clone(), arrays).unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            name,
+            GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+            table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices((0..tag_count).collect())
+            .value_indices(vec![tag_count + 1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        Arc::new(Table::new(
+            info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ))
+    }
+
+    /// Two ordinary metric tables that share the `job` label: only the left-hand side carries the
+    /// integer label `shard`.
+    fn build_non_string_label_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                non_string_label_metric_table("left_shard_job", 3_040, Some(7)),
+                non_string_label_metric_table("right_job", 3_041, None),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn binary_join_with_a_missing_non_string_label_is_empty_not_an_error() {
+        // `left_shard_job` carries the integer label `shard`, `right_job` has no such column at
+        // all. PromQL reads a label a series does not carry as the empty string, but an integer
+        // label has no empty value to compare against, so the two operands share no series. The
+        // join must not reference the column the right-hand side does not have: it keys the
+        // shared `job` only and is forced empty, keeping the shape of the arithmetic.
+        let (plan, batches) = plan_and_execute_query(
+            build_non_string_label_table_provider(),
+            "left_shard_job + right_job",
+        )
+        .await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        // The join is rejected by the predicate instead of by a key column the right-hand side
+        // does not have, and only the shared `job` label is keyed.
+        assert!(plan_str.contains("Boolean(false)"), "{plan_str}");
+        assert!(
+            plan_str.contains("left_shard_job.job = right_job.job"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains(".shard ="), "{plan_str}");
+        // The time index is still keyed alongside the shared label, as it is on every other join.
+        assert_eq!(plan_str.matches("timestamp = ").count(), 1, "{plan_str}");
+        // Nothing was normalized: `job` is a non-nullable string on both sides.
+        assert!(!plan_str.contains(MATCH_KEY_COLUMN_PREFIX), "{plan_str}");
+
+        let field_names = plan.schema().field_names();
+        // The shared `job` label survives in the output as the qualified field `right_job.job`,
+        // never as a bare `job` or an internal match key.
+        assert!(
+            field_names.iter().any(|name| name.ends_with(".job")),
+            "{field_names:?}"
+        );
+        assert!(
+            field_names
+                .iter()
+                .any(|name| name.contains(greptime_value())),
+            "{field_names:?}"
+        );
+        assert!(
+            field_names
+                .iter()
+                .all(|name| !name.starts_with(MATCH_KEY_COLUMN_PREFIX)
+                    && !name.starts_with("__promql_or_match_")),
+            "{field_names:?}"
+        );
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 0);
+    }
+
+    /// Two ordinary metric tables that differ only in how the empty label `y` is encoded:
+    /// `m_null_label` does not carry it (NULL), `m_empty_label` stores the empty string.
+    fn build_null_and_empty_label_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "m_null_label",
+                    3_050,
+                    &[("job", Some("api")), ("y", None)],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[4.0])],
+                ),
+                union_metric_table(
+                    "m_empty_label",
+                    3_051,
+                    &[("job", Some("api")), ("y", Some(""))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn nullable_label_null_matches_empty_string_in_an_arithmetic_island() {
+        // `m_null_label` is used twice, so this is an arithmetic island candidate, but its `y`
+        // label is nullable and the island compares the raw label columns, where NULL never
+        // equals the empty string `m_empty_label` stores. The island leaves such an expression to
+        // the regular binary path, which compares the labels per row: NULL is the empty label
+        // value, so the series match and `(4.0 + 2.0) / 4.0` is reported.
+        let (plan, batches) = plan_and_execute_query(
+            build_null_and_empty_label_table_provider(),
+            "(m_null_label + m_empty_label) / m_null_label",
+        )
+        .await;
+
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains(MATCH_KEY_COLUMN_PREFIX), "{plan_str}");
+        // The island would join the raw label columns and keep only the second sample; the
+        // expression falls back to the label-normalizing binary path instead.
+        assert!(
+            !plan_str.contains(BINARY_ISLAND_LEAF_ALIAS_PREFIX),
+            "{plan_str}"
+        );
+        assert_eq!(float_values(&batches), vec![1.5]);
+        // Both joins pair the normalized label keys with each operand's time index key.
+        assert_eq!(plan_str.matches("timestamp = ").count(), 2, "{plan_str}");
+
+        // The internal match keys stay inside the join: neither the plan nor the result reports
+        // one as a series label.
+        let is_internal_key = |name: &str| {
+            name.starts_with(MATCH_KEY_COLUMN_PREFIX) || name.starts_with("__promql_or_match_")
+        };
+        assert!(
+            plan.schema()
+                .fields()
+                .iter()
+                .all(|field| !is_internal_key(field.name())),
+            "{plan_str}"
+        );
+        assert!(batches.iter().all(|batch| {
+            batch
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| !is_internal_key(field.name()))
+        }));
     }
 }
