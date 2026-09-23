@@ -2511,6 +2511,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
