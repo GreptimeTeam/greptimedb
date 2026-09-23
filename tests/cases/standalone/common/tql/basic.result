@@ -108,8 +108,8 @@ TQL EVAL (0, 10, '5s') {__name__="test", __field__="i"};
 | 2.0 | a | 1970-01-01T00:00:10 |
 +-----+---+---------------------+
 
--- NOT SUPPORTED: every matcher of a selector must not match the empty string, so this is a
--- parse error, not a metric name union.
+-- NOT SUPPORTED: at least one matcher of a selector must not match the empty string, so this is
+-- a parse error, not a metric name union.
 TQL EVAL (0, 10, '5s') {__name__!="test"};
 
 Error: 2000(InvalidSyntax), vector selector must contain at least one non-empty matcher

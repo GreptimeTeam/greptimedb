@@ -474,7 +474,6 @@ enum UnionSelectorPlan {
 }
 
 /// One scanned candidate metric table of a metric name union, with the schema it exposes.
-#[derive(Debug, Clone)]
 struct UnionBranchScan {
     metric_name: String,
     field_columns: Vec<String>,
@@ -1340,10 +1339,11 @@ impl PromPlanner {
 
         let schema = input.schema();
         self.ctx.tag_columns.retain(|column| column != METRIC_NAME);
-        let non_field_exprs = base_ctx
+        self.ctx.field_columns = field_exprs.names;
+        let non_field_exprs = self
+            .ctx
             .tag_columns
             .iter()
-            .filter(|column| column.as_str() != METRIC_NAME)
             .chain(base_ctx.time_index_column.iter())
             .map(|column| {
                 schema
@@ -1355,7 +1355,6 @@ impl PromPlanner {
             .into_iter()
             .map(Ok);
 
-        self.ctx.field_columns = field_exprs.names;
         let field_exprs = field_exprs
             .exprs
             .into_iter()
@@ -2864,9 +2863,6 @@ impl PromPlanner {
         );
 
         let plan = self.selector_scan_plan(offset, label_matchers).await?;
-        // Combining the branches destroys the physical series identifier ordering, so a branch
-        // must not export `__tsid` as its series key.
-        self.ctx.use_tsid = false;
 
         let time_index_column =
             self.ctx
@@ -3006,7 +3002,7 @@ impl PromPlanner {
 
         // Align every branch to the common schema, then combine them with `UNION ALL`.
         let mut combined: Option<LogicalPlan> = None;
-        for branch in &branches {
+        for branch in branches {
             let mut exprs = Vec::with_capacity(field_columns.len() + label_union.len() + 2);
             for (field, target_type) in field_columns.iter().zip(&field_types) {
                 let column = DfExpr::Column(Column::new_unqualified(field.clone()));
@@ -3052,7 +3048,7 @@ impl PromPlanner {
                 },
             );
 
-            let branch_plan = LogicalPlanBuilder::from(branch.plan.clone())
+            let branch_plan = LogicalPlanBuilder::from(branch.plan)
                 .project(exprs)
                 .context(DataFusionPlanningSnafu)?
                 .build()
@@ -3122,8 +3118,8 @@ impl PromPlanner {
 
     /// Returns the common type of one value column across the union branches.
     ///
-    /// Branches must expose the same value columns; numeric types are widened to `Float64` like
-    /// [`PromPlanner::or_operator`] does, while anything else is rejected.
+    /// Branches must expose the same value columns; differing numeric types are widened to
+    /// `Float64`, while equal types are retained.
     ///
     /// Widening `Int64`/`UInt64` to `Float64` loses precision for magnitudes above 2^53. That is
     /// intended and consistent with the Prometheus data model (every sample is a float64) and with
@@ -15542,8 +15538,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         )
     }
 
-    /// Plans and executes a query whose `__name__` matcher was resolved to `metric_names` by the
-    /// caller.
+    /// Plans a query whose `__name__` matcher was resolved to `metric_names` by the caller.
     async fn plan_union_query(
         table_provider: DfTableSourceProvider,
         metric_names: &[&str],
@@ -15773,8 +15768,6 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
             promql_annotations: None,
         };
-        planner.ctx.metric_names = Some(vec!["m_ms".to_string(), "m_ns".to_string()]);
-
         let plan = match planner
             .selector_union_to_series_normalize_plan(
                 &None,
@@ -15859,8 +15852,8 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         let table_provider =
             register_tables(&MemoryCatalogManager::with_default_setup(), vec![table]);
 
-        // `{__name__!="none"}` alone is not a valid PromQL selector: every matcher of a selector
-        // must not match the empty string, so the selector carries a second, non-empty matcher.
+        // `{__name__!="none"}` alone is not a valid PromQL selector: at least one matcher must
+        // not match the empty string, so the selector carries a second, non-empty matcher.
         let err = plan_union_query(
             table_provider,
             &["m_named"],
@@ -15968,8 +15961,6 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             ctx: PromPlannerContext::from_eval_stmt(&eval_stmt),
             promql_annotations: None,
         };
-        planner.ctx.metric_names = None;
-
         let plan = planner
             .prom_expr_to_plan(&eval_stmt.expr, &build_query_engine_state())
             .await

@@ -43,14 +43,8 @@ pub struct MetricNameCandidates {
 
 /// Encodes resolved metric tables for the query context extension.
 pub fn encode_metric_name_candidates(candidates: &MetricNameCandidates) -> String {
-    // Serializing these fields cannot fail.
-    serde_json::to_string(candidates).unwrap_or_else(|_| {
-        serde_json::to_string(&MetricNameCandidates {
-            schema: candidates.schema.clone(),
-            metric_names: Vec::new(),
-        })
-        .expect("an empty candidate list serializes")
-    })
+    // `MetricNameCandidates` contains only strings and vectors, which always serialize to JSON.
+    serde_json::to_string(candidates).expect("metric name candidates serialize")
 }
 
 /// Returns the metric tables resolved for this query, if the caller resolved any.

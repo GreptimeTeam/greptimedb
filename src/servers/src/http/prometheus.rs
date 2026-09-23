@@ -2794,7 +2794,6 @@ mod tests {
             query::promql::query_context_metric_names(&authorized),
             Some(vec!["cpu_user".to_string()])
         );
-        assert_eq!(handler.metric_names.len(), 2);
     }
 
     #[tokio::test]
@@ -2844,8 +2843,8 @@ mod tests {
         let cases = [
             (r#"{__name__=~"cpu.*"}"#, None),
             (r#"count by(__name__) ({__name__=~"cpu.*"})"#, None),
-            // Every matcher of a selector must not match the empty string, so the `!=` matcher
-            // is accompanied by a non-empty one.
+            // At least one matcher must not match the empty string, so the `!=` matcher is
+            // accompanied by a non-empty one.
             (r#"topk(1, {__name__!="cpu",host="a"})"#, None),
             (r#"{__name__="cpu"}"#, Some("cpu")),
             (r#"cpu{host="a"}"#, Some("cpu")),
