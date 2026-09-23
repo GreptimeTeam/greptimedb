@@ -23,18 +23,29 @@ use crate::collider::{CHECK_STEP, Collider, NORMALIZE_STEP};
 use crate::error::{
     CheckpointNotCoveredSnafu, CheckpointOverlappedSnafu, DuplicateExprSnafu, Result,
 };
-use crate::expr::{PartitionExpr, RestrictedOp};
+use crate::expr::{Operand, PartitionExpr, RestrictedOp};
 use crate::multi_dim::MultiDimPartitionRule;
 
 pub struct PartitionChecker<'a> {
     rule: &'a MultiDimPartitionRule,
     collider: Collider<'a>,
+    dimensions: Vec<Operand>,
 }
 
 impl<'a> PartitionChecker<'a> {
     pub fn try_new(rule: &'a MultiDimPartitionRule) -> Result<Self> {
         let collider = Collider::new(rule.exprs())?;
-        Ok(Self { rule, collider })
+        let mut dimensions = collider
+            .normalized_values
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        dimensions.sort();
+        Ok(Self {
+            rule,
+            collider,
+            dimensions,
+        })
     }
 
     pub fn check(&self) -> Result<()> {
@@ -45,6 +56,10 @@ impl<'a> PartitionChecker<'a> {
 
 // Logic of checking rules
 impl<'a> PartitionChecker<'a> {
+    #[expect(
+        clippy::mutable_key_type,
+        reason = "Operand keys contain only columns, functions, and immutable scalar literals"
+    )]
     fn run(&self) -> Result<()> {
         // Sort atomic exprs and check uniqueness
         let mut atomic_exprs = BTreeMap::new();
@@ -77,7 +92,8 @@ impl<'a> PartitionChecker<'a> {
 
         // matrix test
         let mut matrix_foundation = HashMap::new();
-        for (col, values) in self.collider.normalized_values.iter() {
+        for (index, dimension) in self.dimensions.iter().enumerate() {
+            let values = &self.collider.normalized_values[dimension];
             if values.is_empty() {
                 continue;
             }
@@ -88,7 +104,7 @@ impl<'a> PartitionChecker<'a> {
                 cornerstones.push(value.1);
                 cornerstones.push(value.1 + CHECK_STEP);
             }
-            matrix_foundation.insert(col.as_str(), cornerstones);
+            matrix_foundation.insert(index.to_string(), cornerstones);
         }
 
         // If there are no values, the rule is empty and valid.
@@ -96,7 +112,12 @@ impl<'a> PartitionChecker<'a> {
             return Ok(());
         }
 
-        let matrix_generator = MatrixGenerator::new(matrix_foundation);
+        let matrix_generator = MatrixGenerator::new(
+            matrix_foundation
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.clone()))
+                .collect(),
+        );
 
         // Process data in batches using iterator
         let mut results = Vec::with_capacity(self.collider.atomic_exprs.len());
@@ -104,8 +125,8 @@ impl<'a> PartitionChecker<'a> {
             .collider
             .atomic_exprs
             .iter()
-            .map(|expr| expr.to_physical_expr(matrix_generator.schema()))
-            .collect::<Vec<_>>();
+            .map(|expr| expr.to_physical_expr(matrix_generator.schema(), &self.dimensions))
+            .collect::<Result<Vec<_>>>()?;
         for batch in matrix_generator {
             results.clear();
             for physical_expr in &physical_exprs {
@@ -129,12 +150,12 @@ impl<'a> PartitionChecker<'a> {
 
                 if true_count == 0 {
                     return CheckpointNotCoveredSnafu {
-                        checkpoint: self.remap_checkpoint(i, &batch),
+                        checkpoint: self.remap_checkpoint(i, &batch)?,
                     }
                     .fail();
                 } else if true_count > 1 {
                     return CheckpointOverlappedSnafu {
-                        checkpoint: self.remap_checkpoint(i, &batch),
+                        checkpoint: self.remap_checkpoint(i, &batch)?,
                     }
                     .fail();
                 }
@@ -145,7 +166,7 @@ impl<'a> PartitionChecker<'a> {
     }
 
     /// Remap the normalized checkpoint data to the original values.
-    fn remap_checkpoint(&self, i: usize, batch: &RecordBatch) -> String {
+    fn remap_checkpoint(&self, i: usize, batch: &RecordBatch) -> Result<String> {
         let normalized_row = batch
             .columns()
             .iter()
@@ -158,14 +179,28 @@ impl<'a> PartitionChecker<'a> {
         let mut check_point = String::new();
         let schema = batch.schema();
         for (col_index, normalized_value) in normalized_row.iter().enumerate() {
-            let col_name = schema.field(col_index).name();
+            let field_name = schema.field(col_index).name();
+            let dimension = self
+                .dimensions
+                .iter()
+                .enumerate()
+                .find_map(|(index, dimension)| {
+                    (index.to_string() == *field_name).then_some(dimension)
+                })
+                .ok_or_else(|| {
+                    crate::error::UnexpectedSnafu {
+                        err_msg: format!("Unknown partition dimension: {field_name}"),
+                    }
+                    .build()
+                })?;
+            let col_name = dimension.to_string();
 
             if col_index > 0 {
                 check_point.push_str(", ");
             }
 
             // Check if point is on NORMALIZE_STEP or between steps
-            if let Some(values) = self.collider.normalized_values.get(col_name) {
+            if let Some(values) = self.collider.normalized_values.get(dimension) {
                 let normalize_step = NORMALIZE_STEP.0;
 
                 // Check if the normalized value is on a NORMALIZE_STEP boundary
@@ -220,7 +255,7 @@ impl<'a> PartitionChecker<'a> {
             }
         }
 
-        check_point
+        Ok(check_point)
     }
 }
 
@@ -349,6 +384,58 @@ mod tests {
     use super::*;
     use crate::expr::col;
     use crate::multi_dim::MultiDimPartitionRule;
+
+    #[test]
+    fn test_function_dimensions_are_structural() {
+        use crate::function::PartitionFunction;
+        let first = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![col("host"), Value::Int64(1).into(), Value::Int64(1).into()],
+        };
+        let second = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![col("host"), Value::Int64(2).into(), Value::Int64(1).into()],
+        };
+        let check = |expressions| {
+            MultiDimPartitionRule::try_new(vec!["host".into()], vec![1, 2], expressions, true)
+        };
+        assert!(
+            check(vec![
+                first.clone().lt(Value::from("m")),
+                first.clone().gt_eq(Value::from("m"))
+            ])
+            .is_ok()
+        );
+        assert!(
+            check(vec![
+                first.clone().lt(Value::from("m")),
+                first.clone().gt(Value::from("m"))
+            ])
+            .is_err()
+        );
+        assert!(
+            check(vec![
+                first.clone().lt(Value::from("z")),
+                first.clone().gt_eq(Value::from("m"))
+            ])
+            .is_err()
+        );
+        assert!(
+            check(vec![
+                first.clone().lt(Value::from("m")),
+                second.gt_eq(Value::from("m"))
+            ])
+            .is_err()
+        );
+        let named_like_function = col(first.to_string());
+        assert!(
+            check(vec![
+                first.lt(Value::from("m")),
+                named_like_function.gt_eq(Value::from("m"))
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn test_matrix_generator_single_column() {
@@ -582,23 +669,23 @@ mod tests {
         let checker = PartitionChecker::try_new(&rule).unwrap();
 
         let schema = Arc::new(Schema::new(vec![
-            Field::new("host", DataType::Float64, false),
-            Field::new("value", DataType::Float64, false),
+            Field::new("0", DataType::Float64, false),
+            Field::new("1", DataType::Float64, false),
         ]));
         let host_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
         let value_array = Float64Array::from(vec![-0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(host_array), Arc::new(value_array)])
             .unwrap();
 
-        let checkpoint = checker.remap_checkpoint(0, &batch);
+        let checkpoint = checker.remap_checkpoint(0, &batch).unwrap();
         assert_eq!(checkpoint, "host<0, value<0");
-        let checkpoint = checker.remap_checkpoint(1, &batch);
+        let checkpoint = checker.remap_checkpoint(1, &batch).unwrap();
         assert_eq!(checkpoint, "host=0, value=0");
-        let checkpoint = checker.remap_checkpoint(6, &batch);
+        let checkpoint = checker.remap_checkpoint(6, &batch).unwrap();
         assert_eq!(checkpoint, "2<host<3, 2<value<3");
-        let checkpoint = checker.remap_checkpoint(7, &batch);
+        let checkpoint = checker.remap_checkpoint(7, &batch).unwrap();
         assert_eq!(checkpoint, "host=3, value=3");
-        let checkpoint = checker.remap_checkpoint(8, &batch);
+        let checkpoint = checker.remap_checkpoint(8, &batch).unwrap();
         assert_eq!(checkpoint, "host>3, value>3");
     }
 }

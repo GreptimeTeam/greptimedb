@@ -1,0 +1,8 @@
+name = "partition_functions"
+reason = "Preserve function partition metadata and routing across restart."
+introduced_by = "Partition substring and hash functions (#9117)"
+topologies = ["standalone", "distributed"]
+from_range = [">=1.3.0-alpha.1"]
+to_range = [">=1.3.0-alpha.1"]
+features = ["partition"]
+owner = "team"

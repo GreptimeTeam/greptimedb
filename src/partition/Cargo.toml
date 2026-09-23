@@ -17,6 +17,7 @@ datafusion-common.workspace = true
 datafusion-expr.workspace = true
 datafusion-physical-expr.workspace = true
 datatypes.workspace = true
+md5.workspace = true
 moka = { workspace = true, features = ["future"] }
 serde.workspace = true
 serde_json.workspace = true

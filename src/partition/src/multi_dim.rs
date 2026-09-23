@@ -136,6 +136,12 @@ impl MultiDimPartitionRule {
                 let r = &values[*index];
                 Self::perform_op(l, &expr.op, r)
             }
+            (operand @ Operand::Function { .. }, Operand::Value(r)) => {
+                Self::perform_op(&self.evaluate_operand(operand, values)?, &expr.op, r)
+            }
+            (Operand::Value(l), operand @ Operand::Function { .. }) => {
+                Self::perform_op(l, &expr.op, &self.evaluate_operand(operand, values)?)
+            }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
                 let lhs = self.evaluate_expr(lhs, values)?;
                 let rhs = self.evaluate_expr(rhs, values)?;
@@ -146,6 +152,32 @@ impl MultiDimPartitionRule {
                 }
             }
             _ => unreachable!(),
+        }
+    }
+
+    fn evaluate_operand(&self, operand: &Operand, values: &[Value]) -> Result<Value> {
+        match operand {
+            Operand::Column(name) => {
+                let index = self
+                    .name_to_index
+                    .get(name)
+                    .context(UndefinedColumnSnafu { column: name })?;
+                Ok(values[*index].clone())
+            }
+            Operand::Value(value) => Ok(value.clone()),
+            Operand::Function { function, args } => {
+                let args = args
+                    .iter()
+                    .map(|arg| self.evaluate_operand(arg, values))
+                    .collect::<Result<Vec<_>>>()?;
+                function
+                    .evaluate(&args)
+                    .context(error::EvaluatePartitionFunctionSnafu)
+            }
+            Operand::Expr(_) => error::NoExprOperandSnafu {
+                operand: operand.clone(),
+            }
+            .fail(),
         }
     }
 
@@ -228,7 +260,9 @@ impl MultiDimPartitionRule {
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, RegionMask>> {
         let num_rows = record_batch.num_rows();
-        if self.regions.len() == 1 {
+        // Functions can reject row values, even when every valid row belongs
+        // to the same region.
+        if self.regions.len() == 1 && !self.exprs.iter().any(PartitionExpr::contains_function) {
             return Ok([(
                 self.regions[0],
                 RegionMask::from(BooleanArray::from(vec![true; num_rows])),
@@ -261,11 +295,15 @@ impl MultiDimPartitionRule {
         let mut result: HashMap<u32, RegionMask> = physical_exprs
             .iter()
             .zip(self.regions.iter())
-            .filter_map(|(expr, region_num)| {
-                let col_val = match expr
-                    .evaluate(record_batch)
-                    .context(error::EvaluateRecordBatchSnafu)
-                {
+            .zip(self.exprs.iter())
+            .filter_map(|((expr, region_num), partition_expr)| {
+                let evaluated = expr.evaluate(record_batch);
+                let evaluated = if partition_expr.contains_function() {
+                    evaluated.context(error::EvaluatePartitionFunctionSnafu)
+                } else {
+                    evaluated.context(error::EvaluateRecordBatchSnafu)
+                };
+                let col_val = match evaluated {
                     Ok(array) => array,
                     Err(e) => {
                         return Some(Err(e));
@@ -367,6 +405,260 @@ mod tests {
     use super::*;
     use crate::error::{self, Error};
     use crate::expr::col;
+
+    #[test]
+    fn test_function_comparisons_match_row_evaluation() {
+        use datatypes::arrow::array::{Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        use crate::function::PartitionFunction;
+        let operand = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![Operand::Column("host".into()), Value::Int64(1).into()],
+        };
+        let inputs = [
+            Value::Null,
+            Value::from("a"),
+            Value::from("m"),
+            Value::from("z"),
+        ];
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)])),
+            vec![Arc::new(StringArray::from(vec![
+                None,
+                Some("a"),
+                Some("m"),
+                Some("z"),
+            ]))],
+        )
+        .unwrap();
+        for op in [
+            RestrictedOp::Eq,
+            RestrictedOp::NotEq,
+            RestrictedOp::Lt,
+            RestrictedOp::LtEq,
+            RestrictedOp::Gt,
+            RestrictedOp::GtEq,
+        ] {
+            for bound in [Value::Null, Value::from("m")] {
+                let expr = PartitionExpr::new(operand.clone(), op.clone(), bound.into());
+                let rule = MultiDimPartitionRule::try_new(
+                    vec!["host".into()],
+                    vec![1],
+                    vec![expr.clone()],
+                    false,
+                )
+                .unwrap();
+                let physical = expr
+                    .try_as_physical_expr(&batch.schema())
+                    .unwrap()
+                    .evaluate(&batch)
+                    .unwrap();
+                let physical = columnar_value_to_boolean_array(physical, batch.num_rows()).unwrap();
+                assert_eq!(physical.null_count(), 0);
+                for (row, value) in inputs.iter().enumerate() {
+                    assert_eq!(
+                        rule.evaluate_expr(&expr, std::slice::from_ref(value))
+                            .unwrap(),
+                        physical.value(row),
+                        "{expr}, input={value}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_function_invalid_length_with_null_bound() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+        use datatypes::arrow::array::{Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        use crate::function::PartitionFunction;
+        let operand = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![
+                Operand::Column("host".into()),
+                Value::Int64(1).into(),
+                Operand::Column("length".into()),
+            ],
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("host", DataType::Utf8, false),
+                Field::new("length", DataType::Int64, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec!["abc"])),
+                Arc::new(Int64Array::from(vec![-1])),
+            ],
+        )
+        .unwrap();
+        let tautology = PartitionExpr::new(
+            Operand::Expr(operand.clone().lt(Value::Null)),
+            RestrictedOp::Or,
+            Operand::Expr(operand.clone().gt_eq(Value::Null)),
+        );
+        let single_region = MultiDimPartitionRule::try_new(
+            vec!["host".into(), "length".into()],
+            vec![1],
+            vec![tautology],
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            single_region
+                .split_record_batch(&batch)
+                .err()
+                .unwrap()
+                .status_code(),
+            StatusCode::InvalidArguments
+        );
+        for op in [RestrictedOp::Lt, RestrictedOp::GtEq] {
+            let expr = PartitionExpr::new(operand.clone(), op, Value::Null.into());
+            let rule = MultiDimPartitionRule::try_new(
+                vec!["host".into(), "length".into()],
+                vec![1],
+                vec![expr.clone()],
+                false,
+            )
+            .unwrap();
+            assert_eq!(
+                rule.evaluate_expr(&expr, &[Value::from("abc"), Value::Int64(-1)])
+                    .unwrap_err()
+                    .status_code(),
+                StatusCode::InvalidArguments,
+            );
+            assert!(
+                expr.try_as_physical_expr(&batch.schema())
+                    .unwrap()
+                    .evaluate(&batch)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn test_function_partition_dictionary_tags() {
+        use datatypes::arrow::array::{Array, StringDictionaryBuilder};
+        use datatypes::arrow::datatypes::{Field, UInt32Type};
+
+        use crate::function::PartitionFunction;
+        let mut builder = StringDictionaryBuilder::<UInt32Type>::new();
+        builder.append("abc").unwrap();
+        builder.append("xyz").unwrap();
+        builder.append_null();
+        let array = Arc::new(builder.finish());
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new(
+                "host",
+                array.data_type().clone(),
+                true,
+            )])),
+            vec![array],
+        )
+        .unwrap();
+        for function in [PartitionFunction::Substring, PartitionFunction::Hash] {
+            let mut args = vec![Operand::Column("host".into())];
+            if function == PartitionFunction::Substring {
+                args.push(Value::Int64(1).into());
+            }
+            let operand = Operand::Function { function, args };
+            let exprs = vec![
+                operand.clone().lt(Value::from("m")),
+                operand.gt_eq(Value::from("m")),
+            ];
+            let rule = MultiDimPartitionRule::try_new(vec!["host".into()], vec![1, 2], exprs, true)
+                .unwrap();
+            let naive = rule.split_record_batch_naive(&batch).unwrap();
+            for (region, mask) in rule.split_record_batch(&batch).unwrap() {
+                assert_eq!(mask.array(), &naive[&region]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_function_partition_row_batch_and_restore() {
+        use datatypes::arrow::array::StringArray;
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        use crate::function::PartitionFunction;
+        let substring = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![
+                Operand::Column("host".into()),
+                Value::Int64(1).into(),
+                Value::Int64(1).into(),
+            ],
+        };
+        let hash = Operand::Function {
+            function: PartitionFunction::Hash,
+            args: vec![substring.clone(), Operand::Column("idc".into())],
+        };
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("host", DataType::Utf8, true),
+                Field::new("idc", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some("abc"),
+                    Some("z"),
+                    Some("中🙂"),
+                    None,
+                    Some(""),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("a"),
+                    Some("bc"),
+                    Some("🙂"),
+                    Some("a"),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+        for (operand, boundary) in [(substring, "m"), (hash, "8")] {
+            let expressions = [
+                operand.clone().lt(Value::from(boundary)),
+                operand.gt_eq(Value::from(boundary)),
+            ];
+            let expressions = expressions
+                .iter()
+                .map(|expr| {
+                    PartitionExpr::from_json_str(&expr.as_json_str().unwrap())
+                        .unwrap()
+                        .unwrap()
+                })
+                .collect();
+            let rule = MultiDimPartitionRule::try_new(
+                vec!["host".into(), "idc".into()],
+                vec![1, 2],
+                expressions,
+                true,
+            )
+            .unwrap();
+            let naive = rule.split_record_batch_naive(&batch).unwrap();
+            let physical = rule.split_record_batch(&batch).unwrap();
+            let columns = rule.record_batch_to_cols(&batch).unwrap();
+            for row in 0..batch.num_rows() {
+                let region = rule
+                    .find_region(
+                        &columns
+                            .iter()
+                            .map(|column| column.get(row))
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap();
+                assert_ne!(region, 0);
+                assert!(naive[&region].value(row));
+            }
+            for (region, mask) in physical {
+                assert_eq!(mask.array(), &naive[&region]);
+            }
+        }
+    }
 
     #[test]
     fn test_find_region() {

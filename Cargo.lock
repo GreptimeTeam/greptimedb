@@ -10416,6 +10416,7 @@ dependencies = [
  "datafusion-expr",
  "datafusion-physical-expr",
  "datatypes",
+ "md5",
  "moka",
  "rand 0.8.5",
  "serde",

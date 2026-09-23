@@ -32,24 +32,29 @@ use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
 use crate::error;
+use crate::function::PartitionFunction;
 use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
 /// by [`Self::to_parser_expr`].
 ///
 /// [Expr]: sqlparser::ast::Expr
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PartitionExpr {
     pub lhs: Box<Operand>,
     pub op: RestrictedOp,
     pub rhs: Box<Operand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+    Function {
+        function: PartitionFunction,
+        args: Vec<Operand>,
+    },
 }
 
 pub fn col(column_name: impl Into<String>) -> Operand {
@@ -65,7 +70,7 @@ impl From<Value> for Operand {
 impl Operand {
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
         match self {
-            Self::Column(c) => Ok(datafusion_expr::col(format!(r#""{}""#, c))),
+            Self::Column(c) => Ok(Expr::Column(datafusion_common::Column::from_name(c))),
             Self::Value(v) => {
                 let scalar_value = match v {
                     Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
@@ -106,6 +111,48 @@ impl Operand {
                 Ok(datafusion_expr::lit(scalar_value))
             }
             Self::Expr(e) => e.try_as_logical_expr(),
+            Self::Function { function, args } => Ok(datafusion_expr::ScalarUDF::from(*function)
+                .call(
+                    args.iter()
+                        .map(Self::try_as_logical_expr)
+                        .collect::<error::Result<Vec<_>>>()?,
+                )),
+        }
+    }
+
+    fn to_parser_expr(&self) -> ParserExpr {
+        use sqlparser::ast::{
+            Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+            ObjectName,
+        };
+        match self {
+            Self::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Self::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Self::Expr(e) => e.to_parser_expr(),
+            Self::Function { function, args } => ParserExpr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(function.name())]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: args
+                        .iter()
+                        .map(|arg| {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(match arg {
+                                Self::Column(name) => {
+                                    ParserExpr::Identifier(Ident::with_quote('"', name))
+                                }
+                                _ => arg.to_parser_expr(),
+                            }))
+                        })
+                        .collect(),
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
         }
     }
 
@@ -140,13 +187,14 @@ impl Display for Operand {
             Self::Column(v) => write!(f, "{v}"),
             Self::Value(v) => write!(f, "{v}"),
             Self::Expr(v) => write!(f, "{v}"),
+            Self::Function { .. } => write!(f, "{}", self.to_parser_expr()),
         }
     }
 }
 
 /// A restricted set of [Operator](datafusion_expr::Operator) that can be used in
 /// partition expressions.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RestrictedOp {
     // Evaluate to binary
     Eq,
@@ -237,7 +285,9 @@ impl PartitionExpr {
             rhs: Box::new(rhs),
         };
 
-        if matches!(&*expr.lhs, Operand::Value(_)) && matches!(&*expr.rhs, Operand::Column(_)) {
+        if matches!(&*expr.lhs, Operand::Value(_))
+            && matches!(&*expr.rhs, Operand::Column(_) | Operand::Function { .. })
+        {
             std::mem::swap(&mut expr.lhs, &mut expr.rhs);
             expr.op = expr.op.invert_for_swap();
         }
@@ -256,19 +306,8 @@ impl PartitionExpr {
     ///
     /// [Expr]: ParserExpr
     pub fn to_parser_expr(&self) -> ParserExpr {
-        // Safety: Partition rule won't contains unsupported value type.
-        // Otherwise it will be rejected by the parser.
-        let lhs = match &*self.lhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
-        let rhs = match &*self.rhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
+        let lhs = self.lhs.to_parser_expr();
+        let rhs = self.rhs.to_parser_expr();
 
         ParserExpr::BinaryOp {
             left: Box::new(lhs),
@@ -278,6 +317,42 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
+        let function_comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
+            (function @ Operand::Function { .. }, Operand::Value(value)) => {
+                Some((function, value, self.op.clone()))
+            }
+            (Operand::Value(value), function @ Operand::Function { .. }) => {
+                Some((function, value, self.op.invert_for_swap()))
+            }
+            _ => None,
+        };
+        if let Some((function, value, op)) = function_comparison {
+            let function = function.try_as_logical_expr()?;
+            // Partition routing uses a total, null-first ordering, so every
+            // comparison must produce a non-null boolean in the batch path.
+            if matches!(value, Value::Null) {
+                return match op {
+                    RestrictedOp::Eq | RestrictedOp::LtEq => Ok(function.is_null()),
+                    RestrictedOp::NotEq | RestrictedOp::Gt => Ok(function.is_not_null()),
+                    // Keep evaluating the function so invalid arguments fail in
+                    // both row and batch routing, even for constant comparisons.
+                    RestrictedOp::Lt => Ok(function.clone().is_null().and(function.is_not_null())),
+                    RestrictedOp::GtEq => Ok(function.clone().is_null().or(function.is_not_null())),
+                    _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
+                };
+            }
+            let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
+            return match op {
+                RestrictedOp::Eq => Ok(function.clone().eq(bound).and(function.is_not_null())),
+                RestrictedOp::NotEq => Ok(function.clone().not_eq(bound).or(function.is_null())),
+                RestrictedOp::Lt => Ok(function.clone().lt(bound).or(function.is_null())),
+                RestrictedOp::LtEq => Ok(function.clone().lt_eq(bound).or(function.is_null())),
+                RestrictedOp::Gt => Ok(function.clone().gt(bound).and(function.is_not_null())),
+                RestrictedOp::GtEq => Ok(function.clone().gt_eq(bound).and(function.is_not_null())),
+                _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
+            };
+        }
+
         // Special handling for null equality.
         // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
         let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
@@ -436,6 +511,16 @@ impl PartitionExpr {
         })
     }
 
+    pub(crate) fn contains_function(&self) -> bool {
+        [&*self.lhs, &*self.rhs]
+            .into_iter()
+            .any(|operand| match operand {
+                Operand::Function { .. } => true,
+                Operand::Expr(expr) => expr.contains_function(),
+                _ => false,
+            })
+    }
+
     /// Collects all column names referenced by this expression.
     pub fn collect_column_names(&self, columns: &mut HashSet<String>) {
         Self::collect_operand_columns(&self.lhs, columns);
@@ -449,6 +534,11 @@ impl PartitionExpr {
             }
             Operand::Expr(e) => {
                 e.collect_column_names(columns);
+            }
+            Operand::Function { args, .. } => {
+                for arg in args {
+                    Self::collect_operand_columns(arg, columns);
+                }
             }
             Operand::Value(_) => {}
         }

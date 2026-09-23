@@ -1317,6 +1317,42 @@ fn ensure_one_expr(expr: &Expr, columns: &[&Column]) -> Result<()> {
             );
             Ok(())
         }
+        Expr::Function(function) => {
+            use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+            if let FunctionArguments::List(args) = &function.args {
+                for arg in &args.args {
+                    if let FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) = arg {
+                        ensure_one_expr(expr, columns)?;
+                    } else {
+                        return error::InvalidSqlSnafu {
+                            msg: format!("Unsupported partition function argument: {arg}"),
+                        }
+                        .fail();
+                    }
+                }
+                Ok(())
+            } else {
+                error::InvalidSqlSnafu {
+                    msg: format!("Unsupported partition function: {function}"),
+                }
+                .fail()
+            }
+        }
+        Expr::Substring {
+            expr,
+            substring_from,
+            substring_for,
+            ..
+        } => {
+            ensure_one_expr(expr, columns)?;
+            if let Some(start) = substring_from {
+                ensure_one_expr(start, columns)?;
+            }
+            if let Some(length) = substring_for {
+                ensure_one_expr(length, columns)?;
+            }
+            Ok(())
+        }
         Expr::Value(_) => Ok(()),
         Expr::UnaryOp { expr, .. } => {
             ensure_one_expr(expr, columns)?;
