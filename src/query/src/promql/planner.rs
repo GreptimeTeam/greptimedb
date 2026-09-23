@@ -662,20 +662,31 @@ impl PromPlanner {
 
         // `__tsid` based scan projection may prune tag columns. Ensure tags referenced in
         // aggregation modifiers (`by`/`without`) are available before planning group keys.
-        let required_group_tags = match modifier {
+        //
+        // Only the labels the operand still has may be restored. A label the operand dropped by
+        // PromQL semantics, say through `on(...)`, is gone from the input's label set even though
+        // the scan underneath can still produce the column, and grouping on it would resurrect a
+        // series distinction the operand deleted.
+        let required_group_tags: BTreeSet<String> = match modifier {
             None => BTreeSet::new(),
-            Some(LabelModifier::Include(labels)) => labels
-                .labels
-                .iter()
-                .filter(|label| !is_metric_engine_internal_column(label.as_str()))
-                .cloned()
-                .collect(),
+            Some(LabelModifier::Include(labels)) => {
+                let current_tags = self.ctx.tag_columns.iter().collect::<HashSet<_>>();
+                labels
+                    .labels
+                    .iter()
+                    .filter(|label| !is_metric_engine_internal_column(label.as_str()))
+                    .filter(|label| current_tags.contains(label))
+                    .cloned()
+                    .collect()
+            }
             Some(LabelModifier::Exclude(labels)) => {
-                let mut all_tags = self.collect_row_key_tag_columns_from_plan(&input)?;
-                for label in &labels.labels {
-                    let _ = all_tags.remove(label);
-                }
-                all_tags
+                let excluded = labels.labels.iter().collect::<HashSet<_>>();
+                self.ctx
+                    .tag_columns
+                    .iter()
+                    .filter(|tag| !excluded.contains(tag))
+                    .cloned()
+                    .collect()
             }
         };
 

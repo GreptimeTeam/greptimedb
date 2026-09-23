@@ -131,3 +131,101 @@ TQL EVAL (0, 0, '5s') spread_right / on(host) group_left spread_left;
 DROP TABLE spread_left;
 
 DROP TABLE spread_right;
+
+-- An outer aggregate groups on the labels the operand has left, not on the ones the scan
+-- underneath could still produce.
+CREATE TABLE outer_agg_a (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, device)
+);
+
+CREATE TABLE outer_agg_b (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+INSERT INTO outer_agg_a VALUES ('h1', 'd1', 0, 10), ('h2', 'd2', 0, 20);
+
+INSERT INTO outer_agg_b VALUES ('h1', 0, 2), ('h2', 0, 4);
+
+-- `on(host)` leaves only `host`, so `without(host)` groups everything together.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum without(host) (outer_agg_a / on(host) outer_agg_b);
+
+-- `device` is not a label of the operand any more, so it groups everything together too.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum by(device) (outer_agg_a / on(host) outer_agg_b);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_a / on(host) outer_agg_b);
+
+-- A label the operand still has stays groupable, whether or not the scan projected it.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_a);
+
+DROP TABLE outer_agg_a;
+
+DROP TABLE outer_agg_b;
+
+-- Same over the metric engine, where the scan prunes tag columns in favour of `__tsid`.
+CREATE TABLE outer_agg_physical (
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+) ENGINE = metric WITH ("physical_metric_table" = "");
+
+CREATE TABLE outer_agg_metric_a (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY(host, device),
+)
+ENGINE = metric
+WITH(
+  on_physical_table = 'outer_agg_physical'
+);
+
+CREATE TABLE outer_agg_metric_b (
+  host STRING NULL,
+  ts TIMESTAMP(3) NOT NULL,
+  greptime_value DOUBLE NULL,
+  TIME INDEX (ts),
+  PRIMARY KEY(host),
+)
+ENGINE = metric
+WITH(
+  on_physical_table = 'outer_agg_physical'
+);
+
+INSERT INTO outer_agg_metric_a (host, device, ts, greptime_value) VALUES
+  ('h1', 'd1', 0, 10), ('h2', 'd2', 0, 20);
+
+INSERT INTO outer_agg_metric_b (host, ts, greptime_value) VALUES
+  ('h1', 0, 2), ('h2', 0, 4);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum without(host) (outer_agg_metric_a / on(host) outer_agg_metric_b);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum by(device) (outer_agg_metric_a / on(host) outer_agg_metric_b);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a / on(host) outer_agg_metric_b);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum without(device) (outer_agg_metric_a);
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '5s') sum by(host) (outer_agg_metric_a);
+
+DROP TABLE outer_agg_metric_a;
+
+DROP TABLE outer_agg_metric_b;
+
+DROP TABLE outer_agg_physical;
