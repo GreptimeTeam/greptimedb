@@ -60,7 +60,10 @@ use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 impl PostgresServerHandlerInner {
-    fn new_query_context(&self) -> QueryContextRef {
+    /// Creates a query context carrying this connection's batching
+    /// selection, so write paths can route through the pending-rows
+    /// batcher when it is enabled.
+    pub(super) fn new_query_context(&self) -> QueryContextRef {
         let mut ctx = self.session.new_query_context();
         Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
         ctx
