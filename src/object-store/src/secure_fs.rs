@@ -391,6 +391,28 @@ struct SecureFsWriter {
     synced: bool,
 }
 
+#[derive(Debug)]
+struct UnsyncedOverwrite {
+    flush_error: Option<Error>,
+}
+
+impl fmt::Display for UnsyncedOverwrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "overwrite file was not synced")
+    }
+}
+
+impl std::error::Error for UnsyncedOverwrite {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.flush_error.as_ref().map(|error| error as _)
+    }
+}
+
+/// Whether an abort error proves an opened overwrite has not been synced.
+pub fn is_unsynced_overwrite_abort(error: &Error) -> bool {
+    std::error::Error::source(error).is_some_and(|source| source.is::<UnsyncedOverwrite>())
+}
+
 impl SecureFsWriter {
     async fn ensure_file(&mut self) -> Result<&mut tokio::fs::File> {
         if self.file.is_none() {
@@ -486,16 +508,16 @@ impl oio::Write for SecureFsWriter {
         if self.file.is_none() {
             return flush;
         }
-        let mut error = Error::new(
+        let error = Error::new(
             ErrorKind::Unsupported,
             "filesystem writes cannot be aborted without atomic writes",
         );
-        if let Err(flush_error) = flush {
-            if self.synced {
-                return Err(flush_error);
-            }
-            error = error.set_source(flush_error);
+        if !self.synced {
+            return Err(error.set_source(UnsyncedOverwrite {
+                flush_error: flush.err(),
+            }));
         }
+        flush?;
         Err(error)
     }
 }

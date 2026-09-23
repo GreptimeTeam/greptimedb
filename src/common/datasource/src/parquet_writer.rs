@@ -232,10 +232,11 @@ impl ParquetFileWriter {
     pub async fn abort(mut self) -> Result<()> {
         let result = self.sink.abort().await;
         if self.creation == ParquetCreationPolicy::Overwrite
-            && !self.close_started
-            && result
-                .as_ref()
-                .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
+            && result.as_ref().is_err_and(|error| {
+                error.kind() == object_store::ErrorKind::Unsupported
+                    && (!self.close_started
+                        || object_store::secure_fs::is_unsynced_overwrite_abort(error))
+            })
         {
             let store = self.store.clone();
             let path = self.path.clone();
@@ -402,6 +403,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn overwrite_abort_deletes_after_unsynced_close() {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory, oio};
+
+        struct FailedClose(oio::Writer);
+        impl oio::Write for FailedClose {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.0.write(bytes).await
+            }
+            async fn close(
+                &mut self,
+            ) -> object_store::Result<object_store::layers::mock::Metadata> {
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unexpected,
+                    "close failed before sync",
+                ))
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                self.0.abort().await
+            }
+        }
+
+        let directory = common_test_util::temp_dir::create_temp_dir("unsynced_parquet");
+        let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+            .unwrap()
+            .build_operator();
+        let path = "partial.parquet";
+        let factory: MockWriterFactory = Arc::new(|_, _, writer| Box::new(FailedClose(writer)));
+        let store = store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+        let mut writer = ParquetFileWriter::open(batch().schema(), store.clone(), path, 1, None)
+            .await
+            .unwrap();
+        writer.write(batch(), None).await.unwrap();
+        assert!(writer.finish(None).await.is_err());
+        assert!(store.exists(path).await.unwrap());
+        writer.abort().await.unwrap();
+        assert!(!store.exists(path).await.unwrap());
     }
 
     #[tokio::test]
