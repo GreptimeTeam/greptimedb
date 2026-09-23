@@ -365,7 +365,7 @@ pub enum Error {
     },
 
     #[snafu(display(
-        "WAL object sequence {} is not settled: its entries are being written or the outcome of its create is unknown",
+        "WAL object sequence {} is not settled: the open batch has assigned entry ids under it",
         object_seq
     ))]
     WalObjectSequenceUnsettled {

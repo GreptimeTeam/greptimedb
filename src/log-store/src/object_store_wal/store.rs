@@ -54,8 +54,14 @@ use crate::object_store_wal::format::{
 use crate::object_store_wal::io::{ListedObject, ObjectStoreIo, PutResult};
 
 const COMMAND_BUFFER: usize = 1024;
+/// Appends queued for the actor; a caller beyond them waits to send.
+const APPEND_BUFFER: usize = 16;
 const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
 const MAX_IN_FLIGHT_CREATES: usize = 4;
+/// Number of sealed batches that may wait to be created or indexed. While this
+/// many wait, the actor takes no append from its channel, so a stalled object
+/// store holds callers back instead of growing the backlog.
+const MAX_SEALED_BATCHES: usize = 2 * MAX_IN_FLIGHT_CREATES;
 /// Number of objects whose footers recovery fetches at a time.
 const RECOVERY_CONCURRENCY: usize = 8;
 /// Bytes recovery reads from the end of an object in one request. The window
@@ -71,7 +77,9 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
 /// Objects are indexed in the catalog and their batches acknowledged in
 /// sequence order, so an acknowledged entry never has a missing predecessor.
-/// An append returns once its object is durable and indexed.
+/// An append returns once its object is durable and indexed. While
+/// [`MAX_SEALED_BATCHES`] batches wait to become durable no append is
+/// admitted.
 pub(crate) struct ObjectStoreLogStore {
     prefix: String,
     io: Arc<dyn WalObjectIo>,
@@ -80,6 +88,7 @@ pub(crate) struct ObjectStoreLogStore {
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
     command_tx: mpsc::Sender<Command>,
+    append_tx: mpsc::Sender<QueuedAppend>,
     #[cfg(any(test, feature = "testing"))]
     admitted_appends: watch::Receiver<usize>,
     #[cfg(any(test, feature = "testing"))]
@@ -137,6 +146,7 @@ impl ObjectStoreLogStore {
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
+        let (append_tx, append_rx) = mpsc::channel(APPEND_BUFFER);
         #[cfg(any(test, feature = "testing"))]
         let (admitted_appends_tx, admitted_appends_rx) = watch::channel(0);
         #[cfg(any(test, feature = "testing"))]
@@ -151,6 +161,7 @@ impl ObjectStoreLogStore {
             terminal_error: terminal_error.clone(),
             stopped: stopped.clone(),
             command_rx,
+            append_rx,
             open_batch: OpenBatch::new(max_batch_bytes),
             issued_entry_ids: durable_entry_ids,
             pending: Vec::new(),
@@ -159,7 +170,6 @@ impl ObjectStoreLogStore {
             draining: false,
             stop: Vec::new(),
             next_object_seq: Some(next_object_seq),
-            unresolved_object_seq: None,
             writer_instance: uuid::Uuid::new_v4().into_bytes(),
             flush_interval: config.flush_interval,
             #[cfg(any(test, feature = "testing"))]
@@ -178,6 +188,7 @@ impl ObjectStoreLogStore {
             terminal_error,
             stopped,
             command_tx,
+            append_tx,
             #[cfg(any(test, feature = "testing"))]
             admitted_appends: admitted_appends_rx,
             #[cfg(any(test, feature = "testing"))]
@@ -353,11 +364,8 @@ impl LogStore for ObjectStoreLogStore {
         }
 
         let (response_tx, response_rx) = oneshot::channel();
-        self.command_tx
-            .send(Command::Append {
-                entries,
-                response: response_tx,
-            })
+        self.append_tx
+            .send((entries, response_tx))
             .await
             .ok()
             .context(ObjectStoreWalStoppedSnafu)?;
@@ -460,13 +468,11 @@ impl LogStore for ObjectStoreLogStore {
     ///
     /// The watermark and the floor are applied together by the actor: a call
     /// cancelled before its command is queued publishes neither, while a
-    /// command already queued still applies both. The floor moves only from a
-    /// settled state: while a sealed batch is not durable, while the open
-    /// batch holds ids under the next sequence, or while a rolled back
-    /// sequence may have left an object that its create has not reconciled,
-    /// the call fails with [`Error::WalObjectSequenceUnsettled`] and records
-    /// neither. The watermark is kept in memory; the caller re-establishes it
-    /// after a restart.
+    /// command already queued still applies both. While the open batch holds
+    /// ids under the next sequence the floor cannot move, and the call fails
+    /// with [`Error::WalObjectSequenceUnsettled`] and records neither. The
+    /// watermark is kept in memory; the caller re-establishes it after a
+    /// restart.
     async fn obsolete(
         &self,
         provider: &Provider,
@@ -529,11 +535,9 @@ impl LogStore for ObjectStoreLogStore {
 
 type AppendResponse = oneshot::Sender<Result<AppendBatchResponse>>;
 
+type QueuedAppend = (Vec<Entry>, AppendResponse);
+
 enum Command {
-    Append {
-        entries: Vec<Entry>,
-        response: AppendResponse,
-    },
     /// Answered once the watermark is recorded and no id of the region at
     /// or below `entry_id` can be assigned, or with the reason neither was
     /// done.
@@ -608,7 +612,7 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// | Situation | Sequence | Waiters | Store |
 /// | --- | --- | --- | --- |
 /// | created, or identical retry | advances | acknowledged in order | healthy |
-/// | transient error, no later object created | rolls back to the failed batch | this and every later batch fail; entry ids roll back to the durable watermark | healthy |
+/// | transient error, no later object created | not reused: a create that reported an error may have written its object | this and every later batch fail; retries are assigned new ids | healthy |
 /// | transient error, a later object is durable | unchanged | this and every later batch fail | poisoned: the later object cannot be rolled back, and its entries were never acknowledged |
 /// | conflicting object, encoding or catalog error | unchanged | every batch that is not durable fails | poisoned |
 /// | created at the last representable sequence | cannot advance | acknowledged | poisoned: no later batch can be allocated a sequence |
@@ -617,6 +621,10 @@ type CreateOutcome = (u64, Result<PutResult>);
 /// flight has completed, because only then is it known whether a later object
 /// exists. After `stop` began nothing is admitted and no create starts;
 /// creates in flight run to completion and acknowledge if they succeed.
+///
+/// Appends arrive on their own channel, which the actor does not read while
+/// [`MAX_SEALED_BATCHES`] batches wait, so commands such as `stop` are handled
+/// while admission is held back.
 struct Actor {
     io: Arc<dyn WalObjectIo>,
     catalog: Arc<RwLock<ObjectCatalog>>,
@@ -624,9 +632,10 @@ struct Actor {
     terminal_error: TerminalError,
     stopped: Arc<AtomicBool>,
     command_rx: mpsc::Receiver<Command>,
+    append_rx: mpsc::Receiver<QueuedAppend>,
     open_batch: OpenBatch,
     /// Largest entry id ever handed out per region, whether it became
-    /// durable or was rolled back. Unlike the accepted ids of the open batch
+    /// durable or failed. Unlike the accepted ids of the open batch
     /// it never moves down.
     issued_entry_ids: HashMap<RegionId, EntryId>,
     /// Waiters of the open batch.
@@ -640,13 +649,9 @@ struct Actor {
     /// Callers of `stop`, answered once nothing is in flight.
     stop: Vec<oneshot::Sender<Result<()>>>,
     /// Sequence of the next sealed batch, `None` once the sequence is
-    /// exhausted. The open batch assigns its entry ids from it.
+    /// exhausted. The open batch assigns its entry ids from it. It is above
+    /// every sealed batch and never moves back while the store runs.
     next_object_seq: Option<u64>,
-    /// Largest sequence whose batch failed transiently and was rolled back:
-    /// its object may exist. The sequences from the next one up to it are
-    /// reused in order, so the conditional create at each reconciles it; no
-    /// sequence is skipped until an object at or above it is indexed.
-    unresolved_object_seq: Option<u64>,
     writer_instance: [u8; 16],
     flush_interval: Duration,
     #[cfg(any(test, feature = "testing"))]
@@ -675,10 +680,10 @@ impl Actor {
                 Some((object_seq, result)) = self.creates.next(), if !self.creates.is_empty() => {
                     self.on_create_completed(object_seq, result);
                 }
+                Some((entries, response)) = self.append_rx.recv(), if self.sealed.len() < MAX_SEALED_BATCHES => {
+                    self.handle_append(entries, response);
+                }
                 command = self.command_rx.recv() => match command {
-                    Some(Command::Append { entries, response }) => {
-                        self.handle_append(entries, response);
-                    }
                     Some(Command::Obsolete { region_id, entry_id, response }) => {
                         self.handle_obsolete(region_id, entry_id, response);
                     }
@@ -906,10 +911,7 @@ impl Actor {
                 object_seq: u64,
                 later_object_seq: u64,
             },
-            RollBack {
-                object_seq: u64,
-                error: Arc<Error>,
-            },
+            RollBack(Arc<Error>),
         }
         while let Some(front) = self.sealed.front() {
             let next = match &front.state {
@@ -929,10 +931,7 @@ impl Actor {
                             later_object_seq: later.object_seq,
                         }
                     } else {
-                        Next::RollBack {
-                            object_seq: front.object_seq,
-                            error: error.clone(),
-                        }
+                        Next::RollBack(error.clone())
                     }
                 }
             };
@@ -956,8 +955,8 @@ impl Actor {
                     );
                     break;
                 }
-                Next::RollBack { object_seq, error } => {
-                    self.roll_back(object_seq, error);
+                Next::RollBack(error) => {
+                    self.roll_back(error);
                     break;
                 }
             }
@@ -992,33 +991,17 @@ impl Actor {
         for waiter in batch.seal_waiters {
             let _ = waiter.send(Ok(()));
         }
-        // Objects are indexed in sequence order, so every rolled back
-        // sequence up to this one was written again and reconciled.
-        if self
-            .unresolved_object_seq
-            .is_some_and(|unresolved| unresolved <= batch.object_seq)
-        {
-            self.unresolved_object_seq = None;
-        }
         true
     }
 
-    /// Drops every batch that is not durable after the batch `object_seq`
-    /// failed to be created while no later object was created. Its sequence
-    /// stays free and the entry ids are handed out again, so a retry of the
-    /// same entries writes the same object. Waiters of a store that was
-    /// stopped meanwhile learn that instead of the I/O error, like every
-    /// other entry that never became durable.
-    fn roll_back(&mut self, object_seq: u64, error: Arc<Error>) {
-        self.next_object_seq = Some(object_seq);
-        // Every batch that failed may have left an object behind.
-        let failed = self
-            .sealed
-            .iter()
-            .filter(|batch| matches!(batch.state, CreateState::Failed(_)))
-            .map(|batch| batch.object_seq)
-            .max();
-        self.unresolved_object_seq = self.unresolved_object_seq.max(failed);
+    /// Drops every batch that is not durable after the front batch failed to
+    /// be created while no later object was created. Their sequences are not
+    /// reused: a create that reported an error may still have written its
+    /// object, which a retry batched differently would conflict with, so the
+    /// next batch keeps the sequence after the last sealed one. Waiters of a
+    /// store that was stopped meanwhile learn that instead of the I/O error,
+    /// like every other entry that never became durable.
+    fn roll_back(&mut self, error: Arc<Error>) {
         self.draining = false;
         let stopped = self.is_stopped();
         let failure = || {
@@ -1089,13 +1072,9 @@ impl Actor {
     }
 
     /// Moves the sequence of the next object above the object that holds
-    /// `entry_id` unless it is there already. The move fails while the next
-    /// sequence is not settled: the open batch handed out ids under it, a
-    /// create is in flight, or a rolled back batch may have left an object
-    /// at it. Skipping such a sequence would leave an object that recovery
-    /// indexes but this store never did, so the next create at that sequence
-    /// has to reconcile it first. A floor that does not fit an entry id
-    /// poisons the store like an exhausted sequence.
+    /// `entry_id` unless it is there already. The move fails while the open
+    /// batch has handed out ids under the next sequence. A floor that does
+    /// not fit an entry id poisons the store like an exhausted sequence.
     fn raise_sequence_floor(&mut self, entry_id: EntryId) -> Result<()> {
         // Nothing is assigned an id after stop began.
         if self.is_stopped() {
@@ -1108,27 +1087,11 @@ impl Actor {
         let Some(next_object_seq) = self.next_object_seq else {
             return Ok(());
         };
-        // A failed create rolls the sequence back to the first batch that is
-        // not durable, so ids below the floor are out of reach only when
-        // that sequence is at or above it, not the speculative next one.
-        let lowest_object_seq = self
-            .sealed
-            .front()
-            .map_or(next_object_seq, |batch| batch.object_seq);
-        if lowest_object_seq >= sequence_floor {
+        if next_object_seq >= sequence_floor {
             return Ok(());
         }
-        if let Some(batch) = self.sealed.front() {
-            return WalObjectSequenceUnsettledSnafu {
-                object_seq: batch.object_seq,
-            }
-            .fail();
-        }
         ensure!(
-            self.open_batch.is_empty()
-                && self
-                    .unresolved_object_seq
-                    .is_none_or(|unresolved| unresolved < next_object_seq),
+            self.open_batch.is_empty(),
             WalObjectSequenceUnsettledSnafu {
                 object_seq: next_object_seq,
             }
@@ -2211,6 +2174,7 @@ mod tests {
     /// Builds a store whose commands the test receives instead of an actor.
     fn store_without_actor() -> (ObjectStoreLogStore, mpsc::Receiver<Command>) {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
+        let (append_tx, _) = mpsc::channel(APPEND_BUFFER);
         let store = ObjectStoreLogStore {
             prefix: PREFIX.to_string(),
             io: Arc::new(ObjectStoreIo::new(memory_store(), PREFIX).unwrap()),
@@ -2219,6 +2183,7 @@ mod tests {
             terminal_error: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             command_tx,
+            append_tx,
             admitted_appends: watch::channel(0).1,
             creates_held: watch::channel(false).0,
             creates_fail: Arc::default(),
@@ -2962,7 +2927,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_transient_failure_rolls_back_batches_that_were_not_created() {
+    async fn test_store_transient_failure_fails_the_batches_that_were_not_created() {
         let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
         let region_id = region(1);
         // Every slot is taken; the last batch waits for one.
@@ -2973,8 +2938,7 @@ mod tests {
 
         // Object 0 fails while the others are in flight: nothing is decided
         // until they complete, and the freed slots start no create. None of
-        // the later objects is created either: every batch fails and the
-        // sequence rolls back to object 0.
+        // the later objects is created either: every batch fails.
         releases.remove(&0).unwrap().send(false).unwrap();
         round_trip_actor(&store).await;
         assert!(appends.iter().all(|append| !append.is_finished()));
@@ -2993,36 +2957,22 @@ mod tests {
         assert!(object_seqs(io.as_ref()).await.is_empty());
         assert_eq!(0, latest(&store, region_id));
 
-        // The retried entries take the same sequences and ids.
+        // The retried entries take the sequences after the last sealed one.
         let retries = spawn_appends(&store, region_id, 2).await;
         for (_, release) in parked_creates(&mut parked, 2).await {
             release.send(true).unwrap();
         }
-        for (retry, object_seq) in retries.into_iter().zip(0..) {
+        for (retry, object_seq) in retries.into_iter().zip(5..) {
             let response = timeout(WAIT, retry).await.unwrap().unwrap().unwrap();
             assert_eq!(
                 HashMap::from([(region_id, id(object_seq, 1))]),
                 response.last_entry_ids
             );
         }
-        assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+        assert_eq!(vec![5, 6], object_seqs(io.as_ref()).await);
         assert_eq!(
-            expected_entries(region_id, &[(id(0, 1), "a1"), (id(1, 1), "a2")]),
+            expected_entries(region_id, &[(id(5, 1), "a1"), (id(6, 1), "a2")]),
             read_entries(&store, region_id, 1).await
-        );
-
-        // Objects 2 and 3 may still exist from the failed creates, so the
-        // floor cannot skip sequence 2 until the last of them is reconciled.
-        let error = store
-            .obsolete(&provider(region(2)), region(2), id(9, 1))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                Error::WalObjectSequenceUnsettled { object_seq: 2, .. }
-            ),
-            "unexpected error: {error:?}"
         );
     }
 
@@ -3213,111 +3163,83 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_store_floor_does_not_skip_an_object_left_by_a_failed_create() {
+    async fn test_store_does_not_reuse_the_sequence_of_a_failed_create() {
         let (io, _) = RecordingIo::over(memory_store());
-        let store = open_over(io.clone(), &eager()).await;
+        let store = open_over(io.clone(), &manual()).await;
         let region_one = region(1);
         let region_two = region(2);
 
-        // Object 0 is written, but its create is reported as failed: the
-        // object exists and is not indexed.
+        // Two appends share object 0, which is written but reported as
+        // failed: it exists and is not indexed.
+        let first = spawn_append_batch(&store, vec![entry(&store, region_one, "a1")]);
+        store.wait_for_admitted_appends(1).await.unwrap();
+        let second = spawn_append_batch(&store, vec![entry(&store, region_two, "b1")]);
+        store.wait_for_admitted_appends(2).await.unwrap();
         io.fail_after_next_put.store(true, Ordering::Relaxed);
-        append(&store, region_one, "a1").await.unwrap_err();
+        store.seal_open_batch().await.unwrap_err();
+        for append in [first, second] {
+            timeout(WAIT, append).await.unwrap().unwrap().unwrap_err();
+        }
         assert_eq!(vec![0], object_seqs(io.as_ref()).await);
         assert_eq!(0, latest(&store, region_one));
 
-        // A floor from another region may not skip sequence 0: a later
-        // object would carry the retry, and recovery would index both.
-        let error = store
-            .obsolete(&provider(region_two), region_two, id(5, 1))
-            .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                Error::WalObjectSequenceUnsettled { object_seq: 0, .. }
-            ),
-            "unexpected error: {error:?}"
-        );
-        assert!(
+        // Retried apart, the entries land in later objects rather than
+        // conflicting with object 0.
+        for (region_id, data, object_seq) in [(region_one, "a1", 1), (region_two, "b1", 2)] {
+            let retry = spawn_append_batch(&store, vec![entry(&store, region_id, data)]);
             store
-                .obsolete_entry_ids
-                .lock()
-                .unwrap()
-                .get(&region_two)
-                .is_none()
-        );
-
-        // The identical retry reconciles sequence 0; now the floor applies.
-        let response = append(&store, region_one, "a1").await.unwrap();
-        assert_eq!(HashMap::from([(region_one, 1)]), response.last_entry_ids);
-        store
-            .obsolete(&provider(region_two), region_two, id(5, 1))
-            .await
-            .unwrap();
-        let response = append(&store, region_two, "b1").await.unwrap();
-        assert_eq!(
-            HashMap::from([(region_two, id(6, 1))]),
-            response.last_entry_ids
-        );
-        assert_eq!(vec![0, 6], object_seqs(io.as_ref()).await);
+                .wait_for_admitted_appends(object_seq as usize + 2)
+                .await
+                .unwrap();
+            store.seal_open_batch().await.unwrap();
+            let response = timeout(WAIT, retry).await.unwrap().unwrap().unwrap();
+            assert_eq!(
+                HashMap::from([(region_id, id(object_seq, 1))]),
+                response.last_entry_ids
+            );
+        }
+        assert_eq!(vec![0, 1, 2], object_seqs(io.as_ref()).await);
         store.stop().await.unwrap();
 
-        // Recovery indexes the same objects the store did: one copy of "a1".
-        let store = open_over(io, &eager()).await;
+        // Recovery indexes object 0 as well: its entries were never
+        // acknowledged and replay like those of a crash before acknowledgement.
+        let store = open_over(io, &manual()).await;
         assert_eq!(
-            expected_entries(region_one, &[(1, "a1")]),
+            expected_entries(region_one, &[(1, "a1"), (id(1, 1), "a1")]),
             read_entries(&store, region_one, 0).await
         );
         assert_eq!(
-            expected_entries(region_two, &[(id(6, 1), "b1")]),
+            expected_entries(region_two, &[(1, "b1"), (id(2, 1), "b1")]),
             read_entries(&store, region_two, 0).await
         );
-        assert_eq!(1, latest(&store, region_one));
+        store.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_store_floor_is_measured_against_a_rollback_not_the_next_sequence() {
-        let (store, _, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+    async fn test_store_floor_applies_while_a_create_is_in_flight() {
+        let (store, io, mut parked) = open_parking_creates(memory_store(), &eager()).await;
         let region_one = region(1);
         let region_two = region(2);
         let pending = spawn_append_batch(&store, vec![entry(&store, region_one, "a1")]);
         let (_, release) = next_create(&mut parked).await;
 
-        // Object 0 is in flight and the next sequence is 1, but a failure
-        // rolls it back to 0: a watermark naming object 0 is not accepted.
-        let error = store
-            .obsolete(&provider(region_two), region_two, 1)
+        // Object 0 is in flight and the open batch is empty: the floor moves
+        // the next sequence, which a failure of object 0 does not move back.
+        store
+            .obsolete(&provider(region_two), region_two, id(5, 1))
             .await
-            .unwrap_err();
-        assert!(
-            matches!(
-                error,
-                Error::WalObjectSequenceUnsettled { object_seq: 0, .. }
-            ),
-            "unexpected error: {error:?}"
-        );
-        assert!(
-            store
-                .obsolete_entry_ids
-                .lock()
-                .unwrap()
-                .get(&region_two)
-                .is_none()
-        );
+            .unwrap();
         release.send(false).unwrap();
         timeout(WAIT, pending).await.unwrap().unwrap().unwrap_err();
 
-        // The other region takes id 1 under sequence 0 and can read it back.
         let write = spawn_append_batch(&store, vec![entry(&store, region_two, "b1")]);
         next_create(&mut parked).await.1.send(true).unwrap();
         let response = timeout(WAIT, write).await.unwrap().unwrap().unwrap();
-        assert_eq!(HashMap::from([(region_two, 1)]), response.last_entry_ids);
-        assert_eq!(1, latest(&store, region_two));
         assert_eq!(
-            expected_entries(region_two, &[(1, "b1")]),
-            read_entries(&store, region_two, 0).await
+            HashMap::from([(region_two, id(6, 1))]),
+            response.last_entry_ids
         );
+        assert_eq!(vec![6], object_seqs(io.as_ref()).await);
     }
 
     #[tokio::test]
@@ -3391,7 +3313,7 @@ mod tests {
         };
 
         // Object 0 is in flight and a2 waits in the open batch under
-        // sequence 1 when the create fails: both roll back.
+        // sequence 1 when the create fails: both fail.
         let sealed = spawn_append_batch(&store, vec![entry(&store, region_id, "a1")]);
         store.wait_for_admitted_appends(1).await.unwrap();
         let seal = spawn_seal();
@@ -3408,20 +3330,23 @@ mod tests {
         }
         timeout(WAIT, seal).await.unwrap().unwrap().unwrap_err();
 
-        // The next entry takes the first id of sequence 0 again, alone.
+        // The next entry takes the first id of sequence 1 again, alone.
         let retry = spawn_append_batch(&store, vec![entry(&store, region_id, "b1")]);
         store.wait_for_admitted_appends(3).await.unwrap();
         let seal = spawn_seal();
         next_create(&mut parked).await.1.send(true).unwrap();
         timeout(WAIT, seal).await.unwrap().unwrap().unwrap();
         let response = timeout(WAIT, retry).await.unwrap().unwrap().unwrap();
-        assert_eq!(HashMap::from([(region_id, 1)]), response.last_entry_ids);
         assert_eq!(
-            expected_entries(region_id, &[(1, "b1")]),
+            HashMap::from([(region_id, id(1, 1))]),
+            response.last_entry_ids
+        );
+        assert_eq!(
+            expected_entries(region_id, &[(id(1, 1), "b1")]),
             read_entries(&store, region_id, 0).await
         );
 
-        // Object 1 conflicts while c2 waits in the open batch: both fail.
+        // Object 2 conflicts while c2 waits in the open batch: both fail.
         let sealed = spawn_append_batch(&store, vec![entry(&store, region_id, "c1")]);
         store.wait_for_admitted_appends(4).await.unwrap();
         let seal = spawn_seal();
@@ -3430,7 +3355,7 @@ mod tests {
         store.wait_for_admitted_appends(5).await.unwrap();
         ObjectStoreIo::new(object_store, PREFIX)
             .unwrap()
-            .put_if_absent(1, Bytes::from_static(b"foreign"))
+            .put_if_absent(2, Bytes::from_static(b"foreign"))
             .await
             .unwrap();
         release.send(true).unwrap();
@@ -3442,7 +3367,7 @@ mod tests {
             );
         }
         timeout(WAIT, seal).await.unwrap().unwrap().unwrap_err();
-        assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+        assert_eq!(vec![1, 2], object_seqs(io.as_ref()).await);
         store.stop().await.unwrap();
     }
 
@@ -3474,6 +3399,53 @@ mod tests {
             );
         }
         store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_holds_appends_back_while_the_sealed_batches_are_full() {
+        let (store, _, mut parked) = open_parking_creates(memory_store(), &eager()).await;
+        let region_id = region(1);
+        let admitted = || *store.admitted_appends.borrow();
+
+        // Every create is parked: once the sealed batches are full, further
+        // appends wait in the channel and are not admitted.
+        let mut appends = spawn_appends(&store, region_id, MAX_SEALED_BATCHES).await;
+        for index in 0..3 {
+            let entries = vec![entry(&store, region_id, &format!("w{index}"))];
+            appends.push(spawn_append_batch(&store, entries));
+        }
+        let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
+        round_trip_actor(&store).await;
+        assert_eq!(MAX_SEALED_BATCHES, admitted());
+
+        // A durable object frees a place, and one more append is admitted.
+        releases.remove(&0).unwrap().send(true).unwrap();
+        timeout(
+            WAIT,
+            store.wait_for_admitted_appends(MAX_SEALED_BATCHES + 1),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        round_trip_actor(&store).await;
+        assert_eq!(MAX_SEALED_BATCHES + 1, admitted());
+
+        // Stop is handled while appends are held back: the batches whose create
+        // has not started and the appends still waiting learn of the stop.
+        let stop = begin_spawned_stop(&store).await;
+        for release in releases.into_values() {
+            release.send(true).unwrap();
+        }
+        next_create(&mut parked).await.1.send(true).unwrap();
+        timeout(WAIT, stop).await.unwrap().unwrap().unwrap();
+        let mut acknowledged = 0;
+        for append in appends {
+            match timeout(WAIT, append).await.unwrap().unwrap() {
+                Ok(_) => acknowledged += 1,
+                Err(error) => assert_stopped(&error),
+            }
+        }
+        assert_eq!(MAX_IN_FLIGHT_CREATES + 1, acknowledged);
     }
 
     /// Starts `stop` and waits until it has set the stopped flag.
