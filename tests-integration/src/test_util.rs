@@ -1248,7 +1248,7 @@ pub async fn setup_pg_server_with_prom_native_histogram(
     let instance = setup_standalone_instance(name, store_type).await;
 
     // Prometheus remote-write HTTP app with native histograms enabled.
-    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, true)
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let app = http_server.build(http_server.make_app()).unwrap();
