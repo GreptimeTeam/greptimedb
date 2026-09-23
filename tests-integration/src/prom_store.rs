@@ -18,7 +18,11 @@ mod tests {
 
     use api::prom_store::remote::label_matcher::Type as MatcherType;
     use api::prom_store::remote::{
-        Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, WriteRequest,
+        Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
+    };
+    use api::v1::value::ValueData;
+    use api::v1::{
+        ColumnDataType, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType, Value,
     };
     use client::OutputData;
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
@@ -278,6 +282,241 @@ mod tests {
         };
         assert_eq!(stored(0), expected_first);
         assert_eq!(stored(1), expected_second);
+
+        // Negative, non-aligned timestamps must floor towards negative
+        // infinity on remote read, matching `Timestamp::convert_to` on the
+        // ingestion path: -1001us/-1001000ns -> -2ms, not -1ms.
+        if matches!(expected_unit, TimeUnit::Microsecond | TimeUnit::Nanosecond) {
+            let (ts_datatype, negative_value) = if expected_unit == TimeUnit::Microsecond {
+                (
+                    ColumnDataType::TimestampMicrosecond,
+                    ValueData::TimestampMicrosecondValue(-1001),
+                )
+            } else {
+                (
+                    ColumnDataType::TimestampNanosecond,
+                    ValueData::TimestampNanosecondValue(-1_001_000),
+                )
+            };
+            let negative_request = RowInsertRequests {
+                inserts: vec![RowInsertRequest {
+                    table_name: "metric1".to_string(),
+                    rows: Some(Rows {
+                        schema: vec![
+                            api::v1::ColumnSchema {
+                                column_name: "greptime_timestamp".to_string(),
+                                datatype: ts_datatype as i32,
+                                semantic_type: SemanticType::Timestamp as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "greptime_value".to_string(),
+                                datatype: ColumnDataType::Float64 as i32,
+                                semantic_type: SemanticType::Field as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                            api::v1::ColumnSchema {
+                                column_name: "job".to_string(),
+                                datatype: ColumnDataType::String as i32,
+                                semantic_type: SemanticType::Tag as i32,
+                                datatype_extension: None,
+                                options: None,
+                            },
+                        ],
+                        rows: vec![Row {
+                            values: vec![
+                                Value {
+                                    value_data: Some(negative_value),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::F64Value(3.0)),
+                                },
+                                Value {
+                                    value_data: Some(ValueData::StringValue("spark".to_string())),
+                                },
+                            ],
+                        }],
+                    }),
+                }],
+            };
+            instance
+                .write(negative_request, ctx.clone(), true)
+                .await
+                .unwrap();
+
+            let read_request = ReadRequest {
+                queries: vec![Query {
+                    start_timestamp_ms: -2,
+                    end_timestamp_ms: 0,
+                    matchers: vec![LabelMatcher {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "metric1".to_string(),
+                        r#type: 0,
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let resp = instance.read(read_request, ctx.clone()).await.unwrap();
+            let body = prom_store::snappy_decompress(&resp.body).unwrap();
+            let read_response = ReadResponse::decode(&body[..]).unwrap();
+            assert_eq!(1, read_response.results.len());
+            assert_eq!(
+                read_response.results[0].timeseries[0].samples,
+                vec![Sample {
+                    value: 3.0,
+                    timestamp: -2,
+                }],
+                "remote read must floor negative non-aligned timestamps"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_standalone_prom_store_write_existing_logical_table_of_other_physical_unit() {
+        common_telemetry::init_default_ut_logging();
+        let standalone = GreptimeDbStandaloneBuilder::new(
+            "test_prom_store_write_existing_logical_other_physical_unit",
+        )
+        .build()
+        .await;
+        let instance = standalone.fe_instance();
+
+        // Two physical metric tables with different time index units.
+        let db = "prometheus_mixed_units";
+        let ctx = Arc::new(QueryContext::with(DEFAULT_CATALOG_NAME, db));
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+        let mut output = instance
+            .do_query(
+                "CREATE TABLE phy_us (greptime_timestamp TIMESTAMP(6) NOT NULL, \
+                 greptime_value DOUBLE NULL, TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')",
+                ctx.clone(),
+            )
+            .await;
+        assert!(output.remove(0).is_ok());
+
+        // First create the logical table `shared_metric` on the default
+        // (millisecond) physical table.
+        let shared_series = TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "shared_metric".to_string(),
+                },
+                Label {
+                    name: "job".to_string(),
+                    value: "demo".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        };
+        let (row_inserts, _) = to_grpc_row_insert_requests(&WriteRequest {
+            timeseries: vec![shared_series.clone()],
+            ..Default::default()
+        })
+        .unwrap();
+        instance
+            .write(row_inserts, ctx.clone(), true)
+            .await
+            .unwrap();
+
+        // Now select the microsecond physical table while writing to BOTH the
+        // existing millisecond `shared_metric` (bound to the default physical
+        // table) and a new table: the existing table's request must keep the
+        // millisecond unit, and only the new table uses microsecond.
+        let mut hint_ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
+        hint_ctx.set_extension(PHYSICAL_TABLE_PARAM, "phy_us".to_string());
+        let hint_ctx = Arc::new(hint_ctx);
+        let (row_inserts, _) = to_grpc_row_insert_requests(&WriteRequest {
+            timeseries: vec![
+                TimeSeries {
+                    samples: vec![Sample {
+                        value: 1.5,
+                        timestamp: 1500,
+                    }],
+                    ..shared_series
+                },
+                TimeSeries {
+                    labels: vec![
+                        Label {
+                            name: prom_store::METRIC_NAME_LABEL.to_string(),
+                            value: "fresh_us_metric".to_string(),
+                        },
+                        Label {
+                            name: "job".to_string(),
+                            value: "demo".to_string(),
+                        },
+                    ],
+                    samples: vec![Sample {
+                        value: 2.5,
+                        timestamp: 1500,
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        })
+        .unwrap();
+        instance
+            .write(row_inserts, hint_ctx.clone(), true)
+            .await
+            .unwrap();
+
+        // The existing table keeps its millisecond unit and precision.
+        let mut output = instance
+            .do_query(
+                "SELECT greptime_timestamp FROM shared_metric ORDER BY greptime_timestamp",
+                ctx.clone(),
+            )
+            .await;
+        let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .take();
+        let shared_ts = batches[0]
+            .column(0)
+            .as_primitive::<TimestampMillisecondType>();
+        assert_eq!((shared_ts.value(0), shared_ts.value(1)), (1000, 1500));
+
+        // The new table is created on the selected physical table with the
+        // microsecond unit.
+        let mut output = instance
+            .do_query(
+                "SELECT greptime_timestamp FROM fresh_us_metric",
+                ctx.clone(),
+            )
+            .await;
+        let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+            unreachable!()
+        };
+        let batches = common_recordbatch::RecordBatches::try_collect(stream)
+            .await
+            .unwrap()
+            .take();
+        let fresh_ts = batches[0]
+            .column(0)
+            .as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(fresh_ts.value(0), 1_500_000);
     }
 
     async fn test_prom_store_remote_rw(instance: &Arc<Instance>, physical_table: Option<String>) {

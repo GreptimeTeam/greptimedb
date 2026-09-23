@@ -572,20 +572,24 @@ impl Inserter {
             .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
             .await?;
 
-        // Align the requests' time index unit with the physical table's before
-        // creating logical tables or writing: the metric engine requires the
-        // logical tables (hence the requests) to use the same time index unit
-        // as the physical table. Ingestion endpoints encode timestamps in a
-        // fixed unit (Prometheus remote write always uses millisecond, OTLP
-        // uses nanosecond on the metric engine path), so rewrite the schema
-        // and values to the physical table's unit here. Converting to a
-        // coarser unit truncates the sub-unit part, following
-        // `Timestamp::convert_to`'s floor semantics.
-        //
-        // This reuses the table lookup from `create_physical_table_on_demand`
-        // (no extra catalog access) and is a no-op apart from a schema scan
-        // when the units already match.
-        align_row_insert_requests_time_unit(&physical_table_ref, &mut requests)?;
+        // Align each request's time index unit with the unit of the table it
+        // actually targets, before creating logical tables or writing: the
+        // metric engine requires every logical table (hence its write
+        // requests) to use the same time index unit as the logical table's
+        // physical table. Ingestion endpoints encode timestamps in a fixed
+        // unit (Prometheus remote write always uses millisecond, OTLP keeps
+        // nanosecond precision on the metric engine path), so rewrite the
+        // schema and values here: an existing destination table keeps its own
+        // unit — it may be bound to a different physical table than the one
+        // selected by this request — and only new tables use the selected
+        // physical table's unit. Converting to a coarser unit truncates the
+        // sub-unit part, following `Timestamp::convert_to`'s floor semantics.
+        self.align_metric_rows_per_destination(
+            &ctx,
+            table_time_index_unit(&physical_table_ref),
+            &mut requests,
+        )
+        .await?;
 
         // check and create logical tables
         let CreateAlterTableResult {
@@ -1344,14 +1348,17 @@ impl Inserter {
         }
     }
 
-    /// Aligns the requests' time index unit with the physical metric table's
-    /// time index unit, so that write-path gates (e.g. the logical batcher
-    /// eligibility check) observe the physical table's unit instead of the
+    /// Aligns each request's time index unit with the unit of the table the
+    /// request targets, so that write-path gates (e.g. the logical batcher
+    /// eligibility check) observe the destination table's unit instead of the
     /// ingestion endpoint's encoding unit (Prometheus remote write always
     /// uses millisecond; OTLP keeps nanosecond precision on the metric engine
-    /// path). A missing physical table is aligned to the millisecond unit of
-    /// the auto-created default; the actual creation (if any) happens later
-    /// in [`Inserter::handle_metric_row_inserts`].
+    /// path). Existing destination tables keep their own unit — they may be
+    /// bound to a different physical table than `physical_table` — while new
+    /// tables use `physical_table`'s unit. A missing physical table is
+    /// treated as the millisecond unit of the auto-created default; the
+    /// actual creation (if any) happens later in
+    /// [`Inserter::handle_metric_row_inserts`].
     ///
     /// `handle_metric_row_inserts` aligns again (a no-op after this), so
     /// calling this is only needed before choosing a write path.
@@ -1361,13 +1368,49 @@ impl Inserter {
         physical_table: &str,
         requests: &mut RowInsertRequests,
     ) -> Result<()> {
-        let table = self
+        let physical_unit = match self
             .get_table(ctx.current_catalog(), &ctx.current_schema(), physical_table)
-            .await?;
-        match table {
-            Some(table) => align_row_insert_requests_time_unit(&table, requests),
-            None => convert_row_insert_requests_time_unit(requests, TimeUnit::Millisecond),
+            .await?
+        {
+            Some(table) => table_time_index_unit(&table),
+            // A missing physical table is auto-created with the millisecond
+            // unit later.
+            None => Some(TimeUnit::Millisecond),
+        };
+        self.align_metric_rows_per_destination(ctx, physical_unit, requests)
+            .await
+    }
+
+    /// Converts each request's time index column to the unit of the table the
+    /// request targets: the existing table's own unit when the table exists,
+    /// and `physical_unit` (of the request's selected physical table) for new
+    /// tables.
+    async fn align_metric_rows_per_destination(
+        &self,
+        ctx: &QueryContextRef,
+        physical_unit: Option<TimeUnit>,
+        requests: &mut RowInsertRequests,
+    ) -> Result<()> {
+        for request in &mut requests.inserts {
+            let Some(rows) = request.rows.as_mut() else {
+                continue;
+            };
+            let target_unit = match self
+                .get_table(
+                    ctx.current_catalog(),
+                    &ctx.current_schema(),
+                    &request.table_name,
+                )
+                .await?
+            {
+                Some(table) => table_time_index_unit(&table),
+                None => physical_unit,
+            };
+            if let Some(target_unit) = target_unit {
+                convert_rows_time_unit(rows, target_unit)?;
+            }
         }
+        Ok(())
     }
 
     async fn get_table(
@@ -1636,41 +1679,16 @@ fn request_is_native_histogram(request_schema: &[ColumnSchema]) -> bool {
         )
 }
 
-/// Rewrites the time index column of every request in `requests` to the given
-/// physical metric table's time index unit.
-///
-/// This only rewrites requests whose time index unit differs from the
-/// physical table's; converting to a coarser unit truncates the sub-unit part
-/// (floor, see `Timestamp::convert_to`). A metric table without a timestamp
-/// column is left alone: the metric engine rejects it anyway.
-fn align_row_insert_requests_time_unit(
-    physical_table: &TableRef,
-    requests: &mut RowInsertRequests,
-) -> Result<()> {
-    let Some(target_unit) = physical_table
+/// Returns the table's time index unit, if any. A metric table without a
+/// timestamp column is left alone by the unit alignment: the metric engine
+/// rejects it anyway.
+fn table_time_index_unit(table: &TableRef) -> Option<TimeUnit> {
+    table
         .table_info()
         .meta
         .schema
         .timestamp_column()
         .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
-    else {
-        return Ok(());
-    };
-    convert_row_insert_requests_time_unit(requests, target_unit)
-}
-
-/// Converts the time index column of each request to `target_unit`.
-fn convert_row_insert_requests_time_unit(
-    requests: &mut RowInsertRequests,
-    target_unit: TimeUnit,
-) -> Result<()> {
-    for request in &mut requests.inserts {
-        let Some(rows) = request.rows.as_mut() else {
-            continue;
-        };
-        convert_rows_time_unit(rows, target_unit)?;
-    }
-    Ok(())
 }
 
 fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> {
@@ -2162,8 +2180,12 @@ mod tests {
     }
 
     fn ms_row_insert_request(timestamp_ms: i64) -> RowInsertRequest {
+        ms_row_insert_request_named("my_metric", timestamp_ms)
+    }
+
+    fn ms_row_insert_request_named(table: &str, timestamp_ms: i64) -> RowInsertRequest {
         RowInsertRequest {
-            table_name: "my_metric".to_string(),
+            table_name: table.to_string(),
             rows: Some(Rows {
                 schema: vec![
                     time_index_column_schema(
@@ -2184,6 +2206,20 @@ mod tests {
                 }],
             }),
         }
+    }
+
+    /// Converts the time index column of each request to `target_unit`.
+    fn convert_row_insert_requests_time_unit(
+        requests: &mut RowInsertRequests,
+        target_unit: TimeUnit,
+    ) -> Result<()> {
+        for request in &mut requests.inserts {
+            let Some(rows) = request.rows.as_mut() else {
+                continue;
+            };
+            convert_rows_time_unit(rows, target_unit)?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -2285,35 +2321,79 @@ mod tests {
     }
 
     #[test]
-    fn test_align_row_insert_requests_time_unit() {
-        // Microsecond physical table, millisecond request (prometheus remote
-        // write shape): the request is rewritten to the physical unit.
-        let table = make_metric_physical_table_ref_with_time_unit(TimeUnit::Microsecond);
-        let mut requests = RowInsertRequests {
-            inserts: vec![ms_row_insert_request(123)],
-        };
-        align_row_insert_requests_time_unit(&table, &mut requests).unwrap();
-        let rows = requests.inserts[0].rows.as_ref().unwrap();
+    fn test_table_time_index_unit() {
         assert_eq!(
-            rows.schema[0].datatype,
+            table_time_index_unit(&make_metric_physical_table_ref_with_time_unit(
+                TimeUnit::Microsecond
+            )),
+            Some(TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            table_time_index_unit(&make_metric_physical_table_ref_with_time_unit(
+                TimeUnit::Millisecond
+            )),
+            Some(TimeUnit::Millisecond)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_align_metric_rows_per_destination() {
+        use catalog::RegisterTableRequest;
+        use catalog::memory::MemoryCatalogManager;
+
+        // An existing millisecond logical table `existing`, plus a
+        // microsecond physical table selected by the request: the existing
+        // table's request keeps the millisecond unit (it is bound to another
+        // physical table), while the new table's request is converted to the
+        // selected physical table's microsecond unit.
+        let mut inserter = batcher_test_inserter().await;
+        let existing = make_metric_physical_table_ref_with_time_unit(TimeUnit::Millisecond);
+        let catalog = MemoryCatalogManager::with_default_setup();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "existing".to_string(),
+                table_id: 1,
+                table: existing.clone(),
+            })
+            .unwrap();
+        inserter.catalog_manager = catalog;
+
+        let ctx = Arc::new(QueryContext::with(
+            DEFAULT_CATALOG_NAME,
+            DEFAULT_SCHEMA_NAME,
+        ));
+        let mut requests = RowInsertRequests {
+            inserts: vec![
+                ms_row_insert_request_named("existing", 123),
+                ms_row_insert_request_named("fresh", 123),
+            ],
+        };
+        inserter
+            .align_metric_rows_per_destination(&ctx, Some(TimeUnit::Microsecond), &mut requests)
+            .await
+            .unwrap();
+
+        let existing_rows = requests.inserts[0].rows.as_ref().unwrap();
+        assert_eq!(
+            existing_rows.schema[0].datatype,
+            ColumnDataType::TimestampMillisecond as i32
+        );
+        assert!(matches!(
+            existing_rows.rows[0].values[0].value_data,
+            Some(ValueData::TimestampMillisecondValue(123))
+        ));
+
+        let fresh_rows = requests.inserts[1].rows.as_ref().unwrap();
+        assert_eq!(
+            fresh_rows.schema[0].datatype,
             ColumnDataType::TimestampMicrosecond as i32
         );
         assert!(matches!(
-            rows.rows[0].values[0].value_data,
+            fresh_rows.rows[0].values[0].value_data,
             Some(ValueData::TimestampMicrosecondValue(123_000))
         ));
-
-        // Millisecond physical table (the auto-created default): no-op.
-        let table = make_metric_physical_table_ref_with_time_unit(TimeUnit::Millisecond);
-        let mut requests = RowInsertRequests {
-            inserts: vec![ms_row_insert_request(123)],
-        };
-        align_row_insert_requests_time_unit(&table, &mut requests).unwrap();
-        let rows = requests.inserts[0].rows.as_ref().unwrap();
-        assert_eq!(
-            rows.schema[0].datatype,
-            ColumnDataType::TimestampMillisecond as i32
-        );
     }
 
     #[tokio::test]
