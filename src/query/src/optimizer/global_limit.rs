@@ -197,18 +197,12 @@ fn restore_required_partitioning(
     ))
 }
 
-#[expect(
-    deprecated,
-    reason = "HashPartitioned is accepted during the KeyPartitioned migration"
-)]
 fn partitioning_to_restore_for(
     child: &Arc<dyn ExecutionPlan>,
     required_distribution: &Distribution,
 ) -> Option<Partitioning> {
-    if !matches!(
-        required_distribution,
-        Distribution::HashPartitioned(_) | Distribution::KeyPartitioned(_)
-    ) || child.output_partitioning().partition_count() <= 1
+    if !matches!(required_distribution, Distribution::KeyPartitioned(_))
+        || child.output_partitioning().partition_count() <= 1
     {
         return None;
     }
@@ -228,10 +222,6 @@ fn partitioning_to_restore_for(
     }
 }
 
-#[expect(
-    deprecated,
-    reason = "HashPartitioned is accepted during the KeyPartitioned migration"
-)]
 fn inherited_partitioning_to_restore(
     plan: &Arc<dyn ExecutionPlan>,
     child: &Arc<dyn ExecutionPlan>,
@@ -248,7 +238,7 @@ fn inherited_partitioning_to_restore(
 
     let satisfies_parent_distribution = matches!(
         parent.required_distribution,
-        Distribution::HashPartitioned(_) | Distribution::KeyPartitioned(_)
+        Distribution::KeyPartitioned(_)
     ) && plan
         .output_partitioning()
         .satisfaction(
@@ -330,8 +320,7 @@ mod tests {
                 AggregateMode::FinalPartitioned,
                 AggregateMode::SinglePartitioned,
             ] {
-                // The query limit is the only initial limit. Cover both final
-                // aggregate modes with keys in every hash partition.
+                // The query limit is the only initial limit.
                 let input = input_with_all_hash_partitions();
                 let aggregate = match mode {
                     AggregateMode::FinalPartitioned => {
@@ -414,7 +403,7 @@ mod tests {
         config.execution.target_partitions = 3;
         let input = input_with_all_hash_partitions();
         let local_limit = Arc::new(LocalLimitExec::new(
-            agg_with_limit(hash_repartition(input), AggregateMode::SinglePartitioned, 2),
+            agg(hash_repartition(input), AggregateMode::SinglePartitioned),
             1,
         )) as Arc<dyn ExecutionPlan>;
 
@@ -780,14 +769,6 @@ mod tests {
 
     fn agg(input: Arc<dyn ExecutionPlan>, mode: AggregateMode) -> Arc<dyn ExecutionPlan> {
         agg_with_limit_options(input, mode, None)
-    }
-
-    fn agg_with_limit(
-        input: Arc<dyn ExecutionPlan>,
-        mode: AggregateMode,
-        limit: usize,
-    ) -> Arc<dyn ExecutionPlan> {
-        agg_with_limit_options(input, mode, Some(LimitOptions::new(limit)))
     }
 
     fn agg_with_limit_options(
