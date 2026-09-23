@@ -290,6 +290,7 @@ jobs:
         with:
           persist-credentials: false
           ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          fetch-depth: 0
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -297,7 +298,6 @@ jobs:
           whoami
           id
           test "$(id -u)" -ne 0
-          fetch-depth: 0
       - name: Run compat updater unit tests
         run: python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py'
       - name: Check compat version window and anchors
@@ -316,6 +316,7 @@ jobs:
         with:
           persist-credentials: false
           ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          fetch-depth: 0
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -323,7 +324,6 @@ jobs:
           whoami
           id
           test "$(id -u)" -ne 0
-          fetch-depth: 0
       - name: Download pre-built binaries
         uses: actions/download-artifact@v4
         with:
