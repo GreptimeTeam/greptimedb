@@ -305,14 +305,25 @@ struct BinaryResultLabels {
     exprs: Vec<DfExpr>,
     names: Vec<String>,
     aggregation_field_labels: Vec<String>,
+    /// `__tsid` column of the operand the labels come from, when that operand contributes its
+    /// whole tag set and the column still identifies the result series.
+    tsid: Option<DfExpr>,
 }
 
 impl BinaryResultLabels {
     fn apply(&self, ctx: &mut PromPlannerContext) {
         ctx.tag_columns = self.names.clone();
         ctx.aggregation_field_labels = self.aggregation_field_labels.clone();
-        // `__tsid` identifies an operand's series, not the reduced result label set.
-        ctx.use_tsid = false;
+        ctx.use_tsid = self.tsid.is_some();
+    }
+
+    /// `__tsid` is projected from whichever operand the labels come from, so it carries that
+    /// operand's qualifier. Re-qualify it as the result's own, which is what the context names
+    /// and what the enclosing expression looks the column up by.
+    fn tsid_projection(&self, table_ref: Option<TableReference>) -> Option<DfExpr> {
+        self.tsid
+            .clone()
+            .map(|tsid| tsid.alias_qualified(table_ref, DATA_SCHEMA_TSID_COLUMN_NAME))
     }
 }
 
@@ -1960,11 +1971,11 @@ impl PromPlanner {
 
         // Preserve `__tsid` if present, so it can still be used internally downstream. It's
         // stripped from the final output anyway.
-        if let Some(tsid_col) = Self::optional_tsid_projection(
-            schema,
-            Some(table_ref),
-            context.use_tsid && result_labels.is_none(),
-        ) {
+        let tsid_col = match result_labels {
+            Some(labels) => labels.tsid_projection(Some(table_ref.clone())),
+            None => Self::optional_tsid_projection(schema, Some(table_ref), context.use_tsid),
+        };
+        if let Some(tsid_col) = tsid_col {
             project_exprs.push(tsid_col);
         }
 
@@ -6092,6 +6103,7 @@ impl PromPlanner {
         let mut exprs = Vec::with_capacity(labels.len());
         let mut names = Vec::with_capacity(labels.len());
         let mut aggregation_field_labels = Vec::new();
+        let mut sources = HashSet::new();
         for (from_left, label) in labels {
             let (table_ref, context) = if from_left {
                 (left_table_ref, left_context)
@@ -6105,13 +6117,33 @@ impl PromPlanner {
             if context.aggregation_field_labels.contains(&label) {
                 aggregation_field_labels.push(label.clone());
             }
+            sources.insert(from_left);
             names.push(label);
         }
+
+        // One operand contributing every one of its tags as the whole result label set keeps the
+        // one-to-one correspondence between its `__tsid` and a result series: no other operand
+        // value reaches the labels, and the matching gives each of its rows a single partner.
+        let source_context = match sources.into_iter().collect::<Vec<_>>().as_slice() {
+            [true] => Some((left_table_ref, left_context)),
+            [false] => Some((right_table_ref, right_context)),
+            _ => None,
+        };
+        let tsid = source_context
+            .filter(|(_, context)| {
+                context.use_tsid
+                    && context.tag_columns.len() == names.len()
+                    && context.tag_columns.iter().all(|tag| names.contains(tag))
+            })
+            .and_then(|(table_ref, _)| {
+                Self::optional_tsid_projection(schema, Some(table_ref), true)
+            });
 
         Ok(BinaryResultLabels {
             exprs,
             names,
             aggregation_field_labels,
+            tsid,
         })
     }
 
@@ -7532,11 +7564,14 @@ impl PromPlanner {
         let non_field_columns_iter = tag_columns_iter
             .into_iter()
             .chain(self.ctx.time_index_column.iter().map(lookup));
-        let tsid_iter = Self::optional_tsid_projection(
-            input.schema(),
-            table_ref.as_ref(),
-            self.ctx.use_tsid && result_labels.is_none(),
-        )
+        let tsid_iter = match result_labels {
+            Some(labels) => labels.tsid_projection(table_ref.clone()),
+            None => Self::optional_tsid_projection(
+                input.schema(),
+                table_ref.as_ref(),
+                self.ctx.use_tsid,
+            ),
+        }
         .into_iter()
         .map(Ok);
 
