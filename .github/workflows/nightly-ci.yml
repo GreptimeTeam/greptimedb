@@ -52,7 +52,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
+          ref: 5b6d0750ba8be93dbc7abfb92c261b5d168fd2bc
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -90,7 +90,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
+          ref: 5b6d0750ba8be93dbc7abfb92c261b5d168fd2bc
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -118,7 +118,7 @@ jobs:
         with:
           distribution: Ubuntu-22.04
       - name: Running tests
-        run: cargo nextest run -F dashboard --no-fail-fast --retries 0
+        run: cargo nextest run -F dashboard
         env:
           CARGO_BUILD_RUSTFLAGS: "-C linker=lld-link"
           RUST_BACKTRACE: 1
@@ -169,7 +169,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
+          ref: 5b6d0750ba8be93dbc7abfb92c261b5d168fd2bc
       - name: Record tested source and runner identity
         shell: bash
         run: |
