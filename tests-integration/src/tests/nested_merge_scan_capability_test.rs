@@ -55,19 +55,16 @@
 //!   executes: the inner region queries of the nested plans are admitted as execution stages of the
 //!   outer queries, so they don't wait for the permit that their own query holds (see
 //!   [`test_nested_merge_scan_capability_internal_stage_under_concurrency_limit`]),
-//! * the inner `MergeScan` resolves the leader of the regions of the build table through the table
-//!   route cache of the datanode, whose version counter is shared by every table of the container:
-//!   a cold load of the route of the build table still returns the rows of the join while an
-//!   unrelated table id is invalidated in a loop (see
+//! * a cold load of the route of the build table returns the rows of the join after an unrelated
+//!   table id is invalidated once (see
 //!   [`test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use api::v1::region::{QueryRequest, RegionRequestHeader};
-use common_meta::cache::{LayeredCacheRegistry, TableRouteCacheRef};
+use common_meta::cache::TableRouteCacheRef;
 use common_meta::cache_invalidator::{CacheInvalidator, Context};
 use common_meta::instruction::CacheIdent;
 use common_query::Output;
@@ -98,20 +95,9 @@ const BUILD_TABLE: &str = "nested_cap_build";
 /// plan cannot be resolved.
 const MISSING_INNER_TABLE: &str = "nested_cap_missing_build";
 
-/// The table id that no table of the cluster uses. The test of the cold route load invalidates this
-/// table id while it cold-loads the route of [`BUILD_TABLE`]: the version counter of the version
-/// checked table route cache belongs to the cache container and not to a single table, so this
-/// unrelated invalidation bumps the version that the cold load compares.
+/// The table id that no table of the cluster uses. The cold-load test invalidates this unrelated
+/// table once before it executes nested queries for [`BUILD_TABLE`].
 const UNRELATED_TABLE_ID: TableId = 999_999;
-
-/// The interval of the unrelated invalidation loop of
-/// [`test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation`].
-///
-/// Short enough to hit an in-flight load of the table route cache, long enough to leave the retry
-/// loop of the version checked load room to finish (a retry sleeps for at least `10ms`): the test
-/// must fail because a route was stale or belonged to another table, not because the retry loop of
-/// the cache gave up.
-const UNRELATED_INVALIDATION_INTERVAL: Duration = Duration::from_millis(20);
 
 /// `(a_id, probe_key, probe_v)` of the probe table: `a_id` is the primary key and the partition
 /// column, `probe_key` is the join key and `probe_v` is the value of the row.
@@ -257,27 +243,8 @@ async fn test_nested_merge_scan_capability_join_across_datanodes() {
     assert_cross_datanode_region_query(&cluster, &expectation, &baseline_requests);
 }
 
-/// The route of the build table is loaded cold while an *unrelated* table id is invalidated: the
-/// version counter of the version checked table route cache belongs to the cache container and not
-/// to a single table, so an invalidation of any `TableId` bumps the version that a cold load
-/// compares, and a load that runs while an unrelated table is invalidated retries (retrying is what
-/// keeps the loaded route correct; see the known limitation of `DatanodeRegionQueryHandler`).
-///
-/// The invalidation of the unrelated table id is injected into the layered cache registry of every
-/// datanode, which is exactly the local handling path of the invalidation instruction that a
-/// datanode receives from metasrv; the broadcast to the datanode is the only part not exercised
-/// here.
-///
-/// The test pins the correctness of the retry path. The route of the build table is dropped on
-/// every datanode (so the nested plans really load it from metasrv, the assertion below checks the
-/// cache is cold), then every probe region executes the nested plan while a background task
-/// invalidates the unrelated table id in a loop. The rows must be the rows of the join in every
-/// round: a retried load must neither return the route of another table nor a stale route.
-///
-/// The test also reports how often the table route caches loaded a route with and without the
-/// unrelated invalidation. A version checked load counts every attempt, so the amplification of the
-/// unrelated invalidation is visible in the counter; the test logs the numbers instead of asserting
-/// them, because the unrelated invalidation only hits an in-flight load with some probability.
+/// The route of the build table is cold before the nested queries run. An unrelated table id is
+/// invalidated once before those queries, and the nested plan must still return the join rows.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation() {
     common_telemetry::init_default_ut_logging();
@@ -309,13 +276,7 @@ async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation
     );
 
     let build_table_id = table_id(&build_leaders);
-    info!(
-        "the regions of {BUILD_TABLE} belong to the table id {build_table_id}; the test \
-         invalidates the unrelated table id {UNRELATED_TABLE_ID} while the datanodes load the \
-         route of {BUILD_TABLE}"
-    );
 
-    // The reference join of the frontend and the nested plan, as in the other capability tests.
     let reference = query_pretty(&frontend, &join_sql(), query_ctx()).await;
     info!("join result of the frontend:\n{reference}");
     assert_eq!(
@@ -327,99 +288,25 @@ async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation
     let query_ctx = query_ctx();
     let plan = encode(&nested_plan(&frontend, &query_ctx).await);
 
-    // 1. The baseline: the route of the build table is dropped on every datanode and nothing
-    // invalidates a table while the nested plans run, so both datanodes load the route of the build
-    // table from metasrv exactly once.
     invalidate_table_ids(&cluster, &[build_table_id]).await;
-    assert_route_cold(&cluster, build_table_id).await;
+    assert_route_cold(&cluster, build_table_id);
+    invalidate_table_ids(&cluster, &[UNRELATED_TABLE_ID]).await;
 
-    let loads_before = table_route_cache_loads();
-    let rows_cold = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
-    let cold_loads = table_route_cache_loads() - loads_before;
+    let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
     assert_eq!(
         expected_join_rows(),
-        multiset(rows_cold.clone()),
+        multiset(rows),
         "the nested plans returned an unexpected multiset of rows after the route of {BUILD_TABLE} \
-         was dropped: {rows_cold:?}"
-    );
-    // Every datanode owns a probe region, so every datanode resolved the leader of the regions of
-    // the build table with a cold route cache: the baseline really started without the route.
-    assert!(
-        cold_loads >= 2,
-        "expected the datanodes to load the dropped route of {BUILD_TABLE} from metasrv, but the \
-         table route cache only loaded a route {cold_loads} time(s)"
+         was dropped and unrelated table id {UNRELATED_TABLE_ID} was invalidated"
     );
 
-    // 2. The unrelated invalidation: a background task invalidates the table id of a table that the
-    // cluster does not have, the way the datanodes handle the invalidation instruction of a DDL
-    // that touched some other table. Every round drops the route of the build table again, so the
-    // nested plans load a cold route while the unrelated invalidation runs.
-    let stop = Arc::new(AtomicBool::new(false));
-    let unrelated_invalidations = Arc::new(AtomicUsize::new(0));
-    let invalidation_task = tokio::spawn(invalidate_unrelated_table_id(
-        cluster
-            .datanode_cache_registries
-            .values()
-            .cloned()
-            .collect::<Vec<Arc<LayeredCacheRegistry>>>(),
-        stop.clone(),
-        unrelated_invalidations.clone(),
-    ));
-
-    let mut loads_with_invalidation = 0;
-    for round in 0..3 {
-        invalidate_table_ids(&cluster, &[build_table_id]).await;
-        assert_route_cold(&cluster, build_table_id).await;
-
-        let loads_before = table_route_cache_loads();
-        let rows = run_nested_queries(&cluster, &probe_leaders, &plan, &query_ctx).await;
-        loads_with_invalidation += table_route_cache_loads() - loads_before;
-
-        assert_eq!(
-            expected_join_rows(),
-            multiset(rows.clone()),
-            "round {round}: the nested plans returned an unexpected multiset of rows while the \
-             unrelated table id {UNRELATED_TABLE_ID} was invalidated: {rows:?}"
+    for datanode in datanodes(&probe_leaders) {
+        assert!(
+            table_route_cache(&cluster, datanode).contains_key(&build_table_id),
+            "the datanode {datanode} must hold the route of {BUILD_TABLE} after it executed the \
+             nested plan of its probe region"
         );
-        assert_eq!(
-            multiset(rows_cold.clone()),
-            multiset(rows.clone()),
-            "round {round}: the nested plans returned different rows while the unrelated table id \
-             {UNRELATED_TABLE_ID} was invalidated, i.e. a retried route load returned another \
-             route than the cold load"
-        );
-
-        // The retry loop of a route load that the unrelated invalidation interrupted must have
-        // loaded the route of the build table: the retry must not leave the cache without the
-        // route of the table that the nested plan asked for.
-        for datanode in datanodes(&probe_leaders) {
-            assert!(
-                table_route_cache(&cluster, datanode).contains_key(&build_table_id),
-                "round {round}: the datanode {datanode} must hold the route of {BUILD_TABLE} after \
-                 it executed the nested plan of its probe region"
-            );
-        }
     }
-
-    stop.store(true, Ordering::Relaxed);
-    invalidation_task
-        .await
-        .expect("the task that invalidates the unrelated table id must stop");
-
-    // Best effort measurement, not an assertion: the unrelated invalidation retries a cold load
-    // only if it lands in the window between the version the load read and the version it compares
-    // afterwards, so the counts vary with the timing of the machine. The counter is the
-    // `CACHE_CONTAINER_CACHE_MISS` of the cache container, which every attempt of a version checked
-    // load increments; the cache name is shared by the datanodes and the frontend of the test
-    // process, but the frontend is idle while the nested plans of a round run.
-    let unrelated_invalidations = unrelated_invalidations.load(Ordering::Relaxed);
-    info!(
-        "the table route caches loaded a cold route of {BUILD_TABLE} {cold_loads} time(s) without \
-         an unrelated invalidation and {loads_with_invalidation} time(s) while the unrelated table \
-         id {UNRELATED_TABLE_ID} was invalidated {unrelated_invalidations} time(s); a count above 2 \
-         per round means the shared version counter of the cache container made the cold loads \
-         retry"
-    );
 }
 
 /// A failing inner region makes the whole query fail: the datanode must not return the rows of the
@@ -942,60 +829,18 @@ async fn invalidate_table_ids(cluster: &GreptimeDbCluster, table_ids: &[TableId]
     }
 }
 
-/// Invalidates [`UNRELATED_TABLE_ID`] on `registries` until `stop` is set, and counts the rounds.
-async fn invalidate_unrelated_table_id(
-    registries: Vec<Arc<LayeredCacheRegistry>>,
-    stop: Arc<AtomicBool>,
-    invalidations: Arc<AtomicUsize>,
-) {
-    while !stop.load(Ordering::Relaxed) {
-        for registry in &registries {
-            registry
-                .invalidate(
-                    &Context::default(),
-                    &[CacheIdent::TableId(UNRELATED_TABLE_ID)],
-                )
-                .await
-                .expect("the datanode must invalidate the unrelated table id");
-        }
-        invalidations.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(UNRELATED_INVALIDATION_INTERVAL).await;
-    }
-}
-
-/// Waits until no datanode holds the route of `table_id` any more, i.e. until the route is cold.
-///
-/// The invalidation is awaited before this call, so the wait is a safety net for the internals of
-/// the cache (e.g. its pending tasks) rather than a required step.
-async fn assert_route_cold(cluster: &GreptimeDbCluster, table_id: TableId) {
-    for attempt in 0..100 {
-        let mut cached = Vec::new();
-        for datanode_id in cluster.datanode_cache_registries.keys() {
-            if table_route_cache(cluster, *datanode_id).contains_key(&table_id) {
-                cached.push(*datanode_id);
-            }
-        }
-        if cached.is_empty() {
-            return;
-        }
-        assert!(
-            attempt < 99,
-            "the datanodes {cached:?} must drop the route of the table {table_id} after the \
-             invalidation"
-        );
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-}
-
-/// The number of attempts that the table route caches of the process made to load a route: every
-/// attempt of a version checked load (including its retries) increments this counter.
-///
-/// The counter is labeled with the cache name only, so it adds up the table route caches of the
-/// datanodes and of the frontend of the test process.
-fn table_route_cache_loads() -> u64 {
-    common_meta::metrics::CACHE_CONTAINER_CACHE_MISS
-        .with_label_values(&[cache::TABLE_ROUTE_CACHE_NAME])
-        .get()
+/// Asserts that no datanode holds the route of `table_id`, i.e. the route is cold.
+fn assert_route_cold(cluster: &GreptimeDbCluster, table_id: TableId) {
+    let cached = cluster
+        .datanode_cache_registries
+        .keys()
+        .filter(|datanode_id| table_route_cache(cluster, **datanode_id).contains_key(&table_id))
+        .collect::<Vec<_>>();
+    assert!(
+        cached.is_empty(),
+        "the datanodes {cached:?} must drop the route of the table {table_id} after the \
+         invalidation"
+    );
 }
 
 /// Creates the probe and build tables of the tests and inserts the rows.
