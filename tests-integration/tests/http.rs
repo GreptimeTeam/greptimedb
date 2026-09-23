@@ -93,6 +93,31 @@ use yaml_rust::YamlLoader;
 use crate::both_deployment_cases;
 use crate::event_recorder_test_util::assert_procedure_actor_by_table;
 
+/// Registers tests that exercise nothing below the HTTP layer, so running them
+/// against a remote object store only pays bucket setup and teardown.
+#[macro_export]
+macro_rules! http_local_tests {
+    ($($(#[$meta:meta])* $test:ident),*,) => {
+        mod integration_http_local_test {
+            $(
+                #[tokio::test(flavor = "multi_thread")]
+                $(
+                    #[$meta]
+                )*
+                async fn $test() {
+                    let store_type = tests_integration::test_util::StorageType::File;
+                    // Support both unit tests and fallible tests without discarding errors.
+                    let result = $crate::http::$test(store_type).await;
+                    assert_eq!(
+                        std::process::Termination::report(result),
+                        std::process::ExitCode::SUCCESS,
+                    );
+                }
+            )*
+        }
+    };
+}
+
 #[macro_export]
 macro_rules! http_test {
     ($service:ident, $($(#[$meta:meta])* $test:ident),*,) => {
@@ -134,12 +159,7 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
-                test_metrics_api,
-                test_health_api,
-                test_status_api,
                 test_config_api,
-                test_dynamic_tracer_toggle,
-                test_dashboard_path,
                 test_dashboard_api,
                 test_prometheus_remote_write,
                 test_prometheus_remote_write_v2,
@@ -151,7 +171,6 @@ macro_rules! http_tests {
                 test_vm_proto_remote_write,
 
                 test_pipeline_api,
-                test_test_pipeline_api,
                 test_pipeline_name_in_header,
                 test_plain_text_ingestion,
                 test_pipeline_auto_transform,
@@ -187,8 +206,6 @@ macro_rules! http_tests {
                 test_loki_json_logs_with_pipeline,
                 test_elasticsearch_logs,
                 test_elasticsearch_logs_with_index,
-                test_splunk_health,
-                test_splunk_health_is_public,
                 test_splunk_logs,
                 test_splunk_raw,
                 test_log_query,
@@ -1810,15 +1827,21 @@ pub async fn test_splunk_logs(store_type: StorageType) {
     .await;
     let client = TestClient::new(app).await;
 
-    // Authenticated SQL query (the user-provider harness requires auth on /v1/sql).
+    // Authenticated SQL statement (the user-provider harness requires auth on
+    // /v1/sql). Posted as a form so quotes and parentheses survive.
     async fn query(client: &TestClient, sql: &str) -> String {
         let res = client
-            .get(format!("/v1/sql?sql={sql}").as_str())
+            .post("/v1/sql")
             .header("Authorization", basic_auth("greptime_user", "greptime_pwd"))
+            .form(&[("sql", sql)])
             .send()
             .await;
-        assert_eq!(res.status(), StatusCode::OK, "query failed: {sql}");
-        res.text().await
+        let status = res.status();
+        let body = res.text().await;
+        assert_eq!(status, StatusCode::OK, "query failed: {sql}: {body}");
+        // A failing statement still comes back as 200 with an `error` envelope.
+        assert!(!body.contains("\"error\""), "query failed: {sql}: {body}");
+        body
     }
 
     // HEC `Authorization: Splunk <user:pass>` + JSON content type.
@@ -1968,6 +1991,34 @@ transform:
         !create.contains("sourcetype"),
         "custom pipeline should have dropped sourcetype (identity would keep it): {create}"
     );
+
+    // 6b. Ingest into a pre-created table with a fulltext index, then flush: the
+    // index file is only written on flush, so this is the one path that reads it
+    // back. `matches_term` is the predicate the index applier recognises.
+    query(
+        &client,
+        "create table splunk_indexed (greptime_timestamp timestamp(9) time index, \
+         \"event\" string fulltext index with(backend='bloom'))",
+    )
+    .await;
+    let res = send_req(
+        &client,
+        splunk_headers(),
+        "/v1/splunk/services/collector/event?table=splunk_indexed",
+        br#"{"event":"disk pressure on web-01","time":1700000020}"#.to_vec(),
+        false,
+    )
+    .await;
+    assert_eq!(StatusCode::OK, res.status());
+    query(&client, "ADMIN FLUSH_TABLE('splunk_indexed')").await;
+    let rows = get_rows_from_output(
+        &query(
+            &client,
+            "select \"event\" from splunk_indexed where matches_term(\"event\", 'pressure')",
+        )
+        .await,
+    );
+    assert_eq!(rows, r#"[["disk pressure on web-01"]]"#);
 
     // 7. Auth failures return HEC codes: missing token -> 2 (401), bad token -> 4 (403).
     let res = send_req(
@@ -2911,6 +2962,18 @@ pub async fn test_prometheus_remote_write(store_type: StorageType) {
     )
     .await;
 
+    // A metric-engine logical table stores its rows in the shared physical
+    // table, so reading them back from SST files goes through a different
+    // column mapping than the memtable read does.
+    flush_table(&client, "metric2").await;
+    validate_data(
+        "prometheus_remote_write_after_flush",
+        &client,
+        "select * from metric2",
+        table_val,
+    )
+    .await;
+
     // Prom RW tables carry the metric identity; type is inferred from naming.
     validate_data(
         "prometheus_remote_write_semantic_identity",
@@ -3217,11 +3280,24 @@ pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: Storag
     )
     .await;
 
+    let histogram_sql = "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;";
+    let histogram_rows = "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]";
     validate_data(
         "prometheus_remote_write_v2_native_histogram_rows",
         &client,
-        "select greptime_timestamp, greptime_native_histogram, job, instance from remote_write_v2_latency_seconds order by greptime_timestamp;",
-        "[[3000,{\"count_f64\":null,\"count_i64\":8,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[1],\"negative_span_lengths\":[1],\"negative_span_offsets\":[-2],\"positive_buckets_f64\":[],\"positive_buckets_i64\":[1,3,2],\"positive_span_lengths\":[3],\"positive_span_offsets\":[0],\"reset_hint\":2,\"schema\":1,\"start_timestamp\":1500,\"sum\":10.0,\"zero_count_f64\":null,\"zero_count_i64\":1,\"zero_threshold\":0.001},\"api\",\"localhost:9090\"],[4000,{\"count_f64\":6.0,\"count_i64\":null,\"custom_values\":[],\"negative_buckets_f64\":[],\"negative_buckets_i64\":[],\"negative_span_lengths\":[],\"negative_span_offsets\":[],\"positive_buckets_f64\":[2.0,3.5],\"positive_buckets_i64\":[],\"positive_span_lengths\":[2],\"positive_span_offsets\":[3],\"reset_hint\":3,\"schema\":2,\"start_timestamp\":2500,\"sum\":20.0,\"zero_count_f64\":0.5,\"zero_count_i64\":null,\"zero_threshold\":0.002},\"api\",\"localhost:9090\"]]",
+        histogram_sql,
+        histogram_rows,
+    )
+    .await;
+
+    // The native histogram column is a struct of nested lists, so its SST
+    // encoding differs from its memtable representation.
+    flush_table(&client, "remote_write_v2_latency_seconds").await;
+    validate_data(
+        "prometheus_remote_write_v2_native_histogram_rows_after_flush",
+        &client,
+        histogram_sql,
+        histogram_rows,
     )
     .await;
 
@@ -4283,6 +4359,31 @@ transform:
     )
     .await;
 
+    // The inverted, skipping and fulltext index files are only written on flush,
+    // so the queries below are the first thing that reads them back.
+    flush_table(&client, "test_db.logs1").await;
+    validate_data(
+        "pipeline_db_inverted_index",
+        &client,
+        "select id2 from test_db.logs1 where id1 = 2436",
+        "[[2528]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_db_skipping_index",
+        &client,
+        "select id1 from test_db.logs1 where type = 'I'",
+        "[[2436]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_db_fulltext_index",
+        &client,
+        "select id1 from test_db.logs1 where matches(log, 'ClusterAdapter')",
+        "[[2436]]",
+    )
+    .await;
+
     // 5. remove pipeline
     let encoded_ver_str: String =
         url::form_urlencoded::byte_serialize(version_str.as_bytes()).collect();
@@ -5076,6 +5177,24 @@ transform:
         &client,
         "show create table pipeline_index_options",
         expected_schema,
+    )
+    .await;
+
+    // The fulltext and skipping index files are only written on flush, so the
+    // queries below are the first thing that reads them back.
+    flush_table(&client, "pipeline_index_options").await;
+    validate_data(
+        "pipeline_index_options_fulltext",
+        &client,
+        "select trace_id from pipeline_index_options where matches(message, 'greptime')",
+        "[[42]]",
+    )
+    .await;
+    validate_data(
+        "pipeline_index_options_skipping",
+        &client,
+        "select message from pipeline_index_options where trace_id = 42",
+        r#"[["hello greptime"]]"#,
     )
     .await;
 
@@ -6995,6 +7114,18 @@ pub async fn test_otlp_metrics_new(store_type: StorageType) {
     )
     .await;
 
+    // A metric-engine logical table stores its rows in the shared physical
+    // table, so reading them back from SST files goes through a different
+    // column mapping than the memtable read does.
+    flush_table(&client, "claude_code_cost_usage_USD_total").await;
+    validate_data(
+        "otlp_metrics_all_select_after_flush",
+        &client,
+        "select * from `claude_code_cost_usage_USD_total` order by model desc;",
+        expected,
+    )
+    .await;
+
     // The synthesized resource descriptor: a plain mito info table keyed by
     // the raw OTel attribute keys (service.name is the only allowlisted
     // resource attribute in this payload), independent of the promote/ignore
@@ -7846,6 +7977,17 @@ pub async fn test_otlp_traces_v0(store_type: StorageType) {
     )
     .await;
 
+    // The attribute columns are JSON and the event/link columns are lists, whose
+    // SST encodings differ from their memtable representations.
+    flush_table(&client, "opentelemetry_traces").await;
+    validate_data(
+        "otlp_traces_after_flush",
+        &client,
+        "select * from opentelemetry_traces;",
+        expected,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -7969,6 +8111,30 @@ pub(crate) async fn test_otlp_traces_v2(
          and create_options like '%table_data_model=greptime_trace_v2%' \
          and create_options like '%greptime.semantic.pipeline=greptime_trace_v2%';",
         "[[1]]",
+    )
+    .await;
+
+    // JSON2 path extraction has to resolve the same way against SST files as it
+    // does against the memtable.
+    flush_table(&client, "trace_v2_spans").await;
+    validate_data(
+        "otlp_traces_v2_json2_after_flush",
+        &client,
+        "select service_name, span_attributes.\"http.status_code\"::BIGINT, \
+         resource_attributes.\"deployment.environment\"::STRING, \
+         scope_attributes.enabled::BOOLEAN from trace_v2_spans;",
+        r#"[["frontend",200,"production",true]]"#,
+    )
+    .await;
+    validate_data(
+        "otlp_traces_v2_events_links_after_flush",
+        &client,
+        r#"select json_get_string(span_events, '$[0].name'),
+                  json_get_int(span_events, '$[0].attributes."event.code"'),
+                  json_get_string(span_links, '$[0].trace_id'),
+                  json_get_string(span_links, '$[0].attributes."link.type"')
+           from trace_v2_spans;"#,
+        r#"[["cache.hit",7,"cc9e0991a2e63d274984bd44ee669203","follows_from"]]"#,
     )
     .await;
 
@@ -8124,6 +8290,17 @@ pub async fn test_otlp_traces_v1(store_type: StorageType) {
     // select traces data
     let expected = r#"[[1736480942444376000,1736480942444499000,123000,null,"c05d7a4ec8e1f231f02ed6e8da8655b4","d24f921c75f68e23","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444376000,1736480942444499000,123000,"d24f921c75f68e23","c05d7a4ec8e1f231f02ed6e8da8655b4","9630f2916e2f7909","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]],[1736480942444589000,1736480942444712000,123000,null,"cc9e0991a2e63d274984bd44ee669203","eba7be77e3558179","SPAN_KIND_CLIENT","lets-go","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-server",[],[]],[1736480942444589000,1736480942444712000,123000,"eba7be77e3558179","cc9e0991a2e63d274984bd44ee669203","8f847259b0f6e1ab","SPAN_KIND_SERVER","okey-dokey-0","STATUS_CODE_UNSET","","","telemetrygen","","telemetrygen","1.2.3.4","telemetrygen-client",[],[]]]"#;
     validate_data("otlp_traces", &client, "select * from mytable;", expected).await;
+
+    // `span_events` / `span_links` are JSON columns and the table is partitioned
+    // on `trace_id`, so the read back has to reassemble SST files across regions.
+    flush_table(&client, "mytable").await;
+    validate_data(
+        "otlp_traces_after_flush",
+        &client,
+        "select * from mytable;",
+        expected,
+    )
+    .await;
 
     // The trace v1 main table carries the trace identity (events/links preserved as
     // JSON columns by the v1 model).
@@ -8961,6 +9138,17 @@ pub async fn test_otlp_logs(store_type: StorageType) {
         )
         .await;
 
+        // The attribute columns are JSON, whose SST encoding differs from their
+        // memtable representation.
+        flush_table(&client, "opentelemetry_logs").await;
+        validate_data(
+            "otlp_logs_after_flush",
+            &client,
+            "select * from opentelemetry_logs;",
+            expected,
+        )
+        .await;
+
         // The auto-created log table carries the log identity.
         validate_data(
             "otlp_logs_semantic_identity",
@@ -9343,6 +9531,17 @@ pub async fn test_loki_pb_logs(store_type: StorageType) {
     )
     .await;
 
+    // `structured_metadata` is a JSON column, whose SST encoding differs from its
+    // memtable representation.
+    flush_table(&client, "loki_table_name").await;
+    validate_data(
+        "loki_pb_content_after_flush",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
     guard.remove_all().await;
 }
 
@@ -9542,6 +9741,17 @@ pub async fn test_loki_json_logs(store_type: StorageType) {
     let expected = "[[1735901380059465984,\"this is line one\",{\"key1\":\"value1\",\"key2\":\"value2\"},\"integration\",\"test\"],[1735901398478897920,\"this is line two\",{\"key3\":\"value3\"},\"integration\",\"test\"],[1735901398478897921,\"this is line two updated\",{},\"integration\",\"test\"]]";
     validate_data(
         "loki_json_content",
+        &client,
+        "select * from loki_table_name;",
+        expected,
+    )
+    .await;
+
+    // `structured_metadata` is a JSON column, whose SST encoding differs from its
+    // memtable representation.
+    flush_table(&client, "loki_table_name").await;
+    validate_data(
+        "loki_json_content_after_flush",
         &client,
         "select * from loki_table_name;",
         expected,
@@ -9767,7 +9977,7 @@ pub async fn test_log_query(store_type: StorageType) {
 
     // prepare data with SQL API
     let res = client
-        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string);")
+        .get("/v1/sql?sql=create table logs (`ts` timestamp time index, `message` string fulltext index with(backend='bloom'));")
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
@@ -9841,6 +10051,35 @@ pub async fn test_log_query(store_type: StorageType) {
             "before-explicit-end",
         ]
     );
+
+    // The fulltext index file is only written on flush. Replay the log query to
+    // cover the SST read path, and add a `matches_term` query, which is the
+    // predicate the index applier actually recognises.
+    flush_table(&client, "logs").await;
+    let res = client
+        .post("/v1/logs")
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_string(&log_query).unwrap())
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK, "{:?}", res.text().await);
+    let resp = res.text().await;
+    let output = serde_json::from_str::<Value>(&resp).unwrap();
+    let rows = output["output"][0]["records"]["rows"].as_array().unwrap();
+    let mut flushed_messages = rows
+        .iter()
+        .map(|row| row[1].as_str().unwrap())
+        .collect::<Vec<_>>();
+    flushed_messages.sort_unstable();
+    assert_eq!(flushed_messages, messages);
+
+    validate_data(
+        "log_query_fulltext_index",
+        &client,
+        "select message from logs where matches_term(message, 'at-explicit-end')",
+        r#"[["at-explicit-end"]]"#,
+    )
+    .await;
 
     let res = client
         .get("/v1/sql?sql=create table logs_limit (`ts` timestamp time index, `message` string);")
@@ -10865,11 +11104,20 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let mut req: ExportTraceServiceRequest = serde_json::from_str(content).unwrap();
-    // Modify timestamp fields
+    // The fixture is written against a fixed base instant. Move it next to now:
+    // this table is created with `ttl=7d`, and stale spans would be dropped as
+    // expired the moment they are flushed into SST files.
     let now = Utc::now().timestamp_nanos_opt().unwrap() as u64;
+    let delta_micros = (now / 1_000) as i64 - 60_000_000 - JAEGER_V1_FIXTURE_BASE_MICROS as i64;
+    let delta_nanos = delta_micros * 1_000;
     for span in req.resource_spans.iter_mut() {
         for scope_span in span.scope_spans.iter_mut() {
-            // Only modify the timestamp fields for the span with the name "test-jaeger-get-operations" to current time.
+            for span in scope_span.spans.iter_mut() {
+                span.start_time_unix_nano = (span.start_time_unix_nano as i64 + delta_nanos) as u64;
+                span.end_time_unix_nano = (span.end_time_unix_nano as i64 + delta_nanos) as u64;
+            }
+            // `/api/operations` is queried without a time range, so these spans
+            // stay pinned to the last few seconds.
             if scope_span.scope.as_ref().unwrap().name == "test-jaeger-get-operations" {
                 for span in scope_span.spans.iter_mut() {
                     span.start_time_unix_nano = now - 5_000_000_000; // 5 seconds ago
@@ -10946,7 +11194,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/operations` API.
@@ -10995,12 +11244,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/services/{service_name}/operations` API.
     let res = client
-        .get("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422")
+        .get(&shift_fixture_micros("/v1/jaeger/api/services/test-jaeger-query-api/operations?start=1738726754492421&end=1738726754642422", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11023,7 +11273,8 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     }
     "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API without start and end.
@@ -11149,12 +11400,26 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
+    assert_eq!(resp, expected);
+
+    // Replay the same lookup against SST files: `trace_id` and `service_name`
+    // carry BLOOM skipping indexes whose puffin files only exist after a flush,
+    // and `span_events` / `span_links` are JSON columns.
+    flush_table(&client, trace_table_name).await;
+    let res = client
+        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea")
+        .header("x-greptime-trace-table-name", trace_table_name)
+        .send()
+        .await;
+    assert_eq!(StatusCode::OK, res.status());
+    let resp: Value = serde_json::from_str(&res.text().await).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API with start and end in microseconds.
     let res = client
-        .get("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?start=1738726754492421&end=1738726754642422")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces/5611dce1bc9ebed65352d99a027b08ea?start=1738726754492421&end=1738726754642422", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11275,12 +11540,16 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces/{trace_id}` API for non-existent trace.
     let res = client
-        .get("/v1/jaeger/api/traces/0000000000000000000000000000dead")
+        .get(&shift_fixture_micros(
+            "/v1/jaeger/api/traces/0000000000000000000000000000dead",
+            delta_micros,
+        ))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11299,12 +11568,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 }
 "#;
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&operation=access-mysql&start=1738726754492421&end=1738726754642422&tags=%7B%22operation.type%22%3A%22access-mysql%22%7D", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11426,13 +11696,14 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API with tags.
     // 1. first query without tags, get 2 results
     let res = client
-            .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422")
+            .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422", delta_micros))
             .header("x-greptime-trace-table-name", trace_table_name)
             .send()
             .await;
@@ -11443,12 +11714,13 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // 2. second query with tags, get 1 result
     let res = client
-.get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422&tags=%7B%22operation.type%22%3A%22access-pg%22%7D")
+.get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754492422&end=1738726754592422&tags=%7B%22operation.type%22%3A%22access-pg%22%7D", delta_micros))
 .header("x-greptime-trace-table-name", trace_table_name)
 .send()
 .await;
@@ -11459,14 +11731,15 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 "#;
 
     let resp: Value = serde_json::from_str(&res.text().await).unwrap();
-    let expected: Value = serde_json::from_str(expected).unwrap();
+    let expected: Value =
+        serde_json::from_str(&shift_fixture_micros(expected, delta_micros)).unwrap();
     assert_eq!(resp, expected);
 
     // Test `/api/traces` API with Grafana User-Agent.
     // When user agent is Grafana, only return at most 3 spans per trace (earliest by timestamp).
     // Trace `5611dce1bc9ebed65352d99a027b08fb` has 4 spans, so only 3 should be returned.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .header("User-Agent", "Grafana/8.0.0")
         .send()
@@ -11514,7 +11787,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
     // Test `/api/traces` API without User-Agent (default behavior).
     // All 4 spans should be returned for the trace.
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .send()
         .await;
@@ -11534,7 +11807,7 @@ pub async fn test_jaeger_query_api_for_trace_v1(store_type: StorageType) {
 
     // Test `/api/traces` API with Jaeger User-Agent (should return all spans like default).
     let res = client
-        .get("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004")
+        .get(&shift_fixture_micros("/v1/jaeger/api/traces?service=test-jaeger-query-api&start=1738726754600000&end=1738726754700004", delta_micros))
         .header("x-greptime-trace-table-name", trace_table_name)
         .header("User-Agent", "Jaeger-Query/1.0.0")
         .send()
@@ -11611,6 +11884,59 @@ pub async fn test_influxdb_write(store_type: StorageType) {
     .await;
 
     guard.remove_all().await;
+}
+
+/// Flushes `table` so the rows written so far move from the memtable into SST
+/// files. Replaying a query afterwards covers the encode/decode round trip and,
+/// for indexed columns, the puffin files that only exist after a flush.
+/// Base microsecond instant the `test_jaeger_query_api_for_trace_v1` fixture and
+/// its expected responses are written against.
+const JAEGER_V1_FIXTURE_BASE_MICROS: u64 = 1_738_726_754_492_421;
+
+/// Shifts every fixture timestamp in `text` by `delta` microseconds, so expected
+/// responses and query bounds follow the payload after it is moved next to now.
+///
+/// Only integer literals within a day of [`JAEGER_V1_FIXTURE_BASE_MICROS`] are
+/// rewritten; durations, counts and ids are left alone.
+fn shift_fixture_micros(text: &str, delta: i64) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(|c: char| c.is_ascii_digit()) {
+        out.push_str(&rest[..start]);
+        let digits_end = rest[start..]
+            .find(|c: char| !c.is_ascii_digit())
+            .map_or(rest.len(), |offset| start + offset);
+        let digits = &rest[start..digits_end];
+        match digits.parse::<i64>() {
+            Ok(value) if (value - JAEGER_V1_FIXTURE_BASE_MICROS as i64).abs() < 86_400_000_000 => {
+                out.push_str(&(value + delta).to_string())
+            }
+            _ => out.push_str(digits),
+        }
+        rest = &rest[digits_end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+async fn flush_table(client: &TestClient, table: &str) {
+    // The argument is parsed as a SQL table name, so an unquoted identifier is
+    // lower-cased and will not resolve a mixed-case table.
+    let quoted = table
+        .split('.')
+        .map(|part| format!("\"{part}\""))
+        .collect::<Vec<_>>()
+        .join(".");
+    let res = client
+        .post("/v1/sql")
+        .form(&[("sql", format!("ADMIN FLUSH_TABLE('{quoted}')"))])
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(status, StatusCode::OK, "flush {table} fail: {body}");
+    // A failing statement still comes back as 200 with an `error` envelope.
+    assert!(!body.contains("\"error\""), "flush {table} fail: {body}");
 }
 
 async fn validate_data(test_name: &str, client: &TestClient, sql: &str, expected: &str) {
