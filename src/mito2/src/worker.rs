@@ -602,7 +602,8 @@ impl<S: LogStore> WorkerStarter<S> {
         let running = Arc::new(AtomicBool::new(true));
         let (series_index_task_state, series_index_receiver) = if self.series_index_store.is_some()
         {
-            let (state, receiver) = SeriesIndexTaskState::new(self.id);
+            let (state, receiver) =
+                SeriesIndexTaskState::new(self.id, self.config.worker_channel_size);
             (Some(Arc::new(state)), Some(receiver))
         } else {
             (None, None)

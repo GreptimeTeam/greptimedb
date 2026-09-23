@@ -135,18 +135,16 @@ impl<S> RegionWorkerLoop<S> {
             );
             return;
         };
-        let receiver = match state.reconcile(region) {
-            Ok(receiver) => receiver,
-            Err(error) => {
-                sender.send(Err(error));
-                return;
-            }
-        };
+        let state = state.clone();
         let worker_id = self.id;
         common_runtime::spawn_global(async move {
-            let result = receiver
-                .await
-                .unwrap_or_else(|_| WorkerStoppedSnafu { id: worker_id }.fail());
+            let result = async {
+                let receiver = state.reconcile(region).await?;
+                receiver
+                    .await
+                    .unwrap_or_else(|_| WorkerStoppedSnafu { id: worker_id }.fail())
+            }
+            .await;
             sender.send(result.map(|_| 0));
         });
     }

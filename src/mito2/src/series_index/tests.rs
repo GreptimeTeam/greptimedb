@@ -832,7 +832,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
     region.version_control.alter_options(options);
     let store = ObjectStore::new(Memory::default()).unwrap();
     let (purger, receiver) = series_index_channel(store.clone());
-    let (state, commands) = super::task::SeriesIndexTaskState::new(0);
+    let (state, commands) = super::task::SeriesIndexTaskState::new(0, 2);
     let state = Arc::new(state);
     let clock = Arc::new(crate::time_provider::mock::MockTimeProvider::new(0));
     // A notification issued before the task starts must also trigger maintenance.
@@ -914,7 +914,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let control = load_version_control(&store, region_id, &purger).await;
     let snapshot = control.current();
     assert_eq!(&entry, snapshot.series_indexes[&entry.index_uuid].entry());
-    let (state, commands) = super::task::SeriesIndexTaskState::new(0);
+    let (state, commands) = super::task::SeriesIndexTaskState::new(0, 2);
     let state = Arc::new(state);
     state.stop();
     super::task::spawn_series_index_tasks(
@@ -1015,7 +1015,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
         .unwrap();
     let store = ObjectStore::new(Memory::default()).unwrap().layer(layer);
     let (purger, purge_receiver) = series_index_channel(store.clone());
-    let (state, receiver) = super::task::SeriesIndexTaskState::new(0);
+    let (state, receiver) = super::task::SeriesIndexTaskState::new(0, 2);
     let state = Arc::new(state);
     let regions = Arc::new(RegionMap::default());
     regions.insert_region(region.clone());
@@ -1035,6 +1035,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     assert!(
         state
             .reconcile(region.clone())
+            .await
             .unwrap()
             .await
             .unwrap()
@@ -1046,6 +1047,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
         1,
         state
             .reconcile(region)
+            .await
             .unwrap()
             .await
             .unwrap()
