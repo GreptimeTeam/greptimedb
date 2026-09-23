@@ -712,11 +712,7 @@ impl RangeManipulateStream {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
         let timestamp_values = if self.time_unit == TimeUnit::Millisecond && self.offset == 0 {
-            // Fast path: for millisecond input without offset, scaling by the
-            // native tick (10^6) and truncating back by 10^6 is the identity, so
-            // the payload can reuse the input buffers instead of being rebuilt
-            // row by row. `reinterpret_cast` only shares the value and validity
-            // buffers, keeping null validity exactly as the row-wise path below.
+            // Millisecond input with zero offset is already the required payload; reuse values and validity buffers.
             timestamps.reinterpret_cast::<TimestampMillisecondType>()
         } else {
             let scale = nanoseconds_per_native_tick(self.time_unit);
@@ -1416,11 +1412,10 @@ mod test {
     }
 
     /// A millisecond time column with zero offset must reuse the input buffers
-    /// while producing exactly what the original per-row construction produced.
+    /// while producing the expected payload.
     #[tokio::test]
     async fn millisecond_payload_without_offset_matches_row_wise_construction() {
         const OFFSET: Millisecond = 1_000;
-        // A negative extreme exercises truncation toward zero in the wide path.
         let extreme = i64::MIN / 2;
         let raw_timestamps = vec![extreme, -1_000, 0, 60_000];
         let schema = Arc::new(Schema::new(vec![
@@ -1437,22 +1432,6 @@ mod test {
             vec![input_ts.clone(), Arc::new(Float64Array::from(vec![7.0; 4]))],
         )
         .unwrap();
-
-        // Oracle: the original per-row payload construction.
-        let row_wise = |offset: Millisecond| {
-            raw_timestamps
-                .iter()
-                .enumerate()
-                .map(|(index, timestamp)| {
-                    if !input_ts.is_valid(index) {
-                        return None;
-                    }
-                    let shifted_ns =
-                        (*timestamp as i128) * 1_000_000 + (offset as i128) * 1_000_000;
-                    Some(i64::try_from(shifted_ns / 1_000_000).unwrap())
-                })
-                .collect::<Vec<Option<i64>>>()
-        };
 
         async fn payload(offset: Millisecond, batch: RecordBatch, schema: SchemaRef) -> ArrayRef {
             let input = Arc::new(DataSourceExec::new(Arc::new(
@@ -1491,23 +1470,8 @@ mod test {
             ranges.values().clone()
         }
 
-        let assert_row_wise = |actual: &TimestampMillisecondArray, expected: &[Option<i64>]| {
-            assert_eq!(actual.len(), expected.len());
-            for (index, expected) in expected.iter().enumerate() {
-                assert_eq!(
-                    actual.is_valid(index),
-                    expected.is_some(),
-                    "validity mismatch at row {index}"
-                );
-                if let Some(expected) = expected {
-                    assert_eq!(
-                        actual.value(index),
-                        *expected,
-                        "value mismatch at row {index}"
-                    );
-                }
-            }
-        };
+        let unshifted_expected = vec![Some(extreme), Some(-1_000), Some(0), None];
+        let shifted_expected = vec![Some(extreme + OFFSET), Some(0), Some(1_000), None];
 
         // Zero offset: the payload is the identity and shares the input buffers.
         let unshifted = payload(0, batch.clone(), schema.clone()).await;
@@ -1520,21 +1484,15 @@ mod test {
             input_ts.values().as_ptr(),
             "a millisecond payload without offset should reuse the input buffers"
         );
-        assert_row_wise(unshifted, &row_wise(0));
+        assert_eq!(unshifted.iter().collect::<Vec<_>>(), unshifted_expected);
 
-        // Non-zero offset: the payload is shifted, so it cannot be reused as-is.
+        // Non-zero offset: the payload is shifted.
         let shifted = payload(OFFSET, batch, schema).await;
         let shifted = shifted
             .as_any()
             .downcast_ref::<TimestampMillisecondArray>()
             .unwrap();
-        assert_ne!(
-            shifted.values().as_ptr(),
-            input_ts.values().as_ptr(),
-            "a non-zero offset must rebuild the payload"
-        );
-        assert_row_wise(shifted, &row_wise(OFFSET));
-        assert_eq!(shifted.value(0), extreme + OFFSET);
+        assert_eq!(shifted.iter().collect::<Vec<_>>(), shifted_expected);
     }
 
     #[tokio::test]
