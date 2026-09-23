@@ -34,9 +34,12 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use arrow_schema::extension::ExtensionType;
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::Json2ExtensionType;
+use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
@@ -500,7 +503,50 @@ impl IndexerBuilderImpl {
         let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
             self.index_options.inverted_index.ignore_column_ids.iter(),
         );
-        if indexed_column_ids.is_empty() {
+        let mut json_targets = Vec::new();
+        // Only new SSTs get hint indexes. Historical/manual index rebuilds are out of scope.
+        if matches!(
+            self.build_type,
+            IndexBuildType::Flush | IndexBuildType::Compact
+        ) {
+            for column in &self.metadata.column_metadatas {
+                if !column.column_schema.data_type.is_json2()
+                    || self
+                        .index_options
+                        .inverted_index
+                        .ignore_column_ids
+                        .contains(&column.column_id)
+                {
+                    continue;
+                }
+                let Ok(Some(extension)) =
+                    column.column_schema.extension_type::<Json2ExtensionType>()
+                else {
+                    continue;
+                };
+                for hint in extension.metadata().json_settings().type_hints() {
+                    if !hint.inverted_index {
+                        continue;
+                    }
+                    // JSON hints may also describe containers through non-SQL ingestion.
+                    if !(hint.data_type.is_numeric()
+                        || hint.data_type.is_boolean()
+                        || hint.data_type.is_string())
+                    {
+                        continue;
+                    }
+                    match IndexTarget::json_path(
+                        column.column_id,
+                        hint.path.clone(),
+                        hint.data_type.clone(),
+                    ) {
+                        Ok(target) => json_targets.push(target),
+                        Err(err) => warn!(err; "Skipping invalid JSON inverted index target"),
+                    }
+                }
+            }
+        }
+        if indexed_column_ids.is_empty() && json_targets.is_empty() {
             debug!(
                 "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
                 self.metadata.region_id, file_id,
@@ -532,7 +578,8 @@ impl IndexerBuilderImpl {
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
             indexed_column_ids,
-        );
+        )
+        .with_json_targets(json_targets);
 
         Some(indexer)
     }

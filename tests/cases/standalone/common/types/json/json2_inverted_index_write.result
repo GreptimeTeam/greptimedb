@@ -1,0 +1,184 @@
+CREATE TABLE json2_index_write (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (
+        max_auto_expanded_paths = 0,
+        "service.name" STRING INVERTED INDEX,
+        service.name STRING INVERTED INDEX,
+        status BIGINT INVERTED INDEX,
+        bytes BIGINT UNSIGNED INVERTED INDEX,
+        duration DOUBLE INVERTED INDEX,
+        success BOOLEAN INVERTED INDEX,
+        absent STRING INVERTED INDEX,
+        unindexed STRING
+    ),
+    ordinary STRING INVERTED INDEX
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_write VALUES
+    (1, '{"service.name":"api","service":{"name":"nested"},"status":200,"bytes":18446744073709551615,"duration":1.5,"success":true,"unindexed":"ignored"}', 'a'),
+    (2, '{"service":{}}', 'b'),
+    (3, '{}', 'c'),
+    (4, NULL, 'd');
+
+Affected Rows: 4
+
+ADMIN FLUSH_TABLE('json2_index_write');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_write') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+-- Read physical index metadata, not the table's declared index settings.
+SELECT index_type, target_type, target_json, blob_size > 0 AS has_index_data
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_write')
+ORDER BY target_type, target_json;
+
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+| index_type | target_type | target_json                                                                                      | has_index_data |
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+| inverted   | column      | {"column":2}                                                                                     | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Boolean":null},"path":["success"]}}                       | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Float64":{}},"path":["duration"]}}                        | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["status"]}}                            | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["absent"]}}         | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["service","name"]}} | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["service.name"]}}   | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"UInt64":{}},"path":["bytes"]}}                            | true           |
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+
+INSERT INTO json2_index_write VALUES
+    (5, '{"service.name":"worker","service":{"name":"batch"},"status":500}', 'e');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_write');
+
++----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_write') |
++----------------------------------------+
+| 0                                      |
++----------------------------------------+
+
+SELECT target_type, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_write')
+GROUP BY target_type ORDER BY target_type;
+
++-------------+-------------+
+| target_type | index_count |
++-------------+-------------+
+| column      | 2           |
+| json_path   | 14          |
++-------------+-------------+
+
+ADMIN COMPACT_TABLE('json2_index_write', 'swcs', '86400');
+
++-----------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_index_write', 'swcs', '86400') |
++-----------------------------------------------------------+
+| 0                                                         |
++-----------------------------------------------------------+
+
+SELECT index_type, target_type, target_json, blob_size > 0 AS has_index_data
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_write')
+ORDER BY target_type, target_json;
+
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+| index_type | target_type | target_json                                                                                      | has_index_data |
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+| inverted   | column      | {"column":2}                                                                                     | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Boolean":null},"path":["success"]}}                       | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Float64":{}},"path":["duration"]}}                        | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["status"]}}                            | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["absent"]}}         | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["service","name"]}} | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"String":{"size_type":"Utf8"}},"path":["service.name"]}}   | true           |
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"UInt64":{}},"path":["bytes"]}}                            | true           |
++------------+-------------+--------------------------------------------------------------------------------------------------+----------------+
+
+SELECT COUNT(*) FROM json2_index_write;
+
++----------+
+| count(*) |
++----------+
+| 5        |
++----------+
+
+DROP TABLE json2_index_write;
+
+Affected Rows: 0
+
+-- A JSON-only index must still produce an index file and file-level availability.
+CREATE TABLE json2_index_only (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (value BIGINT INVERTED INDEX)
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_only VALUES (1, '{"value":42}'), (2, '{}');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json2_index_only');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_only') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+SELECT index_type, target_type, target_json, index_file_size > 0 AS has_index_file
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_only');
+
++------------+-------------+----------------------------------------------------------------------+----------------+
+| index_type | target_type | target_json                                                          | has_index_file |
++------------+-------------+----------------------------------------------------------------------+----------------+
+| inverted   | json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["value"]}} | true           |
++------------+-------------+----------------------------------------------------------------------+----------------+
+
+DROP TABLE json2_index_only;
+
+Affected Rows: 0
+
+-- Ignoring the JSON root column disables all of its hinted indexes.
+CREATE TABLE json2_index_ignored (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (value BIGINT INVERTED INDEX)
+) WITH ('append_mode' = 'true', 'index.inverted_index.ignore_column_ids' = '1');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_ignored VALUES (1, '{"value":42}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_ignored');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_ignored') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+SELECT COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_ignored');
+
++-------------+
+| index_count |
++-------------+
+| 0           |
++-------------+
+
+DROP TABLE json2_index_ignored;
+
+Affected Rows: 0
+

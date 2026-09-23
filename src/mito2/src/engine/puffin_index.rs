@@ -368,6 +368,15 @@ fn decode_target_info(target_key: &str) -> (String, String) {
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
         ),
+        Ok(IndexTarget::JsonPath {
+            column_id,
+            path,
+            data_type,
+        }) => (
+            "json_path".to_string(),
+            json!({ "json_path": { "column": column_id, "path": path, "data_type": data_type } })
+                .to_string(),
+        ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),
             json!({ "error": "failed_to_decode" }).to_string(),

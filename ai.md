@@ -175,10 +175,10 @@ UTF-8 编码，base64url 不带 padding。这可避免点、引号和 Unicode �
 必须能够还原编码后的目标；读取 blob metadata 后，后续代码使用有类型结构，而不是
 解析字符串。
 
-Puffin blob 名称继续采用 `<index-kind>-<target-key>`。既有列键不变，旧 blob 仍可读取。系统表输出将目标解码为目标类型和 JSON。例如，一个 JSON 叶子显示为：
+倒排索引继续使用共享 Puffin blob `greptime-inverted-index-v1`，其内部元数据以 target key 区分各目标；不为每个 JSON hint 新建一个 blob。其他索引沿用各自现有的 blob 命名方式。既有列键不变，旧 blob 仍可读取。系统表输出将目标解码为目标类型和 JSON。例如，一个 JSON 叶子显示为：
 
 ```json
-{"json_path":{"column":7,"path":["resource","service.name"],"data_type":{"String":{}}}}
+{"json_path":{"column":7,"path":["resource","service.name"],"data_type":{"String":{"size_type":"Utf8"}}}}
 ```
 
 ## 索引构建
@@ -186,6 +186,10 @@ Puffin blob 名称继续采用 `<index-kind>-<target-key>`。既有列键不变�
 构造 indexer 时，region metadata 除普通列目标外，还应从每个 JSON2 列的 `JsonSettings` 产出 JSON 目标。三个既有 creator 持有 `IndexTarget` 描述符，而非只有 `ColumnId`。
 
 索引在 flush 或 compaction 生成新 SST 时构建，不为已有 SST 单独补建。构建时必须确保输出数据中实际物化叶子的类型与 target 的 `data_type` 一致。
+
+`Flush / Compact` 任务收集 JSON2 index targets，包括异步执行；`SchemaChange / Manual` 任务不收集。异步构建因 schema 变化而放弃原结果、以 `SchemaChange` 重试时，允许该 SST 缺少 JSON2 索引，查询回退扫描。不额外向构建器传递同步或异步模式。
+
+JSON2 的物理字符串可使用 `Utf8View`，与 hint 声明的 `String` 共享 UTF-8 索引值编码；允许这种物理表示差异，target 仍记录声明类型。叶子提取必须合并所有父对象的 null bitmap，不能索引 null 父对象下的占位值。表级 `ignore_column_ids` 包含根 JSON2 列时，跳过其全部 hint 索引；分段行数复用表级倒排配置。
 
 对于 `ColumnId` 目标，保持现有取值逻辑。对于 `JsonPath` 目标，共享 resolver 沿根 Struct array 按 `path` 寻找已显式物化的对象字段，并返回最终可空 Arrow array。该 resolver 每个 batch 行产生一个值；缺失的 hinted 叶子由 JSON2 现有逻辑补为 null。随后三个 creator 以既有值编码消费这个标量 array：
 
@@ -196,6 +200,8 @@ Puffin blob 名称继续采用 `<index-kind>-<target-key>`。既有列键不变�
 因此后端不需要 JSON 专用重写；新增部分仅是目标选择和 Arrow 叶子提取。稀疏主键的处理仍只适用于普通 tag 列；JSON2 目标是物化的 field 值，走现有 field-value 路径。
 
 `IndexOutput` 与 `FileMeta` 当前通过 `ColumnIndexMetadata` 记录逐列索引可用性。不得将 JSON 叶子塞入 `column_id`。本次不接入已有 SST 的手动或异步补建流程，因此不再以补建需求为由预设新增 target-index 元数据集合。实现前需确认新 SST 的索引产出、文件级可用性记录及查询路径是否需要扩展这些结构；如确有必要，仅增加这些路径所需的元数据，并保持旧 manifest 可读。Puffin target key 仍是索引目标身份的依据。
+
+第二阶段沿用现有文件级索引可用性与文件大小记录，不扩展 `FileMeta`。JSON hint 的逐目标元信息保存在倒排 blob 内，`ColumnIndexMetadata` 继续仅表示普通列索引。
 
 ## 索引应用
 
@@ -214,16 +220,16 @@ JSON settings 和 Puffin 名称是持久化格式；若新 SST 的索引管理�
 - 含 `inverted_index` 的旧 JSON2 type-hint metadata 仍可读取。
 - 若需要新增 `FileMeta` 字段，必须使用 serde 默认值等兼容方式，保证旧 manifest 仍可读取。
 - 已有 SST 缺少对应 type-hint 索引时正常扫描；不会因新增或修改索引声明而触发历史 SST 补建。
-- 不理解 JSON 路径 blob 的二进制必须忽略它，而不能把它当作列索引解释。在默认打开开关前，必须有明确的混合版本兼容性用例。
+- 不理解 JSON 路径 target key 的二进制不能把它当作普通列索引解释；混合版本发布验证另行讨论。
 
-实现时必须依照本地 runbook 在 `tests/compatibility/` 下覆盖 JSON settings、索引目标编码，以及实际涉及的 manifest 格式变更。
+本次不新增或运行 `tests/compatibility/` 用例。索引目标编解码及旧普通列 key 的稳定性通过单元测试验证，CREATE 元信息和 flush / compaction 索引产物通过 SQLness 验证。
 
 # 增量实施计划
 
 本轮先实现倒排索引，分为三个阶段。每个阶段完成后，须经用户验证确认，才继续下一阶段。跳数与全文索引的接入安排另行讨论。
 
 1. **语法解析**：完成倒排索引声明的解析、校验和展示，通过 SQLness case 验证 CREATE、SHOW CREATE 及非法声明；合法 ALTER 的解析和格式化由解析器测试验证。本阶段不修改 protobuf，不验证 ALTER 的索引配置传递，也不接入索引构建或查询应用。
-2. **写入实现**：增加携带 `ConcreteDataType` 的 `IndexTarget::JsonPath`、稳定编解码和 JSON2 标量叶子提取，使 flush / compaction 新生成的 SST 正确创建索引元信息及倒排索引文件；补充固定 key 样例及实际涉及的持久化兼容性验证，不为已有 SST 补建索引。
+2. **写入实现**：增加携带 `ConcreteDataType` 的 `IndexTarget::JsonPath`、稳定编解码和 JSON2 标量叶子提取，使 flush / compaction 新生成的 SST 正确创建索引元信息及倒排索引文件；通过固定 key 样例、单元测试和 SQLness 验证，不新增 compatibility 用例，不为已有 SST 补建索引。
 3. **查询应用**：识别精确路径谓词，按当前显式 hints、索引开关和类型选择可用 target，并应用倒排索引裁剪。通过 SQLness case 验证索引应用及查询结果，覆盖缺失值、未索引路径、旧 SST 无匹配索引和 hint 变更后的回退行为。
 
 已知后续事项：当前 ALTER 的 protobuf `JsonTypeHint` 不携带索引配置，接收端将倒排标记设为 false。完整支持 ALTER 时需扩展协议和传递链路；届时可先将 proto 依赖指向本地仓库进行开发，本阶段不处理。
