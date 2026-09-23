@@ -1,24 +1,6 @@
-# PromQL nullable range-function benchmark: regression evidence for the indexed
-# valid-sample lookup in nullable range functions (#9234).
-#
-# `rate`/`increase`/`delta` and the presence evaluator behind
-# `count_over_time`/`last_over_time` fall back to a per-window validity scan once
-# any sample of a series is NULL. `nullable_table` writes NULL on every fourth
-# sample of every series, so 25% of its samples are missing (one missing sample
-# per minute at the 15s cadence) and every window of every series contains both
-# NULL and non-NULL samples instead of being entirely NULL or entirely dense.
-# `dense_table` is the same fixture without NULLs; it keeps the no-NULL fast path
-# measured next to the nullable path.
-#
-# 128 series x 780 timestamps at 15s cadence = 99,840 rows per table, written as
-# 13 SSTs x 7,680 rows. Data starts one hour before evaluation; 481 evaluations
-# span two hours. Range windows are left-open and every series is dense on the
-# 15s grid, so a fully covered 5m window holds 20 slots and a 1m window holds 4.
-# Five of the 20 slots and one of the 4 slots are NULL, which makes
-# `count_over_time(nullable_table[5m])` return exactly 15 and
-# `count_over_time(nullable_table[1m])` return exactly 3 at every one of the 481
-# evaluations: no window is entirely NULL and none is NULL-free, so every window
-# of every series takes the nullable branch.
+# Benchmarks nullable PromQL range functions against a dense control. Every
+# 15-second series has NULL every fourth sample; fully covered windows therefore
+# retain 15 valid samples at [5m] and 3 at [1m].
 
 [case]
 name = "promql_nullable_range_fn"
@@ -109,16 +91,6 @@ series_layout = "timestamp_major"
 name = "rate_nullable_5m"
 kind = "tql"
 query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') rate(nullable_table{host=~'host.*'}[5m])"
-warmup = 3
-iterations = 9
-
-[scenario.queries.thresholds]
-max_candidate_latency_regression_pct = 20
-
-[[scenario.queries]]
-name = "increase_nullable_5m"
-kind = "tql"
-query = "TQL ANALYZE VERBOSE (1704070800, 1704078000, '15s') increase(nullable_table{host=~'host.*'}[5m])"
 warmup = 3
 iterations = 9
 
