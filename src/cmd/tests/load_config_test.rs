@@ -159,6 +159,7 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
+                    experimental_series_index_max_size: ReadableSize::gb(5),
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
@@ -397,6 +398,7 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
+                    experimental_series_index_max_size: ReadableSize::gb(5),
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),

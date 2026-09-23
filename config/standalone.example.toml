@@ -707,6 +707,13 @@ compress_manifest = false
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
 
+## Approximate series and range index size limit in open regions, shared across workers.
+## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
+## retained by readers are not counted.
+## Minimum: 1KiB. Takes effect on restart.
+#+ experimental_series_index_max_size = "5GiB"
+
 ## Whether to build and query range indexes when series indexes are enabled.
 ## Obsolete range-index metadata and files are still cleaned up when disabled.
 #+ experimental_enable_range_index = false
