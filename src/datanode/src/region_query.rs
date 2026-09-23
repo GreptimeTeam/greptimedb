@@ -37,14 +37,10 @@ use store_api::storage::RegionId;
 
 /// Serves the region queries issued by the datanode itself.
 ///
-/// Known limitation: [`RegionQueryHandler::select_target`] resolves the leader of a region through
-/// the table route cache, which uses `InitStrategy::VersionChecked`. The version counter of that
-/// strategy belongs to the `CacheContainer` and not to a single table: any `TableId` invalidation
-/// bumps the shared version, so a cold load of one table's route retries (and loads again) when an
-/// *unrelated* table is invalidated concurrently. Clusters with frequent DDL or region movement can
-/// therefore see amplified cold-load retries on the datanode; the tail latency of cold loads in
-/// such clusters is worth verifying. The retries only add work, they keep the loaded route correct
-/// (a stale route is never returned).
+/// Known limitation: [`RegionQueryHandler::select_target`] resolves a region leader through the
+/// version-checked table route cache, whose version is shared by the `CacheContainer`. An
+/// unrelated `TableId` invalidation can therefore add route loads and cold-load latency; sustained
+/// conflicts may exhaust the retry budget and fail the region query.
 pub struct DatanodeRegionQueryHandler {
     partition_manager: PartitionRuleManagerRef,
     node_manager: NodeManagerRef,

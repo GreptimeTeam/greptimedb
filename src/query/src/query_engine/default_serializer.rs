@@ -359,10 +359,9 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         catalog_list: Arc<dyn CatalogProviderList>,
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
-        let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
+        let session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_catalog_list(catalog_list)
             .build();
-        register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
         // Payloads need the engine catalog rather than the request's region-bound catalog.
         let catalog_manager = session_state
