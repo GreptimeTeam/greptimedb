@@ -35,7 +35,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           WORKFLOWS: ${{ steps.admit.outputs.workflow }}
-          HEAD_SHA: ${{ steps.admit.outputs.head_sha }}
           HEAD_REF: ${{ steps.admit.outputs.head_ref }}
           FUZZ_PROFILE: ${{ steps.admit.outputs.fuzz_profile }}
         run: |
@@ -46,7 +45,7 @@ jobs:
               inputs+=(-f "inputs[fuzz_profile]=${FUZZ_PROFILE}")
             fi
             gh api --method POST "/repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/dispatches" \
-              -f ref="${HEAD_REF}" -f "inputs[expected_head_sha]=${HEAD_SHA}" "${inputs[@]}"
+              -f ref="${HEAD_REF}" "${inputs[@]}"
           done
       - name: Reply with command result
         if: ${{ steps.admit.outputs.reply != '' && steps.admit.outputs.pr_number != '' }}

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Admit `/ci` comments and dispatch a pinned draft-PR CI workflow."""
+"""Admit `/ci` comments and dispatch a draft-PR CI workflow."""
 import json, os, re, sys, urllib.request
 
 COMMAND = re.compile(r'^/ci(?:\s+(.+))?$')
@@ -29,7 +29,7 @@ OPTIONS = {
     'fuzz chaos': ('integration.yml', 'chaos', 'chaos fuzz'),
     'fuzz all': ('integration.yml', 'all', 'all fuzz'),
 }
-HELP = '''Available draft-PR CI commands:\n\n- `/ci` — standard CI\n- `/ci rust` — Rust CI\n- `/ci integration` — integration CI without fuzz\n- `/ci checks` or `/ci docs`\n- `/ci fuzz standalone|distributed|chaos`\n- `/ci fuzz all` — all fuzz suites (admin only)\n\nCommands require the PR author or repository write/maintain/admin permission and a same-repository open draft PR. `/ci fuzz all` requires admin permission. CI is pinned to the current head SHA; comment again after a push.'''
+HELP = '''Available draft-PR CI commands:\n\n- `/ci` — standard CI\n- `/ci rust` — Rust CI\n- `/ci integration` — integration CI without fuzz\n- `/ci checks` or `/ci docs`\n- `/ci fuzz standalone|distributed|chaos`\n- `/ci fuzz all` — all fuzz suites (admin only)\n\nCommands require the PR author or repository write/maintain/admin permission and a same-repository open draft PR. `/ci fuzz all` requires admin permission. CI runs the branch head at dispatch time.'''
 
 def api(path):
     req=urllib.request.Request(os.environ['GITHUB_API_URL']+path, headers={'Authorization':'Bearer '+os.environ['GITHUB_TOKEN'],'Accept':'application/vnd.github+json'})
@@ -69,6 +69,6 @@ def main():
         elif permission not in ('write','maintain','admin'):
             return reject(number,'PR author or repository write permission is required.')
     workflow, profile, label=OPTIONS[arg]
-    out(skip='false',pr_number=number,head_sha=head_sha,head_ref=head_ref,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for `{head_sha}`.')
+    out(skip='false',pr_number=number,head_sha=head_sha,head_ref=head_ref,workflow=workflow,fuzz_profile=profile,reply=f'Dispatched {label} for branch `{head_ref}`.')
     return 0
 if __name__ == '__main__': sys.exit(main())

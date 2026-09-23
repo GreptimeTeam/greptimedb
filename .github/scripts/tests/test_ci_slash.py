@@ -31,7 +31,6 @@ spec.loader.exec_module(ci)
 
 
 OPTIONS_TO_TEST = ["/ci", "/ci rust", "/ci fuzz chaos", "/ci fuzz all"]
-DISPATCHED_WORKFLOWS = ("rust.yml", "integration.yml", "checks.yml", "docs.yml")
 
 
 class CiSlashTest(unittest.TestCase):
@@ -133,23 +132,6 @@ class CiSlashTest(unittest.TestCase):
                 ])
                 self.assertIn("skip=true", output)
                 self.assertIn(reason, output)
-
-    def test_sha_verifier_preserves_default_needs_behavior(self):
-        for name in DISPATCHED_WORKFLOWS:
-            with self.subTest(workflow=name):
-                workflow = (SCRIPT.parents[1] / "workflows" / name).read_text()
-                self.assertIn(
-                    "  verify_dispatch_head:\n"
-                    "    name: Verify dispatched head\n",
-                    workflow,
-                )
-                self.assertIn(
-                    "      - name: Verify the admitted head\n"
-                    "        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}",
-                    workflow,
-                )
-                self.assertIn("needs: verify_dispatch_head", workflow)
-                self.assertNotIn("always()", workflow)
 
 
 if __name__ == "__main__":

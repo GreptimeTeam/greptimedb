@@ -20,10 +20,6 @@ on:
         required: false
         default: false
         type: boolean
-      expected_head_sha:
-        description: Head SHA verified by the CI command admission workflow
-        required: false
-        type: string
 
 name: Checks
 
@@ -35,21 +31,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify_dispatch_head:
-    name: Verify dispatched head
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify the admitted head
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.ci_command }}
-        env:
-          EXPECTED_HEAD_SHA: ${{ inputs.expected_head_sha }}
-        run: |
-          test -n "${EXPECTED_HEAD_SHA}"
-          test "${GITHUB_SHA}" = "${EXPECTED_HEAD_SHA}"
-
   check-typos-and-docs:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: verify_dispatch_head
     name: Check typos and docs
     runs-on: ubuntu-latest
     steps:
@@ -65,7 +48,6 @@ jobs:
 
   license-header-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: verify_dispatch_head
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -82,7 +64,6 @@ jobs:
 
   github-script-tests:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: verify_dispatch_head
     name: GitHub Script Tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -120,7 +101,6 @@ jobs:
 
   check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: verify_dispatch_head
     name: Check
     runs-on: ${{ matrix.os }}
     strategy:
@@ -150,7 +130,6 @@ jobs:
 
   toml:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    needs: verify_dispatch_head
     name: Toml Check
     runs-on: ubuntu-latest
     timeout-minutes: 60
