@@ -8,7 +8,7 @@ permissions:
   actions: write
   contents: read
   issues: write
-  pull-requests: read
+  pull-requests: write
 
 jobs:
   admit:
@@ -64,7 +64,7 @@ jobs:
           PR_NUMBER: ${{ steps.admit.outputs.pr_number || github.event.client_payload.github.payload.issue.number }}
           ADMIT_OUTCOME: ${{ steps.admit.outcome }}
           DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
-        # Use the issue-comment endpoint with the existing issues: write permission.
+        # PR replies require pull-requests: write even through the issue-comment endpoint.
         run: |
           [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]] || exit 1
           if [[ "${ADMIT_OUTCOME}" == failure || "${DISPATCH_OUTCOME}" == failure ]]; then
