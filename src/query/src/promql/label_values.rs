@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use common_time::Timestamp;
 use common_time::timestamp::TimeUnit;
@@ -33,19 +33,21 @@ use crate::promql::error::{
 /// a negative duration, and an RFC3339 query parameter can name one, so the sign
 /// is recovered here instead of unwrapping.
 fn millis_since_epoch(time: SystemTime) -> Result<Timestamp> {
-    let (millis, before_epoch) = match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => (duration.as_millis(), false),
-        Err(earlier) => (earlier.duration().as_millis(), true),
+    let (duration, before_epoch) = match time.duration_since(UNIX_EPOCH) {
+        Ok(duration) => (duration, false),
+        Err(earlier) => (earlier.duration(), true),
     };
-    let millis = i64::try_from(millis)
-        .ok()
-        .with_context(|| SystemTimeOutOfRangeSnafu { time })?;
+    let millis = checked_millis(duration).with_context(|| SystemTimeOutOfRangeSnafu { time })?;
 
     Ok(Timestamp::new_millisecond(if before_epoch {
         -millis
     } else {
         millis
     }))
+}
+
+fn checked_millis(duration: Duration) -> Option<i64> {
+    i64::try_from(duration.as_millis()).ok()
 }
 
 fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
@@ -121,8 +123,6 @@ pub fn rewrite_label_values_query(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
@@ -139,7 +139,13 @@ mod tests {
 
     #[test]
     fn millis_beyond_i64_are_rejected() {
-        let time = UNIX_EPOCH + Duration::from_secs(1 << 60);
-        assert!(millis_since_epoch(time).is_err());
+        assert_eq!(
+            checked_millis(Duration::from_millis(i64::MAX as u64)),
+            Some(i64::MAX)
+        );
+        assert_eq!(
+            checked_millis(Duration::from_millis(i64::MAX as u64 + 1)),
+            None
+        );
     }
 }
