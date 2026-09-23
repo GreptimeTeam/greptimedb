@@ -52,7 +52,12 @@ pub(crate) async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
-    let engine = env.create_engine(MitoConfig::default()).await;
+    let engine = env
+        .create_engine(MitoConfig {
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        })
+        .await;
     let metadata = Arc::new(sst_region_metadata_with_encoding(
         PrimaryKeyEncoding::Sparse,
     ));
@@ -93,6 +98,10 @@ pub(crate) async fn prepare_region_with_timestamps(
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    // Flush completion can precede compaction scheduling. Keep background TTL
+    // cleanup from racing tests that alter options after preparing the SSTs.
+    let region = engine.get_region(region_id).unwrap();
+    region.update_schedule_compaction_millis();
     for &ts in timestamps {
         engine
             .handle_request(
@@ -122,7 +131,6 @@ pub(crate) async fn prepare_region_with_timestamps(
             .unwrap();
         flush_region(&engine, region_id, None).await;
     }
-    let region = engine.get_region(region_id).unwrap();
     (engine, region)
 }
 

@@ -303,6 +303,16 @@ mod tests {
         let mut env = TestEnv::with_prefix("series-capacity-cleanup").await;
         let (engine, region) =
             prepare_region_with_timestamps(&mut env, &[1000, 2000, 3000, 4000, 5000]).await;
+        assert_eq!(
+            5,
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files())
+                .count()
+        );
         let mut options = region.version().options.clone();
         options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(100)));
         region.version_control.alter_options(options);
@@ -338,6 +348,7 @@ mod tests {
         };
         task.maintain().await;
         let previous = region.series_index_version();
+        assert_eq!(1, previous.series_indexes.len());
         let old_id = *previous.series_indexes.keys().next().unwrap();
         task.max_size = previous.disk_usage() - excess;
         writes.lock().unwrap().clear();
