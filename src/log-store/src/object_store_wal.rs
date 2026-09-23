@@ -39,10 +39,10 @@
 //! object can still appear, so objects form a chain: every object links to
 //! the object it extends by sequence and writer instance, and recovery replays
 //! only the chain that ends at the complete object with the largest epoch and
-//! sequence. An object is complete when every link on its chain holds; a link
-//! to a missing object holds only below every present object, where objects
-//! are collected. Objects off the chain are orphans, which are never replayed
-//! but keep their sequences. Each open writes an object without segments that
+//! sequence. An object is complete when every link on its chain names a
+//! present object written by the recorded instance, back to an object that
+//! starts the chain. Objects off the chain are orphans, which are never
+//! replayed but keep their sequences. Each open writes an object without segments that
 //! starts an epoch above every present object before it accepts writes, so a
 //! late object of an earlier instance never ends the chain.
 //!

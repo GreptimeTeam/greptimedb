@@ -488,6 +488,18 @@ fn finish_recovery(objects: Vec<FetchedObject>) -> Result<Recovered> {
         .map(|fetched| (fetched.object.object_seq, &fetched.header))
         .collect::<BTreeMap<_, _>>();
     let chain = select_chain(&headers);
+    // Every open writes an object that starts a chain or extends a complete
+    // one, and nothing removes objects, so present objects without any
+    // complete chain mean objects of the chain are gone.
+    ensure!(
+        headers.is_empty() || !chain.is_empty(),
+        CorruptedWalObjectSnafu {
+            reason: format!(
+                "no object among {} present objects completes a chain",
+                headers.len()
+            ),
+        }
+    );
     let tip = chain.last().map(|object_seq| ChainLink {
         object_seq: *object_seq,
         writer_instance: headers[object_seq].writer_instance,
@@ -533,18 +545,14 @@ fn finish_recovery(objects: Vec<FetchedObject>) -> Result<Recovered> {
 /// Returns, in sequence order, the objects on the chain that ends at the tip:
 /// the complete object with the largest epoch, then the largest sequence.
 ///
-/// An object is complete when every link on its chain holds. A link holds when
-/// the object starts a chain, or when its predecessor is present and carries
-/// the writer instance the link records, or when its predecessor is missing
-/// and lies below every present object, which is where objects are collected.
-/// A create that was reported as failed may still leave its object, but every
-/// object written after that failure links past it, and every instance writes
-/// under an epoch above every object present when it opened, so neither such
-/// an object nor a late object of an earlier instance ends the chosen chain.
+/// An object is complete when every link on its chain holds: the chain starts
+/// at an object without a predecessor, and every other link names a present
+/// object that carries the writer instance the link records. A create that
+/// was reported as failed may still leave its object, but every object
+/// written after that failure links past it, and every instance writes under
+/// an epoch above every object present when it opened, so neither such an
+/// object nor a late object of an earlier instance ends the chosen chain.
 fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
-    let Some(&lowest) = headers.keys().next() else {
-        return Vec::new();
-    };
     // A predecessor precedes its successor, so one pass in sequence order
     // settles every object.
     let mut complete = HashMap::with_capacity(headers.len());
@@ -556,7 +564,7 @@ fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
                 Some(prev) => {
                     prev.writer_instance == link.writer_instance && complete[&link.object_seq]
                 }
-                None => link.object_seq < lowest,
+                None => false,
             },
         };
         complete.insert(object_seq, holds);
@@ -1957,15 +1965,24 @@ mod tests {
                 chain_header(2, a, 1, Some((0, a))),
             ])
         );
-        // A predecessor below every present object was collected.
-        assert_eq!(
-            vec![3, 4],
+        // A missing predecessor breaks the link, whether or not it lies below
+        // every present object, so an object that lands late below it cannot
+        // change which links hold.
+        assert!(
             chain_of(&[
                 chain_header(3, a, 1, Some((2, a))),
                 chain_header(4, a, 1, Some((3, a))),
             ])
+            .is_empty()
         );
-        // A missing predecessor above a present object breaks the link.
+        assert!(
+            chain_of(&[
+                chain_header(2, a, 1, Some((1, a))),
+                chain_header(4, b, 2, Some((3, a))),
+                chain_header(5, b, 2, Some((4, b))),
+            ])
+            .is_empty()
+        );
         assert_eq!(
             vec![1],
             chain_of(&[
@@ -1975,18 +1992,6 @@ mod tests {
         );
         // A predecessor at or above the object itself never holds.
         assert!(chain_of(&[chain_header(5, a, 1, Some((5, a)))]).is_empty());
-        // Instance A's tip 3 was collected after instance B extended it. Late
-        // objects of A that extend object 3 hold their links, below or above
-        // B's tip, but carry an earlier epoch.
-        assert_eq!(
-            vec![4, 6],
-            chain_of(&[
-                chain_header(4, b, 2, Some((3, a))),
-                chain_header(5, a, 1, Some((3, a))),
-                chain_header(6, b, 2, Some((4, b))),
-                chain_header(7, a, 1, Some((3, a))),
-            ])
-        );
     }
 
     #[tokio::test]
@@ -2043,6 +2048,23 @@ mod tests {
         let recovered = recover(&io).await.unwrap();
         assert_eq!(Some(0), recovered.tip.map(|tip| tip.object_seq));
         assert_eq!(3, recovered.next_object_seq);
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_rejects_objects_without_a_complete_chain() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        // Object 1 extends object 0, which is gone.
+        put_header(&io, chain_header(1, 1, 1, Some((0, 1))), &[]).await;
+        let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::CorruptedWalObject { reason, .. }
+                if reason.contains("no object among 1 present objects completes a chain")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![1], object_seqs(&io).await);
     }
 
     #[tokio::test]
