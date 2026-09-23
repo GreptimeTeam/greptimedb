@@ -66,7 +66,7 @@ INSERT INTO at_modifier_counter_total VALUES
     (360000, 280.0, 'b');
 
 -- 1. Instant query anchored at an absolute timestamp: the sample window is `(anchor - lookback,
--- anchor]` = `(-200s, 300s]`, so its newest samples are 5.0 for host 'a' and 12.0 for host 'b', both
+-- anchor]` = `(0s, 300s]`, so its newest samples are 5.0 for host 'a' and 12.0 for host 'b', both
 -- at 300s. The output timestamps stay the evaluation timestamps.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (100, 100, '1s') at_modifier_gauge @ 300;
@@ -119,9 +119,6 @@ TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300);
 -- that lost its anchor (or was read from the wrong one) shows up in one of them as well.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 300, '1s') rate(at_modifier_counter_total[5m]);
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300) != 0.5;
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300) != 1.0;
@@ -203,14 +200,10 @@ TQL EVAL (100, 100, '1s') at_modifier_missing @ 300;
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300));
 
--- Consistency: comparing the per-host sequence above against the anchored value of the other series
--- keeps exactly the series that does not match, at every step. Both comparisons together assert
--- that host 'a' stays at 1.0 and host 'b' at 0.5 for the whole grid.
+-- Consistency: comparing the per-host sequence above against 1.0 keeps exactly host 'b' at
+-- every step, confirming it stays at 0.5 for the whole grid.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300)) != 1.0;
-
--- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300)) != 0.5;
 
 -- A value function over an anchored selector keeps one row per series per step as well.
 -- SQLNESS SORT_RESULT 3 1

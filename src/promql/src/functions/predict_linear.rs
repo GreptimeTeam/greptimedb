@@ -138,8 +138,7 @@ impl PredictLinear {
         let eval_ts_iter: Box<dyn Iterator<Item = Option<i64>>> = match eval_ts_col {
             ColumnarValue::Scalar(eval_ts_scalar) => {
                 let eval_ts = match eval_ts_scalar {
-                    ScalarValue::TimestampMillisecond(Some(eval_ts), _)
-                    | ScalarValue::Int64(Some(eval_ts)) => *eval_ts,
+                    ScalarValue::TimestampMillisecond(Some(eval_ts), _) => *eval_ts,
                     // For a NULL or otherwise unusable evaluation timestamp, returns NULL array,
                     // which conforms to PromQL's behavior.
                     _ => {
@@ -164,13 +163,6 @@ impl PredictLinear {
                         eval_ts_array
                             .as_any()
                             .downcast_ref::<TimestampMillisecondArray>()
-                            .expect("checked by data type")
-                            .iter(),
-                    ),
-                    DataType::Int64 => Box::new(
-                        eval_ts_array
-                            .as_any()
-                            .downcast_ref::<datafusion::arrow::array::Int64Array>()
                             .expect("checked by data type")
                             .iter(),
                     ),
@@ -210,7 +202,6 @@ impl PredictLinear {
                 index,
                 t.unwrap(),
                 eval_ts,
-                Self::name(),
             )? {
                 Some(value) => result_builder.append_value(value),
                 None => result_builder.append_null(),
@@ -222,7 +213,6 @@ impl PredictLinear {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn predict_linear_impl(
     ts_range: &RangeArray,
     value_range: &RangeArray,
@@ -231,7 +221,6 @@ fn predict_linear_impl(
     index: usize,
     t: i64,
     eval_ts: i64,
-    func_name: &str,
 ) -> Result<Option<f64>, DataFusionError> {
     let (ts_offset, ts_len) = ts_range.get_offset_length(index).unwrap();
     let (value_offset, value_len) = value_range.get_offset_length(index).unwrap();
@@ -239,7 +228,9 @@ fn predict_linear_impl(
         ts_len == value_len,
         DataFusionError::Execution(format!(
             "{}: time and value arrays in a group should have the same length, found {} and {}",
-            func_name, ts_len, value_len
+            PredictLinear::name(),
+            ts_len,
+            value_len
         )),
     )?;
     if ts_len < 2 {
@@ -438,7 +429,7 @@ mod test {
             (2000, 0, 2.0),
             // One second past the window's end the trend is at 3.
             (3000, 0, 3.0),
-            // Two seconds past the window's end, predicting another two seconds ahead.
+            // One second past the window's end, predicting another two seconds ahead.
             (3000, 2, 5.0),
         ] {
             let ts_values = Arc::new(TimestampMillisecondArray::from_iter(

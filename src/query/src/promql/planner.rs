@@ -162,7 +162,6 @@ const MAX_SCATTER_POINTS: i64 = 400;
 /// arguments are step-invariant, mirroring Prometheus' `AtModifierUnsafeFunctions`. A call to one
 /// of them is never promoted to a step-invariant subtree; see [`PromPlanner::is_step_invariant`].
 const AT_MODIFIER_UNSAFE_FUNCTIONS: [&str; 15] = [
-    // Step invariant functions: they do not read samples at all.
     "days_in_month",
     "day_of_month",
     "day_of_week",
@@ -241,9 +240,9 @@ struct PromPlannerContext {
     ///
     /// [`Self::start`] and the sample timestamps are compared on the shifted timeline: a range
     /// payload carries `sample_timestamp + offset`, while the time index column of a folded row
-    /// stays the evaluation timestamp of its step. `None` (or a stale value) only matters for
-    /// functions that read it right after their input plan is built, like `predict_linear`.
-    range_fold_offset: Option<Millisecond>,
+    /// stays the evaluation timestamp of its step. It only matters for functions that read it
+    /// right after their input plan is built, like `predict_linear`.
+    range_fold_offset: Millisecond,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -444,7 +443,7 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
-        self.range_fold_offset = None;
+        self.range_fold_offset = 0;
     }
 
     /// Reset table name and schema to empty
@@ -668,7 +667,7 @@ impl PromPlanner {
         .context(DataFusionPlanningSnafu)?;
         // A subquery always folds with offset 0, so its payload timestamps are already on the
         // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
-        self.ctx.range_fold_offset = Some(0);
+        self.ctx.range_fold_offset = 0;
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
@@ -2299,7 +2298,7 @@ impl PromPlanner {
             grid_start,
             grid_end,
             time_index_column,
-        )?))
+        )))
     }
 
     /// Convert the timestamp of an `@` modifier into milliseconds since the Unix epoch.
@@ -2355,10 +2354,10 @@ impl PromPlanner {
         grid_start: Millisecond,
         grid_end: Millisecond,
         time_index_column: String,
-    ) -> Result<LogicalPlan> {
+    ) -> LogicalPlan {
         if grid_start == grid_end {
             // A single evaluation step: `anchored` is already stamped with that timestamp.
-            return Ok(anchored);
+            return anchored;
         }
 
         let replayed = InstantManipulate::new(
@@ -2373,9 +2372,9 @@ impl PromPlanner {
             self.ctx.field_columns.first().cloned(),
             anchored,
         );
-        Ok(LogicalPlan::Extension(Extension {
+        LogicalPlan::Extension(Extension {
             node: Arc::new(replayed),
-        }))
+        })
     }
 
     /// Sorts `input` by its series key and time index and splits it into one batch per series.
@@ -2558,11 +2557,10 @@ impl PromPlanner {
         let field_column = self.ctx.field_columns.first().cloned();
         let series_key_columns = self.series_key_columns();
         let manipulate = match at_offset {
-            Some(_) => {
+            Some(at_offset) => {
                 // Select the anchored sample once, then report it at every step of the outer
                 // grid. The samples keep their native anchor-time timestamps, so the manipulate
                 // must shift them onto the evaluation timeline with the rewritten offset.
-                let at_offset = at_offset.expect("checked Some above");
                 let anchored = InstantManipulate::new(
                     grid_start,
                     grid_start,
@@ -2581,7 +2579,7 @@ impl PromPlanner {
                     grid_start,
                     grid_end,
                     time_index_column,
-                )?
+                )
             }
             None => LogicalPlan::Extension(Extension {
                 node: Arc::new(InstantManipulate::new(
@@ -2668,10 +2666,10 @@ impl PromPlanner {
         // Samples are shifted onto the evaluation timeline with the very same offset while the
         // window is folded. Record it so that the function above the selector can recover the
         // evaluation instant of the folded window; see [`Self::create_range_eval_ts_expr`].
-        self.ctx.range_fold_offset = Some(match at_offset {
+        self.ctx.range_fold_offset = match at_offset {
             Some(at_offset) => at_offset,
             None => offset_ms,
-        });
+        };
         let grid_start = self.ctx.start;
         let grid_end = self.ctx.end;
 
@@ -2707,11 +2705,10 @@ impl PromPlanner {
             .clone()
             .expect("time index should be set in `setup_context`");
         let manipulate = match at_offset {
-            Some(_) => {
+            Some(at_offset) => {
                 // Fold the anchored window once, then report it at every step of the outer
                 // grid. The samples keep their native anchor-time timestamps, so the manipulate
                 // must shift them onto the evaluation timeline with the rewritten offset.
-                let at_offset = at_offset.expect("checked Some above");
                 let anchored = RangeManipulate::new(
                     grid_start,
                     grid_start,
@@ -2731,7 +2728,7 @@ impl PromPlanner {
                     grid_start,
                     grid_end,
                     time_index_column,
-                )?
+                )
             }
             None => {
                 let manipulate = RangeManipulate::new(
@@ -2781,7 +2778,7 @@ impl PromPlanner {
         let args = self.create_function_args(&args.args)?;
         // The input plan below records the fold offset of a range selector it is built from, which
         // is only meaningful for that input; drop whatever an earlier argument left behind.
-        self.ctx.range_fold_offset = None;
+        self.ctx.range_fold_offset = 0;
         let input = if let Some(prom_expr) = &args.input {
             self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", query_engine_state)
                 .await?
@@ -4992,7 +4989,7 @@ impl PromPlanner {
     /// The sum is computed on the millisecond representation and cast back, so that the result
     /// keeps the `Timestamp(Millisecond)` type the range functions declare for it.
     fn create_range_eval_ts_expr(&self, input_schema: &DFSchemaRef) -> Result<DfExpr> {
-        let offset = self.ctx.range_fold_offset.unwrap_or_default();
+        let offset = self.ctx.range_fold_offset;
         let eval_ts = self
             .create_time_index_column_expr()?
             .cast_to(
@@ -9912,9 +9909,11 @@ mod test {
         );
     }
 
-    /// A range selector with `@` folds its window once, at the start of the evaluation.
+    /// A call whose argument is one selector anchored by `@` is step-invariant: the whole call is
+    /// evaluated once, at the start of the evaluation, and its result is reported at every step.
+    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr` wrapper.
     #[tokio::test]
-    async fn at_modifier_anchors_range_selector_window() {
+    async fn at_modifier_promotes_step_invariant_subtree() {
         let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
         let plan_str = plan.display_indent_schema().to_string();
         // The scan is limited to the anchored window (offset by `eval_start - anchor`).
@@ -9924,28 +9923,6 @@ mod test {
             ),
             "{plan_str}"
         );
-        // Both the fold and the replay exist: the window is folded at the anchor and then
-        // reported at every step.
-        assert_eq!(
-            plan_str
-                .matches("PromRangeManipulate: req range=[0..0]")
-                .count(),
-            1,
-            "{plan_str}"
-        );
-        assert!(
-            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
-            "{plan_str}"
-        );
-    }
-
-    /// A call whose argument is one selector anchored by `@` is step-invariant: the whole call is
-    /// evaluated once, at the start of the evaluation, and its result is reported at every step.
-    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr` wrapper.
-    #[tokio::test]
-    async fn at_modifier_promotes_step_invariant_subtree() {
-        let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
-        let plan_str = plan.display_indent_schema().to_string();
         // A single fold, at the anchor...
         assert_eq!(
             plan_str
@@ -10113,7 +10090,7 @@ mod test {
     #[tokio::test]
     async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
         // A call over one anchored selector, and a unary above one, are still promoted: their
-        // output keeps the layout of the selector.
+        // output layout is re-established before replay.
         for query in ["abs(some_metric @ 300)", "-some_metric @ 300"] {
             let plan = build_at_modifier_plan(query, 0, 1000).await;
             let plan_str = plan.display_indent_schema().to_string();
@@ -10164,7 +10141,7 @@ mod test {
         );
     }
 
-    /// `@` before the first representable millisecond is rejected instead of silently wrapping.
+    /// `@` beyond the representable millisecond range is rejected instead of silently wrapping.
     #[tokio::test]
     async fn at_modifier_rejects_unrepresentable_timestamp() {
         let eval_stmt = build_eval_stmt("some_metric @ 1e16");
@@ -12584,7 +12561,6 @@ mod test {
         .display_indent_schema()
         .to_string();
 
-        assert!(plan.contains("prom_mixed_range_float"), "{query}\n{plan}");
         assert!(
             plan.contains(
                 "prom_mixed_range_float(Utf8(\"predict_linear\"), timestamp_range, greptime_value, greptime_native_histogram, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms)))"
