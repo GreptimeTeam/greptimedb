@@ -52,7 +52,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf611d7dcc4b05b39adaf7b49e7030acd
+          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -90,7 +90,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf611d7dcc4b05b39adaf7b49e7030acd
+          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -169,7 +169,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: 5d6b5c7bf611d7dcc4b05b39adaf7b49e7030acd
+          ref: 5d6b5c7bf6dc80be96b1918490f7ced3c5a96700
       - name: Record tested source and runner identity
         shell: bash
         run: |
