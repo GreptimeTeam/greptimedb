@@ -57,7 +57,8 @@ const LABEL_PRESERVING_RANGE_FUNCTIONS: [&str; 20] = [
 /// to the other operand can only drop rows that had no partner, whatever the matcher kind, and
 /// `NULL` pairs only with `NULL`. Nor can it split a match group, whose series agree on every
 /// matching label: a propagated matcher removes whole groups, so the cardinality check still
-/// sees every group that takes part in the matching.
+/// sees every group that takes part in the matching. A duplicate in a group without a partner
+/// goes unreported as a result, where Prometheus fails the query on it.
 /// Grouped matching is conservatively restricted to a provably unique one-side operand.
 ///
 /// `left_tags` and `right_tags` are the tag columns of the planned operands: a matcher may just
