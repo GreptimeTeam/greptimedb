@@ -722,6 +722,17 @@ ADMIN FLUSH_FLOW('test_numbers_basic');
 
 SELECT avg_after_filter_num FROM out_num_cnt_basic;
 
+INSERT INTO
+    numbers_input_basic
+VALUES
+    (10, "2021-07-01 00:00:00.200"),
+    (23, "2021-07-01 00:00:00.600");
+
+-- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
+ADMIN FLUSH_FLOW('test_numbers_basic');
+
+SELECT avg_after_filter_num FROM out_num_cnt_basic;
+
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;
 DROP TABLE out_num_cnt_basic;
