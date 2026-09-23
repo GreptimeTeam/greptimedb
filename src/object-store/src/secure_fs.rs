@@ -970,7 +970,7 @@ mod tests {
         writer.file = Some(failing_file);
 
         assert!(writer.close().await.is_err());
-        assert!(writer.abort().await.is_err());
+        writer.abort().await.unwrap();
         assert!(!temp_dir.path().join("partial").exists());
     }
 
