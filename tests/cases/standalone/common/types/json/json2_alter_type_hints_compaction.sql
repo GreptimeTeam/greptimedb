@@ -14,7 +14,7 @@ ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction');
 
 ALTER TABLE json2_alter_type_hints_compaction
     MODIFY COLUMN attrs JSON2 (
-        kind INT64
+        kind BIGINT
     );
 
 INSERT INTO json2_alter_type_hints_compaction VALUES

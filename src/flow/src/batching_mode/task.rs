@@ -18,21 +18,29 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::v1::{CreateTableExpr, TableName};
 use catalog::CatalogManagerRef;
+use catalog::kvbackend::KvBackendCatalogManager;
 use client::OutputWithMetrics;
 use common_error::ext::BoxedError;
+use common_meta::key::schema_name::SchemaNameKey;
+use common_query::OutputData;
 use common_query::logical_plan::breakup_insert_plan;
 use common_telemetry::tracing::warn;
 use common_telemetry::{debug, info};
-use common_time::Timestamp;
+use common_time::{TimeToLive, Timestamp};
 use datafusion::datasource::DefaultTableSource;
 use datafusion::sql::unparser::expr_to_sql;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_common::utils::quote_identifier;
 use datafusion_common::{DFSchemaRef, ScalarValue, TableReference};
-use datafusion_expr::{DmlStatement, LogicalPlan, WriteOp, col, lit};
+use datafusion_expr::{DmlStatement, LogicalPlan, Projection, WriteOp, col, lit};
 use datatypes::schema::Schema;
+use datatypes::vectors::Helper;
+use futures::TryStreamExt;
 use query::QueryEngineRef;
-use query::options::FLOW_INCREMENTAL_MODE;
+use query::options::{
+    FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE,
+    FLOW_RETURN_REGION_SEQ,
+};
 use query::query_engine::DefaultSerializer;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
@@ -55,7 +63,7 @@ use crate::batching_mode::state::{
 use crate::batching_mode::table_creator::{QueryType, create_table_with_expr};
 use crate::batching_mode::time_window::TimeWindowExpr;
 use crate::batching_mode::utils::{
-    AddFilterRewriter, ColumnMatcherRewriter, df_plan_to_sql,
+    AddFilterRewriter, ColumnMatcherRewriter, analyze_incremental_aggregate_plan, df_plan_to_sql,
     gen_plan_with_matching_schema_and_values, get_table_info_df_schema, sql_to_df_plan,
 };
 use crate::df_optimizer::apply_df_optimizer;
@@ -190,6 +198,56 @@ fn encode_insert_plan_request(
             },
         )),
     })
+}
+
+fn recovery_aggregate_input(plan: &LogicalPlan) -> Result<LogicalPlan, Error> {
+    let plan = match plan {
+        LogicalPlan::Projection(projection) => projection.input.as_ref(),
+        _ => plan,
+    };
+    let LogicalPlan::Aggregate(aggregate) = plan else {
+        return UnexpectedSnafu {
+            reason: "Recovery timestamp projection did not find an aggregate".to_string(),
+        }
+        .fail();
+    };
+    Ok(aggregate.input.as_ref().clone())
+}
+
+fn capture_recovery_batch_windows(
+    batch: &common_recordbatch::RecordBatch,
+    time_window_expr: &TimeWindowExpr,
+    windows: &mut BTreeSet<(Timestamp, Timestamp)>,
+) -> Result<(), Error> {
+    if batch.num_columns() != 1 {
+        return UnexpectedSnafu {
+            reason: format!(
+                "Recovery timestamp projection returned {} columns instead of one",
+                batch.num_columns()
+            ),
+        }
+        .fail();
+    }
+    let values = Helper::try_into_vector(batch.column(0).clone())
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    for index in 0..values.len() {
+        let timestamp = values.get(index).as_timestamp().context(UnexpectedSnafu {
+            reason: "Recovery timestamp projection returned a null or non-timestamp value"
+                .to_string(),
+        })?;
+        let (start, end) = time_window_expr.eval(timestamp)?;
+        let window = (
+            start.context(UnexpectedSnafu {
+                reason: "Recovery time-window expression returned no lower bound".to_string(),
+            })?,
+            end.context(UnexpectedSnafu {
+                reason: "Recovery time-window expression returned no upper bound".to_string(),
+            })?,
+        );
+        windows.insert(window);
+    }
+    Ok(())
 }
 
 fn format_insert_target_columns(plan: &LogicalPlan) -> String {
@@ -481,6 +539,377 @@ impl BatchingTask {
     pub fn query_context_snapshot(&self) -> QueryContextRef {
         let query_ctx = self.state.read().unwrap().query_ctx.clone();
         Arc::new(query_ctx.fork())
+    }
+
+    /// Returns the retention lower bound aligned to this task's time window.
+    pub fn recovery_retention_lower_bound(&self) -> Result<Option<Timestamp>, Error> {
+        let Some(expire_after) = self.config.expire_after else {
+            return Ok(None);
+        };
+        let expire_after = u64::try_from(expire_after).map_err(|_| {
+            UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} has negative expire_after {expire_after}",
+                    self.config.flow_id
+                ),
+            }
+            .build()
+        })?;
+        let now = Timestamp::new_second(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|err| {
+                    UnexpectedSnafu {
+                        reason: format!("Failed to read recovery wall clock: {err}"),
+                    }
+                    .build()
+                })?
+                .as_secs() as i64,
+        );
+        let lower = now
+            .sub_duration(Duration::from_secs(expire_after))
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        self.config
+            .time_window_expr
+            .as_ref()
+            .context(UnexpectedSnafu {
+                reason: "Recovery expiry requires a time-window expression".to_string(),
+            })?
+            .eval(lower)?
+            .0
+            .context(UnexpectedSnafu {
+                reason: "Recovery expiry time-window expression returned no lower bound"
+                    .to_string(),
+            })
+            .map(Some)
+    }
+
+    /// Verifies that recovery can still read all source data required by its retained scope.
+    pub async fn validate_recovery_retention(
+        &self,
+        retention_lower: Option<Timestamp>,
+        windows: &[(Timestamp, Timestamp)],
+    ) -> Result<(), Error> {
+        for name in &self.config.source_table_names {
+            let table = self
+                .config
+                .catalog_manager
+                .table(&name[0], &name[1], &name[2], None)
+                .await
+                .map_err(BoxedError::new)
+                .context(ExternalSnafu)?
+                .context(UnexpectedSnafu {
+                    reason: format!(
+                        "Flow {} source table {} is unavailable for recovery retention validation",
+                        self.config.flow_id,
+                        name.join(".")
+                    ),
+                })?;
+            let ttl = if let Some(ttl) = table.table_info().meta.options.ttl {
+                ttl
+            } else {
+                let manager = self
+                    .config
+                    .catalog_manager
+                    .as_any()
+                    .downcast_ref::<KvBackendCatalogManager>()
+                    .context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} cannot resolve inherited TTL for source table {} during recovery",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                manager
+                    .table_metadata_manager_ref()
+                    .schema_manager()
+                    .get(SchemaNameKey::new(&name[0], &name[1]))
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+                    .context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} schema {}.{} is unavailable for recovery retention validation",
+                            self.config.flow_id, name[0], name[1]
+                        ),
+                    })?
+                    .ttl
+                    .map(Into::into)
+                    .unwrap_or(TimeToLive::Forever)
+            };
+
+            match ttl {
+                TimeToLive::Forever => {}
+                TimeToLive::Instant => {
+                    return UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has instant TTL and cannot be recovered",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    }
+                    .fail();
+                }
+                TimeToLive::Duration(ttl) => {
+                    let expire_after = self.config.expire_after.context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has TTL {ttl:?}, but recovery has no expire_after",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                    let expire_after = u64::try_from(expire_after).map_err(|_| {
+                        UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} has negative expire_after {expire_after} during recovery retention validation",
+                                self.config.flow_id
+                            ),
+                        }
+                        .build()
+                    })?;
+                    if ttl <= Duration::from_secs(expire_after) {
+                        return UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} source table {} TTL {ttl:?} must exceed expire_after {expire_after}s for recovery",
+                                self.config.flow_id,
+                                name.join(".")
+                            ),
+                        }
+                        .fail();
+                    }
+                    let mut oldest = retention_lower.context(UnexpectedSnafu {
+                        reason: format!(
+                            "Flow {} source table {} has finite TTL {ttl:?}, but recovery has no retained lower bound",
+                            self.config.flow_id,
+                            name.join(".")
+                        ),
+                    })?;
+                    for (start, _) in windows {
+                        oldest = oldest.min(*start);
+                    }
+                    let cutoff = Timestamp::current_millis()
+                        .sub_duration(ttl)
+                        .map_err(BoxedError::new)
+                        .context(ExternalSnafu)?;
+                    if oldest <= cutoff {
+                        return UnexpectedSnafu {
+                            reason: format!(
+                                "Flow {} recovery requires source table {} data from {oldest:?}, older than TTL {ttl:?} cutoff {cutoff:?}",
+                                self.config.flow_id,
+                                name.join(".")
+                            ),
+                        }
+                        .fail();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Discovers the source time windows touched by the exact sequence range `(C, H]`.
+    ///
+    /// This compatibility wrapper captures the retention bound before discovery.
+    pub async fn capture_recovery_windows(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+        lower: &BTreeMap<u64, u64>,
+    ) -> Result<(BTreeMap<u64, u64>, Vec<(Timestamp, Timestamp)>), Error> {
+        let retention_lower = self.recovery_retention_lower_bound()?;
+        self.capture_recovery_windows_since(engine, frontend_client, lower, retention_lower)
+            .await
+    }
+
+    /// Discovers windows under `lower` using a caller-frozen retention bound.
+    ///
+    /// The caller owns the execution guard and freezes this bound with its recovery scope.
+    /// This read-only method leaves task state untouched. Terminal proof must cover every
+    /// region in `lower`; subset or pruned proofs are rejected.
+    pub async fn capture_recovery_windows_since(
+        &self,
+        engine: &QueryEngineRef,
+        frontend_client: &FrontendClient,
+        lower: &BTreeMap<u64, u64>,
+        retention_lower: Option<Timestamp>,
+    ) -> Result<(BTreeMap<u64, u64>, Vec<(Timestamp, Timestamp)>), Error> {
+        if lower.is_empty() {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} recovery window capture requires nonempty lower sequence bounds",
+                    self.config.flow_id
+                ),
+            }
+            .fail();
+        }
+        if !self.sequence_range_capable().await? {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} recovery window capture requires sequence_range-capable sources",
+                    self.config.flow_id
+                ),
+            }
+            .fail();
+        }
+
+        let query_ctx = self.query_context_snapshot();
+        let plan = sql_to_df_plan(query_ctx, engine.clone(), &self.config.query, false).await?;
+        let input = recovery_aggregate_input(&plan)?;
+        let Some(analysis) = analyze_incremental_aggregate_plan(&plan)? else {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} recovery window capture requires a supported aggregate input",
+                    self.config.flow_id
+                ),
+            }
+            .fail();
+        };
+        if !analysis.unsupported_exprs.is_empty() {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} recovery window capture has unsupported aggregate expressions: {:?}",
+                    self.config.flow_id, analysis.unsupported_exprs
+                ),
+            }
+            .fail();
+        }
+        let time_window_expr = self
+            .config
+            .time_window_expr
+            .as_ref()
+            .context(UnexpectedSnafu {
+                reason: format!(
+                    "Flow {} recovery window capture requires a time-window expression",
+                    self.config.flow_id
+                ),
+            })?;
+        let input = if let Some(retention_lower) = retention_lower {
+            let mut add_filter = AddFilterRewriter::new(
+                col(&time_window_expr.column_name).gt_eq(lit(to_df_literal(retention_lower)?)),
+            );
+            input
+                .rewrite(&mut add_filter)
+                .with_context(|_| DatafusionSnafu {
+                    context: "Failed to apply recovery expire_after filter".to_string(),
+                })?
+                .data
+        } else {
+            input
+        };
+        let timestamp_plan = LogicalPlan::Projection(
+            Projection::try_new(vec![col(&time_window_expr.column_name)], Arc::new(input))
+                .context(DatafusionSnafu {
+                    context: "Failed to project recovery source timestamps".to_string(),
+                })?,
+        );
+        let catalog = &self.config.sink_table_name[0];
+        let schema = &self.config.sink_table_name[1];
+        let timestamp_plan = timestamp_plan
+            .clone()
+            .transform_down_with_subqueries(|p| {
+                if let LogicalPlan::TableScan(mut table_scan) = p {
+                    let resolved = table_scan.table_name.resolve(catalog, schema);
+                    table_scan.table_name = resolved.into();
+                    Ok(Transformed::yes(LogicalPlan::TableScan(table_scan)))
+                } else {
+                    Ok(Transformed::no(p))
+                }
+            })
+            .with_context(|_| DatafusionSnafu {
+                context: format!(
+                    "Failed to fix table ref in recovery timestamp plan, plan={:?}",
+                    timestamp_plan
+                ),
+            })?
+            .data;
+        let message = DFLogicalSubstraitConvertor {}
+            .encode(&timestamp_plan, DefaultSerializer)
+            .context(SubstraitEncodeLogicalPlanSnafu)?;
+        let request = api::v1::QueryRequest {
+            query: Some(api::v1::query_request::Query::LogicalPlan(message.to_vec())),
+        };
+        let lower_json = serde_json::to_string(lower).map_err(|err| {
+            UnexpectedSnafu {
+                reason: format!("Failed to serialize recovery lower sequence bounds: {err}"),
+            }
+            .build()
+        })?;
+        let extensions = [
+            (FLOW_RETURN_REGION_SEQ, "true"),
+            (FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_SEQUENCE_RANGE),
+            (FLOW_INCREMENTAL_AFTER_SEQS, lower_json.as_str()),
+        ];
+        let mut peer_desc = None;
+        let result = frontend_client
+            .query_with_terminal_metrics(
+                catalog,
+                schema,
+                request,
+                &extensions,
+                &HashMap::new(),
+                &mut peer_desc,
+            )
+            .await?;
+        let mut aligned_windows = BTreeSet::new();
+        let metrics = result.metrics.clone();
+        match result.output.data {
+            OutputData::AffectedRows(_) => {
+                return UnexpectedSnafu {
+                    reason: "Recovery timestamp projection unexpectedly returned affected rows"
+                        .to_string(),
+                }
+                .fail();
+            }
+            OutputData::RecordBatches(batches) => {
+                for batch in batches.iter() {
+                    capture_recovery_batch_windows(batch, time_window_expr, &mut aligned_windows)?;
+                }
+            }
+            OutputData::Stream(mut stream) => {
+                while let Some(batch) = stream
+                    .try_next()
+                    .await
+                    .map_err(BoxedError::new)
+                    .context(ExternalSnafu)?
+                {
+                    capture_recovery_batch_windows(&batch, time_window_expr, &mut aligned_windows)?;
+                }
+            }
+        }
+        if !metrics.is_ready() {
+            return UnexpectedSnafu {
+                reason: "Recovery timestamp projection ended without terminal metrics".to_string(),
+            }
+            .fail();
+        }
+        let participating = metrics.participating_regions().context(UnexpectedSnafu {
+            reason: "Recovery timestamp projection has no participating-region proof".to_string(),
+        })?;
+        let high = metrics.region_watermark_map().context(UnexpectedSnafu {
+            reason: "Recovery timestamp projection has no terminal watermark proof".to_string(),
+        })?;
+        if participating.len() != lower.len()
+            || high.len() != lower.len()
+            || participating
+                .iter()
+                .any(|region| !lower.contains_key(region))
+            || lower
+                .iter()
+                .any(|(region, low)| high.get(region).is_none_or(|watermark| watermark < low))
+            || high.keys().any(|region| !participating.contains(region))
+        {
+            return UnexpectedSnafu {
+                reason: format!(
+                    "Recovery timestamp projection returned incomplete or regressing terminal proof: lower={lower:?}, participating={participating:?}, high={high:?}"
+                ),
+            }
+            .fail();
+        }
+        Ok((
+            high.into_iter().collect(),
+            aligned_windows.into_iter().collect(),
+        ))
     }
 
     /// Validates that the sink table schema can accept this flow's ordinary output.

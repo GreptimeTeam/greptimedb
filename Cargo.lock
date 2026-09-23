@@ -5468,6 +5468,7 @@ dependencies = [
  "operator",
  "pretty_assertions",
  "prometheus 0.14.0",
+ "prost 0.14.1",
  "query",
  "rand 0.9.4",
  "serde",
