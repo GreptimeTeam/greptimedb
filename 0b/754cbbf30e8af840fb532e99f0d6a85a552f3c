@@ -1,0 +1,23 @@
+.github/workflows/rust.yml
+  s_f574cafbc4d180::t_ca0f1f79e21ebf 160,162,190,195-200
+src/mito2/src/cache/write_cache.rs
+  s_f574cafbc4d180::t_008f7cd68ce6ae 793-794
+src/query/src/promql/label_values.rs
+  s_f574cafbc4d180::t_ed9c8febac1f57 40-48,142-152
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "0b754cbbf30e8af840fb532e99f0d6a85a552f3c",
+  "prompts": {},
+  "sessions": {
+    "s_f574cafbc4d180": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0cc44-d9e4-7a01-a152-a4ace6fd6fd4",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
