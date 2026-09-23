@@ -925,6 +925,34 @@ async fn test_find_group_by_exprs() {
 }
 
 #[tokio::test]
+async fn test_find_group_by_exprs_does_not_replace_group_key_with_derived_expr() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT host, lower(host) AS host_lc, ts, SUM(val) AS total \
+        FROM (SELECT CAST(number AS STRING) AS host, ts, number AS val FROM numbers_with_ts) \
+        GROUP BY host, ts";
+
+    for optimize in [false, true] {
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, optimize)
+            .await
+            .unwrap();
+        let plan_display = plan.display_indent_schema().to_string();
+        let mut group_finder = FindGroupByFinalName::default();
+        plan.visit(&mut group_finder).unwrap();
+        let group_names = group_finder.get_group_expr_names().unwrap_or_default();
+
+        assert!(
+            group_names.contains("host"),
+            "optimize={optimize}, group keys {group_names:?} must keep host:\n{plan_display}"
+        );
+        assert!(
+            !group_names.contains("host_lc"),
+            "optimize={optimize}, derived host_lc must not replace host:\n{plan_display}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_analyze_incremental_aggregate_plan() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
