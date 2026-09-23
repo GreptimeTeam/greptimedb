@@ -1,0 +1,70 @@
+# Temporary workflow for a same-repository branch, not part of the fix PR.
+name: CI command reply permission smoke test
+on:
+  push:
+    branches: [ci-command-permission-smoke]
+permissions: {}
+env:
+  TEST_PR: '9323'
+jobs:
+  read-permission:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+      pull-requests: read
+    steps:
+      - name: Check comment authorization twice
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_STATUS: '403'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            body="CI reply permission smoke test (${GITHUB_RUN_ID}, attempt ${attempt})."
+            jq -n --arg body "$body" '{body: $body}' > request.json
+            status=$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/json' \
+              --data-binary @request.json \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${TEST_PR}/comments")
+            echo "attempt=${attempt} expected=${EXPECTED_STATUS} actual=${status}"
+            jq '{id, html_url, message}' response.json
+            [[ "$status" == "$EXPECTED_STATUS" ]]
+          done
+  write-permission:
+    needs: read-permission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Check comment authorization twice
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_STATUS: '201'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2; do
+            body="CI reply permission smoke test (${GITHUB_RUN_ID}, attempt ${attempt})."
+            jq -n --arg body "$body" '{body: $body}' > request.json
+            status=$(curl --silent --show-error --output response.json --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'Content-Type: application/json' \
+              --data-binary @request.json \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/issues/${TEST_PR}/comments")
+            echo "attempt=${attempt} expected=${EXPECTED_STATUS} actual=${status}"
+            jq '{id, html_url, message}' response.json
+            [[ "$status" == "$EXPECTED_STATUS" ]]
+          done
