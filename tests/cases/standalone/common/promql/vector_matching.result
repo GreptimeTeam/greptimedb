@@ -201,3 +201,52 @@ DROP TABLE collide_right;
 
 Affected Rows: 0
 
+-- Partitioning on a column outside the match keys puts one match group in several regions. The
+-- cardinality check counts the merged data, so it must still see the duplicate.
+CREATE TABLE spread_left (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, device)
+)
+PARTITION ON COLUMNS (device) (
+  device < 'eth1',
+  device >= 'eth1'
+);
+
+Affected Rows: 0
+
+CREATE TABLE spread_right (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+Affected Rows: 0
+
+INSERT INTO spread_left VALUES ('host1', 'eth0', 0, 10), ('host1', 'eth1', 0, 20);
+
+Affected Rows: 2
+
+INSERT INTO spread_right VALUES ('host1', 0, 2);
+
+Affected Rows: 1
+
+TQL EVAL (0, 0, '5s') spread_left / on(host) spread_right;
+
+Error: 3001(EngineExecuteQuery), Execution error: multiple matches for labels {host="host1"}: many-to-one matching must be explicit (group_left/group_right)
+
+TQL EVAL (0, 0, '5s') spread_right / on(host) group_left spread_left;
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="host1"} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+DROP TABLE spread_left;
+
+Affected Rows: 0
+
+DROP TABLE spread_right;
+
+Affected Rows: 0
+

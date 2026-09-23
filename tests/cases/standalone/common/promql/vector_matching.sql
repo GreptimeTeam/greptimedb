@@ -98,3 +98,36 @@ TQL EVAL (0, 0, '5s') collide_left / on(host) collide_right;
 DROP TABLE collide_left;
 
 DROP TABLE collide_right;
+
+-- Partitioning on a column outside the match keys puts one match group in several regions. The
+-- cardinality check counts the merged data, so it must still see the duplicate.
+CREATE TABLE spread_left (
+  host STRING NULL,
+  device STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host, device)
+)
+PARTITION ON COLUMNS (device) (
+  device < 'eth1',
+  device >= 'eth1'
+);
+
+CREATE TABLE spread_right (
+  host STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY(host)
+);
+
+INSERT INTO spread_left VALUES ('host1', 'eth0', 0, 10), ('host1', 'eth1', 0, 20);
+
+INSERT INTO spread_right VALUES ('host1', 0, 2);
+
+TQL EVAL (0, 0, '5s') spread_left / on(host) spread_right;
+
+TQL EVAL (0, 0, '5s') spread_right / on(host) group_left spread_left;
+
+DROP TABLE spread_left;
+
+DROP TABLE spread_right;
