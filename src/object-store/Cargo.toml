@@ -10,7 +10,7 @@ workspace = true
 [features]
 mysql-object-store = ["opendal/services-mysql"]
 services-memory = ["opendal/services-memory"]
-testing = ["derive_builder"]
+testing = ["derive_builder", "uuid"]
 
 [dependencies]
 bytes.workspace = true
@@ -38,7 +38,7 @@ reqwest.workspace = true
 serde.workspace = true
 snafu.workspace = true
 tokio.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = "1.0"
@@ -46,6 +46,7 @@ common-telemetry.workspace = true
 common-test-util.workspace = true
 datafusion_object_store.workspace = true
 futures.workspace = true
+object-store = { workspace = true, features = ["testing"] }
 object_store_opendal.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
