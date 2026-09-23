@@ -49,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -146,7 +146,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -204,7 +204,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -289,7 +289,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
           fetch-depth: 0
       - name: Record tested source and runner identity
         shell: bash
@@ -315,7 +315,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
           fetch-depth: 0
       - name: Record tested source and runner identity
         shell: bash
@@ -362,7 +362,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -501,7 +501,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -571,7 +571,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -640,7 +640,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -754,7 +754,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
@@ -996,7 +996,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-          ref: 0c63fb8677ac82dd078124251cb1c20b7544ba04
+          ref: fac310a6c36b9744783d16e257deeee62864ebf1
       - name: Record tested source and runner identity
         shell: bash
         run: |
