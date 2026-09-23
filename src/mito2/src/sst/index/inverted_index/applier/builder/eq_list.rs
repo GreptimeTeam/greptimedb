@@ -18,6 +18,7 @@ use datafusion_expr::{BinaryExpr, Expr as DfExpr, Operator};
 use datatypes::data_type::ConcreteDataType;
 use index::Bytes;
 use index::inverted_index::search::predicate::{InListPredicate, Predicate};
+use index::target::IndexTarget;
 
 use crate::error::Result;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
@@ -25,20 +26,20 @@ use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBui
 impl InvertedIndexApplierBuilder<'_> {
     /// Collects an eq expression in the form of `column = lit`.
     pub(crate) fn collect_eq(&mut self, left: &DfExpr, right: &DfExpr) -> Result<()> {
-        let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
+        let Some((target, data_type)) = self
+            .expr_to_index_target(left)?
+            .or(self.expr_to_index_target(right)?)
+        else {
             return Ok(());
         };
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
         let predicate = Predicate::InList(InListPredicate {
             list: BTreeSet::from_iter([Self::encode_lit(lit, data_type)?]),
         });
-        self.add_predicate(column_id, predicate);
+        self.add_predicate(target, predicate);
         Ok(())
     }
 
@@ -53,22 +54,22 @@ impl InvertedIndexApplierBuilder<'_> {
             return Ok(());
         };
 
-        let Some(column_name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
+        let Some((target, data_type)) = self
+            .expr_to_index_target(left)?
+            .or(self.expr_to_index_target(right)?)
+        else {
             return Ok(());
         };
         let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
             return Ok(());
         };
 
         let bytes = Self::encode_lit(lit, data_type.clone())?;
         let mut inlist = BTreeSet::from_iter([bytes]);
 
-        if Self::collect_eq_list_inner(column_name, &data_type, or_list, &mut inlist)? {
+        if self.collect_eq_list_inner(&target, &data_type, or_list, &mut inlist)? {
             let predicate = Predicate::InList(InListPredicate { list: inlist });
-            self.add_predicate(column_id, predicate);
+            self.add_predicate(target, predicate);
         }
 
         Ok(())
@@ -79,7 +80,8 @@ impl InvertedIndexApplierBuilder<'_> {
     /// Returns false if the expression doesn't match the form then
     /// caller can safely ignore the expression.
     fn collect_eq_list_inner(
-        column_name: &str,
+        &self,
+        target: &IndexTarget,
         data_type: &ConcreteDataType,
         expr: &DfExpr,
         inlist: &mut BTreeSet<Bytes>,
@@ -94,18 +96,22 @@ impl InvertedIndexApplierBuilder<'_> {
         };
 
         if op == &Operator::Or {
-            let r = Self::collect_eq_list_inner(column_name, data_type, left, inlist)?
-                .then(|| Self::collect_eq_list_inner(column_name, data_type, right, inlist))
+            let r = self
+                .collect_eq_list_inner(target, data_type, left, inlist)?
+                .then(|| self.collect_eq_list_inner(target, data_type, right, inlist))
                 .transpose()?
                 .unwrap_or(false);
             return Ok(r);
         }
 
         if op == &Operator::Eq {
-            let Some(name) = Self::column_name(left).or_else(|| Self::column_name(right)) else {
+            let Some((candidate, _)) = self
+                .expr_to_index_target(left)?
+                .or(self.expr_to_index_target(right)?)
+            else {
                 return Ok(false);
             };
-            if column_name != name {
+            if target != &candidate {
                 return Ok(false);
             }
             let Some(lit) = Self::nonnull_lit(right).or_else(|| Self::nonnull_lit(left)) else {
@@ -154,7 +160,10 @@ mod tests {
             .collect_eq(&string_lit("bar"), &tag_column())
             .unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 2);
         assert_eq!(
             predicates[0],
@@ -188,7 +197,10 @@ mod tests {
             .collect_eq(&field_column(), &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(3))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -279,7 +291,10 @@ mod tests {
 
         builder.collect_or_eq_list(&eq_expr, &or_eq_list).unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

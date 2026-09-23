@@ -74,9 +74,7 @@ fn json_settings_from_proto(settings: api::v1::JsonSettings) -> Result<JsonSetti
             Ok(JsonTypeHint {
                 path: hint.path,
                 data_type,
-                // Index configuration is not supported yet, so this is temporarily
-                // hardcoded to false.
-                inverted_index: false,
+                inverted_index: hint.inverted_index,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -419,6 +417,23 @@ mod tests {
     use table::requests::REPARTITION_COLUMN_HINT_KEY;
 
     use super::*;
+
+    #[test]
+    fn test_json_settings_preserve_inverted_index() {
+        for enabled in [false, true] {
+            let settings = json_settings_from_proto(api::v1::JsonSettings {
+                type_hints: vec![api::v1::JsonTypeHint {
+                    path: vec!["service".into()],
+                    data_type: ColumnDataType::String as i32,
+                    inverted_index: enabled,
+                    ..Default::default()
+                }],
+                max_auto_expanded_paths: Some(0),
+            })
+            .unwrap();
+            assert_eq!(enabled, settings.type_hints()[0].inverted_index);
+        }
+    }
 
     #[test]
     fn test_alter_expr_to_request() {

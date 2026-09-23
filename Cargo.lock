@@ -6079,7 +6079,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=9533078d6fd4bdaddbca0750cb9bf7ad64b2e568#9533078d6fd4bdaddbca0750cb9bf7ad64b2e568"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=dcd5e4f32c30eb0545cbb808c64836736c5024b3#dcd5e4f32c30eb0545cbb808c64836736c5024b3"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -6940,6 +6940,7 @@ dependencies = [
  "ahash 0.8.12",
  "async-trait",
  "asynchronous-codec",
+ "base64 0.22.1",
  "bytemuck",
  "bytes",
  "common-base",
@@ -6949,6 +6950,7 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "criterion 0.7.0",
+ "datatypes",
  "fastbloom",
  "fst",
  "futures",

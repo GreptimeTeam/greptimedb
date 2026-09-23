@@ -49,6 +49,8 @@ const TARGET_TYPE_UNKNOWN: &str = "unknown";
 
 const TARGET_TYPE_COLUMN: &str = "column";
 
+const TARGET_TYPE_JSON_PATH: &str = "json_path";
+
 pub(crate) struct IndexEntryContext<'a> {
     pub(crate) table_dir: &'a str,
     pub(crate) index_file_path: &'a str,
@@ -368,6 +370,11 @@ fn decode_target_info(target_key: &str) -> (String, String) {
         Ok(IndexTarget::ColumnId(id)) => (
             TARGET_TYPE_COLUMN.to_string(),
             json!({ "column": id }).to_string(),
+        ),
+        Ok(IndexTarget::JsonPath(target)) => (
+            TARGET_TYPE_JSON_PATH.to_string(),
+            json!({ "json_path": { "column": target.column_id(), "path": target.path(), "data_type": target.data_type() } })
+                .to_string(),
         ),
         _ => (
             TARGET_TYPE_UNKNOWN.to_string(),

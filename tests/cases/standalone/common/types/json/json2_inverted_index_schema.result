@@ -1,0 +1,268 @@
+-- Enabling a hint index must keep rows from SSTs with only an ordinary index.
+CREATE TABLE json2_index_evolution (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (max_auto_expanded_paths = 0, value BIGINT),
+    ordinary STRING INVERTED INDEX
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat', 'index.inverted_index.segment_row_count' = '1');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_evolution VALUES (1, '{"value":42}', 'a');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_evolution');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_evolution') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+ALTER TABLE json2_index_evolution MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0, value BIGINT INVERTED INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_index_evolution;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| json2_index_evolution | CREATE TABLE IF NOT EXISTS "json2_index_evolution" ( |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                       |   "attrs" JSON2(                                     |
+|                       |     max_auto_expanded_paths = 0,                     |
+|                       |     "value" BIGINT INVERTED INDEX                    |
+|                       |   ) NULL,                                            |
+|                       |   "ordinary" STRING NULL INVERTED INDEX,             |
+|                       |   TIME INDEX ("ts")                                  |
+|                       | )                                                    |
+|                       |                                                      |
+|                       | ENGINE=mito                                          |
+|                       | WITH(                                                |
+|                       |   append_mode = 'true',                              |
+|                       |   'index.inverted_index.segment_row_count' = '1',    |
+|                       |   sst_format = 'flat'                                |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+INSERT INTO json2_index_evolution VALUES (2, '{"value":42}', 'b');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_evolution');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_evolution') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
++-------------------------+
+
+-- Changing the hint type must not use old indexes with a different value encoding.
+ALTER TABLE json2_index_evolution MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0, value DOUBLE INVERTED INDEX);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_index_evolution;
+
++-----------------------+------------------------------------------------------+
+| Table                 | Create Table                                         |
++-----------------------+------------------------------------------------------+
+| json2_index_evolution | CREATE TABLE IF NOT EXISTS "json2_index_evolution" ( |
+|                       |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                       |   "attrs" JSON2(                                     |
+|                       |     max_auto_expanded_paths = 0,                     |
+|                       |     "value" DOUBLE INVERTED INDEX                    |
+|                       |   ) NULL,                                            |
+|                       |   "ordinary" STRING NULL INVERTED INDEX,             |
+|                       |   TIME INDEX ("ts")                                  |
+|                       | )                                                    |
+|                       |                                                      |
+|                       | ENGINE=mito                                          |
+|                       | WITH(                                                |
+|                       |   append_mode = 'true',                              |
+|                       |   'index.inverted_index.segment_row_count' = '1',    |
+|                       |   sst_format = 'flat'                                |
+|                       | )                                                    |
++-----------------------+------------------------------------------------------+
+
+INSERT INTO json2_index_evolution VALUES (3, '{"value":42.5}', 'c');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_evolution');
+
++--------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_evolution') |
++--------------------------------------------+
+| 0                                          |
++--------------------------------------------+
+
+SELECT target_type, target_json, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_evolution')
+GROUP BY target_type, target_json ORDER BY target_type, target_json;
+
++-------------+------------------------------------------------------------------------+-------------+
+| target_type | target_json                                                            | index_count |
++-------------+------------------------------------------------------------------------+-------------+
+| column      | {"column":2}                                                           | 3           |
+| json_path   | {"json_path":{"column":1,"data_type":{"Float64":{}},"path":["value"]}} | 1           |
+| json_path   | {"json_path":{"column":1,"data_type":{"Int64":{}},"path":["value"]}}   | 1           |
++-------------+------------------------------------------------------------------------+-------------+
+
+SELECT ts FROM json2_index_evolution WHERE json_get(attrs, '$.value', NULL::DOUBLE) >= 42.0 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.002 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+DROP TABLE json2_index_evolution;
+
+Affected Rows: 0
+
+-- Removing a hint preserves old JSON values and leaves its old index unused.
+CREATE TABLE json2_index_schema (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (max_auto_expanded_paths = 0, value BIGINT INVERTED INDEX),
+    ordinary STRING INVERTED INDEX
+) WITH ('append_mode' = 'true', 'sst_format' = 'flat', 'index.inverted_index.segment_row_count' = '1');
+
+Affected Rows: 0
+
+INSERT INTO json2_index_schema VALUES (1, '{"value":42}', 'a'), (2, '{"value":7}', 'b');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json2_index_schema');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_schema') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
++-------------------------+
+
+ALTER TABLE json2_index_schema MODIFY COLUMN attrs JSON2 (max_auto_expanded_paths = 0);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_index_schema;
+
++--------------------+---------------------------------------------------+
+| Table              | Create Table                                      |
++--------------------+---------------------------------------------------+
+| json2_index_schema | CREATE TABLE IF NOT EXISTS "json2_index_schema" ( |
+|                    |   "ts" TIMESTAMP(3) NOT NULL,                     |
+|                    |   "attrs" JSON2(                                  |
+|                    |     max_auto_expanded_paths = 0                   |
+|                    |   ) NULL,                                         |
+|                    |   "ordinary" STRING NULL INVERTED INDEX,          |
+|                    |   TIME INDEX ("ts")                               |
+|                    | )                                                 |
+|                    |                                                   |
+|                    | ENGINE=mito                                       |
+|                    | WITH(                                             |
+|                    |   append_mode = 'true',                           |
+|                    |   'index.inverted_index.segment_row_count' = '1', |
+|                    |   sst_format = 'flat'                             |
+|                    | )                                                 |
++--------------------+---------------------------------------------------+
+
+SELECT target_type, COUNT(*) AS index_count
+FROM information_schema.ssts_index_meta
+WHERE table_id = (SELECT table_id FROM information_schema.tables WHERE table_name = 'json2_index_schema')
+GROUP BY target_type ORDER BY target_type;
+
++-------------+-------------+
+| target_type | index_count |
++-------------+-------------+
+| column      | 1           |
+| json_path   | 1           |
++-------------+-------------+
+
+INSERT INTO json2_index_schema VALUES (3, '{"value":42}', 'c');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_index_schema');
+
++-----------------------------------------+
+| ADMIN FLUSH_TABLE('json2_index_schema') |
++-----------------------------------------+
+| 0                                       |
++-----------------------------------------+
+
+SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) = 42 ORDER BY ts;
+
++-------------------------+
+| ts                      |
++-------------------------+
+| 1970-01-01T00:00:00.001 |
+| 1970-01-01T00:00:00.003 |
++-------------------------+
+
+-- SQLNESS REPLACE "metrics_per_partition":.*("rows_inverted_filtered":\d+).*metrics= "metrics_per_partition":{$1} metrics=
+-- SQLNESS REPLACE "metrics_per_partition":\s*\[.*metrics= "metrics_per_partition":REDACTED metrics=
+-- SQLNESS REPLACE (metrics=\{.*\}) metrics=REDACTED
+-- SQLNESS REPLACE (metrics=\[[^\]]*\]) metrics=REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+-- SQLNESS REPLACE "(file_id|time_range_start|time_range_end)":"[^"]+" "$1":"REDACTED"
+-- SQLNESS REPLACE ("[a-z_]+":"[0-9\.]+(ns|us|µs|ms|s)") "DURATION": REDACTED
+-- SQLNESS REPLACE "(size|flat_format)":\s*(\d+|true|false) "$1":REDACTED
+-- SQLNESS REPLACE ,\s*filter=.*?metrics=  metrics=
+-- SQLNESS REPLACE Total\s+rows:\s+\d+ Total rows: REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE ,\s"dyn_filters":\s\[.* REDACTED
+-- SQLNESS REPLACE "index_size":\d+ "index_size":REDACTED
+-- SQLNESS REPLACE "files":\s*\[.*\],\s*"flat_format" "files":REDACTED,"flat_format"
+EXPLAIN ANALYZE VERBOSE SELECT ts FROM json2_index_schema WHERE json_get(attrs, '$.value', NULL::BIGINT) > 600;
+
++-+-+-+
+| stage | node | plan_|
++-+-+-+
+| 0_| 0_|_CooperativeExec metrics=REDACTED_|
+|_|_|_MergeScanExec: REDACTED
+|_|_|_|
+| 1_| 0_|_FilterExec: json_get(attrs@1, $.value, NULL) > 600, projection=[ts@0] metrics=REDACTED_|
+|_|_|_CooperativeExec metrics=REDACTED_|
+|_|_|_UnorderedScan: region=REDACTED, {"partition_count":{"count":2, "mem_ranges":0, "files":2, "file_ranges":2}, "projection": ["ts", "attrs"], "filters": ["json_get(attrs, Utf8(\"$.value\"), Int64(NULL)) > Int64(600)"], "files":REDACTED,"flat_format":REDACTED, "metrics_per_partition":REDACTED metrics=REDACTED |
+|_|_|_|
+|_|_| Total rows: REDACTED_|
++-+-+-+
+
+DROP TABLE json2_index_schema;
+
+Affected Rows: 0
+

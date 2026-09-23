@@ -32,9 +32,12 @@ use std::collections::{HashMap, HashSet};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 
+use arrow_schema::extension::ExtensionType;
 use bloom_filter::creator::BloomFilterIndexer;
 use common_telemetry::{debug, error, info, warn};
 use datatypes::arrow::record_batch::RecordBatch;
+use datatypes::extension::json::Json2ExtensionType;
+use index::target::IndexTarget;
 use mito_codec::row_converter::DensePrimaryKeyCodec;
 use object_store::ObjectStore;
 use puffin_manager::SstPuffinManager;
@@ -284,7 +287,7 @@ impl Indexer {
         let requested: HashSet<_> = self
             .inverted_indexer
             .iter()
-            .flat_map(|indexer| indexer.column_ids())
+            .flat_map(|indexer| indexer.indexed_column_ids())
             .chain(
                 self.bloom_filter_indexer
                     .iter()
@@ -448,7 +451,13 @@ impl IndexerBuilderImpl {
         let indexed_column_ids = self.metadata.inverted_indexed_column_ids(
             self.index_options.inverted_index.ignore_column_ids.iter(),
         );
-        if indexed_column_ids.is_empty() {
+        let mut index_targets: Vec<_> = indexed_column_ids
+            .into_iter()
+            .map(IndexTarget::ColumnId)
+            .collect();
+        index_targets.extend(self.collect_json_inverted_index_targets());
+
+        if index_targets.is_empty() {
             debug!(
                 "No columns to be indexed, skip creating inverted index, region_id: {}, file_id: {}",
                 self.metadata.region_id, file_id,
@@ -479,10 +488,56 @@ impl IndexerBuilderImpl {
             self.intermediate_manager.clone(),
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
-            indexed_column_ids,
+            index_targets,
         );
 
         Some(indexer)
+    }
+
+    /// Collects inverted index targets for JSON type hints with indexing enabled.
+    ///
+    /// Only flush and compaction builds collect these targets; manual and schema-change
+    /// rebuilds return no JSON targets.
+    fn collect_json_inverted_index_targets(&self) -> Vec<IndexTarget> {
+        if !matches!(
+            self.build_type,
+            IndexBuildType::Flush | IndexBuildType::Compact
+        ) {
+            return Vec::new();
+        }
+
+        let mut index_targets = Vec::new();
+        for col in &self.metadata.column_metadatas {
+            if !col.column_schema.data_type.is_json2() {
+                continue;
+            }
+            let Ok(Some(extension)) = col.column_schema.extension_type::<Json2ExtensionType>()
+            else {
+                continue;
+            };
+            for hint in extension.metadata().json_settings().type_hints() {
+                if !hint.inverted_index {
+                    continue;
+                }
+                // JSON hints may also describe containers through non-SQL ingestion.
+                if !(hint.data_type.is_numeric()
+                    || hint.data_type.is_boolean()
+                    || hint.data_type.is_string())
+                {
+                    continue;
+                }
+                match IndexTarget::new_json_path(
+                    col.column_id,
+                    hint.path.clone(),
+                    hint.data_type.clone(),
+                ) {
+                    Ok(target) => index_targets.push(target),
+                    Err(err) => warn!(err; "Skipping invalid JSON inverted index target"),
+                }
+            }
+        }
+
+        index_targets
     }
 
     async fn build_fulltext_indexer(&self, file_id: FileId) -> Option<FulltextIndexer> {

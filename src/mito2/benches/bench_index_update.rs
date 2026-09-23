@@ -33,6 +33,7 @@ use datatypes::arrow::datatypes::UInt32Type;
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SkippingIndexOptions};
+use index::target::IndexTarget;
 use mito_codec::row_converter::SparsePrimaryKeyCodec;
 use mito2::sst::index::intermediate::IntermediateManager;
 use mito2::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
@@ -240,7 +241,11 @@ fn bench_index_update(c: &mut Criterion) {
                                 intermediate.clone(),
                                 None,
                                 NonZeroUsize::new(SEGMENT_ROWS).unwrap(),
-                                inverted_columns.clone(),
+                                inverted_columns
+                                    .iter()
+                                    .copied()
+                                    .map(IndexTarget::ColumnId)
+                                    .collect(),
                             )
                         });
                         let mut bloom = if shape.bloom {
