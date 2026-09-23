@@ -350,9 +350,26 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Incomplete multipart WAL entry of region {}", region_id))]
+    IncompleteWalEntry {
+        region_id: RegionId,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("WAL object sequence is exhausted, last sequence: {}", last_object_seq))]
     WalObjectSequenceExhausted {
         last_object_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "WAL object sequence {} is not settled: its entries are being written or the outcome of its create is unknown",
+        object_seq
+    ))]
+    WalObjectSequenceUnsettled {
+        object_seq: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -370,6 +387,18 @@ pub enum Error {
     #[snafu(display("WAL object already exists with different content, path: {}", path))]
     WalObjectConflict {
         path: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "WAL object {} was not created while the later object {} is durable",
+        object_seq,
+        later_object_seq
+    ))]
+    WalObjectHistoryGap {
+        object_seq: u64,
+        later_object_seq: u64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -405,16 +434,15 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Object store WAL operation failed"))]
-    ObjectStoreWal {
-        source: Arc<Error>,
+    #[snafu(display("Object store WAL log store is stopped"))]
+    ObjectStoreWalStopped {
         #[snafu(implicit)]
         location: Location,
     },
 
-    /// Appending to the object store WAL is unsupported.
-    #[snafu(display("Object store WAL operation is not supported"))]
-    UnsupportedObjectStoreWalOperation {
+    #[snafu(display("Object store WAL operation failed"))]
+    ObjectStoreWal {
+        source: Arc<Error>,
         #[snafu(implicit)]
         location: Location,
     },
@@ -452,6 +480,7 @@ impl ErrorExt for Error {
             | InvalidWalObjectStore { .. }
             | MismatchedWalPrefix { .. }
             | MismatchedWalRegion { .. }
+            | IncompleteWalEntry { .. }
             | InvalidWalEntryRange { .. } => StatusCode::InvalidArguments,
             StartWalTask { .. }
             | StopWalTask { .. }
@@ -465,14 +494,16 @@ impl ErrorExt for Error {
             | OrderedBatchProducerStopped { .. }
             | WaitProduceResultReceiver { .. }
             | WaitDumpIndex { .. }
-            | MetaLengthExceededLimit { .. } => StatusCode::Internal,
+            | MetaLengthExceededLimit { .. }
+            | ObjectStoreWalStopped { .. } => StatusCode::Internal,
 
             CorruptedWalObject { .. }
             | WalObjectConflict { .. }
+            | WalObjectHistoryGap { .. }
             | WalObjectSequenceExhausted { .. }
             | WalEntryPositionExhausted { .. } => StatusCode::Unexpected,
+            WalObjectSequenceUnsettled { .. } => StatusCode::IllegalState,
 
-            UnsupportedObjectStoreWalOperation { .. } => StatusCode::Unsupported,
             InvalidWalObject { source, .. } => source.status_code(),
             ObjectStoreWal { source, .. } => source.status_code(),
 
@@ -513,7 +544,10 @@ impl ErrorExt for Error {
             | WalObjectStore { error, .. } => retry_hint_from_opendal_error(error),
             ObjectStoreWal { source, .. } => source.retry_hint(),
             Io { error, .. } => retry_hint_from_io_error(error),
-            FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => RetryHint::Retryable,
+            FetchEntry { .. }
+            | RaftEngine { .. }
+            | AddEntryLogBatch { .. }
+            | WalObjectSequenceUnsettled { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)
