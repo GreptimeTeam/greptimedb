@@ -97,7 +97,6 @@ hex.workspace = true
 http.workspace = true
 itertools.workspace = true
 jsonb.workspace = true
-meta-srv = { workspace = true, features = ["mock"] }
 mito2 = { workspace = true, features = ["test", "test-shared-fs-region-migration"] }
 mysql_async = { version = "0.37", default-features = false, features = [
     "time",
