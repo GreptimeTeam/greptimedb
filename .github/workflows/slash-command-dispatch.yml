@@ -36,3 +36,11 @@ jobs:
               {"command": "query-regression", "permission": "admin", "issue_type": "pull-request"},
               {"command": "ci", "permission": "none", "issue_type": "pull-request"}
             ]
+      - name: Report CI dispatch failure
+        if: ${{ failure() && (github.event.comment.body == '/ci' || startsWith(github.event.comment.body, '/ci ')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f "body=CI command dispatch failed. See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} for details."

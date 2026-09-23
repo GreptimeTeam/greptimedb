@@ -31,13 +31,22 @@ jobs:
           DISPATCH_HEAD_SHA: ${{ github.event.client_payload.pull_request.head.sha }}
         run: python3 .github/scripts/ci-slash.py
       - name: Dispatch selected CI workflow
+        id: dispatch
         if: ${{ steps.admit.outputs.skip == 'false' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          RUN_IDS: ${{ steps.admit.outputs.run_ids }}
           WORKFLOWS: ${{ steps.admit.outputs.workflow }}
           HEAD_REF: ${{ steps.admit.outputs.head_ref }}
           FUZZ_PROFILE: ${{ steps.admit.outputs.fuzz_profile }}
         run: |
+          if [[ -n "${RUN_IDS}" ]]; then
+            IFS=, read -ra runs <<<"${RUN_IDS}"
+            for run in "${runs[@]}"; do
+              gh api --method POST "/repos/${GITHUB_REPOSITORY}/actions/runs/${run}/rerun"
+            done
+            exit 0
+          fi
           IFS=, read -ra workflows <<<"${WORKFLOWS}"
           for workflow in "${workflows[@]}"; do
             inputs=(-F 'inputs[ci_command]=true')
@@ -48,12 +57,19 @@ jobs:
               -f ref="${HEAD_REF}" "${inputs[@]}"
           done
       - name: Reply with command result
-        if: ${{ steps.admit.outputs.reply != '' && steps.admit.outputs.pr_number != '' }}
+        if: ${{ !cancelled() && github.event.sender.login == 'github-actions[bot]' }}
         env:
           GH_TOKEN: ${{ github.token }}
           REPLY: ${{ steps.admit.outputs.reply }}
-          PR_NUMBER: ${{ steps.admit.outputs.pr_number }}
+          PR_NUMBER: ${{ steps.admit.outputs.pr_number || github.event.client_payload.github.payload.issue.number }}
+          ADMIT_OUTCOME: ${{ steps.admit.outcome }}
+          DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
         # Use the issue-comment endpoint with the existing issues: write permission.
         run: |
+          [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]] || exit 1
+          if [[ "${ADMIT_OUTCOME}" == failure || "${DISPATCH_OUTCOME}" == failure ]]; then
+            REPLY="CI trigger failed; some workflows may already have been requested. See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} for details."
+          fi
+          [[ -n "${REPLY}" ]] || exit 1
           gh api --method POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
             -f "body=${REPLY}"
