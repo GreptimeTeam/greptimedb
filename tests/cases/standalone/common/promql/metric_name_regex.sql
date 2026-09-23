@@ -55,6 +55,11 @@ TQL EVAL (0, 0, '1s') topk(1, {__name__=~"metric_name_regex_[ab]", __schema__="m
 -- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 0, '1s') count by(__name__) ({__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"});
 
+-- Arithmetic computes new sample values, so it drops the metric name: grouping by `__name__`
+-- then reports one group instead of one per metric table.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') count by(__name__) ({__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} * 2);
+
 -- A matcher that resolves to no metric table returns an empty result instead of an error.
 TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_nonexistent.*", __schema__="metric_name_regex"};
 
@@ -62,6 +67,11 @@ TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_nonexistent.*", __schema__="
 -- the metric space is pinned with `__schema__` instead of a second `__name__` matcher.
 -- SQLNESS SORT_RESULT 2 1
 TQL EVAL (0, 0, '1s') {__name__!="metric_name_regex_b", __schema__="metric_name_regex"};
+
+-- Vector matching compares the label set of each series: the union pads `_a` with an empty `idc`
+-- and `_b` with an empty `host`, so `_a` matches the exact-name operand and `_b` does not.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} + {__name__="metric_name_regex_a", __schema__="metric_name_regex"};
 
 -- Candidate metric tables may store their time index at different precisions: `_c` is a
 -- `timestamp(9)` table next to the millisecond `_a`/`_b`. The union aligns every branch to the

@@ -99,6 +99,17 @@ TQL EVAL (0, 0, '1s') count by(__name__) ({__name__=~"metric_name_regex_[ab]", _
 | metric_name_regex_b | 1970-01-01T00:00:00 | 1                     |
 +---------------------+---------------------+-----------------------+
 
+-- Arithmetic computes new sample values, so it drops the metric name: grouping by `__name__`
+-- then reports one group instead of one per metric table.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') count by(__name__) ({__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} * 2);
+
++---------------------+------------------------------------+
+| ts                  | count(greptime_value * Float64(2)) |
++---------------------+------------------------------------+
+| 1970-01-01T00:00:00 | 2                                  |
++---------------------+------------------------------------+
+
 -- A matcher that resolves to no metric table returns an empty result instead of an error.
 TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_nonexistent.*", __schema__="metric_name_regex"};
 
@@ -117,6 +128,17 @@ TQL EVAL (0, 0, '1s') {__name__!="metric_name_regex_b", __schema__="metric_name_
 +----------------+-------+---------------------+---------------------+
 | 1.0            | host1 | metric_name_regex_a | 1970-01-01T00:00:00 |
 +----------------+-------+---------------------+---------------------+
+
+-- Vector matching compares the label set of each series: the union pads `_a` with an empty `idc`
+-- and `_b` with an empty `host`, so `_a` matches the exact-name operand and `_b` does not.
+-- SQLNESS SORT_RESULT 2 1
+TQL EVAL (0, 0, '1s') {__name__=~"metric_name_regex_[ab]", __schema__="metric_name_regex"} + {__name__="metric_name_regex_a", __schema__="metric_name_regex"};
+
++-------+---------------------+------------------------------------------------------------------------------------------+
+| host  | ts                  | metric_name_regex..greptime_value + metric_name_regex.metric_name_regex_a.greptime_value |
++-------+---------------------+------------------------------------------------------------------------------------------+
+| host1 | 1970-01-01T00:00:00 | 2.0                                                                                      |
++-------+---------------------+------------------------------------------------------------------------------------------+
 
 -- Candidate metric tables may store their time index at different precisions: `_c` is a
 -- `timestamp(9)` table next to the millisecond `_a`/`_b`. The union aligns every branch to the
