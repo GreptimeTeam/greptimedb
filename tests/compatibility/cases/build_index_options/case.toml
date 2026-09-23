@@ -1,8 +1,0 @@
-name = "build_index_options"
-reason = "Verify legacy SST index maintenance remains available after adding series-index request options."
-introduced_by = "feat: add BUILD_SERIES_INDEX"
-topologies = ["distributed", "standalone"]
-from_range = [">=v1.2.0"]
-to_range = [">=v1.3.0-alpha.1"]
-features = ["table", "index"]
-owner = "storage"
