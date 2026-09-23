@@ -405,6 +405,18 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "WAL object {} that starts epoch {} was already present, so the open cannot tell whether it wrote it",
+        path,
+        epoch
+    ))]
+    UnconfirmedWalEpochStart {
+        path: String,
+        epoch: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to {} WAL object, path: {}", operation, path))]
     WalObjectStore {
         operation: &'static str,
@@ -514,6 +526,7 @@ impl ErrorExt for Error {
             | ReadIndex { .. }
             | WalObjectStore { .. }
             | StaleWalObject { .. }
+            | UnconfirmedWalEpochStart { .. }
             | Io { .. } => StatusCode::StorageUnavailable,
             // Raft engine
             FetchEntry { .. } | RaftEngine { .. } | AddEntryLogBatch { .. } => {
@@ -550,7 +563,8 @@ impl ErrorExt for Error {
             | RaftEngine { .. }
             | AddEntryLogBatch { .. }
             | WalObjectSequenceUnsettled { .. }
-            | StaleWalObject { .. } => RetryHint::Retryable,
+            | StaleWalObject { .. }
+            | UnconfirmedWalEpochStart { .. } => RetryHint::Retryable,
             ProduceRecord { error, .. } => match error {
                 rskafka::client::producer::Error::Client(error) => {
                     rskafka_client_error_to_retry_hint(error)
