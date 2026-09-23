@@ -668,9 +668,6 @@ struct Actor {
     command_rx: mpsc::Receiver<Command>,
     append_rx: mpsc::Receiver<QueuedAppend>,
     open_batch: OpenBatch,
-    /// Largest entry id ever handed out per region, whether it became
-    /// durable or failed. Unlike the accepted ids of the open batch
-    /// it never moves down.
     issued_entry_ids: HashMap<RegionId, EntryId>,
     /// Waiters of the open batch.
     pending: Vec<PendingAppend>,
@@ -788,12 +785,6 @@ impl Actor {
                 return;
             }
         };
-        for (region_id, entry_id) in &last_entry_ids {
-            self.issued_entry_ids
-                .entry(*region_id)
-                .and_modify(|issued| *issued = (*issued).max(*entry_id))
-                .or_insert(*entry_id);
-        }
         self.pending.push(PendingAppend {
             last_entry_ids,
             response,
@@ -898,8 +889,12 @@ impl Actor {
             #[cfg(any(test, feature = "testing"))]
             let creates_fail = self.creates_fail.clone();
             self.creates.push(Box::pin(async move {
+                // The store was dropped while the create was parked: it never
+                // runs.
                 #[cfg(any(test, feature = "testing"))]
-                let _ = creates_held.wait_for(|held| !*held).await;
+                if creates_held.wait_for(|held| !*held).await.is_err() {
+                    return (object_seq, Err(ObjectStoreWalStoppedSnafu.build()));
+                }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_fail.load(Ordering::Acquire) {
                     let error = object_store::Error::new(
@@ -3607,6 +3602,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_store_create_held_when_the_store_is_dropped_never_runs() {
+        // The actor and a parked create race when the store is dropped, so
+        // the drop is repeated to cover either order.
+        for _ in 0..16 {
+            let (io, _) = RecordingIo::over(memory_store());
+            let store = open_over(io.clone(), &eager()).await;
+            store.hold_creates();
+            let append = spawn_append_batch(&store, vec![entry(&store, region(1), "a1")]);
+            store.wait_for_admitted_appends(1).await.unwrap();
+            append.abort();
+            let _ = append.await;
+            drop(store);
+            // The actor and the parked create hold the only other references
+            // to the object access; once both are gone nothing writes.
+            timeout(WAIT, async {
+                while Arc::strong_count(&io) > 1 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+        }
+    }
+
+    #[tokio::test]
     async fn test_store_rollback_and_poison_drop_the_open_batch() {
         let object_store = memory_store();
         let (store, io, mut parked) = open_parking_creates(object_store.clone(), &manual()).await;
@@ -3868,10 +3889,6 @@ mod tests {
         .context(WalObjectStoreSnafu { operation, path })
     }
 
-    /// Object access whose whole-object reads, or conditional creates, park
-    /// until the test releases them, counting how many are in flight. A
-    /// release of false fails the operation with a transient error before it
-    /// reaches the object store.
     fn chain_header(object_seq: u64, epoch: u64, prev: Option<(u64, u64)>) -> Header {
         Header {
             object_seq,
@@ -4245,6 +4262,10 @@ mod tests {
         }
     }
 
+    /// Object access whose whole-object reads, or conditional creates, park
+    /// until the test releases them, counting how many are in flight. A
+    /// release of false fails the operation with a transient error before it
+    /// reaches the object store.
     struct ParkedIo {
         inner: ObjectStoreIo,
         parked: mpsc::UnboundedSender<(u64, oneshot::Sender<bool>)>,
