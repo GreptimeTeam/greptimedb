@@ -1,0 +1,12 @@
+COPY snapshot_values FROM '${SQLNESS_HOME}/snapshot_parquet_copy/values.parquet' WITH (FORMAT='parquet');
+
+Affected Rows: 2
+
+SELECT * FROM snapshot_values ORDER BY ts;
+
++-------------------------+-----+
+| ts                      | val |
++-------------------------+-----+
+| 1970-01-01T00:00:00.001 | 42  |
+| 1970-01-01T00:00:00.002 | 7   |
++-------------------------+-----+

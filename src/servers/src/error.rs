@@ -62,6 +62,14 @@ pub enum Error {
     #[snafu(display("Pending rows batcher channel closed"))]
     BatcherChannelClosed,
 
+    #[snafu(display("Write rejected: {error}"))]
+    WriteRejected {
+        #[snafu(source)]
+        error: meter_core::collect::WriteRejected,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Unsupported data type: {}, reason: {}", data_type, reason))]
     UnsupportedDataType {
         data_type: ConcreteDataType,
@@ -868,7 +876,7 @@ impl ErrorExt for Error {
 
             Suspended { .. } => StatusCode::Suspended,
 
-            MemoryLimitExceeded { .. } => StatusCode::RateLimited,
+            MemoryLimitExceeded { .. } | WriteRejected { .. } => StatusCode::RateLimited,
 
             GreptimeProto { source, .. } => source.status_code(),
             Partition { source, .. } => source.status_code(),
@@ -914,7 +922,7 @@ impl ErrorExt for Error {
             MemoryLimitExceeded { source, .. } => source.retry_hint(),
             CollectRecordbatch { source, .. } => source.retry_hint(),
 
-            TooManyConcurrentRequests { .. } => RetryHint::Retryable,
+            TooManyConcurrentRequests { .. } | WriteRejected { .. } => RetryHint::Retryable,
 
             _ => RetryHint::NonRetryable,
         }

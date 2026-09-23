@@ -299,6 +299,17 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display(
+        "Duplicate region engine config '{engine}' at region_engine[{first_index}] and region_engine[{duplicate_index}] (indices are zero-based); each engine type may be configured only once"
+    ))]
+    DuplicateRegionEngineConfig {
+        engine: &'static str,
+        first_index: usize,
+        duplicate_index: usize,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Invalid object store WAL config, {} = {:?}: {}", field, value, reason))]
     InvalidObjectStoreWalConfig {
         field: &'static str,
@@ -486,6 +497,7 @@ impl ErrorExt for Error {
             | GcConfigMismatch { .. }
             | ParseAddr { .. }
             | TomlFormat { .. }
+            | DuplicateRegionEngineConfig { .. }
             | InvalidObjectStoreWalConfig { .. }
             | BuildDatanode { .. } => StatusCode::InvalidArguments,
 

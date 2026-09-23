@@ -250,6 +250,7 @@ impl MetasrvBuilder {
         let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
             Box::new(EventHandlerImpl::new(event_inserter)),
             options.event_recorder.event_types.clone(),
+            options.event_recorder.flush_interval,
         ));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));

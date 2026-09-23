@@ -31,6 +31,7 @@ use client::{Client, Database};
 use common_base::Plugins;
 use common_catalog::consts::MIN_USER_TABLE_ID;
 use common_config::Configurable;
+use common_event_recorder::EventRecorderOptions;
 #[cfg(test)]
 use common_meta::DatanodeId;
 use common_meta::key::TableMetadataManager;
@@ -58,6 +59,7 @@ use object_store::config::{
 use object_store::services::{Azblob, Gcs, Oss, S3};
 use object_store::test_util::TempFolder;
 use object_store::{AzblobConnection, GcsConnection, ObjectStore, OssConnection, S3Connection};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::greptime_handler::GreptimeRequestHandler;
 use servers::grpc::{FlightCompression, GrpcOptions, GrpcServer, GrpcServerConfig};
@@ -65,7 +67,6 @@ use servers::http::{HttpOptions, HttpServerBuilder};
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
 use servers::otel_arrow::OtelArrowServiceHandler;
-use servers::pending_rows_batcher::PendingRowsBatcher;
 use servers::postgres::PostgresServer;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -328,6 +329,18 @@ impl StorageType {
     }
 }
 
+/// Event recorder options for tests.
+///
+/// The production flush interval is 5s, and the event tests interleave "run a
+/// DDL, wait for its event, run the next DDL", so each barrier costs a full
+/// window. A short interval removes that wait without changing what is asserted.
+pub fn test_event_recorder_options() -> EventRecorderOptions {
+    EventRecorderOptions {
+        flush_interval: Duration::from_millis(100),
+        ..Default::default()
+    }
+}
+
 fn s3_test_config() -> S3Config {
     S3Config {
         connection: S3Connection {
@@ -363,7 +376,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Gcs::from(&gcs_config.connection);
             let config = ObjectStoreConfig::Gcs(gcs_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Gcs(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Azblob => {
             let azblob_config = AzblobConfig {
@@ -381,7 +394,7 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Azblob::from(&azblob_config.connection);
             let config = ObjectStoreConfig::Azblob(azblob_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Azblob(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::Oss => {
             let oss_config = OssConfig {
@@ -398,32 +411,57 @@ pub fn get_test_store_config(store_type: &StorageType) -> (ObjectStoreConfig, Te
             let builder = Oss::from(&oss_config.connection);
             let config = ObjectStoreConfig::Oss(oss_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::Oss(TempFolder::new(&store, "/")))
+            (config, TempDirGuard::remote(TempFolder::new(&store, "/")))
         }
         StorageType::S3 | StorageType::S3WithCache => {
             let mut s3_config = s3_test_config();
 
-            if *store_type == StorageType::S3WithCache {
-                s3_config.cache.cache_path = "/tmp/greptimedb_cache".to_string();
+            // The datanode wipes `<cache_path>/cache/object/read` on startup, so a
+            // path shared between concurrently running tests lets a starting test
+            // delete the read cache of a running one.
+            let cache_dir = if *store_type == StorageType::S3WithCache {
+                let dir = create_temp_dir("gt_s3_read_cache");
+                s3_config.cache.cache_path = dir.path().to_string_lossy().to_string();
+                Some(dir)
             } else {
                 s3_config.cache.enable_read_cache = false;
-            }
+                None
+            };
 
             let builder = S3::from(&s3_config.connection);
             let config = ObjectStoreConfig::S3(s3_config);
             let store = ObjectStore::new(builder).unwrap();
-            (config, TempDirGuard::S3(TempFolder::new(&store, "/")))
+            (
+                config,
+                TempDirGuard {
+                    remote: Some(TempFolder::new(&store, "/")),
+                    local_cache: cache_dir,
+                },
+            )
         }
-        StorageType::File => (ObjectStoreConfig::File(FileConfig {}), TempDirGuard::None),
+        StorageType::File => (
+            ObjectStoreConfig::File(FileConfig {}),
+            TempDirGuard::default(),
+        ),
     }
 }
 
-pub enum TempDirGuard {
-    None,
-    S3(TempFolder),
-    Oss(TempFolder),
-    Azblob(TempFolder),
-    Gcs(TempFolder),
+#[derive(Default)]
+pub struct TempDirGuard {
+    /// Prefix to wipe from the remote object store, absent for the file backend.
+    remote: Option<TempFolder>,
+    /// Local read cache directory. Only held so it is removed when the guard drops.
+    #[allow(dead_code)]
+    local_cache: Option<TempDir>,
+}
+
+impl TempDirGuard {
+    fn remote(folder: TempFolder) -> Self {
+        Self {
+            remote: Some(folder),
+            local_cache: None,
+        }
+    }
 }
 
 pub struct TestGuard {
@@ -446,11 +484,7 @@ pub struct StorageGuard(pub TempDirGuard);
 impl TestGuard {
     pub async fn remove_all(&mut self) {
         for storage_guard in self.storage_guards.iter_mut() {
-            if let TempDirGuard::S3(guard)
-            | TempDirGuard::Oss(guard)
-            | TempDirGuard::Azblob(guard)
-            | TempDirGuard::Gcs(guard) = &mut storage_guard.0
-            {
+            if let Some(guard) = &mut storage_guard.0.remote {
                 guard.remove_all().await.unwrap()
             }
         }
@@ -465,11 +499,8 @@ impl Drop for TestGuard {
         common_runtime::spawn_global(async move {
             let mut errors = vec![];
             for guard in guards {
-                if let TempDirGuard::S3(guard)
-                | TempDirGuard::Oss(guard)
-                | TempDirGuard::Azblob(guard)
-                | TempDirGuard::Gcs(guard) = guard.0
-                    && let Err(e) = guard.remove_all().await
+                if let Some(remote) = guard.0.remote
+                    && let Err(e) = remote.remove_all().await
                 {
                     errors.push(e);
                 }
@@ -885,7 +916,7 @@ pub fn build_test_prom_server(
     // Mirror the production wiring at `frontend::server`: build the batcher from the
     // instance's managers. A short flush interval keeps the test responsive.
     let pending_rows_batcher = if enable_batcher {
-        PendingRowsBatcher::try_new(
+        LogicalTablePendingRowsBatcher::try_new(
             frontend_ref.partition_manager().clone(),
             frontend_ref.node_manager().clone(),
             frontend_ref.catalog_manager().clone(),
@@ -1253,6 +1284,61 @@ pub async fn setup_pg_server_with_user_provider(
         .unwrap();
 
     (instance.guard, Arc::new(pg_server))
+}
+
+/// Sets up a standalone instance with both a Prometheus remote-write HTTP app
+/// (native histograms enabled) and a Postgres server attached, so native
+/// histogram data written via remote-write can be queried over the Postgres
+/// protocol.
+pub async fn setup_pg_server_with_prom_native_histogram(
+    store_type: StorageType,
+    name: &str,
+) -> (TestGuard, Router, Arc<Box<dyn Server>>) {
+    unsafe {
+        std::env::set_var("TZ", "UTC");
+    }
+
+    let instance = setup_standalone_instance(name, store_type).await;
+
+    // Prometheus remote-write HTTP app with native histograms enabled.
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, true, None)
+        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let app = http_server.build(http_server.make_app()).unwrap();
+
+    // Postgres server on the same instance.
+    let runtime = RuntimeBuilder::default()
+        .worker_threads(2)
+        .thread_name("pg-runtime")
+        .build()
+        .unwrap();
+
+    let fe_pg_addr = format!("127.0.0.1:{}", ports::get_port());
+    let opts = PostgresOptions {
+        addr: fe_pg_addr.clone(),
+        ..Default::default()
+    };
+    let tls_server_config = Arc::new(
+        ReloadableTlsServerConfig::try_new(opts.tls.clone())
+            .expect("Failed to load certificates and keys"),
+    );
+
+    let mut pg_server = Box::new(PostgresServer::new(
+        instance.fe_instance().clone(),
+        opts.tls.should_force_tls(),
+        tls_server_config,
+        0,
+        runtime,
+        None,
+        None,
+    ));
+
+    pg_server
+        .start(fe_pg_addr.parse::<SocketAddr>().unwrap())
+        .await
+        .unwrap();
+
+    (instance.guard, app, Arc::new(pg_server))
 }
 
 pub(crate) async fn prepare_another_catalog_and_schema(instance: &Instance) {

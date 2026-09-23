@@ -35,6 +35,7 @@ use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
     DatabaseExportFile, parse_parallelism_from_option_map, validate_database_directory,
+    validate_database_export_layout,
 };
 use crate::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
 
@@ -68,6 +69,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
+        validate_database_export_layout(&req.with)?;
         validate_database_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(

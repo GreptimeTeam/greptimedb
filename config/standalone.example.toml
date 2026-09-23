@@ -11,6 +11,10 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
+## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
+## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
+#+ experimental_metric_export = false
+
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
@@ -77,9 +81,9 @@ max_concurrent_queries = 0
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-## When synchronous Prometheus or shared table batching is enabled, a nonzero timeout is
+## When synchronous Prometheus, OTLP metrics, or ordinary-table batching is enabled, a nonzero timeout is
 ## raised to at least the largest active flush interval plus 1 second. The intervals come from
-## `prom_store.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
+## `pending_rows_batcher.logical_table.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -206,12 +210,13 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
-## Shared experimental ordinary-table batching for opted-in ingestion protocols.
-## Legacy Prometheus batching settings under prom_store remain supported.
-## HTTP write protocols sharing this batcher. Omitted or empty disables all entrances.
-## Supported: influxdb, opentsdb, otlp, logs, loki, splunk, elasticsearch, http_sql, prom.
-## Prom uses ordinary-table batching without metric engine, otherwise its dedicated batcher.
-## Effective shared Prom settings take precedence; existing prom_store settings remain compatible.
+## Ordinary-table batching for opted-in ingestion protocols.
+## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
+## queue admission without waiting for storage; later failures cannot be returned to the client.
+## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
+## OTLP logs, traces and ordinary metrics use this batcher.
+## MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.
+## Single-connection writes and INSERT SELECT may incur additional flush waits.
 [pending_rows_batcher]
 # protocols = [
 #     "influxdb",
@@ -222,6 +227,8 @@ default_merge_mode = "last_non_null"
 #     "splunk",
 #     "elasticsearch",
 #     "http_sql",
+#     "mysql",
+#     "postgres",
 #     "prom",
 # ]
 ## Flush interval measured from the first pending submission. Zero disables batching.
@@ -231,10 +238,31 @@ max_batch_rows = 100000
 ## Maximum concurrent flushes shared by the frontend batcher.
 max_concurrent_flushes = 256
 ## Maximum queued submissions per table worker.
-worker_channel_capacity = 65526
+worker_channel_capacity = 65536
 ## Maximum admitted original requests awaiting completion.
 max_inflight_requests = 3000
 ## Maximum number of queued table Flow notifications.
+flow_notification_queue_capacity = 1024
+
+## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
+## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
+## Enable independently with protocols and a nonzero flush interval.
+## Omitted fields use independent defaults, not parent settings.
+## Empty protocols or a zero interval disables logical batching without fallback.
+## Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching.
+[pending_rows_batcher.logical_table]
+# protocols = ["prom", "otlp"]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by Prom and OTLP metrics.
+max_concurrent_flushes = 256
+## Maximum queued submissions per physical-table worker.
+worker_channel_capacity = 65536
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued logical-table Flow notifications.
 flow_notification_queue_capacity = 1024
 
 ## Jaeger protocol options.
@@ -268,19 +296,7 @@ with_metric_engine = true
 prom_validation_mode = "strict"
 ## Experimental: enable Prometheus remote write v2 native histogram ingestion.
 experimental_enable_prometheus_native_histogram = false
-## Interval to flush pending rows batcher.
-## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
-#+pending_rows_flush_interval = "0s"
-## Max rows per pending batch before triggering a flush.
-#+max_batch_rows = 100000
-## Max number of concurrent batch flushes.
-#+max_concurrent_flushes = 256
-## Capacity of the pending batch worker channel.
-#+worker_channel_capacity = 65526
-## Max inflight write requests before backpressure.
-#+max_inflight_requests = 3000
-## Maximum number of logical-table flow notifications waiting in the shared queue.
-#+flow_notification_queue_capacity = 1024
+
 
 ## The WAL options.
 [wal]
@@ -670,6 +686,7 @@ skip_ssl_validation = false
 # endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
+## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
 [[region_engine]]
 
 ## The Mito engine options.

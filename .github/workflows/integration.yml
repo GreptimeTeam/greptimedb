@@ -31,6 +31,11 @@ name: Integration CI
 
 env:
   CARGO_FUZZ_VERSION: "0.13.2"
+  # Fuzz targets require a nightly toolchain (cargo-fuzz needs
+  # `-Zsanitizer=fuzzer`). This pin decouples the fuzz workflow from the
+  # workspace default in rust-toolchain.toml, so it keeps working when the
+  # workspace moves to a stable toolchain.
+  FUZZ_RUST_TOOLCHAIN: "nightly-2026-03-21"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
@@ -81,7 +86,7 @@ jobs:
         # `cargo gc` will invoke `cargo build` with specified args
         run: |
           started_epoch="$(date +%s)"
-          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index"
+          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index,ai_functions"
           elapsed_secs=$(( $(date +%s) - started_epoch ))
           printf -- '- Binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Pack greptime binaries
@@ -328,6 +333,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           cache: false
+          toolchain: ${{ env.FUZZ_RUST_TOOLCHAIN }}
       - name: Fuzz Dependency Cache
         id: fuzz-dependencies-cache
         uses: Swatinem/rust-cache@v2
@@ -343,7 +349,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Report fuzz cache lookup
         shell: bash
         run: |
@@ -355,6 +361,8 @@ jobs:
       - name: Set Rust Fuzz
         if: steps.fuzz-binaries.outputs.cache-hit != 'true'
         shell: bash
+        env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
         run: |
           sudo apt-get install -y libfuzzer-14-dev
           cargo install cargo-fuzz --version "${CARGO_FUZZ_VERSION}" --locked
@@ -363,6 +371,7 @@ jobs:
         shell: bash
         env:
           CUSTOM_LIBFUZZER_PATH: /usr/lib/llvm-14/lib/libFuzzer.a
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           FUZZ_TARGETS: |
             fuzz_create_database
             fuzz_create_table
@@ -410,7 +419,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ runner.temp }}/greptime-fuzz-binaries
-          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
+          key: v1-fuzz-binaries-${{ env.CARGO_FUZZ_VERSION }}-${{ env.FUZZ_RUST_TOOLCHAIN }}-all-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/**', 'tests-fuzz/**', 'src/**') }}
       - name: Pack prebuilt fuzz binaries
         shell: bash
         run: |
@@ -479,6 +488,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           FUZZ_SERVICE_LOG: /tmp/greptime-fuzz-runtime/greptime.log
         with:
@@ -537,6 +547,7 @@ jobs:
       - name: Run Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_FUZZ_BINARY_PATH: ./bin/greptime
           GT_FUZZ_INSTANCE_ROOT_DIR: /tmp/greptime-fuzz-artifacts/targets/unstable_fuzz_create_table_standalone/service/instance/
@@ -820,6 +831,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
           GT_KAFKA_WAL_HELPER_URL: http://127.0.0.1:8080
           GT_KAFKA_ADDR: kafka.kafka-cluster.svc.cluster.local:9092
@@ -994,6 +1006,7 @@ jobs:
       - name: Fuzz Test
         uses: ./.github/actions/fuzz-test
         env:
+          RUSTUP_TOOLCHAIN: ${{ env.FUZZ_RUST_TOOLCHAIN }}
           GT_MYSQL_ADDR: 127.0.0.1:4002
         with:
           targets: ${{ matrix.group.targets }}

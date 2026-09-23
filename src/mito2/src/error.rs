@@ -1138,6 +1138,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SST primary key range: {reason}"))]
+    InvalidPrimaryKeyRange {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode SST primary key range {endpoint} endpoint"))]
+    DecodePrimaryKeyRange {
+        endpoint: &'static str,
+        source: mito_codec::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is busy", region_id))]
     RegionBusy {
         region_id: RegionId,
@@ -1586,7 +1601,10 @@ impl ErrorExt for Error {
             FulltextPushText { source, .. }
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
-            DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
+            DecodeStats { .. }
+            | StatsNotPresent { .. }
+            | InvalidPrimaryKeyRange { .. }
+            | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,

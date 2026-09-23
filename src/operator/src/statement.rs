@@ -25,6 +25,7 @@ mod describe;
 mod dml;
 pub mod export_database;
 pub mod export_logical_tables;
+pub mod import_packed;
 mod kill;
 pub mod semantic_graph;
 mod set;
@@ -870,7 +871,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
 /// This function extracts the necessary info including catalog/database name, time range, etc.
-fn to_copy_database_request(
+pub fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,
 ) -> Result<CopyDatabaseRequest> {
