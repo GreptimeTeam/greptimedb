@@ -274,7 +274,7 @@ impl Service for SecureFsBackend {
             path,
             args,
             file: None,
-            closing: false,
+            synced: false,
         })
     }
 
@@ -388,7 +388,7 @@ struct SecureFsWriter {
     path: PathBuf,
     args: OpWrite,
     file: Option<tokio::fs::File>,
-    closing: bool,
+    synced: bool,
 }
 
 impl SecureFsWriter {
@@ -440,11 +440,18 @@ impl oio::Write for SecureFsWriter {
     }
 
     async fn close(&mut self) -> Result<Metadata> {
-        self.closing = true;
-        let file = self.ensure_file().await?;
-        file.flush().await.map_err(new_std_io_error)?;
-        file.sync_all().await.map_err(new_std_io_error)?;
-        let metadata = file.metadata().await.map_err(new_std_io_error)?;
+        {
+            let file = self.ensure_file().await?;
+            file.flush().await.map_err(new_std_io_error)?;
+            file.sync_all().await.map_err(new_std_io_error)?;
+        }
+        self.synced = true;
+        let metadata = self
+            .ensure_file()
+            .await?
+            .metadata()
+            .await
+            .map_err(new_std_io_error)?;
         let mut builder = MetadataBuilder::file(metadata.len());
         builder.last_modified(Timestamp::try_from(
             metadata.modified().map_err(new_std_io_error)?,
@@ -459,11 +466,11 @@ impl oio::Write for SecureFsWriter {
             None => Ok(()),
         };
         if self.args.if_not_exists() {
-            // A failed exclusive create owns no file. Once close starts, preserve
+            // A failed exclusive create owns no file. Once data is synced, preserve
             // potentially committed output for the caller's deliberate retry.
             if let Some(file) = self.file.take() {
                 drop(file);
-                if !self.closing {
+                if !self.synced {
                     let root = self.root.clone();
                     let path = self.path.clone();
                     let cleanup =
@@ -484,7 +491,7 @@ impl oio::Write for SecureFsWriter {
             "filesystem writes cannot be aborted without atomic writes",
         );
         if let Err(flush_error) = flush {
-            if self.closing {
+            if self.synced {
                 return Err(flush_error);
             }
             error = error.set_source(flush_error);
@@ -869,7 +876,7 @@ mod tests {
             path: PathBuf::from("existing"),
             args: OpWrite::default(),
             file: None,
-            closing: false,
+            synced: false,
         };
 
         writer.abort().await.unwrap();
@@ -905,7 +912,7 @@ mod tests {
                 path: PathBuf::from("partial"),
                 args,
                 file: None,
-                closing: false,
+                synced: false,
             };
             writer.ensure_file().await.unwrap();
             let mut failing_file = tokio::fs::OpenOptions::new()
@@ -924,6 +931,47 @@ mod tests {
                 assert!(std::error::Error::source(&error).is_some());
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_conditional_abort_after_close_flush_error() {
+        use std::path::PathBuf;
+
+        use opendal::options::WriteOptions;
+        use opendal::raw::OpWrite;
+        use opendal::raw::oio::Write;
+        use tokio::io::AsyncWriteExt;
+
+        let temp_dir = create_temp_dir("secure_fs_close_flush_error");
+        let root = SecureFsRoot::open(temp_dir.path()).unwrap();
+        let (args, _) = OpWrite::from_options(
+            &root.build_operator().info().capability(),
+            WriteOptions {
+                if_not_exists: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut writer = super::SecureFsWriter {
+            root,
+            path: PathBuf::from("partial"),
+            args,
+            file: None,
+            synced: false,
+        };
+        writer.ensure_file().await.unwrap();
+        let mut failing_file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .await
+            .unwrap();
+        failing_file.write_all(b"partial").await.unwrap();
+        writer.file = Some(failing_file);
+
+        assert!(writer.close().await.is_err());
+        assert!(writer.abort().await.is_err());
+        assert!(!temp_dir.path().join("partial").exists());
     }
 
     #[test]
@@ -948,7 +996,7 @@ mod tests {
                     path: PathBuf::from("partial"),
                     args: OpWrite::default(),
                     file: None,
-                    closing: false,
+                    synced: false,
                 };
                 writer.ensure_file().await.unwrap();
                 let (started, ready) = tokio::sync::oneshot::channel();
