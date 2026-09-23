@@ -41,6 +41,7 @@ use table::requests::{
 };
 
 use crate::error::{self, Result};
+use crate::metrics::OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS;
 use crate::otlp::trace::{KEY_SERVICE_INSTANCE_ID, KEY_SERVICE_NAME, KEY_SERVICE_NAMESPACE};
 use crate::query_handler::MetricsIngestOutcome;
 use crate::row_writer::{self, MultiTableData, TableData};
@@ -634,6 +635,9 @@ fn encode_exponential_histogram(
         reject_data_points(outcome, histogram.data_points.len(), || {
             rejection.message(name)
         })?;
+        OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
+            .with_label_values(&[rejection.reason_label()])
+            .inc_by(histogram.data_points.len() as u64);
         return Ok(false);
     }
 
@@ -651,6 +655,9 @@ fn encode_exponential_histogram(
                 reject_data_points(outcome, 1, || {
                     format!("metric `{name}` data point {index}: {reason}")
                 })?;
+                OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS
+                    .with_label_values(&["invalid_data_point"])
+                    .inc();
                 continue;
             }
         };
@@ -689,6 +696,13 @@ pub(crate) enum ExponentialHistogramRejection {
 }
 
 impl ExponentialHistogramRejection {
+    fn reason_label(&self) -> &'static str {
+        match self {
+            Self::DeltaTemporality => "delta_temporality",
+            Self::UnspecifiedTemporality => "unspecified_temporality",
+        }
+    }
+
     fn message(&self, name: &str) -> String {
         match self {
             Self::DeltaTemporality => format!(
@@ -704,6 +718,8 @@ impl ExponentialHistogramRejection {
 /// Whole-metric acceptance, decided once for the encoder and for the resource
 /// descriptor, which must not describe a resource whose data was rejected.
 /// Individual points can still fail [`exponential_histogram_value`].
+/// Raw-delta storage currently supports sums and explicit histograms; exponential
+/// histograms still require cumulative input. Delta-to-cumulative conversion is out of scope.
 pub(crate) fn exponential_histogram_gate(
     histogram: &ExponentialHistogram,
 ) -> std::result::Result<(), ExponentialHistogramRejection> {
@@ -870,25 +886,44 @@ fn convert_bucket_range(
         merged.push((target_index, count));
     }
 
-    let length = u32::try_from(merged.len())
-        .map_err(|_| format!("{name} bucket span length exceeds u32"))?;
-    let span = BucketSpan {
-        offset: merged[0].0,
-        length,
-    };
+    let mut spans = Vec::<BucketSpan>::new();
     let mut deltas = Vec::with_capacity(merged.len());
+    let mut previous_index = None::<i32>;
     let mut previous = 0i64;
-    for (_, count) in merged {
+    for (index, count) in merged {
+        if count == 0 {
+            continue;
+        }
+        match (spans.last_mut(), previous_index) {
+            (Some(span), Some(previous)) if previous.checked_add(1) == Some(index) => {
+                span.length = span
+                    .length
+                    .checked_add(1)
+                    .ok_or_else(|| format!("{name} bucket span length exceeds u32"))?;
+            }
+            (_, previous) => {
+                let offset = match previous {
+                    Some(previous) => index
+                        .checked_sub(previous)
+                        .and_then(|gap| gap.checked_sub(1))
+                        .ok_or_else(|| format!("{name} bucket span offset overflows i32"))?,
+                    None => index,
+                };
+                spans.push(BucketSpan { offset, length: 1 });
+            }
+        }
         let count = i64::try_from(count)
             .map_err(|_| format!("{name} bucket count {count} overflows i64"))?;
         let delta = count
             .checked_sub(previous)
             .ok_or_else(|| format!("{name} bucket delta overflows i64"))?;
         deltas.push(delta);
+        previous_index = Some(index);
+        // Bucket deltas continue across span gaps; omitted zero buckets do not reset them.
         previous = count;
     }
 
-    Ok((vec![span], deltas, total))
+    Ok((spans, deltas, total))
 }
 
 fn downscale_bucket_index(index: i32, downscale_shift: u32) -> std::result::Result<i32, String> {
@@ -1109,8 +1144,8 @@ fn encode_gauge(
     Ok(())
 }
 
-/// encode this sum metric
-///
+/// Encodes sums, preserving delta points as interval values with a temporality tag.
+/// Ingestion is stateless: values are never accumulated across timestamps.
 fn encode_sum(
     table_writer: &mut MultiTableData,
     name: &str,
@@ -1170,6 +1205,8 @@ const HISTOGRAM_LE_COLUMN: &str = "le";
 ///
 /// By its Prometheus compatibility, we hope to be able to use prometheus
 /// quantile functions on this table.
+/// Delta points retain their temporality tag and interval values. Bucket counts
+/// are prefix-summed within each point, never accumulated across timestamps.
 fn encode_histogram(
     table_writer: &mut MultiTableData,
     name: &str,
@@ -2287,6 +2324,105 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_bucket_range_compacts_zero_runs() {
+        let large = (1u64 << 53) + 1;
+        for (offset, counts, shift, expected_spans, expected_deltas, expected_total) in [
+            (
+                -3,
+                vec![0, 3, 0, 0, 7, 9, 0],
+                0,
+                vec![(-1, 1), (2, 2)],
+                vec![3, 4, 2],
+                19,
+            ),
+            (
+                -4,
+                vec![0, 0, 2, 3, 0, 0, 0, 0, 7, 0],
+                1,
+                vec![(0, 1), (2, 1)],
+                vec![5, 2],
+                12,
+            ),
+            (0, vec![0, 0, 0], 0, vec![], vec![], 0),
+            (0, vec![], 0, vec![], vec![], 0),
+            (i32::MIN, vec![0, 1], 0, vec![(i32::MIN + 2, 1)], vec![1], 1),
+            (i32::MAX - 1, vec![1], 0, vec![(i32::MAX, 1)], vec![1], 1),
+            (
+                0,
+                vec![large, 0, large + 2],
+                0,
+                vec![(1, 1), (1, 1)],
+                vec![large as i64, 2],
+                large * 2 + 2,
+            ),
+        ] {
+            let buckets = exponential_buckets(offset, counts);
+            let (spans, deltas, total) =
+                convert_bucket_range("positive", Some(&buckets), shift).unwrap();
+            assert_eq!(
+                spans
+                    .iter()
+                    .map(|span| (span.offset, span.length))
+                    .collect::<Vec<_>>(),
+                expected_spans,
+                "{buckets:?}, shift={shift}"
+            );
+            assert_eq!(deltas, expected_deltas, "{buckets:?}, shift={shift}");
+            assert_eq!(total, expected_total);
+        }
+
+        // Compaction must not hide invalid source indexes, even for empty buckets.
+        let buckets = exponential_buckets(i32::MAX, vec![0]);
+        assert!(
+            convert_bucket_range("positive", Some(&buckets), 0)
+                .unwrap_err()
+                .contains("shifted bucket index overflows")
+        );
+    }
+
+    #[test]
+    fn test_exponential_histogram_compaction_preserves_integer_counts() {
+        use common_query::native_histogram::{
+            COUNT_I64_FIELD, NEGATIVE_BUCKETS_I64_FIELD, NEGATIVE_SPAN_LENGTHS_FIELD,
+            NEGATIVE_SPAN_OFFSETS_FIELD, POSITIVE_BUCKETS_I64_FIELD, POSITIVE_SPAN_LENGTHS_FIELD,
+            POSITIVE_SPAN_OFFSETS_FIELD,
+        };
+
+        let large = (1u64 << 53) + 1;
+        let buckets = exponential_buckets(-2, vec![0, large, 0, 3, 0]);
+        let point = ExponentialHistogramDataPoint {
+            count: 2 * (large + 3),
+            positive: Some(buckets.clone()),
+            negative: Some(buckets),
+            ..Default::default()
+        };
+        let (value, _) = exponential_histogram_value(&point).unwrap();
+        assert_eq!(
+            native_field(&value, COUNT_I64_FIELD),
+            Some(ValueData::I64Value(point.count as i64))
+        );
+        for (offsets, lengths, counts) in [
+            (
+                POSITIVE_SPAN_OFFSETS_FIELD,
+                POSITIVE_SPAN_LENGTHS_FIELD,
+                POSITIVE_BUCKETS_I64_FIELD,
+            ),
+            (
+                NEGATIVE_SPAN_OFFSETS_FIELD,
+                NEGATIVE_SPAN_LENGTHS_FIELD,
+                NEGATIVE_BUCKETS_I64_FIELD,
+            ),
+        ] {
+            assert_eq!(i32_list(native_field(&value, offsets)), vec![0, 1]);
+            assert_eq!(i32_list(native_field(&value, lengths)), vec![1, 1]);
+            assert_eq!(
+                i64_list(native_field(&value, counts)),
+                vec![large as i64, 3]
+            );
+        }
+    }
+
+    #[test]
     fn test_exponential_histogram_value_uses_integer_family() {
         use common_query::native_histogram::{
             COUNT_F64_FIELD, COUNT_I64_FIELD, POSITIVE_BUCKETS_I64_FIELD,
@@ -2486,6 +2622,69 @@ mod tests {
                 aggregation_temporality: AggregationTemporality::Cumulative as i32,
             })),
             ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_exponential_histogram_rejection_metrics() {
+        let mut invalid = exponential_point();
+        invalid.scale = -5;
+        for (temporality, points, reason, accepted, rejected) in [
+            (
+                AggregationTemporality::Delta,
+                vec![exponential_point(); 2],
+                "delta_temporality",
+                0,
+                2,
+            ),
+            (
+                AggregationTemporality::Unspecified,
+                vec![exponential_point(); 2],
+                "unspecified_temporality",
+                0,
+                2,
+            ),
+            (
+                AggregationTemporality::Cumulative,
+                vec![exponential_point(), invalid],
+                "invalid_data_point",
+                1,
+                1,
+            ),
+            (
+                AggregationTemporality::Cumulative,
+                vec![exponential_point()],
+                "invalid_data_point",
+                1,
+                0,
+            ),
+        ] {
+            let counter =
+                OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS.with_label_values(&[reason]);
+            let before = counter.get();
+            let mut request =
+                metrics_request(vec![exponential_metric("latency", points, temporality)]);
+            request.resource_metrics[0].resource = Some(Resource {
+                attributes: vec![keyvalue("service.name", "api")],
+                ..Default::default()
+            });
+            let mut ctx = descriptor_ctx();
+            let conversion = to_grpc_insert_requests(request, &mut ctx).unwrap();
+            assert_eq!(conversion.outcome.accepted_data_points, accepted);
+            assert_eq!(conversion.outcome.rejected_data_points, rejected);
+            assert_eq!(counter.get() - before, rejected as u64, "{reason}");
+            assert_eq!(conversion.resource_info.is_some(), accepted > 0);
+
+            let before = counter.get();
+            let empty = metrics_request(vec![exponential_metric("empty", vec![], temporality)]);
+            assert_eq!(
+                to_grpc_insert_requests(empty, &mut ctx)
+                    .unwrap()
+                    .outcome
+                    .rejected_data_points,
+                0
+            );
+            assert_eq!(counter.get(), before, "empty metric: {reason}");
         }
     }
 
