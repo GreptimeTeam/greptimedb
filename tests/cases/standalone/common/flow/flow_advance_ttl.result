@@ -116,7 +116,6 @@ SELECT number FROM distinct_basic;
 +--------+
 +--------+
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 +-------------------------------------+
@@ -356,7 +355,6 @@ SELECT number FROM distinct_basic;
 | 22     |
 +--------+
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 +-------------------------------------+

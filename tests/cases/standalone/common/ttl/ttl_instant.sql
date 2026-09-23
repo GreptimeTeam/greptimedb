@@ -20,7 +20,6 @@ from
 ORDER BY
        val;
 
--- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
 ADMIN compact_table('test_ttl');

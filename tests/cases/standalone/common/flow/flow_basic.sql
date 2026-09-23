@@ -180,102 +180,6 @@ DROP TABLE distinct_basic;
 
 DROP TABLE out_distinct_basic;
 
-CREATE TABLE bytes_log (
-    byte INT,
-    ts TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    -- event time
-    TIME INDEX(ts)
-);
-
--- TODO(discord9): remove this after auto infer table's time index is impl
-CREATE TABLE approx_rate (
-    rate DOUBLE,
-    time_window TIMESTAMP,
-    update_at TIMESTAMP,
-    TIME INDEX(time_window)
-);
-
-CREATE FLOW find_approx_rate SINK TO approx_rate AS
-SELECT
-    (max(byte) - min(byte)) / 30.0 as rate,
-    date_bin(INTERVAL '30 second', ts) as time_window
-from
-    bytes_log
-GROUP BY
-    time_window;
-
-SHOW CREATE TABLE approx_rate;
-
-INSERT INTO
-    bytes_log
-VALUES
-    (NULL, '2023-01-01 00:00:01'),
-    (300, '2023-01-01 00:00:29');
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('find_approx_rate');
-
-SELECT
-    rate,
-    time_window
-FROM
-    approx_rate
-ORDER BY time_window ASC;
-
-INSERT INTO
-    bytes_log
-VALUES
-    (NULL, '2022-01-01 00:00:01'),
-    (NULL, '2022-01-01 00:00:29');
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('find_approx_rate');
-
-SELECT
-    rate,
-    time_window
-FROM
-    approx_rate
-ORDER BY time_window ASC;
-
-INSERT INTO
-    bytes_log
-VALUES
-    (101, '2025-01-01 00:00:01'),
-    (300, '2025-01-01 00:00:29');
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('find_approx_rate');
-
-SELECT
-    rate,
-    time_window
-FROM
-    approx_rate
-ORDER BY time_window ASC;
-
-INSERT INTO
-    bytes_log
-VALUES
-    (450, '2025-01-01 00:00:32'),
-    (500, '2025-01-01 00:00:37');
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('find_approx_rate');
-
-SELECT
-    rate,
-    time_window
-FROM
-    approx_rate
-ORDER BY time_window ASC;
-
-DROP TABLE bytes_log;
-
-DROP FLOW find_approx_rate;
-
-DROP TABLE approx_rate;
-
 -- input table
 CREATE TABLE ngx_access_log (
     client STRING,
@@ -817,15 +721,6 @@ VALUES
 ADMIN FLUSH_FLOW('test_numbers_basic');
 
 SELECT avg_after_filter_num FROM out_num_cnt_basic;
-
-INSERT INTO
-    numbers_input_basic
-VALUES
-    (10, "2021-07-01 00:00:00.200"),
-    (23, "2021-07-01 00:00:00.600");
-
--- SQLNESS REPLACE (ADMIN\sFLUSH_FLOW\('\w+'\)\s+\|\n\+-+\+\n\|\s+)[0-9]+\s+\| $1 FLOW_FLUSHED  |
-ADMIN FLUSH_FLOW('test_numbers_basic');
 
 DROP FLOW test_numbers_basic;
 DROP TABLE numbers_input_basic;

@@ -1,4 +1,17 @@
-CREATE TABLE session_skip_wal(host STRING, ts TIMESTAMP TIME INDEX);
+CREATE TABLE session_skip_wal_mysql(host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+CREATE TABLE session_skip_wal_pg(host STRING, ts TIMESTAMP TIME INDEX);
+
+Affected Rows: 0
+
+-- This row is written to WAL and then truncated. It must not be replayed after the restart.
+INSERT INTO session_skip_wal_pg VALUES ('truncated', 500);
+
+Affected Rows: 1
+
+TRUNCATE TABLE session_skip_wal_pg;
 
 Affected Rows: 0
 
@@ -30,24 +43,18 @@ SET skip_wal = false, true;
 Failed to execute query, err: MySqlError { ERROR 1235 (42000): (Unsupported): Not supported: SET skip_wal requires exactly one boolean value }
 
 -- SQLNESS PROTOCOL MYSQL
-INSERT INTO session_skip_wal VALUES ('skipped', 1000);
+INSERT INTO session_skip_wal_mysql VALUES ('skipped', 1000);
 
 affected_rows: 1
 
 -- SQLNESS PROTOCOL MYSQL
-SELECT * FROM session_skip_wal ORDER BY ts;
+SELECT * FROM session_skip_wal_mysql ORDER BY ts;
 
 +---------+---------------------+
 | host    | ts                  |
 +---------+---------------------+
 | skipped | 1970-01-01 00:00:01 |
 +---------+---------------------+
-
--- SQLNESS ARG restart=true
--- SQLNESS PROTOCOL MYSQL
-SELECT * FROM session_skip_wal ORDER BY ts;
-
-affected_rows: 0
 
 -- SQLNESS PROTOCOL MYSQL
 SET skip_wal = false;
@@ -65,32 +72,19 @@ SET skip_wal = 'false';
 affected_rows: 0
 
 -- SQLNESS PROTOCOL MYSQL
-INSERT INTO session_skip_wal VALUES ('persisted', 2000);
+INSERT INTO session_skip_wal_mysql VALUES ('persisted', 2000);
 
 affected_rows: 1
 
 -- SQLNESS PROTOCOL MYSQL
-SELECT * FROM session_skip_wal ORDER BY ts;
+SELECT * FROM session_skip_wal_mysql ORDER BY ts;
 
 +-----------+---------------------+
 | host      | ts                  |
 +-----------+---------------------+
+| skipped   | 1970-01-01 00:00:01 |
 | persisted | 1970-01-01 00:00:02 |
 +-----------+---------------------+
-
--- SQLNESS ARG restart=true
--- SQLNESS PROTOCOL MYSQL
-SELECT * FROM session_skip_wal ORDER BY ts;
-
-+-----------+---------------------+
-| host      | ts                  |
-+-----------+---------------------+
-| persisted | 1970-01-01 00:00:02 |
-+-----------+---------------------+
-
-TRUNCATE TABLE session_skip_wal;
-
-Affected Rows: 0
 
 -- POSTGRES: SET persists across statements on the same connection.
 -- SQLNESS PROTOCOL POSTGRES
@@ -120,27 +114,18 @@ SET skip_wal = false, true;
 Failed to execute query, encountered: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: None, code: SqlState(E0A000), message: "Not supported: SET skip_wal requires exactly one boolean value", detail: None, hint: None, position: None, where_: None, schema: None, table: None, column: None, datatype: None, constraint: None, file: None, line: None, routine: None }) }
 
 -- SQLNESS PROTOCOL POSTGRES
-INSERT INTO session_skip_wal VALUES ('skipped', 1000);
+INSERT INTO session_skip_wal_pg VALUES ('skipped', 1000);
 
 Affected Rows: 1
 
 -- SQLNESS PROTOCOL POSTGRES
-SELECT * FROM session_skip_wal ORDER BY ts;
+SELECT * FROM session_skip_wal_pg ORDER BY ts;
 
 +---------+----------------------------+
 | host    | ts                         |
 +---------+----------------------------+
 | skipped | 1970-01-01 00:00:01.000000 |
 +---------+----------------------------+
-
--- SQLNESS ARG restart=true
--- SQLNESS PROTOCOL POSTGRES
-SELECT * FROM session_skip_wal ORDER BY ts;
-
-+------+----+
-| host | ts |
-+------+----+
-+------+----+
 
 -- SQLNESS PROTOCOL POSTGRES
 SET skip_wal = false;
@@ -158,22 +143,33 @@ SET skip_wal = 'false';
 Affected Rows: 0
 
 -- SQLNESS PROTOCOL POSTGRES
-INSERT INTO session_skip_wal VALUES ('persisted', 2000);
+INSERT INTO session_skip_wal_pg VALUES ('persisted', 2000);
 
 Affected Rows: 1
 
 -- SQLNESS PROTOCOL POSTGRES
-SELECT * FROM session_skip_wal ORDER BY ts;
+SELECT * FROM session_skip_wal_pg ORDER BY ts;
 
 +-----------+----------------------------+
 | host      | ts                         |
 +-----------+----------------------------+
+| skipped   | 1970-01-01 00:00:01.000000 |
 | persisted | 1970-01-01 00:00:02.000000 |
 +-----------+----------------------------+
 
+-- Only the 'persisted' rows survive the restart.
 -- SQLNESS ARG restart=true
+-- SQLNESS PROTOCOL MYSQL
+SELECT * FROM session_skip_wal_mysql ORDER BY ts;
+
++-----------+---------------------+
+| host      | ts                  |
++-----------+---------------------+
+| persisted | 1970-01-01 00:00:02 |
++-----------+---------------------+
+
 -- SQLNESS PROTOCOL POSTGRES
-SELECT * FROM session_skip_wal ORDER BY ts;
+SELECT * FROM session_skip_wal_pg ORDER BY ts;
 
 +-----------+----------------------------+
 | host      | ts                         |
@@ -181,11 +177,19 @@ SELECT * FROM session_skip_wal ORDER BY ts;
 | persisted | 1970-01-01 00:00:02.000000 |
 +-----------+----------------------------+
 
-TRUNCATE TABLE session_skip_wal;
+TRUNCATE TABLE session_skip_wal_mysql;
 
 Affected Rows: 0
 
-DROP TABLE session_skip_wal;
+TRUNCATE TABLE session_skip_wal_pg;
+
+Affected Rows: 0
+
+DROP TABLE session_skip_wal_mysql;
+
+Affected Rows: 0
+
+DROP TABLE session_skip_wal_pg;
 
 Affected Rows: 0
 
