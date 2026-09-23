@@ -157,9 +157,9 @@ jobs:
         env:
           RUSTFLAGS: "-D warnings"
 
-  test-windows-filesystem:
+  test-windows:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
-    name: Test Windows filesystem
+    name: Test Windows
     runs-on: windows-2022
     timeout-minutes: 90
     env:
@@ -187,17 +187,17 @@ jobs:
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "test-windows-filesystem"
+          shared-key: "test-windows"
           cache-all-crates: "true"
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Cargo Nextest
         uses: taiki-e/install-action@nextest
-      - name: Run filesystem regression tests
-        # Keep this focused and omit dashboard, which requires WSL on Windows.
-        run: >-
-          cargo nextest run --locked --lib
-          -p object-store -p common-datasource -p cli
-          -E 'package(=object-store) | package(=common-datasource) | (package(=cli) & test(metadata::snapshot::tests::))'
+      - name: Install WSL distribution
+        uses: Vampire/setup-wsl@v2
+        with:
+          distribution: Ubuntu-22.04
+      - name: Run Windows tests
+        run: cargo nextest run --locked --workspace -F dashboard --no-fail-fast
 
   conflict-check:
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
