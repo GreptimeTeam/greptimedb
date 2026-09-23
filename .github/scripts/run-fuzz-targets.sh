@@ -104,7 +104,7 @@ write_summary() {
             reproduce_args+=("GT_FUZZ_INSTANCE_ROOT_DIR=${GT_FUZZ_INSTANCE_ROOT_DIR}")
           fi
         fi
-        reproduce_args+=(cargo fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
+        reproduce_args+=(cargo +"${RUSTUP_TOOLCHAIN:-nightly}" fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
         if [[ "${fuzz_unstable}" == true ]]; then
           reproduce_args+=(--features=unstable)
         fi
@@ -195,7 +195,7 @@ for ((index = 0; index < ${#targets[@]}; index++)); do
     fi
     run_args=("${fuzz_binary}" "-max_total_time=${FUZZ_MAX_TOTAL_TIME}" "-artifact_prefix=${target_dir}/libfuzzer/")
   else
-    run_args=(cargo fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
+    run_args=(cargo +"${RUSTUP_TOOLCHAIN:-nightly}" fuzz run "${target}" --fuzz-dir tests-fuzz -D -s none)
     if [[ "${fuzz_unstable}" == true ]]; then
       run_args+=(--features=unstable)
     fi

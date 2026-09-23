@@ -32,6 +32,7 @@ use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
     SemanticType, SkippingIndexType as PbSkippingIndexType, WriteHint,
 };
+use arrow_schema::extension::ExtensionType;
 pub use common_base::AffectedRows;
 use common_base::readable_size::ReadableSize;
 use common_grpc::flight::FlightDecoder;
@@ -39,6 +40,8 @@ use common_recordbatch::DfRecordBatch;
 use common_time::range::TimestampRange;
 use common_time::{TimeToLive, Timestamp};
 use datatypes::error::time_index_not_widening_error;
+use datatypes::extension::json::Json2ExtensionType;
+use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use num_enum::TryFromPrimitive;
@@ -795,6 +798,13 @@ pub enum AlterKind {
         /// Columns to change.
         columns: Vec<ModifyColumnType>,
     },
+    /// Set JSON2 settings of a region column.
+    SetJsonSettings {
+        /// Column name.
+        column_name: String,
+        /// Target JSON2 settings.
+        settings: JsonSettings,
+    },
     /// Set region options.
     SetRegionOptions { options: Vec<SetRegionOption> },
     /// Unset region options.
@@ -975,6 +985,9 @@ impl AlterKind {
                     col_to_change.validate(metadata)?;
                 }
             }
+            AlterKind::SetJsonSettings { column_name, .. } => {
+                Self::validate_set_json_settings(column_name, metadata)?
+            }
             AlterKind::SetRegionOptions { .. } => {}
             AlterKind::UnsetRegionOptions { .. } => {}
             AlterKind::SetIndexes { options } => {
@@ -1084,6 +1097,18 @@ impl AlterKind {
             AlterKind::ModifyColumnTypes { columns } => columns
                 .iter()
                 .any(|col_to_change| col_to_change.need_alter(metadata)),
+            AlterKind::SetJsonSettings {
+                column_name,
+                settings,
+            } => metadata.column_by_name(column_name).is_some_and(|col| {
+                col.column_schema
+                    .extension_type::<Json2ExtensionType>()
+                    .ok()
+                    .flatten()
+                    .is_none_or(|extension| {
+                        !extension.metadata().json_settings().equivalent(settings)
+                    })
+            }),
             AlterKind::SetRegionOptions { .. } => true,
             AlterKind::UnsetRegionOptions { .. } => true,
             AlterKind::SetIndexes { options, .. } => options
@@ -1160,6 +1185,34 @@ impl AlterKind {
 
         Ok(())
     }
+
+    fn validate_set_json_settings(col_name: &String, metadata: &RegionMetadata) -> Result<()> {
+        let region_id = metadata.region_id;
+
+        let col = metadata
+            .column_by_name(col_name)
+            .with_context(|| InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} not found", col_name),
+            })?;
+
+        ensure!(
+            col.semantic_type == SemanticType::Field,
+            InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} is not a field column", col_name),
+            }
+        );
+        ensure!(
+            col.column_schema.data_type.is_json2(),
+            InvalidRegionRequestSnafu {
+                region_id,
+                err: format!("column {} is not a JSON2 column", col_name),
+            }
+        );
+
+        Ok(())
+    }
 }
 
 impl TryFrom<alter_request::Kind> for AlterKind {
@@ -1182,6 +1235,15 @@ impl TryFrom<alter_request::Kind> for AlterKind {
                     .map(|x| x.into())
                     .collect::<Vec<_>>();
                 AlterKind::ModifyColumnTypes { columns }
+            }
+            alter_request::Kind::SetJsonSettings(x) => {
+                let settings = x.settings.context(InvalidRawRegionRequestSnafu {
+                    err: "missing settings in SetJsonSettings",
+                })?;
+                AlterKind::SetJsonSettings {
+                    column_name: x.column_name,
+                    settings: json_settings_from_proto(settings)?,
+                }
             }
             alter_request::Kind::DropColumns(x) => {
                 let names = x.drop_columns.into_iter().map(|x| x.name).collect();
@@ -1482,6 +1544,36 @@ impl From<v1::ModifyColumnType> for ModifyColumnType {
             target_type,
         }
     }
+}
+
+fn json_settings_from_proto(settings: v1::JsonSettings) -> Result<JsonSettings> {
+    let type_hints = settings
+        .type_hints
+        .into_iter()
+        .map(|hint| {
+            let wrapper = ColumnDataTypeWrapper::try_new(hint.data_type, hint.datatype_extension)
+                .map_err(|err| {
+                InvalidRawRegionRequestSnafu {
+                    err: err.to_string(),
+                }
+                .build()
+            })?;
+            let data_type = ConcreteDataType::from(wrapper);
+
+            Ok(JsonTypeHint {
+                path: hint.path,
+                data_type,
+                inverted_index: false,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    JsonSettings::try_new(type_hints, settings.max_auto_expanded_paths).map_err(|err| {
+        InvalidRawRegionRequestSnafu {
+            err: err.to_string(),
+        }
+        .build()
+    })
 }
 
 /// Region option changes used by ALTER requests.
@@ -1953,8 +2045,11 @@ mod tests {
     use api::v1::region::RegionColumnDef;
     use api::v1::{ColumnDataType, ColumnDef};
     use common_time::range::TimestampRange;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, FulltextAnalyzer, FulltextBackend};
+    use datatypes::types::JsonType;
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
@@ -2364,6 +2459,34 @@ mod tests {
                 },
             }
         );
+
+        let request = RegionAlterRequest::try_from(AlterRequest {
+            region_id: 0,
+            schema_version: 1,
+            kind: Some(alter_request::Kind::SetJsonSettings(v1::SetJsonSettings {
+                column_name: "payload".to_string(),
+                settings: Some(v1::JsonSettings {
+                    type_hints: vec![v1::JsonTypeHint {
+                        path: vec!["service".to_string()],
+                        data_type: ColumnDataType::String as i32,
+                        datatype_extension: None,
+                    }],
+                    max_auto_expanded_paths: Some(10),
+                }),
+            })),
+        })
+        .unwrap();
+
+        let AlterKind::SetJsonSettings {
+            column_name,
+            settings,
+        } = request.kind
+        else {
+            unreachable!()
+        };
+        assert_eq!("payload", column_name);
+        assert_eq!(Some(10), settings.max_auto_expanded_paths());
+        assert_eq!(1, settings.type_hints().len());
     }
 
     #[test]
@@ -2444,6 +2567,15 @@ mod tests {
             })
             .primary_key(vec![2]);
         builder.build().unwrap()
+    }
+
+    fn json2_column_schema(name: &str, settings: JsonSettings) -> ColumnSchema {
+        let mut column_schema =
+            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
+        column_schema.with_extension_type(&Json2ExtensionType::new(std::sync::Arc::new(
+            JsonMetadata::new(settings),
+        )));
+        column_schema
     }
 
     #[test]
@@ -2728,6 +2860,40 @@ mod tests {
         };
         kind.validate(&metadata).unwrap();
         assert!(kind.need_alter(&metadata));
+    }
+
+    #[test]
+    fn test_validate_set_json_settings() {
+        let mut metadata = new_metadata();
+        let current_schema = json2_column_schema("field_0", JsonSettings::new_v2());
+        let target_settings = JsonSettings::try_new(vec![], Some(10)).unwrap();
+        metadata
+            .column_metadatas
+            .iter_mut()
+            .find(|column| column.column_schema.name == "field_0")
+            .unwrap()
+            .column_schema = current_schema.clone();
+
+        let kind = AlterKind::SetJsonSettings {
+            column_name: "field_0".to_string(),
+            settings: target_settings.clone(),
+        };
+        kind.validate(&metadata).unwrap();
+        assert!(kind.need_alter(&metadata));
+
+        let no_op = AlterKind::SetJsonSettings {
+            column_name: "field_0".to_string(),
+            settings: JsonSettings::new_v2(),
+        };
+        no_op.validate(&metadata).unwrap();
+        assert!(!no_op.need_alter(&metadata));
+
+        AlterKind::SetJsonSettings {
+            column_name: "tag_0".to_string(),
+            settings: target_settings,
+        }
+        .validate(&metadata)
+        .unwrap_err();
     }
 
     #[test]

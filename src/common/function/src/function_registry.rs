@@ -28,14 +28,14 @@ use crate::aggrs::count_hash::CountHash;
 use crate::aggrs::vector::VectorFunction as VectorAggrFunction;
 use crate::function::{Function, FunctionRef};
 use crate::function_factory::ScalarFunctionFactory;
+#[cfg(feature = "ai_functions")]
+use crate::scalars::ai;
 use crate::scalars::anomaly::AnomalyFunction;
 use crate::scalars::avg_calc::AvgCalcFunction;
 use crate::scalars::date::DateFunction;
 use crate::scalars::expression::ExpressionFunction;
 use crate::scalars::hll_count::HllCalcFunction;
 use crate::scalars::ip::IpFunctions;
-#[cfg(feature = "ai_functions")]
-use crate::scalars::jev::JevFunction;
 use crate::scalars::json::JsonFunction;
 use crate::scalars::matches::MatchesFunction;
 use crate::scalars::matches_term::MatchesTermFunction;
@@ -229,7 +229,7 @@ pub static FUNCTION_REGISTRY: LazyLock<Arc<FunctionRegistry>> = LazyLock::new(||
     MatchesFunction::register(&function_registry);
     MatchesTermFunction::register(&function_registry);
     #[cfg(feature = "ai_functions")]
-    JevFunction::register(&function_registry);
+    ai::register(&function_registry);
 
     // System and administration functions
     SystemFunction::register(&function_registry);
@@ -384,11 +384,17 @@ mod tests {
     }
 
     #[test]
-    fn test_jev_registration_matches_feature() {
-        assert_eq!(
-            FUNCTION_REGISTRY.get_function("jev").is_some(),
-            cfg!(feature = "ai_functions")
-        );
+    fn test_ai_registration_matches_feature() {
+        for name in ["ai_match", "ai_choose", "ai_score"] {
+            assert_eq!(
+                FUNCTION_REGISTRY.get_function(name).is_some(),
+                cfg!(feature = "ai_functions"),
+                "{name}"
+            );
+        }
+        for name in ["jev", "jev_choice", "jev_score"] {
+            assert!(FUNCTION_REGISTRY.get_function(name).is_none(), "{name}");
+        }
     }
 
     #[test]

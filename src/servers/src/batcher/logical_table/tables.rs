@@ -75,7 +75,7 @@ impl LogicalTablePendingRowsBatcher {
     /// RecordBatches.
     pub(in crate::batcher::logical_table) async fn build_and_align_table_batches(
         &self,
-        requests: RowInsertRequests,
+        requests: &RowInsertRequests,
         ctx: &QueryContextRef,
     ) -> Result<(Vec<(String, u32, RecordBatchWithTsIdx)>, usize)> {
         let catalog = ctx.current_catalog().to_string();
@@ -113,13 +113,13 @@ impl LogicalTablePendingRowsBatcher {
     /// Extracts non-empty `(table_name, rows)` pairs and computes total row
     /// count across the retained entries.
     pub(in crate::batcher::logical_table) fn collect_non_empty_table_rows(
-        requests: RowInsertRequests,
-    ) -> (Vec<(String, Rows)>, usize) {
-        let mut table_rows: Vec<(String, Rows)> = Vec::with_capacity(requests.inserts.len());
+        requests: &RowInsertRequests,
+    ) -> (Vec<(&str, &Rows)>, usize) {
+        let mut table_rows: Vec<(&str, &Rows)> = Vec::with_capacity(requests.inserts.len());
         let mut total_rows = 0;
 
-        for request in requests.inserts {
-            let Some(rows) = request.rows else {
+        for request in &requests.inserts {
+            let Some(rows) = &request.rows else {
                 continue;
             };
             if rows.rows.is_empty() {
@@ -127,7 +127,7 @@ impl LogicalTablePendingRowsBatcher {
             }
 
             total_rows += rows.rows.len();
-            table_rows.push((request.table_name, rows));
+            table_rows.push((request.table_name.as_str(), rows));
         }
 
         (table_rows, total_rows)
@@ -137,15 +137,15 @@ impl LogicalTablePendingRowsBatcher {
 impl LogicalTablePendingRowsBatcher {
     /// Returns unique `(table_name, proto_schema)` pairs while keeping the
     /// first-seen schema for duplicate table names.
-    pub(in crate::batcher::logical_table) fn collect_unique_table_schemas(
-        table_rows: &[(String, Rows)],
-    ) -> Result<Vec<(&str, &[ColumnSchema])>> {
+    pub(in crate::batcher::logical_table) fn collect_unique_table_schemas<'a>(
+        table_rows: &[(&'a str, &'a Rows)],
+    ) -> Result<Vec<(&'a str, &'a [ColumnSchema])>> {
         let mut unique_tables: Vec<(&str, &[ColumnSchema])> = Vec::with_capacity(table_rows.len());
         let mut seen = HashSet::new();
 
         for (table_name, rows) in table_rows {
-            if seen.insert(table_name.as_str()) {
-                unique_tables.push((table_name.as_str(), &rows.schema));
+            if seen.insert(*table_name) {
+                unique_tables.push((*table_name, &rows.schema));
             } else {
                 // table_rows should group rows by table name.
                 return error::InvalidPromRemoteRequestSnafu {
@@ -233,7 +233,7 @@ impl LogicalTablePendingRowsBatcher {
         catalog: &str,
         schema: &str,
         ctx: &QueryContextRef,
-        table_rows: &[(String, Rows)],
+        table_rows: &[(&str, &Rows)],
         plan: &mut TableResolutionPlan,
     ) -> Result<()> {
         if plan.tables_to_create.is_empty() {
@@ -298,7 +298,7 @@ impl LogicalTablePendingRowsBatcher {
     /// For newly created tables, re-checks all row schemas and appends alter
     /// operations when additional tag columns are still missing.
     pub(in crate::batcher::logical_table) fn enqueue_alter_for_new_tables(
-        table_rows: &[(String, Rows)],
+        table_rows: &[(&str, &Rows)],
         plan: &mut TableResolutionPlan,
     ) -> Result<()> {
         let created_tables: HashSet<&str> = plan
@@ -308,11 +308,11 @@ impl LogicalTablePendingRowsBatcher {
             .collect();
 
         for (table_name, rows) in table_rows {
-            if !created_tables.contains(table_name.as_str()) {
+            if !created_tables.contains(table_name) {
                 continue;
             }
 
-            let Some((region_schema, _)) = plan.region_schemas.get(table_name) else {
+            let Some((region_schema, _)) = plan.region_schemas.get(*table_name) else {
                 continue;
             };
 
@@ -321,13 +321,13 @@ impl LogicalTablePendingRowsBatcher {
                 || plan
                     .tables_to_alter
                     .iter()
-                    .any(|(existing_name, _)| existing_name == table_name)
+                    .any(|(existing_name, _)| existing_name == *table_name)
             {
                 continue;
             }
 
             plan.tables_to_alter
-                .push((table_name.clone(), missing_columns));
+                .push((table_name.to_string(), missing_columns));
         }
 
         Ok(())
@@ -397,13 +397,13 @@ impl LogicalTablePendingRowsBatcher {
     /// Converts proto rows to `RecordBatch` values aligned to resolved region
     /// schemas and returns `(table_name, table_id, batch)` tuples.
     pub(in crate::batcher::logical_table) fn build_aligned_batches(
-        table_rows: &[(String, Rows)],
+        table_rows: &[(&str, &Rows)],
         region_schemas: &HashMap<String, (Arc<ArrowSchema>, u32)>,
     ) -> Result<Vec<(String, u32, RecordBatchWithTsIdx)>> {
         let mut aligned_batches = Vec::with_capacity(table_rows.len());
         for (table_name, rows) in table_rows {
             let (region_schema, table_id) =
-                region_schemas.get(table_name).cloned().with_context(|| {
+                region_schemas.get(*table_name).cloned().with_context(|| {
                     error::UnexpectedResultSnafu {
                         reason: format!("Region schema not resolved for table: {}", table_name),
                     }
@@ -415,7 +415,7 @@ impl LogicalTablePendingRowsBatcher {
                     .start_timer();
                 rows_to_aligned_record_batch(rows, region_schema.as_ref())?
             };
-            aligned_batches.push((table_name.clone(), table_id, record_batch));
+            aligned_batches.push((table_name.to_string(), table_id, record_batch));
         }
 
         Ok(aligned_batches)
@@ -531,7 +531,7 @@ mod tests {
         };
 
         let (table_rows, total_rows) =
-            LogicalTablePendingRowsBatcher::collect_non_empty_table_rows(requests);
+            LogicalTablePendingRowsBatcher::collect_non_empty_table_rows(&requests);
 
         assert_eq!(2, total_rows);
         assert_eq!(1, table_rows.len());

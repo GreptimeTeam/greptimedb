@@ -27,7 +27,7 @@ use datatypes::value::ValueRef;
 use memcomparable::{Deserializer, Serializer};
 use paste::paste;
 use serde::{Deserialize, Serialize};
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use store_api::codec::PrimaryKeyEncoding;
 use store_api::metadata::{RegionMetadata, RegionMetadataRef};
 use store_api::storage::ColumnId;
@@ -38,7 +38,7 @@ use crate::error::{
 use crate::key_values::KeyValue;
 use crate::primary_key_filter::DensePrimaryKeyFilter;
 use crate::row_converter::{
-    CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter,
+    CompositeValues, PrimaryKeyCodec, PrimaryKeyCodecExt, PrimaryKeyFilter, encoded_string_len,
 };
 
 /// Field to serialize and deserialize value in memcomparable format.
@@ -290,84 +290,112 @@ impl SortField {
         bytes: &[u8],
         deserializer: &mut Deserializer<&[u8]>,
     ) -> Result<usize> {
-        let len = self.encoded_field_len(&bytes[deserializer.position()..])?;
+        let pos = deserializer.position();
+        let remaining = bytes
+            .get(pos..)
+            .ok_or(memcomparable::Error::Eof)
+            .context(error::DeserializeFieldSnafu)?;
+        let len = Self::encoded_len(self.encode_data_type(), remaining)?;
+        if len > 1 && self.encode_data_type().is_boolean() && remaining[1] > 1 {
+            return Err(memcomparable::Error::InvalidBoolEncoding(remaining[1]))
+                .context(error::DeserializeFieldSnafu);
+        }
         deserializer.advance(len);
         Ok(len)
     }
 
     /// Checks field boundaries before any unchecked reads in memcomparable.
-    fn encoded_field_len(&self, bytes: &[u8]) -> Result<usize> {
-        let invalid = || {
-            error::InvalidDensePrimaryKeySnafu {
-                reason: "truncated field or invalid encoding",
+    fn encoded_len(data_type: &ConcreteDataType, bytes: &[u8]) -> Result<usize> {
+        let marker = bytes
+            .first()
+            .copied()
+            .ok_or(memcomparable::Error::Eof)
+            .context(error::DeserializeFieldSnafu)?;
+        match marker {
+            0 => return Ok(1),
+            1 => {}
+            value => {
+                return Err(memcomparable::Error::InvalidTagEncoding(value as usize))
+                    .context(error::DeserializeFieldSnafu);
             }
-            .build()
-        };
-        match bytes.first() {
-            Some(0) => return Ok(1),
-            Some(1) => {}
-            _ => return Err(invalid()),
         }
-        let len = match self.encode_data_type() {
-            ConcreteDataType::Boolean(_)
-            | ConcreteDataType::Int8(_)
-            | ConcreteDataType::UInt8(_) => 2,
+        let to_skip = match data_type {
+            ConcreteDataType::Boolean(_) => 2,
+            ConcreteDataType::Int8(_) | ConcreteDataType::UInt8(_) => 2,
             ConcreteDataType::Int16(_) | ConcreteDataType::UInt16(_) => 3,
-            ConcreteDataType::Int32(_)
-            | ConcreteDataType::UInt32(_)
-            | ConcreteDataType::Float32(_)
-            | ConcreteDataType::Date(_) => 5,
-            ConcreteDataType::Int64(_)
-            | ConcreteDataType::UInt64(_)
-            | ConcreteDataType::Float64(_)
-            | ConcreteDataType::Timestamp(_) => 9,
-            ConcreteDataType::Time(_) | ConcreteDataType::Duration(_) => 10,
+            ConcreteDataType::Int32(_) | ConcreteDataType::UInt32(_) => 5,
+            ConcreteDataType::Int64(_) | ConcreteDataType::UInt64(_) => 9,
+            ConcreteDataType::Float32(_) => 5,
+            ConcreteDataType::Float64(_) => 9,
+            ConcreteDataType::Binary(_)
+            | ConcreteDataType::Json(_)
+            | ConcreteDataType::Vector(_) => {
+                // Binary is encoded as a sequence of bytes, not chunked strings.
+                return encoded_binary_len(bytes).context(error::DeserializeFieldSnafu);
+            }
+            ConcreteDataType::String(_) => {
+                return encoded_string_len(bytes).context(error::DeserializeFieldSnafu);
+            }
+            ConcreteDataType::Date(_) => 5,
+            ConcreteDataType::Timestamp(_) => 9, // We treat timestamp as Option<i64>
+            ConcreteDataType::Time(_) => 10,     // i64 and 1 byte time unit
+            ConcreteDataType::Duration(_) => 10,
             ConcreteDataType::Interval(IntervalType::YearMonth(_)) => 5,
             ConcreteDataType::Interval(IntervalType::DayTime(_)) => 9,
             ConcreteDataType::Interval(IntervalType::MonthDayNano(_)) => 17,
             ConcreteDataType::Decimal128(_) => 19,
-            ConcreteDataType::Binary(_)
-            | ConcreteDataType::Json(_)
-            | ConcreteDataType::Vector(_) => {
-                // A serde sequence: each byte is preceded by 1, terminated by 0.
-                let mut pos = 1;
-                while bytes.get(pos) == Some(&1) {
-                    pos += 2;
-                }
-                if bytes.get(pos) != Some(&0) {
-                    return Err(invalid());
-                }
-                pos + 1
-            }
-            ConcreteDataType::String(_) => {
-                match bytes.get(1) {
-                    Some(0) => return Ok(2),
-                    Some(1) => {}
-                    _ => return Err(invalid()),
-                }
-                let mut pos = 2;
-                loop {
-                    match bytes.get(pos + 8) {
-                        Some(1..=8) => break pos + 9,
-                        Some(9) => pos += 9,
-                        _ => return Err(invalid()),
-                    }
-                }
-            }
-            data_type => {
-                return error::NotSupportedFieldSnafu {
+            ConcreteDataType::Null(_)
+            | ConcreteDataType::List(_)
+            | ConcreteDataType::Struct(_)
+            | ConcreteDataType::Dictionary(_) => {
+                return NotSupportedFieldSnafu {
                     data_type: data_type.clone(),
                 }
                 .fail();
             }
         };
-        snafu::ensure!(
-            bytes.len() >= len,
-            error::InvalidDensePrimaryKeySnafu {
-                reason: "truncated field",
-            }
-        );
-        Ok(len)
+        if bytes.len() < to_skip {
+            return Err(memcomparable::Error::Eof).context(error::DeserializeFieldSnafu);
+        }
+        Ok(to_skip)
+    }
+
+    /// Decodes primitive fields straight into a reference value for column
+    /// builders, avoiding owned Value construction and conversion. The caller has
+    /// already checked the encoded boundary.
+    fn deserialize_primitive_ref<B: Buf>(
+        data_type: &ConcreteDataType,
+        deserializer: &mut Deserializer<B>,
+    ) -> Option<Result<ValueRef<'static>>> {
+        macro_rules! decode_primitive {
+            ($($variant:ident, $native:ty),* $(,)?) => {
+                match data_type {
+                    $(ConcreteDataType::$variant(_) => Some(
+                        Option::<$native>::deserialize(deserializer)
+                            .map(ValueRef::from)
+                            .context(error::DeserializeFieldSnafu)
+                    ),)*
+                    _ => None,
+                }
+            };
+        }
+        decode_primitive!(
+            Boolean, bool, Int8, i8, Int16, i16, Int32, i32, Int64, i64, UInt8, u8, UInt16, u16,
+            UInt32, u32, UInt64, u64, Float32, f32, Float64, f64,
+        )
+    }
+}
+
+/// The Option marker has already been checked by SortField.
+fn encoded_binary_len(bytes: &[u8]) -> memcomparable::Result<usize> {
+    let mut current = 1;
+    loop {
+        match bytes.get(current).copied() {
+            Some(0) => return Ok(current + 1),
+            Some(1) if bytes.get(current + 1).is_some() => current += 2,
+            Some(1) | None => return Err(memcomparable::Error::Eof),
+            Some(marker) => return Err(memcomparable::Error::InvalidSeqEncoding(marker)),
+        }
     }
 }
 
@@ -444,7 +472,16 @@ impl DensePrimaryKeyCodec {
                 return Ok(index);
             }
             let start = deserializer.position();
-            let len = field.encoded_field_len(&bytes[start..])?;
+            // Preserve the prefix error contract used by primary-key range mapping.
+            let len = SortField::encoded_len(field.encode_data_type(), &bytes[start..]).map_err(
+                |source| match source {
+                    error::Error::DeserializeField { .. } => error::InvalidDensePrimaryKeySnafu {
+                        reason: "truncated field or invalid encoding",
+                    }
+                    .build(),
+                    source => source,
+                },
+            )?;
             // Production range mapping only needs boundaries, not allocated field values.
             #[cfg(any(debug_assertions, test))]
             field.deserialize(&mut Deserializer::new(&bytes[start..start + len]))?;
@@ -470,6 +507,73 @@ impl DensePrimaryKeyCodec {
         Ok(values)
     }
 
+    /// Iterates over all source PK fields in schema order, checking each field's
+    /// encoded boundary before deserializing it. Stops after the first error.
+    ///
+    /// Unlike positional access, this requires no offsets or value cache. Callers
+    /// can consume each value immediately instead of retaining the entire key.
+    pub fn decode_dense_iter<'a>(
+        &'a self,
+        bytes: &'a [u8],
+    ) -> impl Iterator<Item = Result<(ColumnId, Value)>> + 'a {
+        self.ordered_primary_key_columns.iter().scan(
+            Some(Deserializer::new(bytes)),
+            move |state, (id, field)| {
+                let deserializer = state.as_mut()?;
+                let remaining = &bytes[deserializer.position()..];
+                let decoded = SortField::encoded_len(field.encode_data_type(), remaining)
+                    .and_then(|_| field.deserialize(deserializer).map(|value| (*id, value)));
+                if decoded.is_err() {
+                    *state = None;
+                }
+                Some(decoded)
+            },
+        )
+    }
+
+    /// Returns the column ids and sort fields in encoded primary-key order.
+    pub fn fields(&self) -> &[(ColumnId, SortField)] {
+        &self.ordered_primary_key_columns
+    }
+
+    /// Decodes all fields in source order into a consumer, checking boundaries.
+    /// Strings borrow the reusable buffer for the duration of each callback, so
+    /// materializing them into column builders needs no per-value owned string.
+    pub fn decode_dense_with(
+        &self,
+        bytes: &[u8],
+        value_buf: &mut Vec<u8>,
+        mut consume: impl FnMut(usize, ValueRef<'_>),
+    ) -> Result<()> {
+        let mut deserializer = Deserializer::new(bytes);
+        for (pos, (_, field)) in self.ordered_primary_key_columns.iter().enumerate() {
+            let data_type = field.encode_data_type();
+            let remaining = &bytes[deserializer.position()..];
+            SortField::encoded_len(data_type, remaining)?;
+            if data_type.is_string() && remaining[0] != 0 {
+                deserializer.advance(1);
+                deserializer
+                    .read_bytes_into(value_buf)
+                    .context(error::DeserializeFieldSnafu)?;
+                let value = std::str::from_utf8(value_buf).map_err(|err| {
+                    error::InvalidDensePrimaryKeySnafu {
+                        reason: format!("string is not valid UTF-8: {err}"),
+                    }
+                    .build()
+                })?;
+                consume(pos, ValueRef::String(value));
+            } else if let Some(value) =
+                SortField::deserialize_primitive_ref(data_type, &mut deserializer)
+            {
+                consume(pos, value?);
+            } else {
+                let value = field.deserialize(&mut deserializer)?;
+                consume(pos, value.as_value_ref());
+            }
+        }
+        Ok(())
+    }
+
     /// Returns the field at `pos`.
     ///
     /// # Panics
@@ -488,61 +592,61 @@ impl DensePrimaryKeyCodec {
         offsets_buf: &mut Vec<usize>,
         deserializer: &mut Deserializer<&[u8]>,
     ) -> Result<usize> {
-        if pos < offsets_buf.len() {
-            // We computed the offset before.
-            let offset = offsets_buf[pos];
-            deserializer.advance(offset);
-            return Ok(offset);
-        }
-
+        ensure!(
+            pos < self.num_fields(),
+            error::InvalidDensePrimaryKeySnafu {
+                reason: format!(
+                    "field position {pos} exceeds field count {}",
+                    self.num_fields()
+                ),
+            }
+        );
         if offsets_buf.is_empty() {
-            let mut offset = 0;
-            // Skip values before `pos`.
-            for i in 0..pos {
-                // Offset to skip before reading value i.
-                offsets_buf.push(offset);
-                let skip = self.field_at(i).skip_deserialize(bytes, deserializer)?;
-                offset += skip;
-            }
-            // Offset to skip before reading this value.
-            offsets_buf.push(offset);
-            Ok(offset)
-        } else {
-            // Offsets are not enough.
-            let value_start = offsets_buf.len() - 1;
-            // Advances to decode value at `value_start`.
-            let mut offset = offsets_buf[value_start];
-            deserializer.advance(offset);
-            for i in value_start..pos {
-                // Skip value i.
-                let skip = self.field_at(i).skip_deserialize(bytes, deserializer)?;
-                // Offset for the value at i + 1.
-                offset += skip;
-                offsets_buf.push(offset);
-            }
-            Ok(offset)
+            // The schema bounds this cache. Reserve once even when the first
+            // requested field is near the end of a wide key.
+            offsets_buf.reserve_exact(self.num_fields());
+            offsets_buf.push(0);
         }
+        // Start at the requested field if cached, otherwise resume discovery
+        // from the furthest known boundary.
+        let value_start = pos.min(offsets_buf.len() - 1);
+        let mut offset = offsets_buf[value_start];
+        ensure!(
+            offset <= bytes.len(),
+            error::InvalidDensePrimaryKeySnafu {
+                reason: "cached offset exceeds key length",
+            }
+        );
+        deserializer.advance(offset);
+        for i in value_start..pos {
+            offset += self.field_at(i).skip_deserialize(bytes, deserializer)?;
+            offsets_buf.push(offset);
+        }
+        Ok(offset)
     }
 
     /// Decode value at `pos` in `bytes`.
     ///
-    /// The i-th element in offsets buffer is how many bytes to skip in order to read value at `pos`.
+    /// The i-th element in the offsets buffer is the start of field i. The buffer
+    /// must only be reused for the same encoded key and codec.
+    #[inline]
     pub fn decode_value_at(
         &self,
         bytes: &[u8],
         pos: usize,
         offsets_buf: &mut Vec<usize>,
     ) -> Result<Value> {
-        let mut deserializer = Deserializer::new(bytes);
-        self.advance_to_value_at(bytes, pos, offsets_buf, &mut deserializer)?;
-
-        self.field_at(pos).deserialize(&mut deserializer)
+        let encoded = self.encoded_value_at(bytes, pos, offsets_buf)?;
+        self.field_at(pos)
+            .deserialize(&mut Deserializer::new(encoded))
     }
 
     /// Returns the encoded bytes at `pos` in `bytes`.
     ///
-    /// The i-th element in offsets buffer is how many bytes to skip in order to read value at
-    /// `pos`.
+    /// The i-th element in the offsets buffer is the start of field i. The buffer
+    /// must only be reused for the same encoded key and codec. Validates the
+    /// framing up to this field, without validating or decoding later fields.
+    #[inline]
     pub fn encoded_value_at<'a>(
         &self,
         bytes: &'a [u8],
@@ -555,6 +659,11 @@ impl DensePrimaryKeyCodec {
         let len = self
             .field_at(pos)
             .skip_deserialize(bytes, &mut deserializer)?;
+        // We already found the next field's start while validating this one.
+        // Reuse it instead of scanning this field again on the next lookup.
+        if offsets_buf.len() == pos + 1 && pos + 1 < self.num_fields() {
+            offsets_buf.push(offset + len);
+        }
         Ok(&bytes[offset..offset + len])
     }
 
@@ -598,6 +707,10 @@ impl PrimaryKeyCodec for DensePrimaryKeyCodec {
 
     fn encoding(&self) -> PrimaryKeyEncoding {
         PrimaryKeyEncoding::Dense
+    }
+
+    fn as_dense(&self) -> Option<&DensePrimaryKeyCodec> {
+        Some(self)
     }
 
     fn primary_key_filter(
@@ -663,6 +776,78 @@ mod tests {
         }
         let decoded = encoder.decode(&result).unwrap().into_dense();
         assert_eq!(decoded, row);
+        let mut value_buf = Vec::new();
+        let mut borrowed = Vec::new();
+        encoder
+            .decode_dense_with(&result, &mut value_buf, |_, value| {
+                borrowed.push(Value::from(value))
+            })
+            .unwrap();
+        assert_eq!(borrowed, row);
+        let sequential = encoder
+            .decode_dense_iter(&result)
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            sequential
+                .iter()
+                .map(|(_, value)| value)
+                .collect::<Vec<_>>(),
+            row.iter().collect::<Vec<_>>()
+        );
+        for end in 0..result.len() {
+            assert!(
+                encoder
+                    .decode_dense_with(&result[..end], &mut value_buf, |_, _| {})
+                    .is_err()
+            );
+            assert!(
+                encoder
+                    .decode_dense_iter(&result[..end])
+                    .collect::<Result<Vec<_>>>()
+                    .is_err(),
+                "truncated at {end}"
+            );
+        }
+        // Every supported type must have the same boundaries in positional and
+        // full decoding. Exercise every truncation both at the requested field
+        // and while skipping it to reach a later field.
+        let mut offsets = Vec::new();
+        let mut end = 0;
+        for (pos, value) in row.iter().enumerate() {
+            let encoded = encoder
+                .encoded_value_at(&result, pos, &mut offsets)
+                .unwrap();
+            assert_eq!(
+                encoder
+                    .field_at(pos)
+                    .deserialize(&mut Deserializer::new(encoded))
+                    .unwrap(),
+                *value
+            );
+            let start = end;
+            end += encoded.len();
+            for len in start..end {
+                assert!(
+                    encoder
+                        .encoded_value_at(&result[..len], pos, &mut Vec::new())
+                        .is_err()
+                );
+                assert!(
+                    encoder
+                        .decode_value_at(&result[..len], pos, &mut Vec::new())
+                        .is_err()
+                );
+                if pos + 1 < row.len() {
+                    assert!(
+                        encoder
+                            .encoded_value_at(&result[..len], pos + 1, &mut Vec::new())
+                            .is_err()
+                    );
+                }
+            }
+        }
+        assert_eq!(end, result.len());
         let mut decoded = Vec::new();
         let mut offsets = Vec::new();
         // Iter two times to test offsets buffer.
@@ -869,6 +1054,96 @@ mod tests {
                 .unwrap();
             assert_eq!(encoded_value, expected.as_slice());
         }
+    }
+
+    #[test]
+    fn test_positional_decode_invalid_encoding() {
+        for (ty, bytes) in [
+            (ConcreteDataType::int64_datatype(), vec![2]),
+            (ConcreteDataType::boolean_datatype(), vec![1, 2]),
+            (ConcreteDataType::binary_datatype(), vec![1, 2]),
+            (ConcreteDataType::binary_datatype(), vec![1, 1, 42, 2]),
+            (ConcreteDataType::string_datatype(), vec![1, 2]),
+            (
+                ConcreteDataType::string_datatype(),
+                vec![1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            ),
+            (
+                ConcreteDataType::string_datatype(),
+                vec![1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 10],
+            ),
+        ] {
+            let codec = DensePrimaryKeyCodec::with_fields(vec![
+                (0, SortField::new(ty)),
+                (1, SortField::new(ConcreteDataType::int64_datatype())),
+            ]);
+            for pos in [0, 1, 2, usize::MAX] {
+                assert!(
+                    codec
+                        .encoded_value_at(&bytes, pos, &mut Vec::new())
+                        .is_err()
+                );
+                assert!(codec.decode_value_at(&bytes, pos, &mut Vec::new()).is_err());
+            }
+            assert!(
+                codec
+                    .decode_dense_iter(&bytes)
+                    .collect::<Result<Vec<_>>>()
+                    .is_err()
+            );
+            assert!(
+                codec
+                    .decode_dense_with(&bytes, &mut Vec::new(), |_, _| {})
+                    .is_err()
+            );
+        }
+        let codec = DensePrimaryKeyCodec::with_fields(vec![
+            (0, SortField::new(ConcreteDataType::string_datatype())),
+            (1, SortField::new(ConcreteDataType::int64_datatype())),
+        ]);
+        let bytes = codec
+            .encode([ValueRef::String("abcdefghijk"), ValueRef::Int64(42)].into_iter())
+            .unwrap();
+        for pos in [2, usize::MAX] {
+            assert!(
+                codec
+                    .encoded_value_at(&bytes, pos, &mut Vec::new())
+                    .is_err()
+            );
+            assert!(codec.decode_value_at(&bytes, pos, &mut Vec::new()).is_err());
+        }
+        for offset in [bytes.len(), bytes.len() + 1, usize::MAX] {
+            for pos in [0, 1] {
+                assert!(
+                    codec
+                        .encoded_value_at(&bytes, pos, &mut vec![offset])
+                        .is_err()
+                );
+                assert!(
+                    codec
+                        .decode_value_at(&bytes, pos, &mut vec![offset])
+                        .is_err()
+                );
+            }
+        }
+        let mut invalid_utf8 = bytes;
+        invalid_utf8[2] = 0xff;
+        assert!(
+            codec
+                .decode_dense_with(&invalid_utf8, &mut Vec::new(), |_, _| {})
+                .is_err()
+        );
+        assert!(
+            codec
+                .decode_dense_iter(&invalid_utf8)
+                .collect::<Result<Vec<_>>>()
+                .is_err()
+        );
+        assert!(
+            codec
+                .decode_value_at(&invalid_utf8, 0, &mut Vec::new())
+                .is_err()
+        );
     }
 
     #[test]
