@@ -1,0 +1,80 @@
+CREATE TABLE json2_compaction_null_type_hint_mismatch (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2
+) WITH (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_compaction_null_type_hint_mismatch VALUES
+    (1, '{"kind":1}'),
+    (2, '{"kind":"invalid","message":"keep"}');
+
+Affected Rows: 2
+
+ADMIN FLUSH_TABLE('json2_compaction_null_type_hint_mismatch');
+
++---------------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_compaction_null_type_hint_mismatch') |
++---------------------------------------------------------------+
+| 0                                                             |
++---------------------------------------------------------------+
+
+ALTER TABLE json2_compaction_null_type_hint_mismatch
+    MODIFY COLUMN attrs JSON2 (
+        kind BIGINT
+    );
+
+Affected Rows: 0
+
+INSERT INTO json2_compaction_null_type_hint_mismatch VALUES
+    (3, '{"kind":3}');
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('json2_compaction_null_type_hint_mismatch');
+
++---------------------------------------------------------------+
+| ADMIN FLUSH_TABLE('json2_compaction_null_type_hint_mismatch') |
++---------------------------------------------------------------+
+| 0                                                             |
++---------------------------------------------------------------+
+
+SELECT ts, attrs.kind, attrs.message
+FROM json2_compaction_null_type_hint_mismatch
+ORDER BY ts;
+
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+| ts                      | json_get(json2_compaction_null_type_hint_mismatch.attrs,Utf8("$.kind"),Int64(NULL)) | json_get(json2_compaction_null_type_hint_mismatch.attrs,Utf8("$.message")) |
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                                                   |                                                                            |
+| 1970-01-01T00:00:00.002 |                                                                                     | keep                                                                       |
+| 1970-01-01T00:00:00.003 | 3                                                                                   |                                                                            |
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+
+ADMIN COMPACT_TABLE('json2_compaction_null_type_hint_mismatch', 'swcs', '86400');
+
++----------------------------------------------------------------------------------+
+| ADMIN COMPACT_TABLE('json2_compaction_null_type_hint_mismatch', 'swcs', '86400') |
++----------------------------------------------------------------------------------+
+| 0                                                                                |
++----------------------------------------------------------------------------------+
+
+SELECT ts, attrs.kind, attrs.message
+FROM json2_compaction_null_type_hint_mismatch
+ORDER BY ts;
+
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+| ts                      | json_get(json2_compaction_null_type_hint_mismatch.attrs,Utf8("$.kind"),Int64(NULL)) | json_get(json2_compaction_null_type_hint_mismatch.attrs,Utf8("$.message")) |
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+| 1970-01-01T00:00:00.001 | 1                                                                                   |                                                                            |
+| 1970-01-01T00:00:00.002 |                                                                                     | keep                                                                       |
+| 1970-01-01T00:00:00.003 | 3                                                                                   |                                                                            |
++-------------------------+-------------------------------------------------------------------------------------+----------------------------------------------------------------------------+
+
+DROP TABLE json2_compaction_null_type_hint_mismatch;
+
+Affected Rows: 0
+

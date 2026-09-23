@@ -1,0 +1,144 @@
+-- No credentials or external service needed: NULL propagates without an API call.
+SELECT ai_match(NULL, 'The event reports a failed payment.') AS score;
+
++-------+
+| score |
++-------+
+|       |
++-------+
+
+SELECT ai_match('message', NULL) AS score;
+
++-------+
+| score |
++-------+
+|       |
++-------+
+
+SELECT arrow_typeof(ai_match(NULL, 'condition')) AS score_type;
+
++------------+
+| score_type |
++------------+
+| Float64    |
++------------+
+
+SELECT ai_choose(NULL, 'Route the ticket', '{"billing":null}') AS null_text,
+       ai_choose('message', NULL, 'invalid JSON') AS null_prompt,
+       ai_choose('message', 'Route the ticket', NULL) AS null_criteria;
+
++-----------+-------------+---------------+
+| null_text | null_prompt | null_criteria |
++-----------+-------------+---------------+
+|           |             |               |
++-----------+-------------+---------------+
+
+SELECT ai_score(NULL, 'Rate severity', '["low","high"]') AS null_text,
+       ai_score('message', NULL, 'invalid JSON') AS null_prompt,
+       ai_score('message', 'Rate severity', NULL) AS null_criteria;
+
++-----------+-------------+---------------+
+| null_text | null_prompt | null_criteria |
++-----------+-------------+---------------+
+|           |             |               |
++-----------+-------------+---------------+
+
+SELECT arrow_typeof(ai_choose(NULL, 'prompt', '{"billing":null}')) AS choice_type,
+       arrow_typeof(ai_score(NULL, 'prompt', '["low","high"]')) AS score_type;
+
++-------------+------------+
+| choice_type | score_type |
++-------------+------------+
+| Utf8        | BinaryView |
++-------------+------------+
+
+SELECT json_to_string(rating) AS rating,
+       json_get_float(rating, 'score') AS score,
+       json_get_float(rating, 'confidence') AS confidence,
+       json_get_float(rating, 'probabilities[2]') AS high_probability
+FROM (SELECT ai_score(NULL, 'prompt', '["low","medium","high"]') AS rating) AS rated;
+
++--------+-------+------------+------------------+
+| rating | score | confidence | high_probability |
++--------+-------+------------+------------------+
+|        |       |            |                  |
++--------+-------+------------+------------------+
+
+-- Validate SQL registration, coercion, and asynchronous filtering on a real table.
+CREATE TABLE ai_events (
+    occurred_at TIMESTAMP TIME INDEX,
+    "service" STRING,
+    "message" STRING,
+    PRIMARY KEY ("service")
+);
+
+Affected Rows: 0
+
+INSERT INTO ai_events VALUES
+    ('2026-09-19T01:00:00Z', 'payments', NULL),
+    ('2026-09-19T02:00:00Z', 'auth', NULL);
+
+Affected Rows: 2
+
+SELECT occurred_at, service, message FROM ai_events
+WHERE occurred_at >= '2026-09-19T00:00:00Z'
+  AND occurred_at < '2026-09-20T00:00:00Z'
+  AND service = 'payments'
+  AND ai_match((message), 'The event reports that a payment still failed after retries.') >= 0.8
+ORDER BY occurred_at;
+
++-------------+---------+---------+
+| occurred_at | service | message |
++-------------+---------+---------+
++-------------+---------+---------+
+
+SELECT occurred_at,
+       ai_choose(message, 'Route the ticket', '{"billing":"Payments","technical":"Errors"}') AS team,
+       ai_score(message, 'Rate severity', '["low","medium","high"]') AS rating
+FROM ai_events
+ORDER BY occurred_at;
+
++---------------------+------+--------+
+| occurred_at         | team | rating |
++---------------------+------+--------+
+| 2026-09-19T01:00:00 |      |        |
+| 2026-09-19T02:00:00 |      |        |
++---------------------+------+--------+
+
+DROP TABLE ai_events;
+
+Affected Rows: 0
+
+-- Matching uses two arguments; thresholds are expressed as SQL comparisons.
+SELECT ai_match('message', 'condition', 0.8);
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'ai_match' function: coercion from Utf8, Utf8, Float64 to the signature Exact(Utf8View, Utf8View) failed. No function matches the given name and argument types 'ai_match(Utf8, Utf8, Float64)'. You might need to add explicit type casts.
+	Candidate functions:
+	ai_match(Utf8View, Utf8View)
+
+-- Invalid criteria fail locally before any HTTP request.
+SELECT ai_choose('message', 'prompt', 'not json');
+
+Error: 3001(EngineExecuteQuery), Execution error: ai_choose criteria is not valid JSON: expected ident at line 1 column 2
+
+SELECT ai_choose('message', 'prompt', '{}');
+
+Error: 3001(EngineExecuteQuery), Execution error: ai_choose criteria must be a JSON object with 1 to 255 options; descriptions must be strings, objects, arrays, or null
+
+SELECT ai_score('message', 'prompt', '["only one level"]');
+
+Error: 3001(EngineExecuteQuery), Execution error: ai_score criteria must be a JSON array with 2 to 10 levels; descriptions must be strings, objects, or arrays
+
+-- Both additional modes require criteria.
+SELECT ai_choose('message', 'prompt');
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'ai_choose' function: coercion from Utf8, Utf8 to the signature Exact(Utf8View, Utf8View, Utf8View) failed. No function matches the given name and argument types 'ai_choose(Utf8, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	ai_choose(Utf8View, Utf8View, Utf8View)
+
+SELECT ai_score('message', 'prompt');
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Failed to coerce arguments to satisfy a call to 'ai_score' function: coercion from Utf8, Utf8 to the signature Exact(Utf8View, Utf8View, Utf8View) failed. No function matches the given name and argument types 'ai_score(Utf8, Utf8)'. You might need to add explicit type casts.
+	Candidate functions:
+	ai_score(Utf8View, Utf8View, Utf8View)
+

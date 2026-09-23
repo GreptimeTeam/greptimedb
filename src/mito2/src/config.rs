@@ -164,6 +164,7 @@ pub struct MitoConfig {
 
     // Other configs:
     /// Buffer size for SST writing.
+    // TODO(#9240): Support per-object-store write buffer sizes for backend-specific tuning.
     pub sst_write_buffer_size: ReadableSize,
     /// Maximum number of SST files to scan concurrently (default 384).
     pub max_concurrent_scan_files: usize,

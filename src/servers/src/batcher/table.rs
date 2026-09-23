@@ -38,6 +38,7 @@ use snafu::ResultExt;
 use table::metadata::TableInfoRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, oneshot};
 
+use crate::batcher::pending_rows_batch_sync_enabled;
 use crate::batcher::table::flow_notifier::FlowNotifier;
 use crate::batcher::table::metrics::PENDING_WORKERS;
 use crate::batcher::table::pending_batch::PendingBatch;
@@ -70,6 +71,7 @@ pub struct TablePendingRowsBatcher {
     flush_limiter: FlushLimiter,
     request_limiter: RequestLimiter,
     worker_channel_capacity: usize,
+    pending_rows_batch_sync: bool,
     worker_idle_timeout: Duration,
     inserter: Arc<Inserter>,
     flow_notifier: FlowNotifier,
@@ -110,6 +112,7 @@ impl TablePendingRowsBatcher {
             flush_limiter,
             request_limiter,
             worker_channel_capacity,
+            pending_rows_batch_sync: pending_rows_batch_sync_enabled(),
             worker_idle_timeout: flush_interval.checked_mul(3).unwrap_or(flush_interval),
             inserter,
             flow_notifier,
@@ -160,8 +163,8 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
         })
     }
 
-    /// Waits for completed bulk writes. Cancellation does not retract an admitted
-    /// submission. Combined failures affect all waiters and may be partial writes.
+    /// Acknowledges according to the global batching policy. Cancellation does
+    /// not retract an admitted submission. Flush failures may be partial writes.
     async fn submit(
         &self,
         table_info: TableInfoRef,
@@ -210,6 +213,9 @@ impl PendingRowsBatcher for TablePendingRowsBatcher {
             }
             .fail();
         }
+        if !self.pending_rows_batch_sync {
+            return Ok(total_rows);
+        }
         response_rx
             .await
             .map_err(|_| {
@@ -236,7 +242,7 @@ mod tests {
     use api::v1::region::{RegionRequest, bulk_insert_request, region_request};
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, Row, Rows, Value};
-    use arrow::array::{Int32Array, TimestampMillisecondArray};
+    use arrow::array::{ArrayRef, Int32Array, TimestampMillisecondArray};
     use arrow::datatypes::Schema as ArrowSchema;
     use arrow::record_batch::RecordBatch;
     use catalog::memory::MemoryCatalogManager;
@@ -317,6 +323,111 @@ mod tests {
             _: QueryRequest,
         ) -> MetaResult<SendableRecordBatchStream> {
             panic!("batching must not query the datanode")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_acknowledgement_preserves_admission() {
+        use operator::error::UnexpectedSnafu;
+
+        use crate::batcher::pending_rows_batch_sync_enabled;
+        use crate::batcher::table::batch_key_from_ctx;
+        use crate::batcher::table::pending_batch::notify_batches;
+
+        for sync in [false, true] {
+            for fail in [false, true] {
+                let backend = prepare_mocked_backend().await;
+                let nodes = Arc::new(MockDatanodeManager::new(BulkHandler {
+                    requests: Arc::new(Mutex::new(Vec::new())),
+                    report_missing_row: false,
+                    expected_skip_wal: false,
+                    expected_schema: "public".to_string(),
+                }));
+                let inserter = Arc::new(Inserter::new(
+                    MemoryCatalogManager::new(),
+                    create_partition_rule_manager(backend).await,
+                    nodes,
+                    mock_table_flownode_cache(1, vec![]).await,
+                    true,
+                ));
+                let mut batcher = TablePendingRowsBatcher::try_new(
+                    Duration::from_secs(3600),
+                    1,
+                    1,
+                    1,
+                    1,
+                    NonZeroUsize::new(1).unwrap(),
+                    inserter,
+                )
+                .unwrap();
+                assert_eq!(
+                    batcher.pending_rows_batch_sync,
+                    pending_rows_batch_sync_enabled()
+                );
+                Arc::get_mut(&mut batcher).unwrap().pending_rows_batch_sync = sync;
+                let table = Arc::new(new_test_table_info(1, "ack", [0].into_iter()));
+                let ctx = QueryContext::arc();
+                let key = batch_key_from_ctx(&table.name, &ctx);
+                // Hold the worker command to control completion independently of scheduling.
+                let (_, receiver) = batcher.workers.get_or_create(key, 1).await;
+                let mut receiver = receiver.unwrap();
+                let batch = RecordBatch::try_from_iter(vec![(
+                    "a",
+                    Arc::new(Int32Array::from(vec![1])) as ArrayRef,
+                )])
+                .unwrap();
+                let permit = batcher.acquire().await.unwrap();
+                let submitter = batcher.clone();
+                let submitted =
+                    tokio::spawn(async move { submitter.submit(table, batch, ctx, permit).await });
+                let WorkerCommand::Submit(pending) =
+                    timeout(Duration::from_secs(5), receiver.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut submitted = Some(submitted);
+                if sync {
+                    assert!(!submitted.as_ref().unwrap().is_finished());
+                } else {
+                    assert_eq!(
+                        timeout(Duration::from_secs(5), submitted.take().unwrap())
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .unwrap(),
+                        1
+                    );
+                }
+                // Early acknowledgement must not release capacity before completion.
+                let acquire = batcher.acquire();
+                tokio::pin!(acquire);
+                assert!(futures::poll!(acquire.as_mut()).is_pending());
+                let result = if fail {
+                    Err(Arc::new(
+                        UnexpectedSnafu {
+                            violated: "flush failed".to_string(),
+                        }
+                        .build(),
+                    ))
+                } else {
+                    Ok(())
+                };
+                notify_batches(vec![pending], result);
+                if let Some(submitted) = submitted {
+                    let result = timeout(Duration::from_secs(5), submitted)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(result.is_err(), fail);
+                    if !fail {
+                        assert_eq!(result.unwrap(), 1);
+                    }
+                }
+                timeout(Duration::from_secs(5), acquire)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
         }
     }
 

@@ -602,6 +602,92 @@ async fn start_test_server(server_tls: TlsOption) -> Result<u16> {
     Ok(server_addr.port())
 }
 
+const EMPTY_QUERIES: &[&str] = &[
+    "",
+    " \t\r\n",
+    ";",
+    ";;;",
+    "-- ping",
+    "-- ping\n",
+    "/* ping */",
+    "/* outer /* inner */ comment */",
+    "; -- ping\r\n /* comment */ ;",
+];
+
+#[tokio::test]
+async fn test_simple_query_empty_statements() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for query in EMPTY_QUERIES {
+        let messages = client
+            .simple_query(query)
+            .await
+            .unwrap_or_else(|err| panic!("query {query:?} failed: {err}"));
+        // tokio-postgres exposes EmptyQueryResponse as CommandComplete(0).
+        assert!(
+            matches!(
+                messages.as_slice(),
+                [SimpleQueryMessage::CommandComplete(0)]
+            ),
+            "expected an empty query response for {query:?}, got {messages:?}"
+        );
+    }
+
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(unwrap_results(&messages), vec!["1"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_extended_query_empty_statements() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for query in EMPTY_QUERIES {
+        let statement = client
+            .prepare(query)
+            .await
+            .unwrap_or_else(|err| panic!("prepare {query:?} failed: {err}"));
+        assert_eq!(client.execute(&statement, &[]).await.unwrap(), 0);
+        assert!(client.query(&statement, &[]).await.unwrap().is_empty());
+    }
+
+    let row = client
+        .query_one("SELECT $1::BIGINT", &[&42i64])
+        .await
+        .unwrap();
+    assert_eq!(row.get::<_, i64>(0), 42);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_simple_query_with_comments() -> Result<()> {
+    let server_port = start_test_server(Default::default()).await?;
+    let client = create_plain_connection(server_port, false).await.unwrap();
+
+    for (query, expected) in [
+        ("-- ping\nSELECT 1", vec!["1"]),
+        ("/* comment */ SELECT 1; -- trailing", vec!["1"]),
+        ("SELECT '-- ping'", vec!["-- ping"]),
+        ("SELECT '/* comment */'", vec!["/* comment */"]),
+        ("SELECT 1; /* between */ SELECT 2;", vec!["1", "2"]),
+    ] {
+        let messages = client.simple_query(query).await.unwrap();
+        assert_eq!(unwrap_results(&messages), expected, "query: {query}");
+    }
+
+    assert!(
+        client
+            .simple_query("/* comment */ SELECT missing_column FROM numbers")
+            .await
+            .is_err()
+    );
+    let messages = client.simple_query("SELECT 1").await.unwrap();
+    assert_eq!(unwrap_results(&messages), vec!["1"]);
+    Ok(())
+}
+
 async fn do_simple_query(server_tls: TlsOption, client_tls: bool) -> Result<()> {
     let server_port = start_test_server(server_tls).await?;
 

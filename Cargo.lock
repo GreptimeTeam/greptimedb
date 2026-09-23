@@ -913,6 +913,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "asyncband"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2d85fd3d291fabcc40c7232c92c280ec1754fd7b5d7ea769f143222143e179a"
+
+[[package]]
 name = "asynchronous-codec"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1667,7 +1673,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cache",
- "catalog",
  "chrono",
  "common-base",
  "common-catalog",
@@ -1695,7 +1700,6 @@ dependencies = [
  "lazy_static",
  "meta-client",
  "moka",
- "object-store",
  "partition",
  "paste",
  "prometheus 0.14.0",
@@ -2000,28 +2004,24 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "async-stream",
  "async-trait",
- "auth",
  "base64 0.22.1",
  "cache",
- "catalog",
  "chrono",
  "clap",
  "client",
  "common-base",
  "common-catalog",
  "common-config",
+ "common-datasource",
  "common-error",
  "common-grpc",
  "common-macro",
  "common-meta",
  "common-procedure",
- "common-query",
- "common-recordbatch",
  "common-runtime",
  "common-telemetry",
  "common-test-util",
  "common-time",
- "common-version",
  "common-wal",
  "datatypes",
  "etcd-client",
@@ -2041,14 +2041,13 @@ dependencies = [
  "serde",
  "serde_json",
  "servers",
- "session",
  "snafu 0.8.6",
+ "sql",
  "standalone",
  "store-api",
  "table",
  "tempfile",
  "tokio",
- "tracing-appender",
  "url",
  "uuid",
 ]
@@ -2066,7 +2065,6 @@ dependencies = [
  "common-catalog",
  "common-error",
  "common-grpc",
- "common-grpc-expr",
  "common-macro",
  "common-meta",
  "common-query",
@@ -2092,7 +2090,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic 0.14.2",
- "tracing",
 ]
 
 [[package]]
@@ -2142,10 +2139,8 @@ dependencies = [
  "api",
  "async-trait",
  "auth",
- "base64 0.22.1",
  "cache",
  "catalog",
- "chrono",
  "clap",
  "cli",
  "client",
@@ -2162,7 +2157,6 @@ dependencies = [
  "common-options",
  "common-procedure",
  "common-query",
- "common-recordbatch",
  "common-runtime",
  "common-stat",
  "common-telemetry",
@@ -2176,7 +2170,6 @@ dependencies = [
  "datafusion-physical-plan",
  "datanode",
  "datatypes",
- "either",
  "etcd-client",
  "file-engine",
  "flow",
@@ -2184,7 +2177,6 @@ dependencies = [
  "futures",
  "hex",
  "human-panic",
- "humantime",
  "lazy_static",
  "log-store",
  "meta-client",
@@ -2208,20 +2200,17 @@ dependencies = [
  "serde",
  "serde_json",
  "servers",
- "session",
  "similar-asserts",
  "smallvec",
  "snafu 0.8.6",
  "sqlparser",
  "standalone",
  "store-api",
- "table",
  "temp-env",
  "tempfile",
  "tikv-jemallocator",
  "tokio",
  "toml 0.8.23",
- "tonic 0.14.2",
  "tracing-appender",
 ]
 
@@ -2266,7 +2255,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "117725a109d387c937a1533ce01b450cbde6b88abceea8473c4d7a85853cda3c"
 dependencies = [
  "lazy_static",
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2347,7 +2336,6 @@ dependencies = [
  "serde_json",
  "snafu 0.8.6",
  "temp-env",
- "tempfile",
  "toml 0.8.23",
 ]
 
@@ -2448,14 +2436,11 @@ dependencies = [
  "common-grpc",
  "common-macro",
  "common-meta",
- "common-time",
  "greptime-proto",
- "humantime",
  "meta-client",
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "tokio",
  "tonic 0.14.2",
 ]
 
@@ -2466,21 +2451,18 @@ dependencies = [
  "ahash 0.8.12",
  "api",
  "approx 0.5.1",
- "arc-swap",
  "arrow 59.2.0",
- "arrow-cast 59.2.0",
  "arrow-schema 59.2.0",
  "async-trait",
+ "axum 0.8.4",
  "bincode",
  "catalog",
- "chrono",
  "common-base",
  "common-catalog",
  "common-error",
  "common-macro",
  "common-meta",
  "common-query",
- "common-runtime",
  "common-telemetry",
  "common-time",
  "common-version",
@@ -2505,11 +2487,11 @@ dependencies = [
  "memchr",
  "mito-codec",
  "nalgebra",
- "num",
  "num-traits",
  "paste",
  "pretty_assertions",
  "regex",
+ "reqwest 0.13.4",
  "s2",
  "serde",
  "serde_json",
@@ -2581,7 +2563,6 @@ name = "common-grpc-expr"
 version = "1.3.0-alpha.1"
 dependencies = [
  "api",
- "common-base",
  "common-catalog",
  "common-error",
  "common-macro",
@@ -2589,7 +2570,6 @@ dependencies = [
  "common-sql",
  "common-time",
  "datatypes",
- "paste",
  "prost 0.14.1",
  "snafu 0.8.6",
  "store-api",
@@ -2665,7 +2645,6 @@ dependencies = [
  "common-wal",
  "common-workload",
  "datafusion-common",
- "datafusion-expr",
  "datatypes",
  "deadpool",
  "deadpool-postgres",
@@ -2674,7 +2653,6 @@ dependencies = [
  "flexbuffers",
  "futures",
  "futures-util",
- "greptime-proto",
  "hex",
  "humantime-serde",
  "itertools 0.14.0",
@@ -2769,7 +2747,6 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "async-trait",
  "common-procedure",
- "snafu 0.8.6",
  "tokio",
 ]
 
@@ -2842,13 +2819,11 @@ dependencies = [
  "lazy_static",
  "num_cpus",
  "once_cell",
- "parking_lot 0.12.4",
  "paste",
  "pin-project",
  "prometheus 0.14.0",
  "ratelimit",
  "serde",
- "serde_json",
  "snafu 0.8.6",
  "tempfile",
  "tokio",
@@ -2875,7 +2850,6 @@ dependencies = [
  "common-decimal",
  "common-error",
  "common-macro",
- "common-telemetry",
  "common-time",
  "datafusion-sql",
  "datatypes",
@@ -2893,7 +2867,6 @@ dependencies = [
  "common-base",
  "common-runtime",
  "common-telemetry",
- "lazy_static",
  "nix 0.30.1",
  "num_cpus",
  "prometheus 0.14.0",
@@ -4523,7 +4496,6 @@ dependencies = [
  "async-trait",
  "bytes",
  "cache",
- "client",
  "common-base",
  "common-catalog",
  "common-config",
@@ -4531,7 +4503,6 @@ dependencies = [
  "common-error",
  "common-function",
  "common-greptimedb-telemetry",
- "common-grpc",
  "common-macro",
  "common-meta",
  "common-options",
@@ -5322,7 +5293,6 @@ dependencies = [
  "common-datasource",
  "common-error",
  "common-macro",
- "common-query",
  "common-recordbatch",
  "common-telemetry",
  "common-test-util",
@@ -5462,19 +5432,14 @@ dependencies = [
  "arrow 59.2.0",
  "arrow-flight",
  "arrow-schema 59.2.0",
- "async-recursion",
  "async-trait",
- "bytes",
  "catalog",
  "chrono",
  "client",
  "common-base",
  "common-catalog",
  "common-config",
- "common-datasource",
- "common-decimal",
  "common-error",
- "common-frontend",
  "common-function",
  "common-grpc",
  "common-macro",
@@ -5487,28 +5452,20 @@ dependencies = [
  "common-telemetry",
  "common-time",
  "common-version",
- "config",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-expr",
- "datafusion-substrait",
  "datatypes",
- "enum_dispatch",
  "futures",
  "get-size2",
  "greptime-proto",
  "hostname 0.4.1",
- "http 1.5.0",
  "humantime-serde",
  "itertools 0.14.0",
  "lazy_static",
  "meta-client",
- "nom 7.1.3",
- "num-traits",
- "num_cpus",
  "operator",
- "partition",
  "pretty_assertions",
  "prometheus 0.14.0",
  "prost 0.14.1",
@@ -5518,11 +5475,9 @@ dependencies = [
  "serde_json",
  "servers",
  "session",
- "smallvec",
  "snafu 0.8.6",
  "sql",
  "store-api",
- "strum 0.27.1",
  "substrait 1.3.0-alpha.1",
  "table",
  "tokio",
@@ -5623,7 +5578,6 @@ name = "frontend"
 version = "1.3.0-alpha.1"
 dependencies = [
  "api",
- "arc-swap",
  "arrow-flight",
  "async-stream",
  "async-trait",
@@ -5647,7 +5601,6 @@ dependencies = [
  "common-memory-manager",
  "common-meta",
  "common-options",
- "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
@@ -5662,13 +5615,11 @@ dependencies = [
  "datatypes",
  "futures",
  "hostname 0.4.1",
- "humantime",
  "humantime-serde",
  "hyper-util",
  "lazy_static",
  "log-query",
  "meta-client",
- "num_cpus",
  "opentelemetry-proto",
  "opentelemetry-semantic-conventions 0.31.0",
  "operator",
@@ -5679,7 +5630,6 @@ dependencies = [
  "promql-parser",
  "prost 0.14.1",
  "query",
- "rand 0.9.4",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
@@ -5698,7 +5648,6 @@ dependencies = [
  "tonic 0.14.2",
  "tower 0.5.2",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -6120,7 +6069,7 @@ dependencies = [
 [[package]]
 name = "greptime-proto"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=0c4beffaa2b3968034915867593a717c6ab0c6b4#0c4beffaa2b3968034915867593a717c6ab0c6b4"
+source = "git+https://github.com/GreptimeTeam/greptime-proto.git?rev=3d232f406fad574e8c630fb1c304fe2ebb013c9c#3d232f406fad574e8c630fb1c304fe2ebb013c9c"
 dependencies = [
  "prost 0.14.1",
  "prost-types 0.14.1",
@@ -7933,7 +7882,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07033963ba89ebaf1584d767badaa2e8fcec21aedea6b8c0346d487d49c28667"
 dependencies = [
  "cfg-if",
- "windows-targets 0.48.5",
+ "windows-targets 0.53.5",
 ]
 
 [[package]]
@@ -8111,7 +8060,6 @@ dependencies = [
  "derive_builder 0.20.2",
  "futures",
  "futures-util",
- "itertools 0.14.0",
  "lazy_static",
  "object-store",
  "pin-project",
@@ -8455,20 +8403,16 @@ dependencies = [
  "common-options",
  "common-telemetry",
  "common-time",
- "datatypes",
  "futures",
- "futures-util",
  "humantime-serde",
  "meta-srv",
  "rand 0.9.4",
  "serde",
  "serde_json",
- "session",
  "snafu 0.8.6",
  "tokio",
  "tokio-stream",
  "tonic 0.14.2",
- "tower 0.5.2",
  "tracing",
  "tracing-subscriber",
 ]
@@ -8480,9 +8424,7 @@ dependencies = [
  "api",
  "async-trait",
  "axum 0.8.4",
- "axum-extra",
  "axum-macros",
- "bytes",
  "chrono",
  "clap",
  "client",
@@ -8515,19 +8457,14 @@ dependencies = [
  "futures",
  "h2 0.3.26",
  "hostname 0.4.1",
- "http-body-util",
- "humantime",
  "humantime-serde",
  "hyper-util",
  "itertools 0.14.0",
  "lazy_static",
- "local-ip-address",
  "once_cell",
  "ordered-float 4.6.0",
- "parking_lot 0.12.4",
  "partition",
  "prometheus 0.14.0",
- "prost 0.14.1",
  "rand 0.9.4",
  "regex",
  "rskafka",
@@ -8545,7 +8482,6 @@ dependencies = [
  "toml 0.8.23",
  "tonic 0.14.2",
  "tower 0.5.2",
- "tower-http 0.6.11",
  "tracing",
  "tracing-subscriber",
  "typetag",
@@ -8556,7 +8492,7 @@ dependencies = [
 [[package]]
 name = "meter-core"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f743c3a5fe8c1f57363eac5866c356b7d91f9b39#f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 dependencies = [
  "anymap2",
  "once_cell",
@@ -8567,7 +8503,7 @@ dependencies = [
 [[package]]
 name = "meter-macros"
 version = "0.1.0"
-source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=5618e779cf2bb4755b499c630fba4c35e91898cb#5618e779cf2bb4755b499c630fba4c35e91898cb"
+source = "git+https://github.com/GreptimeTeam/greptime-meter.git?rev=f743c3a5fe8c1f57363eac5866c356b7d91f9b39#f743c3a5fe8c1f57363eac5866c356b7d91f9b39"
 dependencies = [
  "meter-core",
 ]
@@ -8593,7 +8529,6 @@ dependencies = [
  "common-recordbatch",
  "common-runtime",
  "common-telemetry",
- "common-test-util",
  "common-time",
  "common-wal",
  "criterion 0.7.0",
@@ -8713,9 +8648,7 @@ dependencies = [
  "bytes",
  "chrono",
  "common-base",
- "common-config",
  "common-datasource",
- "common-decimal",
  "common-error",
  "common-function",
  "common-grpc",
@@ -8754,7 +8687,6 @@ dependencies = [
  "object-store",
  "parquet",
  "partition",
- "paste",
  "pin-project",
  "prometheus 0.14.0",
  "prost 0.14.1",
@@ -8766,11 +8698,9 @@ dependencies = [
  "rskafka",
  "rstest",
  "rstest_reuse",
- "scopeguard",
  "serde",
  "serde_json",
  "serde_with",
- "session",
  "smallvec",
  "snafu 0.8.6",
  "store-api",
@@ -9552,10 +9482,8 @@ name = "object-store"
 version = "1.3.0-alpha.1"
 dependencies = [
  "anyhow",
- "async-trait",
  "bytes",
  "cap-std",
- "chrono",
  "common-base",
  "common-error",
  "common-macro",
@@ -9565,13 +9493,12 @@ dependencies = [
  "derive_builder 0.20.2",
  "futures",
  "humantime-serde",
- "lazy_static",
+ "object-store",
  "object_store",
  "object_store_opendal",
  "opendal",
  "opendal-http-transport-reqwest",
  "prometheus 0.14.0",
- "rand 0.9.4",
  "reqwest 0.13.4",
  "serde",
  "snafu 0.8.6",
@@ -9610,8 +9537,7 @@ dependencies = [
 [[package]]
 name = "object_store_opendal"
 version = "0.58.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "88f165780495c17aa3ce86846600504198c3fffd99073521552751c2430fa6ac"
+source = "git+https://github.com/GreptimeTeam/opendal.git?rev=c03e56802b47de3ccfc8fe028e59a459b278a0d2#c03e56802b47de3ccfc8fe028e59a459b278a0d2"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9698,9 +9624,9 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "opendal"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f20562cc7447fcc915fc5c23df305a412ea80a733c9f2fd9e2d267e2815be6d"
+checksum = "9fe43e16d96bed57937eb7c4a28559bf4c5fc4a3951656505d1fdd4f856349b4"
 dependencies = [
  "ctor",
  "opendal-core",
@@ -9722,11 +9648,12 @@ dependencies = [
 
 [[package]]
 name = "opendal-core"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec75551ff4cf3e57da98979f6a937aaa9ddb3915bf68cc17d03df733be6646ed"
+checksum = "de4566a412776e3f65d53dd9fceced5b432a0a9c9a1e8d50ccf58823795e5c5b"
 dependencies = [
  "anyhow",
+ "asyncband",
  "base64 0.23.1",
  "bytes",
  "futures",
@@ -9734,7 +9661,6 @@ dependencies = [
  "jiff",
  "log",
  "md-5 0.11.0",
- "mea",
  "percent-encoding",
  "quick-xml 0.41.0",
  "reqsign-core",
@@ -9748,9 +9674,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-http-transport-reqwest"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad4d4f19c3ce01126a30611f8e544eaa217104a278c889ac17c9374fe4f9e4ef"
+checksum = "f772ce6c137ab43647726116d505a649a88d41928fcd813438eb30b02312bcbb"
 dependencies = [
  "bytes",
  "futures",
@@ -9762,21 +9688,21 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-concurrent-limit"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "249ac5b0aa5a7a6c3737342d10456067937f9c9a6f3f02544271f7908ab91081"
+checksum = "3734c648617e5ad724d49175dde8323550624f9614f50e9e81b7aafae30b1734"
 dependencies = [
+ "asyncband",
  "futures",
  "http 1.5.0",
- "mea",
  "opendal-core",
 ]
 
 [[package]]
 name = "opendal-layer-logging"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c75411ab00f77851ff086b686c1e9ca8175ac18c15afa2cb75b9036436cb06c"
+checksum = "0a8daab5a91eac76f94516e7c71e677195c9221840ce8f5e71815e3fc8207742"
 dependencies = [
  "log",
  "opendal-core",
@@ -9784,9 +9710,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-observe-metrics-common"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12dbc31b27ee8e5f658ae6c8514b8276059e5235e2f85138a42e6ed172324876"
+checksum = "0fbe664be117c293cfa3980a0d2fc238bbb38eae5f6c191f376e88ccb830d26b"
 dependencies = [
  "futures",
  "http 1.5.0",
@@ -9795,9 +9721,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-prometheus"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c14e6cb0b3ea8d83bef751613b8bf4512678afe8b49c2c96a633515bc0b34d79"
+checksum = "b32078d8248555ee6271332ec480b78306a44f0d902ea4721ccac00d9b866a21"
 dependencies = [
  "opendal-core",
  "opendal-layer-observe-metrics-common",
@@ -9806,9 +9732,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-retry"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80b7738bd5f233ad8da39af9b9316b9b7a4eaddd91e8e32a1e19b7030688121d"
+checksum = "eb8e22cb1f86ef9af771a8947d3ccf380c8f5b76236f628314dd41c9ba73331a"
 dependencies = [
  "backon",
  "log",
@@ -9817,9 +9743,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-timeout"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a704141924500f3803c05ed871b53305d2a2f11cb5ef20160c3ee688a1857f66"
+checksum = "08ac6c77fe0d1b18e0064a02c19b98dbebcab78bf5e7753ad1f3abbc18850ff4"
 dependencies = [
  "opendal-core",
  "tokio",
@@ -9827,9 +9753,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-layer-tracing"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4827cf8b2ebd9123b1fb7286c421be079948e2b963a452f1f7e8aee2c12e7997"
+checksum = "603807927a799ea981f62a3b0012e17181e39f468793b78ca8bedda66d19813c"
 dependencies = [
  "futures",
  "http 1.5.0",
@@ -9839,9 +9765,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-azblob"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3310fbbb48f111c6f590473c2cd15e1b7f8e384444b0d4e328f0464c864d767"
+checksum = "c6cf31b02e7b44191d97c07254eea109b5da9c17210a29e478c8d0dc26dffb1f"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -9860,9 +9786,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-azure-common"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7348c88edf15af435b7be930077746b569fac5e738c1bf6a363b675e7317c9df"
+checksum = "8107324c3f3cb9970fe20526c2c341b7c5769acbd4699bab73bd525f5fd63d62"
 dependencies = [
  "http 1.5.0",
  "opendal-core",
@@ -9870,9 +9796,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-fs"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "826c4e17a30643b888fe983897f9a4b23b07066e1d069727a923cc8fb419a702"
+checksum = "a0e7d8974aebd33be899200c9d0d50b2141fd5fa5c462b29e20653e3ddbfe339"
 dependencies = [
  "bytes",
  "log",
@@ -9884,9 +9810,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-gcs"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "007f3fba63c21e516c956b891e96ff9892d8175662bfb781cdada9d3766a11e6"
+checksum = "3d80eca6f9227bdf65d43e5b8d5fe75dca8cfab1da07571442a0420400847bea"
 dependencies = [
  "async-trait",
  "bytes",
@@ -9901,13 +9827,14 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
 name = "opendal-service-http"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2fd1f0f28bd052e068d9bb4bc5d30a09de22a4f7cea24558dbeef2b91090cc3"
+checksum = "9ac1553d6b57ca79e200e5c7ded9ab708f2016dadb28ede0f2da71e02fd0b960"
 dependencies = [
  "http 1.5.0",
  "log",
@@ -9917,11 +9844,11 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-mysql"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d4a25f582068ce30ba24eb3efd4ac16ca833c87b5282d8d79634fdbead74d84"
+checksum = "e15592be32b105cd152ab398b3db847e22c8c5f230d9b34ff095ea3d0dc6fd97"
 dependencies = [
- "mea",
+ "asyncband",
  "opendal-core",
  "serde",
  "sqlx",
@@ -9929,9 +9856,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-oss"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cd528ec2d49c5ca69e674ffed7b3e0686fb9cfcfea0596870de381467fda4f1b"
+checksum = "a0ebfa355b1d4edb0e5b2a5b86d8de9f811fae1d7baca6d65246b230b2afc0bd"
 dependencies = [
  "bytes",
  "http 1.5.0",
@@ -9946,9 +9873,9 @@ dependencies = [
 
 [[package]]
 name = "opendal-service-s3"
-version = "0.58.1"
+version = "0.59.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58e80cdf192d7eff05feed747894d64f81905ac4eaf132edf7ea270abdd2d663"
+checksum = "2942f2d8d3d4953c0e8d07cd1244879628d084948e48ce6b6d808c5938f7858d"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -10086,7 +10013,6 @@ dependencies = [
  "ahash 0.8.12",
  "api",
  "arrow 59.2.0",
- "arrow-ipc 59.2.0",
  "async-stream",
  "async-trait",
  "axum 0.8.4",
@@ -10133,7 +10059,6 @@ dependencies = [
  "path-slash",
  "percent-encoding",
  "prometheus 0.14.0",
- "prost 0.14.1",
  "prost-types 0.14.1",
  "query",
  "regex",
@@ -10482,19 +10407,15 @@ name = "partition"
 version = "1.3.0-alpha.1"
 dependencies = [
  "api",
- "async-trait",
  "common-base",
  "common-error",
  "common-macro",
  "common-meta",
- "common-query",
- "common-telemetry",
  "criterion 0.7.0",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-physical-expr",
  "datatypes",
- "itertools 0.14.0",
  "moka",
  "rand 0.8.5",
  "serde",
@@ -10883,29 +10804,22 @@ dependencies = [
  "api",
  "arrow 59.2.0",
  "arrow-schema 59.2.0",
- "async-trait",
  "catalog",
  "chrono",
  "chrono-tz",
  "common-catalog",
  "common-error",
- "common-function",
  "common-macro",
  "common-meta",
  "common-query",
  "common-recordbatch",
- "common-runtime",
  "common-telemetry",
  "common-time",
  "criterion 0.7.0",
- "crossbeam-utils",
  "csv",
- "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
- "datafusion-functions",
- "datafusion-physical-expr",
  "datatypes",
  "dyn-fmt",
  "enum_dispatch",
@@ -10920,10 +10834,8 @@ dependencies = [
  "once_cell",
  "operator",
  "ordered-float 4.6.0",
- "paste",
  "prometheus 0.14.0",
  "query",
- "rayon",
  "regex",
  "serde",
  "serde_json",
@@ -11857,7 +11769,6 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "ahash 0.8.12",
  "api",
- "arc-swap",
  "arrow 59.2.0",
  "arrow-schema 59.2.0",
  "async-recursion",
@@ -11891,12 +11802,10 @@ dependencies = [
  "datafusion-proto",
  "datafusion-sql",
  "datatypes",
- "either",
  "fastrand",
  "futures",
  "futures-util",
  "greptime-proto",
- "humantime",
  "itertools 0.14.0",
  "jsonb",
  "lazy_static",
@@ -11905,11 +11814,8 @@ dependencies = [
  "meter-macros",
  "moka",
  "nalgebra",
- "num",
- "num-traits",
  "object-store",
  "once_cell",
- "parking_lot 0.12.4",
  "partition",
  "paste",
  "pretty_assertions",
@@ -11929,7 +11835,6 @@ dependencies = [
  "substrait 1.3.0-alpha.1",
  "table",
  "tokio",
- "tokio-stream",
  "toml 0.8.23",
  "tracing",
  "uuid",
@@ -12420,9 +12325,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign-aws-core"
-version = "3.0.3"
+version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4af084e1f3cbf3e67e0c972765399bce54ecec804cceba46b39a8331f3c1bff"
+checksum = "bac4749b7dfa7bfaccd01eb03e9dc795ed37e3f20d6f0f38e2c67ee85ad6bc86"
 dependencies = [
  "bytes",
  "form_urlencoded",
@@ -12441,9 +12346,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign-aws-v4"
-version = "3.1.0"
+version = "3.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ac5b3b7cefa28933792b439186459f77f19f9b6edbeab41b8b187150361a206"
+checksum = "ff250f0fd0b913fbd565e405acc553da0f13bde30bfb5403178c9d0313cdc15f"
 dependencies = [
  "bytes",
  "http 1.5.0",
@@ -12477,9 +12382,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign-core"
-version = "3.2.1"
+version = "3.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c07dd510b1e1b9b241883e483358147fb2ed2d497a7b39b065ba61eb93deceb0"
+checksum = "ff052daffb0599681c50f85c59e7236438976efe991ab864edd9f3b235501a0f"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -12490,6 +12395,7 @@ dependencies = [
  "http 1.5.0",
  "jiff",
  "log",
+ "mea",
  "percent-encoding",
  "rsa",
  "serde",
@@ -12501,9 +12407,9 @@ dependencies = [
 
 [[package]]
 name = "reqsign-file-read-tokio"
-version = "3.0.4"
+version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "663d9d55abd0df0830ef0ae43708297cc1371cf4e8ca91f3ac813c309cca8c98"
+checksum = "b3235df90a6bca681aa47dd86f2393d122a6d77042aa8a7c81e218cd45c5bfc0"
 dependencies = [
  "anyhow",
  "reqsign-core",
@@ -13571,7 +13477,6 @@ dependencies = [
  "common-catalog",
  "common-decimal",
  "common-error",
- "common-frontend",
  "common-grpc",
  "common-macro",
  "common-mem-prof",
@@ -13591,7 +13496,6 @@ dependencies = [
  "common-version",
  "criterion 0.5.1",
  "csv",
- "dashmap",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
@@ -13617,6 +13521,8 @@ dependencies = [
  "local-ip-address",
  "log-query",
  "loki-proto",
+ "meter-core",
+ "meter-macros",
  "metric-engine",
  "mime_guess",
  "moka",
@@ -13681,7 +13587,6 @@ dependencies = [
  "tower 0.5.2",
  "tower-http 0.6.11",
  "tracing",
- "tracing-opentelemetry",
  "urlencoding",
  "uuid",
  "vrl",
@@ -14058,25 +13963,19 @@ dependencies = [
  "common-base",
  "common-catalog",
  "common-datasource",
- "common-decimal",
  "common-error",
  "common-macro",
  "common-query",
  "common-sql",
- "common-telemetry",
  "common-time",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
- "datafusion-physical-expr",
  "datafusion-sql",
  "datatypes",
  "either",
- "hex",
- "humantime",
  "iso8601",
  "itertools 0.14.0",
- "jsonb",
  "lazy_static",
  "pretty_assertions",
  "promql-parser",
@@ -14086,7 +13985,6 @@ dependencies = [
  "snafu 0.8.6",
  "sqlparser",
  "sqlparser_derive 0.1.1",
- "store-api",
  "table",
  "uuid",
 ]
@@ -14118,7 +14016,6 @@ dependencies = [
  "client",
  "common-error",
  "common-query",
- "common-recordbatch",
  "common-time",
  "datatypes",
  "flate2",
@@ -14445,7 +14342,7 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "api",
  "aquamarine",
- "async-stream",
+ "arrow-schema 59.2.0",
  "async-trait",
  "bytes",
  "common-base",
@@ -14472,7 +14369,6 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser",
  "strum 0.27.1",
  "tokio",
  "uuid",
@@ -14641,16 +14537,13 @@ dependencies = [
  "common-error",
  "common-function",
  "common-macro",
- "common-telemetry",
  "datafusion",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-substrait",
- "datatypes",
  "promql",
  "prost 0.14.1",
  "snafu 0.8.6",
- "tokio",
 ]
 
 [[package]]
@@ -14799,7 +14692,6 @@ dependencies = [
  "futures",
  "greptime-proto",
  "humantime",
- "humantime-serde",
  "lazy_static",
  "once_cell",
  "parquet",
@@ -14807,10 +14699,8 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu 0.8.6",
- "sqlparser",
  "store-api",
  "tokio",
- "tokio-util",
 ]
 
 [[package]]
@@ -15108,7 +14998,6 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "api",
  "arrow-flight",
- "async-stream",
  "async-trait",
  "auth",
  "axum 0.8.4",
@@ -15118,6 +15007,7 @@ dependencies = [
  "catalog",
  "chrono",
  "clap",
+ "cli",
  "client",
  "cmd",
  "common-base",
@@ -15136,7 +15026,6 @@ dependencies = [
  "common-query",
  "common-recordbatch",
  "common-runtime",
- "common-stat",
  "common-telemetry",
  "common-test-util",
  "common-time",
@@ -15167,7 +15056,6 @@ dependencies = [
  "opentelemetry-proto",
  "operator",
  "otel-arrow-rust",
- "partition",
  "paste",
  "pipeline",
  "plugins",
@@ -15182,7 +15070,6 @@ dependencies = [
  "servers",
  "session",
  "similar-asserts",
- "snafu 0.8.6",
  "sql",
  "sqlx",
  "standalone",
@@ -16796,7 +16683,7 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf221c93e13a30d793f7645a0e7762c55d169dbb0a49671918a2319d289b10bb"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

@@ -29,3 +29,9 @@ derive_more.workspace = true
 snafu.workspace = true
 sql.workspace = true
 uuid.workspace = true
+
+[package.metadata.cargo-shear]
+# `common-error` is required by `common-macro`'s `stack_trace_debug`: the
+# generated code references `::common_error` paths, so it must stay a direct
+# dependency.
+ignored = ["common-error"]

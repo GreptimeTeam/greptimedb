@@ -6,6 +6,12 @@
 cargo install cargo-fuzz
 ```
 
+Note: `cargo-fuzz` instruments targets with `-Zsanitizer=fuzzer`, so fuzz
+targets must be built with a **nightly** toolchain (the workspace default
+toolchain does not need to be nightly — `make fuzz` / `make fuzz-ls`
+invoke `cargo +nightly` for you; CI pins its own nightly in
+`FUZZ_RUST_TOOLCHAIN`).
+
 2. Start GreptimeDB
 3. Copy the `.env.example`, which is at project root, to `.env` and change the values on need.
 

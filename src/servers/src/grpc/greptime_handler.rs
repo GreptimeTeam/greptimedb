@@ -78,9 +78,10 @@ impl GreptimeRequestHandler {
         &self,
         request: GreptimeRequest,
         hints: Vec<(String, String)>,
+        channel: Channel,
     ) -> Result<Output> {
         let header = request.header.as_ref();
-        let query_ctx = create_query_context(Channel::Grpc, header, hints, HashMap::new())?;
+        let query_ctx = create_query_context(channel, header, hints, HashMap::new())?;
         let query = request.request.context(InvalidQuerySnafu {
             reason: "Expecting non-empty GreptimeRequest.",
         })?;

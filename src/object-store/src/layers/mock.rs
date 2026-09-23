@@ -96,6 +96,7 @@ impl Service for MockService {
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
     type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
     fn info(&self) -> opendal::raw::ServiceInfo {
         self.inner.info()
@@ -165,7 +166,6 @@ impl Service for MockService {
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: opendal::raw::OpCopier,
     ) -> Result<Self::Copier> {
         if let Some(result) = self
             .copy_interceptor
@@ -176,7 +176,16 @@ impl Service for MockService {
             return Ok(Box::new(oio::OneShotCopier::completed()) as oio::Copier);
         }
 
-        self.inner.copy(ctx, from, to, args, opts)
+        self.inner.copy(ctx, from, to, args)
+    }
+
+    fn compose(
+        &self,
+        ctx: &OperationContext,
+        to: &str,
+        args: opendal::raw::OpCompose,
+    ) -> Result<Self::Composer> {
+        self.inner.compose(ctx, to, args)
     }
 
     async fn rename(

@@ -22,7 +22,6 @@ workspace = true
 ahash.workspace = true
 api.workspace = true
 arrow.workspace = true
-arrow-ipc.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 bytes.workspace = true
@@ -66,7 +65,6 @@ object-store.workspace = true
 partition.workspace = true
 percent-encoding.workspace = true
 prometheus.workspace = true
-prost.workspace = true
 prost-types = { workspace = true, optional = true }
 query.workspace = true
 regex.workspace = true

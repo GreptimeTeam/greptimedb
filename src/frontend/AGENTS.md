@@ -41,8 +41,20 @@ remote datanodes via `operator`/`client`.
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
-  auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  auto-create, partition routing, meter admission) → local `RegionServer`
+  (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
+  request channel to `Inserter` and check meter admission for each nonempty batch.
+- Finite ingestion requests split internally admit their total rows per database
+  before dispatch (`operator::insert::admit_write` / `admit_row_insert_batches`).
+  The returned context covers chunks and derived writes while preserving WCU
+  accounting and the original protocol channel.
+- Internal gRPC listeners mark requests with `Channel::Internal` in middleware
+  (`server.rs`), including requests handled by Enterprise Flight wrappers.
+
+- **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
+  one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
+  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  The schema adapter holds a weak instance reference to avoid an ownership cycle.
 
 - **Table batching** (`instance/builder.rs`): protocol entry points opt in through
   `QueryContext`. The primary inserter prepares eligible ordinary-table writes

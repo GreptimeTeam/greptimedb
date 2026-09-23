@@ -59,6 +59,14 @@ use crate::postgres::utils::convert_err;
 use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
+impl PostgresServerHandlerInner {
+    fn new_query_context(&self) -> QueryContextRef {
+        let mut ctx = self.session.new_query_context();
+        Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
+        ctx
+    }
+}
+
 #[async_trait]
 impl SimpleQueryHandler for PostgresServerHandlerInner {
     #[tracing::instrument(skip_all, fields(protocol = "postgres"))]
@@ -68,7 +76,7 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_SIMPLE_QUERY, db.as_str()])
@@ -101,6 +109,10 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
         }
 
         let query = if let Ok(statements) = &parsed_query {
+            // Comments, whitespace and empty statements also require EmptyQueryResponse.
+            if statements.is_empty() {
+                return Ok(vec![Response::EmptyQuery]);
+            }
             statements
                 .iter()
                 .map(|s| s.to_string())
@@ -357,6 +369,9 @@ impl QueryParser for DefaultQueryParser {
         let parsed_statements = self.compatibility_parser.parse(sql);
         let (sql, copy_to_stdout_format, copy_from_stdin) =
             if let Ok(mut statements) = parsed_statements {
+                if statements.is_empty() {
+                    return Ok(None);
+                }
                 let first_stmt = statements.remove(0);
                 let format = check_copy_to_stdout(&first_stmt);
                 // A COPY FROM STDIN cannot be planned by the internal SQL
@@ -461,7 +476,7 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
         C::Error: Debug,
         PgWireError: From<<C as Sink<PgWireBackendMessage>>::Error>,
     {
-        let query_ctx = self.session.new_query_context();
+        let query_ctx = self.new_query_context();
         let db = query_ctx.get_db_string();
         let _timer = crate::metrics::METRIC_POSTGRES_QUERY_TIMER
             .with_label_values(&[crate::metrics::METRIC_POSTGRES_EXTENDED_QUERY, db.as_str()])

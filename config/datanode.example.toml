@@ -464,6 +464,7 @@ skip_ssl_validation = false
 # endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
+## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
 [[region_engine]]
 
 ## The Mito engine options.

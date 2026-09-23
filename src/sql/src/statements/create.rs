@@ -157,6 +157,26 @@ impl Display for Json2Options {
     }
 }
 
+impl Json2Options {
+    pub fn build_json_settings(&self) -> Result<JsonSettings> {
+        let type_hints = self
+            .type_hints
+            .iter()
+            .map(|hint| {
+                Ok(datatypes::json::JsonTypeHint {
+                    path: hint.path.clone(),
+                    data_type: sql_data_type_to_concrete_data_type(&hint.data_type)?,
+                    inverted_index: hint.inverted_index,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let max_auto_expanded_paths = self
+            .max_auto_expanded_paths
+            .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS));
+        JsonSettings::try_new(type_hints, max_auto_expanded_paths).map_err(Into::into)
+    }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone, Visit, VisitMut, Serialize)]
 pub struct JsonTypeHint {
     pub path: Vec<String>,
@@ -351,24 +371,7 @@ impl ColumnExtensions {
             return Ok(None);
         };
 
-        let type_hints = options
-            .type_hints
-            .iter()
-            .map(|hint| {
-                Ok(datatypes::json::JsonTypeHint {
-                    path: hint.path.clone(),
-                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
-                    inverted_index: hint.inverted_index,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let settings = JsonSettings::try_new(
-            type_hints,
-            options
-                .max_auto_expanded_paths
-                .or(Some(JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS)),
-        )?;
-        Ok(Some(settings))
+        options.build_json_settings().map(Some)
     }
 
     pub fn set_json_settings(&mut self, settings: JsonSettings) -> Result<()> {
@@ -393,47 +396,19 @@ impl ColumnExtensions {
     }
 }
 
-fn json_type_hint_concrete_data_type(data_type: &DataType) -> Result<ConcreteDataType> {
-    let data_type = sql_data_type_to_concrete_data_type(data_type)?;
-    normalize_json_type_hint_concrete_data_type(&data_type)
-}
-
-fn normalize_json_type_hint_concrete_data_type(
-    data_type: &ConcreteDataType,
-) -> Result<ConcreteDataType> {
-    let normalized = match data_type {
-        ConcreteDataType::String(_) => ConcreteDataType::string_datatype(),
-        ConcreteDataType::Int8(_)
-        | ConcreteDataType::Int16(_)
-        | ConcreteDataType::Int32(_)
-        | ConcreteDataType::Int64(_) => ConcreteDataType::int64_datatype(),
-        ConcreteDataType::UInt8(_)
-        | ConcreteDataType::UInt16(_)
-        | ConcreteDataType::UInt32(_)
-        | ConcreteDataType::UInt64(_) => ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            ConcreteDataType::float64_datatype()
-        }
-        ConcreteDataType::Boolean(_) => ConcreteDataType::boolean_datatype(),
-        _ => {
-            return InvalidSqlSnafu {
-                msg: format!("unsupported JSON2 type hint data type: {data_type}"),
-            }
-            .fail();
-        }
-    };
-    Ok(normalized)
-}
-
 fn json_type_hint_sql_data_type(data_type: &ConcreteDataType) -> Result<DataType> {
-    let data_type = normalize_json_type_hint_concrete_data_type(data_type)?;
     let sql_type = match data_type {
         ConcreteDataType::String(_) => DataType::String(None),
         ConcreteDataType::Int64(_) => DataType::BigInt(None),
         ConcreteDataType::UInt64(_) => DataType::BigIntUnsigned(None),
         ConcreteDataType::Float64(_) => DataType::Double(sqlparser::ast::ExactNumberInfo::None),
         ConcreteDataType::Boolean(_) => DataType::Boolean,
-        _ => unreachable!("JSON2 type hint data type should have been normalized"),
+        _ => {
+            return InvalidSqlSnafu {
+                msg: format!("unsupported JSON2 type hint data type: {data_type}"),
+            }
+            .fail();
+        }
     };
     Ok(sql_type)
 }
@@ -930,7 +905,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "service.name" STRING,
-                "a.b"."c" INT64,
+                "a.b"."c" BIGINT,
                 a."b.c" STRING
             ),
             ts TIMESTAMP TIME INDEX
@@ -974,7 +949,7 @@ ENGINE=mito
     fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64,
+                status_code BIGINT,
                 max_auto_expanded_paths = 1
             ),
             ts TIMESTAMP TIME INDEX
@@ -1000,7 +975,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "1abc" STRING,
-                a."2b" INT64
+                a."2b" BIGINT
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1042,8 +1017,8 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_default() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 DEFAULT -5,
-                duration FLOAT64 DEFAULT +1.5,
+                status_code BIGINT DEFAULT -5,
+                duration DOUBLE DEFAULT +1.5,
                 error BOOLEAN DEFAULT false,
                 message STRING DEFAULT 'unknown'
             ),
@@ -1059,7 +1034,7 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_not_null() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 NOT NULL DEFAULT NULL
+                status_code BIGINT NOT NULL DEFAULT NULL
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1070,23 +1045,23 @@ ENGINE=mito
     }
 
     #[test]
-    fn test_set_json_settings_normalizes_type_hint_sql_types() -> Result<()> {
+    fn test_set_json_settings_preserves_type_hint_sql_types() -> Result<()> {
         let mut extensions = super::ColumnExtensions::default();
         let settings = JsonSettings::try_new(
             vec![
                 DatatypeJsonTypeHint {
                     path: vec!["i".to_string()],
-                    data_type: ConcreteDataType::int32_datatype(),
+                    data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
-                    data_type: ConcreteDataType::float32_datatype(),
+                    data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
-                    data_type: ConcreteDataType::uint32_datatype(),
+                    data_type: ConcreteDataType::uint64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {

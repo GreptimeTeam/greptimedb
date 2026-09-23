@@ -65,8 +65,7 @@ use crate::sst::parquet::{
     PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
 };
 use crate::sst::{
-    DEFAULT_WRITE_BUFFER_SIZE, DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator,
-    maybe_wrap_schema,
+    DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
 };
 
 /// Converts a flat RecordBatch for writing to parquet.
@@ -181,7 +180,11 @@ pub struct ParquetWriter<'a, F: WriterFactory, I: IndexerBuilder, P: FilePathPro
 
 pub trait WriterFactory {
     type Writer: AsyncWrite + Send + Unpin;
-    fn create(&mut self, file_path: &str) -> impl Future<Output = Result<Self::Writer>>;
+    fn create(
+        &mut self,
+        file_path: &str,
+        write_buffer_size: usize,
+    ) -> impl Future<Output = Result<Self::Writer>>;
 }
 
 pub struct ObjectStoreWriterFactory {
@@ -191,10 +194,10 @@ pub struct ObjectStoreWriterFactory {
 impl WriterFactory for ObjectStoreWriterFactory {
     type Writer = Compat<FuturesAsyncWriter>;
 
-    async fn create(&mut self, file_path: &str) -> Result<Self::Writer> {
+    async fn create(&mut self, file_path: &str, write_buffer_size: usize) -> Result<Self::Writer> {
         self.object_store
             .writer_with(file_path)
-            .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .chunk(write_buffer_size)
             .concurrent(DEFAULT_WRITE_CONCURRENCY)
             .await
             .map(|v| v.into_futures_async_write().compat_write())
@@ -566,7 +569,9 @@ where
                 self.current_file,
             ));
             let writer = SizeAwareWriter::new(
-                self.writer_factory.create(&sst_file_path).await?,
+                self.writer_factory
+                    .create(&sst_file_path, opts.write_buffer_size.as_bytes() as usize)
+                    .await?,
                 self.bytes_written.clone(),
             );
             let arrow_writer =

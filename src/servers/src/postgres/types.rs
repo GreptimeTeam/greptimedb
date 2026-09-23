@@ -19,7 +19,7 @@ use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
 use std::task::{Context, Poll};
 
-use arrow::array::{Array, AsArray};
+use arrow::array::{Array, ArrayRef, AsArray};
 use arrow_pg::encoder::{Encoder, encode_value};
 use arrow_pg::list_encoder::encode_list;
 use arrow_schema::{DataType, TimeUnit};
@@ -37,7 +37,7 @@ use datatypes::json::JsonSettings;
 use datatypes::prelude::{ConcreteDataType, DataType as _, Value};
 use datatypes::schema::{Schema, SchemaRef};
 use datatypes::types::{Decimal128Type, IntervalType, TimestampType, jsonb_to_string};
-use datatypes::value::StructValue;
+use datatypes::value::try_value_from_array;
 use futures::Stream;
 use pg_interval::Interval as PgInterval;
 use pgwire::api::Type;
@@ -234,7 +234,8 @@ impl ToSqlText for OidAliasValue<'_> {
     }
 }
 
-/// this function will encode greptime's `StructValue` into PostgreSQL jsonb type
+/// this function will encode greptime's structured values (`StructValue`, or a
+/// list of them) into PostgreSQL jsonb type
 ///
 /// Note that greptimedb has different types of StructValue for storing json data,
 /// based on policy defined in `JsonSettings`. But here the `StructValue`
@@ -245,16 +246,33 @@ impl ToSqlText for OidAliasValue<'_> {
 /// arrays: element in array must be the same type
 fn encode_struct<S: Encoder>(
     _query_ctx: &QueryContextRef,
-    struct_value: StructValue,
+    value: Value,
     builder: &mut S,
     pg_field: &FieldInfo,
 ) -> PgWireResult<()> {
     let encoding_setting = JsonSettings::default();
     let json_value = encoding_setting
-        .decode(Value::Struct(struct_value))
+        .decode(value)
         .map_err(|e| PgWireError::ApiError(Box::new(e)))?;
 
     builder.encode_field(&json_value, pg_field)
+}
+
+/// Encodes one row of a structured column (`Struct`, or `List` of `Struct`) as
+/// a PostgreSQL `json` value.
+///
+/// Returns an error for arrow field types greptimedb cannot represent
+/// (e.g. `Decimal256`) instead of panicking, so the client receives a proper
+/// error response.
+fn encode_structured_json<S: Encoder>(
+    query_ctx: &QueryContextRef,
+    column: &ArrayRef,
+    i: usize,
+    encoder: &mut S,
+    pg_field: &FieldInfo,
+) -> PgWireResult<()> {
+    let value = try_value_from_array(column.as_ref(), i).map_err(convert_err)?;
+    encode_struct(query_ctx, value, encoder, pg_field)
 }
 
 pub(crate) struct RecordBatchRowStream<S, B>
@@ -369,6 +387,11 @@ where
                     }
                 }
 
+                DataType::List(list_field)
+                    if matches!(list_field.data_type(), DataType::Struct(_)) =>
+                {
+                    encode_structured_json(query_ctx, column, i, encoder, pg_field)?;
+                }
                 DataType::List(_) => {
                     let array = column.as_list::<i32>();
                     let items = array.value(i);
@@ -376,7 +399,7 @@ where
                     encode_list(encoder, items, pg_field)?;
                 }
                 DataType::Struct(_) => {
-                    encode_struct(query_ctx, Default::default(), encoder, pg_field)?;
+                    encode_structured_json(query_ctx, column, i, encoder, pg_field)?;
                 }
                 DataType::Utf8 => {
                     let arrow_field = arrow_schema.field(j);
@@ -445,7 +468,9 @@ pub(super) fn type_gt_to_pg(origin: &ConcreteDataType) -> Result<Type> {
             &ConcreteDataType::Decimal128(_) => Ok(Type::NUMERIC_ARRAY),
             &ConcreteDataType::Json(_) => Ok(Type::JSON_ARRAY),
             &ConcreteDataType::Duration(_) => Ok(Type::INTERVAL_ARRAY),
-            &ConcreteDataType::Struct(_) => Ok(Type::JSON_ARRAY),
+            // a list of structs is encoded as a single JSON array, matching the
+            // struct-to-json mapping above
+            &ConcreteDataType::Struct(_) => Ok(Type::JSON),
             &ConcreteDataType::Dictionary(_)
             | &ConcreteDataType::Vector(_)
             | &ConcreteDataType::List(_) => server_error::UnsupportedDataTypeSnafu {
@@ -1919,6 +1944,282 @@ mod test {
         for row in rows {
             assert_eq!(row.field_count, pg_schema_ref.len() as i16);
         }
+    }
+
+    #[test]
+    fn test_encode_list_of_struct_as_json() {
+        use datatypes::types::{StructField, StructType};
+        use datatypes::value::{ListValue, StructValue};
+        use datatypes::vectors::Helper;
+        use pgwire::messages::data::DataRow;
+
+        // struct type: {a: int32, b: float64}
+        let fields = vec![
+            StructField::new("a".to_string(), ConcreteDataType::int32_datatype(), true),
+            StructField::new("b".to_string(), ConcreteDataType::float64_datatype(), true),
+        ];
+        let struct_type =
+            ConcreteDataType::struct_datatype(StructType::new(Arc::new(fields.clone())));
+        let list_type = ConcreteDataType::list_datatype(Arc::new(struct_type.clone()));
+
+        let make_struct = |a: i32, b: f64| {
+            Value::Struct(StructValue::new(
+                vec![Value::Int32(a), Value::Float64(b.into())],
+                StructType::new(Arc::new(fields.clone())),
+            ))
+        };
+        let rows = vec![
+            Value::List(ListValue::new(
+                vec![make_struct(1, 1.5), Value::Null, make_struct(3, 3.5)],
+                Arc::new(struct_type.clone()),
+            )),
+            Value::List(ListValue::new(vec![], Arc::new(struct_type.clone()))),
+            Value::Null,
+        ];
+        let vector = Helper::try_from_row_into_vector(&rows, &list_type).unwrap();
+
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "l".to_string(),
+            list_type.clone(),
+            true,
+        )]));
+        let record_batch = RecordBatch::new(schema.clone(), vec![vector]).unwrap();
+
+        // The list-of-struct column is declared as a single json value.
+        let pg_schema = Arc::new(vec![FieldInfo::new(
+            "l".into(),
+            None,
+            None,
+            type_gt_to_pg(&list_type).unwrap(),
+            FieldFormat::Text,
+        )]);
+        assert_eq!(pg_schema[0].datatype(), &Type::JSON);
+
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let encoder = DataRowEncoder::new(pg_schema.clone());
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            encoder,
+        );
+
+        let data_rows: Vec<DataRow> = futures::executor::block_on(
+            row_stream
+                .filter_map(|x: PgWireResult<_>| async move { x.ok() })
+                .flat_map(stream::iter)
+                .collect(),
+        );
+        assert_eq!(data_rows.len(), 3);
+
+        // Decode text-format fields: [i32 BE length][bytes], -1 for NULL.
+        let decoded: Vec<Option<String>> = data_rows
+            .iter()
+            .map(|row| {
+                assert_eq!(row.field_count, 1);
+                let len = i32::from_be_bytes(row.data[0..4].try_into().unwrap());
+                if len < 0 {
+                    return None;
+                }
+                Some(String::from_utf8(row.data[4..4 + len as usize].to_vec()).unwrap())
+            })
+            .collect();
+
+        // A NULL list row stays NULL.
+        assert_eq!(decoded[2], None);
+
+        // A list of structs is a JSON array; null elements stay null.
+        let json: serde_json::Value = serde_json::from_str(decoded[0].as_deref().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([
+                {"a": 1, "b": 1.5},
+                null,
+                {"a": 3, "b": 3.5},
+            ])
+        );
+
+        // An empty list is an empty JSON array.
+        let json: serde_json::Value = serde_json::from_str(decoded[1].as_deref().unwrap()).unwrap();
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    #[test]
+    fn test_encode_struct_value_as_json() {
+        use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+        use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+        use api::helper::pb_value_to_value_ref;
+        use api::v1::Value as PbValue;
+        use common_query::native_histogram::{
+            encode_native_histogram, native_histogram_column_schema, native_histogram_value_type,
+        };
+        use datatypes::vectors::Helper;
+        use pgwire::messages::data::DataRow;
+
+        fn histogram_value(histogram: &Histogram) -> Value {
+            let value_data = encode_native_histogram(histogram).unwrap();
+            let pb_value = PbValue {
+                value_data: Some(value_data),
+            };
+            let column_schema = native_histogram_column_schema().unwrap();
+            Value::from(pb_value_to_value_ref(
+                &pb_value,
+                column_schema.datatype_extension.as_ref(),
+            ))
+        }
+
+        // One integer-count histogram and one float-count histogram, mirroring
+        // what prometheus remote-write v2 stores. The expected JSON matches the
+        // HTTP query output for the same payloads.
+        let int_histogram = Histogram {
+            schema: 1,
+            sum: 10.0,
+            zero_threshold: 0.001,
+            reset_hint: 2,
+            start_timestamp: 1500,
+            positive_spans: vec![BucketSpan {
+                offset: 0,
+                length: 3,
+            }],
+            positive_deltas: vec![1, 2, -1],
+            negative_spans: vec![BucketSpan {
+                offset: -2,
+                length: 1,
+            }],
+            negative_deltas: vec![1],
+            count: Some(Count::CountInt(8)),
+            zero_count: Some(ZeroCount::ZeroCountInt(1)),
+            ..Default::default()
+        };
+        let float_histogram = Histogram {
+            schema: 2,
+            sum: 20.0,
+            zero_threshold: 0.002,
+            reset_hint: 3,
+            start_timestamp: 2500,
+            positive_spans: vec![BucketSpan {
+                offset: 3,
+                length: 2,
+            }],
+            positive_counts: vec![2.0, 3.5],
+            count: Some(Count::CountFloat(6.0)),
+            zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+            ..Default::default()
+        };
+
+        let rows = vec![
+            histogram_value(&int_histogram),
+            histogram_value(&float_histogram),
+            Value::Null,
+        ];
+        let vector =
+            Helper::try_from_row_into_vector(&rows, native_histogram_value_type()).unwrap();
+
+        let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
+            "greptime_native_histogram",
+            native_histogram_value_type().clone(),
+            true,
+        )]));
+        let record_batch = RecordBatch::new(schema.clone(), vec![vector]).unwrap();
+
+        let pg_schema = Arc::new(vec![FieldInfo::new(
+            "greptime_native_histogram".into(),
+            None,
+            None,
+            Type::JSON,
+            FieldFormat::Text,
+        )]);
+
+        let query_context = QueryContextBuilder::default()
+            .configuration_parameter(Default::default())
+            .build()
+            .into();
+        let encoder = DataRowEncoder::new(pg_schema.clone());
+        let row_stream = RecordBatchRowStream::new(
+            query_context,
+            pg_schema.clone(),
+            schema,
+            stream::once(async { Ok(record_batch) }),
+            encoder,
+        );
+
+        let data_rows: Vec<DataRow> = futures::executor::block_on(
+            row_stream
+                .filter_map(|x: PgWireResult<_>| async move { x.ok() })
+                .flat_map(stream::iter)
+                .collect(),
+        );
+        assert_eq!(data_rows.len(), 3);
+
+        // Decode text-format fields: [i32 BE length][bytes], -1 for NULL.
+        let decoded: Vec<Option<String>> = data_rows
+            .iter()
+            .map(|row| {
+                assert_eq!(row.field_count, 1);
+                let len = i32::from_be_bytes(row.data[0..4].try_into().unwrap());
+                if len < 0 {
+                    return None;
+                }
+                Some(String::from_utf8(row.data[4..4 + len as usize].to_vec()).unwrap())
+            })
+            .collect();
+
+        // A NULL struct row stays NULL.
+        assert_eq!(decoded[2], None);
+
+        let json: serde_json::Value = serde_json::from_str(decoded[0].as_deref().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "count_f64": null,
+                "count_i64": 8,
+                "custom_values": [],
+                "negative_buckets_f64": [],
+                "negative_buckets_i64": [1],
+                "negative_span_lengths": [1],
+                "negative_span_offsets": [-2],
+                "positive_buckets_f64": [],
+                "positive_buckets_i64": [1, 3, 2],
+                "positive_span_lengths": [3],
+                "positive_span_offsets": [0],
+                "reset_hint": 2,
+                "schema": 1,
+                "start_timestamp": 1500,
+                "sum": 10.0,
+                "zero_count_f64": null,
+                "zero_count_i64": 1,
+                "zero_threshold": 0.001
+            })
+        );
+
+        let json: serde_json::Value = serde_json::from_str(decoded[1].as_deref().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "count_f64": 6.0,
+                "count_i64": null,
+                "custom_values": [],
+                "negative_buckets_f64": [],
+                "negative_buckets_i64": [],
+                "negative_span_lengths": [],
+                "negative_span_offsets": [],
+                "positive_buckets_f64": [2.0, 3.5],
+                "positive_buckets_i64": [],
+                "positive_span_lengths": [2],
+                "positive_span_offsets": [3],
+                "reset_hint": 3,
+                "schema": 2,
+                "start_timestamp": 2500,
+                "sum": 20.0,
+                "zero_count_f64": 0.5,
+                "zero_count_i64": null,
+                "zero_threshold": 0.002
+            })
+        );
     }
 
     #[test]

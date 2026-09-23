@@ -31,7 +31,7 @@ new_fixture() {
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\t%s\t%s\n' "${GT_FUZZ_DUMP_DIR}" "$*" "${MOCK_CARGO_MARKER:-}" >>"${MOCK_CARGO_LOG}"
-target="$3"
+target="$4"
 case " ${MOCK_FAIL_TARGETS:-} " in
   *" ${target} "*) exit 17 ;;
 esac
@@ -117,6 +117,20 @@ EOF
   set -e
 }
 
+test_rustup_toolchain_env_is_honored() {
+  new_fixture
+  export RUSTUP_TOOLCHAIN=nightly-2026-03-21
+  run_fixture $'fuzz_create_table' true true "fuzz_create_table"
+  unset RUSTUP_TOOLCHAIN
+
+  assert_eq 1 "${fixture_status}" "pinned toolchain run status"
+  grep -q -- '+nightly-2026-03-21 fuzz run fuzz_create_table' "${fixture}/cargo.log" || \
+    fail "pinned toolchain missing from cargo invocation"
+  grep -q 'cargo +nightly-2026-03-21 fuzz run fuzz_create_table' "${fixture}/artifacts/summary.md" || \
+    fail "pinned toolchain missing from reproduce command"
+  cleanup_fixture
+}
+
 test_successful_targets_run_in_order() {
   new_fixture
   run_fixture $'fuzz_create_table\nfuzz_insert' false true ""
@@ -125,7 +139,7 @@ test_successful_targets_run_in_order() {
   assert_eq 2 "$(wc -l <"${fixture}/cargo.log" | tr -d ' ')" "cargo invocation count"
   assert_eq \
     $'fuzz_create_table\nfuzz_insert' \
-    "$(awk -F '\t' '{print $2}' "${fixture}/cargo.log" | sed -E 's/^fuzz run ([^ ]+).*/\1/')" \
+    "$(awk -F '\t' '{print $2}' "${fixture}/cargo.log" | sed -E 's/^\+nightly fuzz run ([^ ]+).*/\1/')" \
     "target order"
   grep -q -- '--features=unstable' "${fixture}/cargo.log" || fail "unstable feature missing"
   grep -q -- '-max_total_time=120' "${fixture}/cargo.log" || fail "fuzz time missing"
@@ -175,7 +189,7 @@ test_fail_fast_stops_after_first_failure() {
     fail "skipped target annotation missing"
   grep -q '### Reproduce failed targets' "${fixture}/artifacts/summary.md" || \
     fail "reproduction section missing"
-  grep -q 'cargo fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
+  grep -q 'cargo +nightly fuzz run fuzz_insert' "${fixture}/artifacts/summary.md" || \
     fail "reproduction command missing"
   cleanup_fixture
 }
@@ -367,5 +381,6 @@ test_collector_keeps_target_scopes_separate
 test_cluster_collector_honors_target_scope_and_namespace
 test_setup_failure_writes_artifact_contract
 test_setup_failure_keeps_manifest_when_collection_fails
+test_rustup_toolchain_env_is_honored
 
 printf 'All fuzz orchestration script tests passed.\n'

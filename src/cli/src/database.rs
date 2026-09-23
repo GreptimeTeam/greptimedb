@@ -97,8 +97,68 @@ impl DatabaseClient {
         self.sql(sql, DEFAULT_SCHEMA_NAME).await
     }
 
+    /// Requires the explicit packed-import protocol before any restore mutation.
+    pub async fn require_packed_import(&self) -> Result<()> {
+        let url = format!("http://{}/v1/capabilities", self.addr);
+        let mut builder = reqwest::Client::builder().timeout(self.timeout);
+        if let Some(proxy) = self.proxy.clone() {
+            builder = builder.proxy(proxy);
+        }
+        if self.no_proxy {
+            builder = builder.no_proxy();
+        }
+        let client = builder.build().context(BuildClientSnafu)?;
+        let mut request = client.get(&url);
+        if let Some(auth) = &self.auth_header {
+            request = request.header("Authorization", auth);
+        }
+        let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
+            reason: "packed import capability request failed",
+        })?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return crate::error::InvalidArgumentsSnafu {
+                msg: "target does not support packed import",
+            }
+            .fail();
+        }
+        let response = response
+            .error_for_status()
+            .with_context(|_| HttpQuerySqlSnafu {
+                reason: "packed import capability request rejected",
+            })?;
+        let body = response.text().await.with_context(|_| HttpQuerySqlSnafu {
+            reason: "cannot read capability response",
+        })?;
+        let value: Value = serde_json::from_str(&body).context(SerdeJsonSnafu)?;
+        if !value.is_object() {
+            return crate::error::UnexpectedSnafu {
+                msg: "invalid capability response: expected JSON object",
+            }
+            .fail();
+        }
+        if value.get("metric_packed_import").and_then(Value::as_u64) != Some(1) {
+            return crate::error::InvalidArgumentsSnafu {
+                msg: "target does not support packed import version 1",
+            }
+            .fail();
+        }
+        Ok(())
+    }
+
     /// Execute sql query.
     pub async fn sql(&self, sql: &str, schema: &str) -> Result<Option<Vec<Vec<Value>>>> {
+        let body = self.sql_response(sql, schema).await?;
+        Ok(body.output().first().and_then(|output| match output {
+            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
+            GreptimeQueryOutput::AffectedRows(_) => None,
+        }))
+    }
+
+    pub(crate) async fn sql_response(
+        &self,
+        sql: &str,
+        schema: &str,
+    ) -> Result<GreptimedbV1Response> {
         let url = format!("http://{}/v1/sql", self.addr);
         let params = [
             ("db", format!("{}-{}", self.catalog, schema)),
@@ -138,11 +198,7 @@ impl DatabaseClient {
             reason: "cannot get response text".to_string(),
         })?;
 
-        let body = serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)?;
-        Ok(body.output().first().and_then(|output| match output {
-            GreptimeQueryOutput::Records(records) => Some(records.rows().clone()),
-            GreptimeQueryOutput::AffectedRows(_) => None,
-        }))
+        serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)
     }
 }
 
@@ -162,6 +218,47 @@ pub(crate) fn split_database(database: &str) -> Result<(String, Option<String>)>
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn packed_capability_probe_checks_auth_and_protocol_version() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, body, supported) in [
+            (200, r#"{"metric_packed_import":1,"future":2}"#, true),
+            (200, "{}", false),
+            (200, r#"{"metric_packed_import":2}"#, false),
+            (404, "{}", false),
+            (401, "{}", false),
+            (403, "{}", false),
+            (200, "[]", false),
+            (200, "invalid-json", false),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = vec![0; 4096];
+                let n = socket.read(&mut request).await.unwrap();
+                let request = String::from_utf8_lossy(&request[..n]).to_lowercase();
+                assert!(request.starts_with("get /v1/capabilities "));
+                assert!(request.contains("authorization: basic dxnlcjpwyxnzd29yza=="));
+                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let client = super::DatabaseClient::new(
+                address.to_string(),
+                "greptime".into(),
+                Some("user:password".into()),
+                std::time::Duration::from_secs(5),
+                None,
+                true,
+            );
+            assert_eq!(
+                client.require_packed_import().await.is_ok(),
+                supported,
+                "{status}: {body}"
+            );
+            server.await.unwrap();
+        }
+    }
+
     use super::*;
 
     #[test]
