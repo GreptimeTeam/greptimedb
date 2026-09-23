@@ -26,3 +26,9 @@ jemalloc-pprof-mappings = { version = "0.7", package = "mappings" } # for get th
 [target.'cfg(not(windows))'.dependencies.tikv-jemalloc-sys]
 features = ["stats", "profiling", "unprefixed_malloc_on_supported_platforms"]
 version = "0.7"
+
+[package.metadata.cargo-shear]
+# `tikv-jemalloc-sys` is a link-only dependency: it enables jemalloc
+# profiling/stats features and pins the linked jemalloc instance, but is
+# never referenced by name in source code.
+ignored = ["tikv-jemalloc-sys"]

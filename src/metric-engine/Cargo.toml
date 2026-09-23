@@ -14,7 +14,7 @@ async-stream.workspace = true
 async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
-fxhash = "0.2"
+chrono.workspace = true
 common-base.workspace = true
 common-error.workspace = true
 common-grpc.workspace = true
@@ -24,10 +24,10 @@ common-recordbatch.workspace = true
 common-runtime.workspace = true
 common-telemetry.workspace = true
 common-time.workspace = true
-chrono.workspace = true
 datafusion.workspace = true
 datatypes.workspace = true
 futures-util.workspace = true
+fxhash = "0.2"
 humantime-serde.workspace = true
 itertools.workspace = true
 lazy_static = "1.4"
@@ -45,18 +45,14 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+common-function = { workspace = true }
 common-meta = { workspace = true, features = ["testing"] }
-common-test-util.workspace = true
-mito2 = { workspace = true, features = ["test"] }
 common-wal = { workspace = true }
 criterion = { workspace = true, features = ["async", "async_tokio"] }
+mito2 = { workspace = true, features = ["test"] }
 mur3 = "0.1"
-common-function = { workspace = true }
 partition = { workspace = true }
 
 [[bench]]
 name = "bench_tsid_generator"
 harness = false
-
-[package.metadata.cargo-udeps.ignore]
-normal = ["aquamarine"]
