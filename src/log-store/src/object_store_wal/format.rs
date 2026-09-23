@@ -48,8 +48,8 @@ const FOOTER_COUNT_LEN: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Header {
     pub(crate) object_seq: u64,
-    /// Epoch of the store instance that wrote the object. Every open of a
-    /// store starts an epoch above every present object, so the epoch also
+    /// Epoch of the store instance that wrote the object: one above the
+    /// sequence of the start object the instance created, so the epoch also
     /// identifies the instance.
     pub(crate) epoch: u64,
     /// The object this object extends, `None` for the first object of a chain.

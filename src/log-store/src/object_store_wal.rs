@@ -42,8 +42,9 @@
 //! object is complete when every link on its chain names a present object of
 //! the recorded epoch, back to an object that starts the chain. Objects off the
 //! chain are orphans, which are never replayed but keep their sequences. Each
-//! open writes an object without segments that starts an epoch above every
-//! present object before it accepts writes, so a late object of an earlier
+//! open writes an object without segments above every present object before
+//! it accepts writes, and its epoch is one above the sequence of that object,
+//! so no two instances share an epoch and a late object of an earlier
 //! instance never ends the chain.
 //!
 //! Recovery lists the objects, reads and verifies only the header, trailer and

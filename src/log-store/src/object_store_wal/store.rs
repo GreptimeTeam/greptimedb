@@ -152,10 +152,19 @@ impl ObjectStoreLogStore {
             tip,
             max_epoch,
         } = recover(io.as_ref()).await?;
-        let epoch = max_epoch.checked_add(1).context(CorruptedWalObjectSnafu {
-            reason: "an object carries the largest epoch, no later epoch fits",
-        })?;
-        let start = start_epoch(io.as_ref(), next_object_seq, tip, epoch).await?;
+        // Every epoch is one above the sequence of the start object its
+        // instance created, and every object is at or above its start object,
+        // so an epoch above the next sequence names no instance that ran.
+        ensure!(
+            max_epoch <= next_object_seq,
+            CorruptedWalObjectSnafu {
+                reason: format!(
+                    "an object carries epoch {max_epoch}, above the next sequence {next_object_seq}"
+                ),
+            }
+        );
+        let start = start_epoch(io.as_ref(), next_object_seq, tip).await?;
+        let epoch = start.epoch;
         // The epoch identifies this instance in every object it writes.
         info!(
             "Opened object store WAL under {prefix} at epoch {epoch}, start object {}",
@@ -1332,21 +1341,24 @@ fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
     chain
 }
 
-/// Writes the empty object that starts `epoch` at `object_seq`, linked to the
-/// recovered `tip`, and returns it as the tip later objects extend. An object
-/// an earlier instance left at that sequence after recovery listed the prefix
-/// has a lower epoch and never ends a chain, so the start object moves past
-/// it. An object of an equal or later epoch belongs to another writer of the
-/// prefix, and the conflict fails the open, as does a create whose outcome is
-/// unknown: the next open counts the object in either case. So does a create
-/// that finds the same bytes present: another open that recovered the same
-/// objects writes an identical start object, so this open cannot claim the
-/// epoch even if the object is its own.
+/// Writes the empty object that starts the epoch of this instance at
+/// `object_seq`, linked to the recovered `tip`, and returns it as the tip
+/// later objects extend. The epoch is one above the sequence the create
+/// claims, so no two instances share one however their opens interleave, and
+/// it is above the epoch of every object recovery listed.
+///
+/// An object an earlier instance left at that sequence after recovery listed
+/// the prefix has a lower epoch and never ends a chain, so the start object
+/// moves to the next sequence and epoch. An object of an equal or later epoch
+/// belongs to another writer of the prefix, and the conflict fails the open,
+/// as does a create whose outcome is unknown: the next open counts the object
+/// in either case. So does a create that finds the same bytes present:
+/// another open that recovered the same objects writes an identical start
+/// object, so this open cannot claim the epoch even if the object is its own.
 async fn start_epoch(
     io: &dyn WalObjectIo,
     mut object_seq: u64,
     tip: Option<ChainLink>,
-    epoch: u64,
 ) -> Result<ChainLink> {
     loop {
         ensure!(
@@ -1355,6 +1367,7 @@ async fn start_epoch(
                 last_object_seq: OBJECT_SEQ_LIMIT - 1,
             }
         );
+        let epoch = object_seq + 1;
         let header = Header {
             object_seq,
             epoch,
@@ -3977,11 +3990,11 @@ mod tests {
             );
             assert_eq!(id(2, 1), latest(&store, region(1)));
             store.stop().await.unwrap();
-            // Every open starts an epoch above every present object, and the
-            // first restart's start object extends the chain the second
-            // restart replays.
+            // Every open starts the epoch one above the sequence of its start
+            // object, and the first restart's start object extends the chain
+            // the second restart replays.
             let start = decode_header(&io.get(3 + restart).await.unwrap()).unwrap();
-            assert_eq!(2 + restart, start.epoch);
+            assert_eq!(4 + restart, start.epoch);
             assert_eq!(Some(2 + restart), start.prev.map(|prev| prev.object_seq));
         }
         assert_eq!(vec![0, 1, 2, 3, 4], object_seqs(&io).await);
@@ -4054,7 +4067,7 @@ mod tests {
         );
         store.stop().await.unwrap();
         let start = decode_header(&io.get(3).await.unwrap()).unwrap();
-        assert_eq!(3, start.epoch);
+        assert_eq!(4, start.epoch);
         assert_eq!(
             Some(ChainLink {
                 object_seq: 1,
@@ -4095,7 +4108,7 @@ mod tests {
             if moves {
                 result.unwrap().stop().await.unwrap();
                 let start = decode_header(&fixtures.get(2).await.unwrap()).unwrap();
-                assert_eq!(2, start.epoch);
+                assert_eq!(3, start.epoch);
                 assert_eq!(Some(0), start.prev.map(|prev| prev.object_seq));
             } else {
                 let error = result.unwrap_err();
@@ -4151,6 +4164,51 @@ mod tests {
                 start.prev
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_store_opens_racing_across_a_late_object_take_distinct_epochs() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_fixture(&io, 0, &[]).await;
+        // Open A recovers object 0 and pauses before its start object.
+        let recovered = recover(&io).await.unwrap();
+        // A late object of epoch 1 lands at sequence 2, across the gap at
+        // sequence 1, and open B, which lists it, completes.
+        put_header(&io, chain_header(2, 1, Some((0, 1))), &[]).await;
+        open(object_store, &eager()).await.stop().await.unwrap();
+        let b = decode_header(&io.get(3).await.unwrap()).unwrap();
+        assert_eq!(4, b.epoch);
+
+        // Open A resumes at the sequence it recovered: the epoch follows from
+        // the sequence it claims, so it differs from the epoch of open B.
+        let a = start_epoch(&io, recovered.next_object_seq, recovered.tip)
+            .await
+            .unwrap();
+        assert_eq!(
+            ChainLink {
+                object_seq: 1,
+                epoch: 2,
+            },
+            a
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_open_rejects_an_epoch_above_the_next_sequence() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        // No instance that starts at or below sequence 0 writes epoch 5.
+        put_header(&io, chain_header(0, 5, None), &[]).await;
+        let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::CorruptedWalObject { reason, .. }
+                if reason.contains("carries epoch 5, above the next sequence 1")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![0], object_seqs(&io).await);
     }
 
     /// Object access whose first create lets another object land at a given
