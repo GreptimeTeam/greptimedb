@@ -790,7 +790,7 @@ mod tests {
     async fn test_read_metadata_from_write_cache() {
         common_telemetry::init_default_ut_logging();
         let mut env = TestEnv::new().await;
-        let data_home = env.data_home().display().to_string();
+        let data_home = "write_cache_metadata".to_string();
         let mock_store = env.init_object_store_manager();
 
         let local_dir = create_temp_dir("");
