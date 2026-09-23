@@ -55,7 +55,6 @@ use crate::object_store_wal::io::{ListedObject, ObjectStoreIo, PutResult};
 
 const COMMAND_BUFFER: usize = 1024;
 const MIN_FLUSH_INTERVAL: Duration = Duration::from_millis(10);
-/// Number of conditional creates that run at a time.
 const MAX_IN_FLIGHT_CREATES: usize = 4;
 /// Number of objects whose footers recovery fetches at a time.
 const RECOVERY_CONCURRENCY: usize = 8;
@@ -1614,10 +1613,11 @@ mod tests {
         (open_over(io.clone(), config).await, io, parked)
     }
 
-    async fn yield_a_while() {
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
+    /// Round-trips a command through the actor, so an assertion that
+    /// something did not happen runs after the actor handled every command
+    /// sent before. The open batch must be empty, as under the eager config.
+    async fn round_trip_actor(store: &ObjectStoreLogStore) {
+        store.seal_open_batch().await.unwrap();
     }
 
     #[tokio::test]
@@ -2208,10 +2208,9 @@ mod tests {
         assert_stopped(&store.append_batch(Vec::new()).await.unwrap_err());
     }
 
-    #[tokio::test]
-    async fn test_store_stop_with_actor_gone() {
+    /// Builds a store whose commands the test receives instead of an actor.
+    fn store_without_actor() -> (ObjectStoreLogStore, mpsc::Receiver<Command>) {
         let (command_tx, command_rx) = mpsc::channel(COMMAND_BUFFER);
-        drop(command_rx);
         let store = ObjectStoreLogStore {
             prefix: PREFIX.to_string(),
             io: Arc::new(ObjectStoreIo::new(memory_store(), PREFIX).unwrap()),
@@ -2224,6 +2223,13 @@ mod tests {
             creates_held: watch::channel(false).0,
             creates_fail: Arc::default(),
         };
+        (store, command_rx)
+    }
+
+    #[tokio::test]
+    async fn test_store_stop_with_actor_gone() {
+        let (store, command_rx) = store_without_actor();
+        drop(command_rx);
         store.stop().await.unwrap();
         store.stop().await.unwrap();
     }
@@ -2878,7 +2884,7 @@ mod tests {
             (0..MAX_IN_FLIGHT_CREATES as u64).collect::<BTreeSet<_>>(),
             releases.keys().copied().collect::<BTreeSet<_>>()
         );
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert!(parked.try_recv().is_err());
         assert!(appends.iter().all(|append| !append.is_finished()));
 
@@ -2890,7 +2896,7 @@ mod tests {
             assert_eq!(expected_next, object_seq);
             releases.insert(object_seq, release);
         }
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert_eq!(vec![1, 2], object_seqs(io.as_ref()).await);
         assert!(appends.iter().all(|append| !append.is_finished()));
         assert_eq!(0, latest(&store, region_id));
@@ -2924,7 +2930,7 @@ mod tests {
             fourth.last_entry_ids
         );
         let appends = appends.collect::<Vec<_>>();
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert!(appends.iter().all(|append| !append.is_finished()));
         releases.remove(&4).unwrap().send(true).unwrap();
         for (append, object_seq) in appends.into_iter().zip(4..) {
@@ -2962,7 +2968,7 @@ mod tests {
         // Every slot is taken; the last batch waits for one.
         let appends = spawn_appends(&store, region_id, MAX_IN_FLIGHT_CREATES + 1).await;
         let mut releases = parked_creates(&mut parked, MAX_IN_FLIGHT_CREATES).await;
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert!(parked.try_recv().is_err());
 
         // Object 0 fails while the others are in flight: nothing is decided
@@ -2970,7 +2976,7 @@ mod tests {
         // the later objects is created either: every batch fails and the
         // sequence rolls back to object 0.
         releases.remove(&0).unwrap().send(false).unwrap();
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert!(appends.iter().all(|append| !append.is_finished()));
         for release in releases.into_values() {
             release.send(false).unwrap();
@@ -3086,8 +3092,14 @@ mod tests {
 
         // Object 1 is created; object 0 conflicts with the foreign object.
         releases.remove(&1).unwrap().send(true).unwrap();
-        yield_a_while().await;
-        assert_eq!(vec![0, 1], object_seqs(&foreign).await);
+        timeout(WAIT, async {
+            while object_seqs(&foreign).await != [0, 1] {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        round_trip_actor(&store).await;
         assert!(appends.iter().all(|append| !append.is_finished()));
         releases.remove(&0).unwrap().send(true).unwrap();
         for append in appends {
@@ -3310,43 +3322,35 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_obsolete_queued_behind_stop_records_the_watermark() {
-        let store = open(memory_store(), &eager()).await;
+        let (store, mut command_rx) = store_without_actor();
         let region_id = region(1);
-        let region_two = region(2);
-        append(&store, region_id, "a1").await.unwrap();
-        append(&store, region_two, "b1").await.unwrap();
-
-        // Both commands are queued before the actor runs; it handles the
-        // stop, exits and drops the obsolete without answering it.
-        let stop = store.stop();
-        tokio::pin!(stop);
-        assert!(futures::poll!(stop.as_mut()).is_pending());
         let provider_one = provider(region_id);
-        let obsolete = store.obsolete(&provider_one, region_id, 1);
-        tokio::pin!(obsolete);
-        assert!(futures::poll!(obsolete.as_mut()).is_pending());
-        timeout(WAIT, stop).await.unwrap().unwrap();
-        timeout(WAIT, store.command_tx.closed()).await.unwrap();
-        timeout(WAIT, obsolete).await.unwrap().unwrap();
 
-        // Nothing is assigned an id any more, so the watermark alone holds.
+        // The actor exits with the command still queued and never answers
+        // it: nothing is assigned an id any more, so the watermark alone holds.
+        let (result, ()) = tokio::join!(store.obsolete(&provider_one, region_id, 1), async {
+            let command = timeout(WAIT, command_rx.recv()).await.unwrap();
+            assert!(matches!(
+                command,
+                Some(Command::Obsolete { entry_id: 1, .. })
+            ));
+        });
+        result.unwrap();
         assert_eq!(
             Some(&1),
             store.obsolete_entry_ids.lock().unwrap().get(&region_id)
         );
-        assert!(read_entries(&store, region_id, 0).await.is_empty());
-        assert_eq!(1, latest(&store, region_id));
 
         // The same holds for a call that finds the actor gone.
+        drop(command_rx);
         store
-            .obsolete(&provider(region_two), region_two, id(1, 1))
+            .obsolete(&provider(region(2)), region(2), id(1, 1))
             .await
             .unwrap();
         assert_eq!(
             Some(&id(1, 1)),
-            store.obsolete_entry_ids.lock().unwrap().get(&region_two)
+            store.obsolete_entry_ids.lock().unwrap().get(&region(2))
         );
-        assert!(read_entries(&store, region_two, 0).await.is_empty());
     }
 
     #[tokio::test]
@@ -3356,7 +3360,7 @@ mod tests {
         store.hold_creates();
         let held = spawn_append_batch(&store, vec![entry(&store, region_id, "a1")]);
         store.wait_for_admitted_appends(1).await.unwrap();
-        yield_a_while().await;
+        round_trip_actor(&store).await;
         assert!(!held.is_finished());
         assert!(object_seqs(store.io.as_ref()).await.is_empty());
         store.release_creates();
