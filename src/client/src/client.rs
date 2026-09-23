@@ -87,6 +87,7 @@ struct Inner {
 
 impl Default for Inner {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self::with_manager_and_peers(ChannelManager::new(), Vec::new(), ClientOptions::default())
     }
 }
@@ -105,7 +106,7 @@ struct Peers {
 }
 
 impl Inner {
-    // The legacy single-manager path intentionally shares its pool between lanes.
+    #[deprecated(note = "legacy single-manager path shares its pool between lanes")]
     fn with_manager_and_peers(
         channel_manager: ChannelManager,
         peers: Vec<String>,
@@ -225,48 +226,60 @@ fn random_initial_delay(max_delay: Duration) -> Duration {
 
 impl Client {
     /// Creates a client whose query and control lanes intentionally share the default manager.
-    ///
-    /// Use [`Self::with_query_and_control_managers`] with independently constructed
-    /// managers when the lanes must be isolated.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn new() -> Self {
         Default::default()
     }
 
     /// Creates a client whose query and control lanes intentionally share one manager.
-    ///
-    /// Use [`Self::with_query_and_control_managers`] with independently constructed
-    /// managers when the lanes must be isolated.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn with_urls<U, A>(urls: A) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_urls_and_options(urls, ClientOptions::default())
     }
 
     /// Creates a client with URLs and custom options.
     ///
     /// The query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_urls_and_options<U, A>(urls: A, options: ClientOptions) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_manager_and_urls_and_options(ChannelManager::new(), urls, options)
     }
 
     /// Creates a TLS client whose query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_tls_and_urls<U, A>(urls: A, client_tls: ClientTlsOption) -> Result<Self>
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_tls_and_urls_and_options(urls, client_tls, ClientOptions::default())
     }
 
     /// Creates a client with TLS URLs and custom options.
     ///
     /// The query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_tls_and_urls_and_options<U, A>(
         urls: A,
         client_tls: ClientTlsOption,
@@ -280,6 +293,7 @@ impl Client {
         let tls_config =
             load_client_tls_config(Some(client_tls)).context(error::CreateTlsChannelSnafu)?;
         let channel_manager = ChannelManager::with_config(channel_config, tls_config);
+        #[allow(deprecated)]
         Ok(Self::with_manager_and_urls_and_options(
             channel_manager,
             urls,
@@ -288,14 +302,15 @@ impl Client {
     }
 
     /// Creates a client with one manager shared intentionally by query and control lanes.
-    ///
-    /// Use [`Self::with_query_and_control_managers`] with independently constructed
-    /// managers when the lanes must be isolated.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn with_manager_and_urls<U, A>(channel_manager: ChannelManager, urls: A) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_manager_and_urls_and_options(channel_manager, urls, ClientOptions::default())
     }
 
@@ -348,6 +363,9 @@ impl Client {
     /// Creates a client with a channel manager, URLs, and custom options.
     ///
     /// The query and control lanes intentionally share this manager and its pool.
+    #[deprecated(
+        note = "shares this manager and its pool between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_manager_and_urls_and_options<U, A>(
         channel_manager: ChannelManager,
         urls: A,
@@ -602,6 +620,7 @@ impl Client {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
