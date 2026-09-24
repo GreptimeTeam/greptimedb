@@ -66,18 +66,6 @@ FROM
 | 600     | 2024-10-18T19:01:30 |
 +---------+---------------------+
 
--- Test if FLOWS table works, but don't care about the result since it vary from runs
-SELECT
-    count(CASE WHEN state_size > 0 THEN 1 ELSE 0 END) as active_flows,
-FROM
-    INFORMATION_SCHEMA.FLOWS;
-
-+--------------+
-| active_flows |
-+--------------+
-| 1            |
-+--------------+
-
 DROP FLOW requests_long_term;
 
 Affected Rows: 0

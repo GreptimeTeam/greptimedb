@@ -112,7 +112,53 @@ pub struct BareCommand {
     enable_gc: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct Parallelism {
+    /// How many environments (standalone, distributed) run at the same time.
+    env: usize,
+    /// How many database instances run at the same time within one environment.
+    instance: usize,
+}
+
 impl BareCommand {
+    fn parallelism(&self) -> Parallelism {
+        let self_managed_kafka =
+            matches!(self.wal, Wal::Kafka) && self.kafka_wal_broker_endpoints.is_none();
+        // External servers are shared by both environments, a filtered run is for
+        // debugging a single case, and each environment starts and tears down the
+        // self-managed Kafka cluster on its own.
+        if self.server_addr.server_addr.is_some()
+            || self.config.test_filter != ".*"
+            || self_managed_kafka
+        {
+            return Parallelism {
+                env: 1,
+                instance: 1,
+            };
+        }
+
+        // Instances of one environment would share the same metadata table and
+        // Kafka topics. Only distributed uses the kv backend, and the two
+        // environments use different Kafka topic prefixes, so the environments
+        // themselves can still run concurrently.
+        if self.setup_etcd
+            || !self.store_addrs.is_empty()
+            || self.setup_pg.is_some()
+            || self.setup_mysql.is_some()
+            || self.kafka_wal_broker_endpoints.is_some()
+        {
+            return Parallelism {
+                env: self.jobs,
+                instance: 1,
+            };
+        }
+
+        Parallelism {
+            env: self.jobs,
+            instance: self.jobs,
+        }
+    }
+
     pub async fn run(mut self) {
         let temp_dir = tempfile::Builder::new()
             .prefix("sqlness")
@@ -134,22 +180,11 @@ impl BareCommand {
         if self.jobs == 0 {
             self.jobs = num_cpus::get() / 2;
         }
-
-        // normalize parallelism to 1 if any of the following conditions are met:
-        // Note: parallelism in pg and mysql is possible, but need configuration.
-        if self.server_addr.server_addr.is_some()
-            || self.setup_etcd
-            || self.setup_pg.is_some()
-            || self.setup_mysql.is_some()
-            || matches!(self.wal, Wal::Kafka)
-            || self.kafka_wal_broker_endpoints.is_some()
-            || self.config.test_filter != ".*"
-        {
-            self.jobs = 1;
-            println!(
-                "Normalizing parallelism to 1 due to server addresses, etcd/pg/mysql/kafka setup, or test filter usage"
-            );
-        }
+        let parallelism = self.parallelism();
+        println!(
+            "Environment parallelism: {}, instance parallelism per environment: {}",
+            parallelism.env, parallelism.instance
+        );
 
         let config = ConfigBuilder::default()
             .case_dir(util::get_case_dir(self.config.case_dir))
@@ -158,8 +193,8 @@ impl BareCommand {
             .follow_links(true)
             .env_config_file(self.config.env_config_file)
             .interceptor_registry(interceptor_registry)
-            .parallelism(self.jobs)
-            .env_parallelism(self.jobs)
+            .parallelism(parallelism.instance)
+            .env_parallelism(parallelism.env)
             .build()
             .unwrap();
 
@@ -214,5 +249,63 @@ impl BareCommand {
             println!("Removing state in {:?}", sqlness_home);
             tokio::fs::remove_dir_all(sqlness_home).await.unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parallelism(jobs: &str, args: &[&str]) -> Parallelism {
+        let cmd = BareCommand::try_parse_from(["bare", "-j", jobs].iter().chain(args)).unwrap();
+        cmd.parallelism()
+    }
+
+    #[test]
+    fn test_parallelism() {
+        let serial = Parallelism {
+            env: 1,
+            instance: 1,
+        };
+        let env_only = Parallelism {
+            env: 4,
+            instance: 1,
+        };
+
+        assert_eq!(
+            parallelism("4", &[]),
+            Parallelism {
+                env: 4,
+                instance: 4
+            }
+        );
+        assert_eq!(parallelism("4", &["--setup-pg"]), env_only);
+        assert_eq!(parallelism("4", &["--setup-mysql"]), env_only);
+        assert_eq!(parallelism("4", &["--setup-etcd"]), env_only);
+        assert_eq!(
+            parallelism("4", &["--store-addrs", "127.0.0.1:2379"]),
+            env_only
+        );
+        assert_eq!(
+            parallelism("4", &["-w", "kafka", "-k", "127.0.0.1:9092"]),
+            env_only
+        );
+        assert_eq!(parallelism("4", &["-w", "kafka"]), serial);
+        assert_eq!(parallelism("4", &["-t", "basic"]), serial);
+        assert_eq!(
+            parallelism(
+                "4",
+                &[
+                    "-s",
+                    "127.0.0.1:4001",
+                    "-p",
+                    "127.0.0.1:4003",
+                    "-m",
+                    "127.0.0.1:4002"
+                ]
+            ),
+            serial
+        );
+        assert_eq!(parallelism("1", &["--setup-pg"]), serial);
     }
 }

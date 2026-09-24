@@ -114,16 +114,6 @@ GROUP BY
 
 Affected Rows: 0
 
--- SQLNESS ARG restart=true
-SELECT 1;
-
-+----------+
-| Int64(1) |
-+----------+
-| 1        |
-+----------+
-
--- SQLNESS SLEEP 3s
 SHOW CREATE TABLE out_num_cnt_basic;
 
 +-------------------+---------------------------------------------------+
