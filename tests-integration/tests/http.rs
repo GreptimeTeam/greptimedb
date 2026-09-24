@@ -85,7 +85,7 @@ use tests_integration::test_util::{
     MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
     setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
+    setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -2492,7 +2492,6 @@ enable = true
 
 [otlp]
 enable = true
-experimental_enable_exponential_histogram = false
 trace_ingest_chunk_size = 512
 experimental_enable_resource_info = true
 
@@ -2500,7 +2499,6 @@ experimental_enable_resource_info = true
 enable = true
 with_metric_engine = true
 prom_validation_mode = "strict"
-experimental_enable_prometheus_native_histogram = false
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
@@ -2563,6 +2561,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
@@ -3152,7 +3151,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend_native_histogram(
+    let (app, mut guard) = setup_test_prom_app_with_frontend(
         store_type,
         "prometheus_remote_write_v2_native_histogram",
     )
@@ -3532,7 +3531,7 @@ async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: b
     common_telemetry::init_default_ut_logging();
     let mut instance =
         MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
-    let server = build_test_prom_server(instance.frontend(), true, false).build();
+    let server = build_test_prom_server(instance.frontend(), true).build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
@@ -7464,7 +7463,6 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
         ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
     };
-    use tests_integration::test_util::setup_test_http_app_with_otlp_exponential_histogram;
 
     common_telemetry::init_default_ut_logging();
     let req = ExportMetricsServiceRequest {
@@ -7511,44 +7509,8 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         )]
     };
 
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_disabled",
-        false,
-    )
-    .await;
-    let client = TestClient::new(app).await;
-    let res = send_req(
-        &client,
-        headers(),
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::BAD_REQUEST, res.status());
-    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
-    assert_eq!(3, status.code);
-    assert!(
-        status
-            .message
-            .contains("otlp.experimental_enable_exponential_histogram")
-    );
-    validate_data(
-        "otlp_exponential_histogram_disabled_no_table",
-        &client,
-        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency';",
-        "[[0]]",
-    )
-    .await;
-    guard.remove_all().await;
-
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_enabled",
-        true,
-    )
-    .await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_exponential_histogram").await;
     let client = TestClient::new(app).await;
     let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
     assert_eq!(StatusCode::OK, res.status());
@@ -12041,16 +12003,9 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
         .with_influxdb_handler(fe.clone())
         .with_opentsdb_handler(fe.clone())
         .with_log_ingest_handler(fe.clone(), None, None)
-        .with_otlp_handler(fe.clone(), true, false)
+        .with_otlp_handler(fe.clone(), true)
         // The pending batcher uses BulkInsert, deliberately outside this PR.
-        .with_prom_handler(
-            fe.clone(),
-            Some(fe),
-            true,
-            PromValidationMode::Strict,
-            false,
-            None,
-        )
+        .with_prom_handler(fe.clone(), Some(fe), true, PromValidationMode::Strict, None)
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
     for case in cases {
@@ -12395,7 +12350,6 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
-        false,
     )
     .await;
 

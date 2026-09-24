@@ -312,6 +312,7 @@ mod tests {
     ) -> (SeriesIndexFileHandle, UnboundedReceiver<PurgeRequest>) {
         let (purger, receiver) = series_index_channel(store.clone());
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: common_time::Timestamp::new_second(0),
             bucket_end: common_time::Timestamp::new_second(60),

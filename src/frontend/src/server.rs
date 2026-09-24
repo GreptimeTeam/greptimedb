@@ -146,19 +146,14 @@ where
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.prom_store.prom_validation_mode,
-                    opts.prom_store
-                        .experimental_enable_prometheus_native_histogram,
                     pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(
-                self.instance.clone(),
-                opts.prom_store.with_metric_engine,
-                opts.otlp.experimental_enable_exponential_histogram,
-            );
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
@@ -624,8 +619,6 @@ mod tests {
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.enable = prom_enabled;
-            opts.prom_store
-                .experimental_enable_prometheus_native_histogram = true;
             let shared = &mut opts.pending_rows_batcher.table;
             shared.protocols = vec![if selected {
                 BatchingProtocol::Prom
