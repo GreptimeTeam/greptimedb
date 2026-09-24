@@ -222,6 +222,20 @@ struct PromPlannerContext {
     /// named by the caller from its own selector — and a table that stores a `__name__` column of
     /// its own is only ever read, never rewritten.
     materialize_metric_name: bool,
+    /// Whether the `__name__` column of the plan this context was captured from is the constant
+    /// name this planner projected for a selector written on one metric table.
+    ///
+    /// A name materialized this way is the name of the single table the operand reads, the same
+    /// value for every row of that operand, so it is not a label the operand's series were read
+    /// with and it does not make an operand without labels a labelled one. Binary matching asks
+    /// exactly that question — an operand without a label of its own meets an operand that stores
+    /// labels by timestamp (see [`PromPlanner::prom_binary_expr_to_plan_inner`]) — while a
+    /// `__name__` column the operand reports another way is a label like any other there: a table
+    /// that stores the column, a set operator, a metric name union and every operator that builds
+    /// its result from the samples it read each report their own name column, so they leave this
+    /// false and only a selector, the filtering operators over it (a comparison without `bool`),
+    /// the calls that only reorder or relabel samples and `topk`/`bottomk` keep it set.
+    metric_name_is_materialized: bool,
     /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
     /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
     ///
@@ -453,6 +467,7 @@ impl PromPlannerContext {
         self.schema_name = None;
         self.range = None;
         self.selector_metric_names = None;
+        self.metric_name_is_materialized = false;
         // `metric_names` is query scoped, not selector scoped: a query may plan a selector with
         // an equality matcher before the selector that consumes the resolved metric tables.
     }
@@ -741,6 +756,10 @@ impl PromPlanner {
             self.ctx.materialize_metric_name = outer;
             input?
         };
+        // The result of an aggregation reports the group keys it was built from, so the constant
+        // name of one table does not describe it. `topk`/`bottomk` report the samples they selected
+        // (see [`PromPlanner::aggregate_keeps_metric_name`]) and keep whatever the input reported.
+        let input_metric_name_is_materialized = self.ctx.metric_name_is_materialized;
         let input_has_tsid = input.schema().fields().iter().any(|field| {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
@@ -782,7 +801,9 @@ impl PromPlanner {
 
         match (*op).id() {
             token::T_TOPK | token::T_BOTTOMK => {
-                self.prom_topk_bottomk_to_plan(aggr_expr, input).await
+                let plan = self.prom_topk_bottomk_to_plan(aggr_expr, input).await?;
+                self.ctx.metric_name_is_materialized = input_metric_name_is_materialized;
+                Ok(plan)
             }
             _ => {
                 // When `__tsid` is available, tag columns may have been pruned from the input plan.
@@ -922,11 +943,13 @@ impl PromPlanner {
 
                 let sort_expr = group_exprs.into_iter().map(|expr| expr.sort(true, false));
 
-                builder
+                let plan = builder
                     .sort(sort_expr)
                     .context(DataFusionPlanningSnafu)?
                     .build()
-                    .context(DataFusionPlanningSnafu)
+                    .context(DataFusionPlanningSnafu)?;
+                self.ctx.metric_name_is_materialized = false;
+                Ok(plan)
             }
         }
     }
@@ -1451,17 +1474,33 @@ impl PromPlanner {
     /// comparison compute every sample they return, so the name an operator above them observes is
     /// not one of their labels and their operands are not asked for it. Every other binary
     /// expression keeps the output schema it has without one.
+    ///
+    /// A filtering comparison this way materializes the name of the table each of its operands
+    /// reads, which is not a label of those operands' series: the matching below therefore keeps
+    /// broadcasting an operand that has no label of its own, even though it now reports a name
+    /// (see [`PromPlannerContext::metric_name_is_materialized`]).
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
+        let observed_metric_name = self.ctx.materialize_metric_name;
         let materialize = Self::is_token_a_set_op(binary_expr.op)
             || Self::on_matches_metric_name(&binary_expr.modifier)
-            || (self.ctx.materialize_metric_name && Self::binary_keeps_metric_name(binary_expr));
+            || (observed_metric_name && Self::binary_keeps_metric_name(binary_expr));
+        // The comparison materializes those names to report them to an expression above and, by
+        // default, does not match on them: a modifier that names `on(__name__)` compares the name
+        // like any other matching label instead.
+        let operand_names_are_synthetic = observed_metric_name
+            && Self::binary_keeps_metric_name(binary_expr)
+            && !Self::on_matches_metric_name(&binary_expr.modifier);
         let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
         let plan = self
-            .prom_binary_expr_to_plan_inner(query_engine_state, binary_expr)
+            .prom_binary_expr_to_plan_inner(
+                query_engine_state,
+                binary_expr,
+                operand_names_are_synthetic,
+            )
             .await;
         self.ctx.materialize_metric_name = outer;
         plan
@@ -1471,6 +1510,7 @@ impl PromPlanner {
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
+        operand_names_are_synthetic: bool,
     ) -> Result<LogicalPlan> {
         // promql-parser accepts fill modifiers, but Greptime does not implement the
         // required outer joins and missing-value substitution. Reject them before the
@@ -1822,6 +1862,24 @@ impl PromPlanner {
                 // `vector()` uses EmptyMetric and keeps GreptimeDB's timestamp broadcast.
                 let has_empty_metric_operand = left_is_empty_metric || right_is_empty_metric;
 
+                // A metric table without labels still produces one series per timestamp, so an
+                // operand that carries no label of its own meets an operand that stores labels by
+                // timestamp alone instead of matching label by label. The `__name__` column a
+                // filtering comparison materializes on its operands
+                // (`operand_names_are_synthetic`) is the name of the single table each operand
+                // reads, the same value for every row, so it is not one of the operand's labels
+                // and does not make a tagless operand a labelled one. Only the operand's own
+                // columns are asked for here: a name a metric name union or a set operator reports
+                // per row, or one the table stores, keeps its place as a label.
+                let carries_no_labels_of_its_own = |context: &PromPlannerContext| {
+                    context.tag_columns.is_empty()
+                        || (operand_names_are_synthetic
+                            && context.metric_name_is_materialized
+                            && context
+                                .tag_columns
+                                .iter()
+                                .all(|column| column == METRIC_NAME))
+                };
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
                     right_input,
@@ -1832,8 +1890,8 @@ impl PromPlanner {
                     lhs.value_type() == ValueType::Scalar
                         || rhs.value_type() == ValueType::Scalar
                         || has_empty_metric_operand
-                        || ((left_context.tag_columns.is_empty()
-                            || right_context.tag_columns.is_empty())
+                        || ((carries_no_labels_of_its_own(&left_context)
+                            || carries_no_labels_of_its_own(&right_context))
                             && !left_context
                                 .tag_columns
                                 .iter()
@@ -2473,6 +2531,12 @@ impl PromPlanner {
             .prom_call_expr_to_plan_inner(query_engine_state, call_expr)
             .await;
         self.ctx.materialize_metric_name = outer;
+        // A call reports the samples it read only when it does not compute new ones (see
+        // [`PromPlanner::call_keeps_metric_name`]); every other call builds its result from the
+        // samples, so the constant name of one table does not describe it.
+        if !Self::call_keeps_metric_name(call_expr.func.name) {
+            self.ctx.metric_name_is_materialized = false;
+        }
         plan
     }
 
@@ -2939,17 +3003,21 @@ impl PromPlanner {
     /// every consumer recovering the name from the query text. It is the same constant column a
     /// metric name union materializes for each of its branches, and it is added above the series
     /// key, so the rows a selector emits, their order, and the series they are split into are
-    /// unchanged.
+    /// unchanged. The context records that the column is this constant
+    /// (see [`PromPlannerContext::metric_name_is_materialized`]) because the name is not a label
+    /// the rows were read with.
     fn materialize_selector_metric_name(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
         // The expression this selector belongs to does not observe the metric name, so the
         // selector keeps the columns it would have without one: a plain selector result reports
         // the value, the labels and the time index, and the caller names a single metric table
         // from its own selector.
         if !self.ctx.materialize_metric_name {
+            self.ctx.metric_name_is_materialized = false;
             return Ok(plan);
         }
 
         let Some(name) = self.ctx.table_name.clone().filter(|name| !name.is_empty()) else {
+            self.ctx.metric_name_is_materialized = false;
             return Ok(plan);
         };
         // A table may already store a column with this name. Preserve its values rather
@@ -2962,6 +3030,7 @@ impl PromPlanner {
             .chain(self.ctx.time_index_column.iter())
             .any(|column| column == METRIC_NAME)
         {
+            self.ctx.metric_name_is_materialized = false;
             return Ok(plan);
         }
 
@@ -2982,6 +3051,7 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
+        self.ctx.metric_name_is_materialized = true;
         self.ctx.tag_columns.push(METRIC_NAME.to_string());
         Ok(plan)
     }
@@ -3331,6 +3401,8 @@ impl PromPlanner {
         self.ctx.table_name = Some(String::new());
         self.ctx.time_index_column = Some(time_index_column.clone());
         self.ctx.field_columns = field_columns;
+        // The branches name their rows, so the name column is not one constant of one table.
+        self.ctx.metric_name_is_materialized = false;
         self.ctx.tag_columns = series_key_columns.clone();
         self.ctx.use_tsid = false;
 
@@ -4233,7 +4305,9 @@ impl PromPlanner {
             .cloned()
             .collect();
         self.ctx.tag_columns = tags;
-        // The operand is a plain selector: its tag columns are the table's.
+        // The operand is a plain selector: its tag columns are the table's, and a `__name__`
+        // column among them is one the table stores.
+        self.ctx.metric_name_is_materialized = false;
         self.ctx.aggregation_field_labels.clear();
 
         self.ctx.use_tsid = false;
@@ -4247,6 +4321,7 @@ impl PromPlanner {
         self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
         self.ctx.reset_table_name_and_schema();
         self.ctx.tag_columns = vec![];
+        self.ctx.metric_name_is_materialized = false;
         self.ctx.aggregation_field_labels.clear();
         self.ctx.field_columns = vec![DEFAULT_FIELD_COLUMN.to_string()];
         self.ctx.use_tsid = false;
@@ -4766,6 +4841,11 @@ impl PromPlanner {
 
                 // Remove it from tag columns if exists to avoid duplicated column names
                 self.ctx.tag_columns.retain(|tag| *tag != dst_label);
+                if dst_label == METRIC_NAME {
+                    // A destination that names the metric name computes it from the other labels,
+                    // so the column is no longer the name the selector read.
+                    self.ctx.metric_name_is_materialized = false;
+                }
                 new_tags.push(dst_label);
                 // Add the new label expr to evaluate
                 exprs.push(concat_expr);
@@ -7448,7 +7528,12 @@ impl PromPlanner {
             );
         }
 
-        let output_context = left_context.clone();
+        // An AND/UNLESS result is derived even when its left-hand operand is a selector that
+        // materialized a name: which rows survive depends on the right-hand operand, and this
+        // operator reports the rows of its left operand as a set operator, not the rows of one
+        // table under one constant name.
+        let mut output_context = left_context.clone();
+        output_context.metric_name_is_materialized = false;
         let visible_left_schema = left.schema().clone();
         let mut left_context = left_context;
         let mut right_context = right_context;
@@ -7702,14 +7787,19 @@ impl PromPlanner {
         match (left_is_empty, right_is_empty) {
             (true, false) => {
                 self.ctx = right_context;
+                // A set operator reports each row under the name of the operand it came from, so
+                // its result is not one table's rows under one constant name.
+                self.ctx.metric_name_is_materialized = false;
                 return Ok(right);
             }
             (false, true) => {
                 self.ctx = left_context;
+                self.ctx.metric_name_is_materialized = false;
                 return Ok(left);
             }
             (true, true) => {
                 self.ctx = left_context;
+                self.ctx.metric_name_is_materialized = false;
                 return Ok(left);
             }
             (false, false) => {}
@@ -8256,6 +8346,8 @@ impl PromPlanner {
         // step 4: update context
         let output_field_col = left_field_col.clone();
         let mut output_context = left_context;
+        // Each row of the merged plan keeps the name of the operand it came from.
+        output_context.metric_name_is_materialized = false;
         let mut visible_tags = all_tags.into_iter().collect::<Vec<_>>();
         visible_tags.sort_unstable();
         output_context.time_index_column = Some(left_time_index_column);
@@ -19135,5 +19227,267 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
                 .iter()
                 .all(|field| !is_internal_key(field.name()))
         }));
+    }
+
+    /// A filtering comparison reports the labels of its left-hand operand, the metric name among
+    /// them, so the planner materializes the name of the table each operand reads when an
+    /// expression above observes the name of the comparison's result.
+    ///
+    /// The name it materializes that way is the name of the one table the operand reads — the same
+    /// value for every row of that operand — so it is not a label the operand's series were read
+    /// with, and it does not turn an operand that carries no label into a labelled one: the
+    /// tagless operand still meets an operand that stores labels by timestamp, exactly as it does
+    /// without the name column. Materializing the name must not make `tagless` and `labelled`
+    /// match label by label, which would drop the row instead of reporting it (see
+    /// `PromPlannerContext::metric_name_is_materialized` and the `only_join_time_index` decision in
+    /// `prom_binary_expr_to_plan_inner`).
+    ///
+    /// Both comparator orientations are asserted because a filtering comparison reports the
+    /// left-hand operand's labels either way, and the same shapes without the set operator above
+    /// them keep the columns they had before the name column existed.
+    #[tokio::test]
+    async fn review_repro_tagless_comparison_under_a_set_operator_keeps_every_row() {
+        let tagless_row = vec![(1.0, vec![(METRIC_NAME.to_string(), "tagless".to_string())])];
+        let labelled_row = vec![(
+            2.0,
+            vec![
+                (METRIC_NAME.to_string(), "labelled".to_string()),
+                ("host".to_string(), "a".to_string()),
+            ],
+        )];
+        for (query, expected) in [
+            // `tagless < labelled` filters the tagless sample (1 < 2), so the set operator reports
+            // that row under the name the comparison kept.
+            (
+                r#"(tagless < labelled) or missing_metric"#,
+                tagless_row.clone(),
+            ),
+            (
+                r#"missing_metric or (tagless < labelled)"#,
+                tagless_row.clone(),
+            ),
+            // The labels are the left-hand operand's, so the mirrored orientation reports the
+            // labelled sample together with its `host`.
+            (
+                r#"(labelled > tagless) or missing_metric"#,
+                labelled_row.clone(),
+            ),
+            (
+                r#"missing_metric or (labelled > tagless)"#,
+                labelled_row.clone(),
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+
+        // Beside a differently labelled metric the set operator keeps both rows: the comparison
+        // row under its own name, the selector row under its own.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(tagless < labelled) or other_labelled"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![
+                (1.0, vec![(METRIC_NAME.to_string(), "tagless".to_string())]),
+                (
+                    4.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "other_labelled".to_string()),
+                        ("host".to_string(), "b".to_string()),
+                    ]
+                ),
+            ]
+        );
+
+        // Nothing above the comparison observes its name, so the comparison materializes none of
+        // it and each orientation keeps the columns it always had: a filtering comparison reports
+        // the left-hand operand's labels, so one order reports the tagless sample and the other the
+        // labelled one.
+        for (query, expected) in [
+            (r#"tagless < labelled"#, vec![(1.0, Vec::new())]),
+            (
+                r#"labelled > tagless"#,
+                vec![(2.0, vec![("host".to_string(), "a".to_string())])],
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+
+        // The tagless arithmetic baseline is untouched: `+` computes new samples and drops the
+        // name, so its operands materialize no name column on either side of a set operator.
+        for query in [
+            r#"tagless + labelled"#,
+            r#"(tagless + labelled) or missing_metric"#,
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), tagless_broadcast_row(), "{query}");
+        }
+    }
+
+    /// The broadcast above applies to an operand that carries no label of its own, and never to a
+    /// comparison that matches on the metric name.
+    ///
+    /// `on(__name__)` names the name among the matching labels, so the two tagless tables report
+    /// different names and never pair — with or without an expression above the comparison — and
+    /// the materialized name is compared like any other matching label. A `bool` comparison
+    /// computes new samples instead of filtering them, so it drops the name and its operands
+    /// materialize none: those operands keep the plain tagless broadcast.
+    #[tokio::test]
+    async fn review_repro_comparison_keeps_explicit_name_matching_and_bool_semantics() {
+        for query in [
+            r#"tagless < on(__name__) other_tagless"#,
+            r#"(tagless < on(__name__) other_tagless) or missing_metric"#,
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert!(labeled_values(&batches).is_empty(), "{query}");
+        }
+
+        // The same request on the same table pairs the two rows, so the materialized name is still
+        // the name the operand reports.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"tagless <= on(__name__) tagless"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![(METRIC_NAME.to_string(), "tagless".to_string())])]
+        );
+
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(tagless <= bool labelled) or missing_metric"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+        );
+
+        // A function that computes new samples drops the name as well, so its input keeps the
+        // broadcast and the row survives the function and the set operator above it.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"sum(tagless < labelled) or missing_metric"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), vec![(1.0, Vec::new())]);
+    }
+
+    /// A set operator's derived operand keeps the rows it always had.
+    ///
+    /// The operand a comparison matches on may be a set operator rather than a selector: `and`
+    /// reports a subset of its left-hand operand's rows, `or` reports the rows of either operand.
+    /// Either result is a set operator's own row set, not the rows of one table under one constant
+    /// name, so the comparison above it matches those rows the way it did before the operands of a
+    /// comparison started materializing their names. An operand that carries no label of its own is
+    /// still matched by timestamp — but only when it is a selector's own rows, which the
+    /// `tagless`/`labelled` pair above covers — so the `and` shape below reports the row its
+    /// left-hand operand produced after the filter, and the `or` beside a differently named metric
+    /// keeps that metric's row instead of deduplicating it away.
+    #[tokio::test]
+    async fn review_repro_set_operator_operand_keeps_its_rows_under_a_comparison() {
+        // The `and` result is tagless, so the comparison against `labelled` reports no row: the
+        // `or` above the comparison then reports the `other_tagless` row it always did.
+        let other_tagless_row = vec![(
+            4.0,
+            vec![(METRIC_NAME.to_string(), "other_tagless".to_string())],
+        )];
+        for (query, expected) in [
+            (
+                r#"((tagless and tagless) < labelled) or other_tagless"#,
+                other_tagless_row.clone(),
+            ),
+            (
+                r#"((tagless unless missing_metric) < labelled) or other_tagless"#,
+                other_tagless_row.clone(),
+            ),
+            // An empty operand is no operand: the `or` reports the comparison's own row, which is
+            // the row its selector read under the name the comparison kept.
+            (
+                r#"({__name__=~"missing_.*"} or (tagless < labelled)) or missing_metric"#,
+                vec![(1.0, vec![(METRIC_NAME.to_string(), "tagless".to_string())])],
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+    }
+
+    /// A `__name__` column a table stores is a label of that table's series, not a materialized
+    /// name, so a comparison does not broadcast it by timestamp.
+    ///
+    /// The table below stores `__name__` and no other tag, so its single series would broadcast to
+    /// `labelled` by timestamp if the column were the name this planner materializes. It is not:
+    /// the stored column keeps its place as the operand's own label, exactly as it does for a
+    /// comparison no expression above observes, and the join stays empty.
+    #[tokio::test]
+    async fn review_repro_stored_metric_name_tag_keeps_matching_label_by_label() {
+        fn build_provider() -> DfTableSourceProvider {
+            register_tables(
+                &MemoryCatalogManager::with_default_setup(),
+                vec![
+                    union_metric_table(
+                        "labelled",
+                        3_070,
+                        &[("host", Some("a"))],
+                        &[1_000],
+                        &[float_field(greptime_value(), &[2.0])],
+                    ),
+                    union_metric_table(
+                        "stored_only",
+                        3_071,
+                        &[(METRIC_NAME, Some("stored_only"))],
+                        &[1_000],
+                        &[float_field(greptime_value(), &[10.0])],
+                    ),
+                ],
+            )
+        }
+        for query in [
+            r#"stored_only > labelled"#,
+            r#"(stored_only > labelled) or missing_metric"#,
+            r#"missing_metric or (stored_only > labelled)"#,
+        ] {
+            let batches = execute_union_query(build_provider(), &[], query).await;
+            assert!(labeled_values(&batches).is_empty(), "{query}");
+        }
+    }
+
+    /// `label_replace` rejects a destination label that starts with `__`, `__name__` included.
+    ///
+    /// `label_replace(vector, "__name__", ...)` is how PromQL renames a series; this planner
+    /// refuses the reserved prefix instead (see `PromPlanner::validate_label_name`). The rejection
+    /// is pre-existing — the same query fails to plan before and after the metric names a set
+    /// operator, a comparison or a metric name union materializes — and is out of scope here; it is
+    /// asserted so the limitation is visible rather than incidental.
+    #[tokio::test]
+    async fn review_repro_label_replace_destination_metric_name_stays_rejected() {
+        for query in [
+            r#"label_replace(foo, "__name__", "renamed", "host", "a")"#,
+            r#"label_replace(foo, "__name__", "renamed", "host", "a") or missing_metric"#,
+            r#"label_replace(foo, "__name__", "$1", "__name__", "(.*)") or missing_metric"#,
+        ] {
+            let err = plan_union_query(build_metric_name_exact_foo_table_provider(), &[], query)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid destination label name"),
+                "{query}: {err}"
+            );
+        }
     }
 }
