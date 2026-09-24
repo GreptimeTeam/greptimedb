@@ -214,9 +214,13 @@ struct PromPlannerContext {
     /// is the table being scanned rather than one of its columns. The planner materializes it as a
     /// constant `__name__` column only where the expression observes it: the operands of a set
     /// operator, which report each side's own name, and of a modifier that matches on
-    /// `on(__name__)`. Every other selector keeps the output columns it has without a name column
-    /// — a result that selects one metric table is named by the caller from its own selector — and
-    /// a table that stores a `__name__` column of its own is only ever read, never rewritten.
+    /// `on(__name__)`. An operator in between stops the observation unless its own result reports
+    /// the name (see [`PromPlanner::binary_keeps_metric_name`],
+    /// [`PromPlanner::aggregate_keeps_metric_name`] and [`PromPlanner::call_keeps_metric_name`]),
+    /// so a name column never reaches an operand that discards it. Every other selector keeps the
+    /// output columns it has without a name column — a result that selects one metric table is
+    /// named by the caller from its own selector — and a table that stores a `__name__` column of
+    /// its own is only ever read, never rewritten.
     materialize_metric_name: bool,
     /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
     /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
@@ -723,7 +727,20 @@ impl PromPlanner {
             param,
         } = aggr_expr;
 
-        let mut input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let mut input = {
+            // An aggregation reports the group keys it was asked for, not the labels of the
+            // samples it read: only `by(__name__)` and the ranking aggregations report the name of
+            // their input (see [`PromPlanner::aggregate_keeps_metric_name`]), so only they ask
+            // their input for a `__name__` column. An observation of this aggregation's result
+            // reaches its input no other way: materializing the name below it would join an
+            // enclosing expression on a label the aggregation's own result does not report.
+            let materialize =
+                self.ctx.materialize_metric_name && Self::aggregate_keeps_metric_name(op, modifier);
+            let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
+            let input = self.prom_expr_to_plan(expr, query_engine_state).await;
+            self.ctx.materialize_metric_name = outer;
+            input?
+        };
         let input_has_tsid = input.schema().fields().iter().any(|field| {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
@@ -1428,16 +1445,20 @@ impl PromPlanner {
     ///
     /// A set operator reports each operand's own labels — the metric name among them — and a
     /// modifier that names `on(__name__)` matches on the metric name, so the selectors both
-    /// operands read have to materialize their name as a `__name__` column. Every other binary
+    /// operands read have to materialize their name as a `__name__` column. An expression above
+    /// that observes the name of this result reaches the operands only when the operator reports
+    /// the name itself (see [`PromPlanner::binary_keeps_metric_name`]): arithmetic and a `bool`
+    /// comparison compute every sample they return, so the name an operator above them observes is
+    /// not one of their labels and their operands are not asked for it. Every other binary
     /// expression keeps the output schema it has without one.
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
     ) -> Result<LogicalPlan> {
-        let materialize = self.ctx.materialize_metric_name
-            || Self::is_token_a_set_op(binary_expr.op)
-            || Self::on_matches_metric_name(&binary_expr.modifier);
+        let materialize = Self::is_token_a_set_op(binary_expr.op)
+            || Self::on_matches_metric_name(&binary_expr.modifier)
+            || (self.ctx.materialize_metric_name && Self::binary_keeps_metric_name(binary_expr));
         let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
         let plan = self
             .prom_binary_expr_to_plan_inner(query_engine_state, binary_expr)
@@ -2428,7 +2449,30 @@ impl PromPlanner {
         }))
     }
 
+    /// Plans a function call.
+    ///
+    /// Only the functions that report the samples they read keep the metric name (see
+    /// [`PromPlanner::call_keeps_metric_name`]); every other function computes the result it
+    /// returns, so it does not ask its arguments for a `__name__` column. An argument that
+    /// observes the name itself — the operands of a set operator, a modifier that names
+    /// `on(__name__)` — still materializes it: this boundary only stops an observation of the
+    /// call's result from reaching the call's input.
     async fn prom_call_expr_to_plan(
+        &mut self,
+        query_engine_state: &QueryEngineState,
+        call_expr: &Call,
+    ) -> Result<LogicalPlan> {
+        let materialize =
+            self.ctx.materialize_metric_name && Self::call_keeps_metric_name(call_expr.func.name);
+        let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
+        let plan = self
+            .prom_call_expr_to_plan_inner(query_engine_state, call_expr)
+            .await;
+        self.ctx.materialize_metric_name = outer;
+        plan
+    }
+
+    async fn prom_call_expr_to_plan_inner(
         &mut self,
         query_engine_state: &QueryEngineState,
         call_expr: &Call,
@@ -5239,6 +5283,37 @@ impl PromPlanner {
             result.push(expr);
         }
         Ok(result)
+    }
+
+    /// Whether a binary expression reports the metric name of the samples it returns.
+    ///
+    /// A comparison without `bool` filters the samples of its left operand and reports their
+    /// labels, the metric name among them; arithmetic and a `bool` comparison compute new samples
+    /// and drop the name. An expression above that observes the name of a binary result therefore
+    /// observes the operands only in the first case, and every other operator answers with a result
+    /// of its own.
+    fn binary_keeps_metric_name(expr: &PromBinaryExpr) -> bool {
+        Self::is_token_a_comparison_op(expr.op)
+            && !expr
+                .modifier
+                .as_ref()
+                .is_some_and(|modifier| modifier.return_bool)
+    }
+
+    /// Whether an aggregation reports the metric name of the samples it reads.
+    ///
+    /// An aggregation reports the group keys it was asked for, not the labels of its input
+    /// samples, so the name survives it in exactly two ways: `by(__name__)` reports the name as a
+    /// group key, and `topk`/`bottomk` select samples of the input and report the labels they were
+    /// read with. Every other aggregation — `without(...)` included, which drops the name — builds
+    /// its own result from the samples, so an observation of that result must not reach its input.
+    fn aggregate_keeps_metric_name(op: &TokenType, modifier: &Option<LabelModifier>) -> bool {
+        matches!(op.id(), token::T_TOPK | token::T_BOTTOMK)
+            || matches!(
+                modifier,
+                Some(LabelModifier::Include(labels))
+                    if labels.labels.iter().any(|label| label == METRIC_NAME)
+            )
     }
 
     /// Whether a function call keeps the metric name of its input series.
@@ -17233,22 +17308,50 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
 
     #[tokio::test]
     async fn review_repro_nested_count_rewrite_applies_over_a_set_operator() {
-        // The set operator materializes `__name__` in a projection above the series split, so the
-        // nested-`count` rewrite reads a projection where it used to read the manipulator's input
-        // directly (see `CountNestAggrRule::prune_instant_input`). The rewrite must still apply,
-        // and it must still group by the full series key.
-        let provider = build_metric_name_foo_and_bar_table_provider();
-        let plan = build_optimized_promql_plan(
-            provider,
-            &build_eval_stmt(r#"scalar(count(count(foo or bar) by (host)))"#),
-        )
-        .await;
-        let plan_str = plan.display_indent_schema().to_string();
-        assert!(
-            plan_str.contains("Aggregate: groupBy=[[foo.host, foo.timestamp]]"),
-            "{plan_str}"
-        );
-        assert!(plan_str.contains("AS __name__"), "{plan_str}");
+        // This asserts the rewrite itself, not its input plan: `CountNestAggrRule` proves it ran by
+        // replacing the outer `count(<column>)` with `count(Int64(1))` over a `Distinct` presence
+        // set. The unrewritten inner `count(foo.greptime_value) by (host, timestamp)` stays in the
+        // plan either way, so asserting that shape would pass for a plan the rule never touched.
+        //
+        // The rule requires the inner input to be the instant-vector-selector plan, so an operand
+        // that is a set operator is not eligible and the nested aggregate stays as written; the
+        // name a set operator materializes stays beside it. A set operator *above* the nested
+        // `count` does not change either answer: the outer set operator observes the name of a
+        // `count`, which reports its own group keys and materializes no name for it.
+        for (query, rewritten, has_name) in [
+            // The control: the outer `count` sees the operand's direct selector plan and the
+            // expression never observes the metric name.
+            (r#"count(count(foo) by (host))"#, true, false),
+            // Eligible beside a set operator: the outer `count` still sees the operand's direct
+            // selector plan, and the set operator materializes the other operand's own name.
+            (r#"count(count(foo) by (host)) or bar"#, true, true),
+            // Not eligible: `foo or bar` is not the direct instant-vector-selector plan, so the
+            // rule declines and the nested aggregate stays as written. The set operator below still
+            // materializes each operand's name, so the plan keeps it.
+            (r#"count(count(foo or bar) by (host))"#, false, true),
+            // A set operator above the nested `count` does not make the inner operand eligible
+            // either, and the `count` reports no name for it: the names in the plan are the inner
+            // set operator's own.
+            (
+                r#"count(count(foo or bar) by (host)) or missing_metric"#,
+                false,
+                true,
+            ),
+        ] {
+            let plan = build_optimized_promql_plan(
+                build_metric_name_foo_and_bar_table_provider(),
+                &build_eval_stmt(query),
+            )
+            .await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert_eq!(
+                plan_str.contains("count(Int64(1)) AS count(count(foo.greptime_value))")
+                    && plan_str.contains("Distinct:"),
+                rewritten,
+                "{query}"
+            );
+            assert_eq!(plan_str.contains("AS __name__"), has_name, "{query}");
+        }
     }
 
     /// The user-visible columns of a TQL EVAL statement: `StatementExecutor::plan_tql` plans the
@@ -17718,6 +17821,244 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         .await;
         assert_eq!(float_values(&batches), vec![1.0, 1.0]);
         assert_eq!(labeled_values(&batches), vec![(1.0, vec![]), (1.0, vec![])]);
+    }
+
+    /// Two metric tables that store no labels, next to two that store `host`.
+    ///
+    /// A metric table without labels still produces one series per timestamp, which GreptimeDB's
+    /// PromQL planner joins by timestamp when it meets an operand that stores labels.
+    fn build_tagless_and_labelled_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "tagless",
+                    3_060,
+                    &[],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "other_tagless",
+                    3_061,
+                    &[],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[4.0])],
+                ),
+                union_metric_table(
+                    "labelled",
+                    3_062,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+                union_metric_table(
+                    "other_labelled",
+                    3_063,
+                    &[("host", Some("b"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[4.0])],
+                ),
+            ],
+        )
+    }
+
+    /// The single row `tagless + labelled` reports: the labelled operand's labels, value 3.
+    fn tagless_broadcast_row() -> Vec<(f64, Vec<(String, String)>)> {
+        vec![(3.0, vec![("host".to_string(), "a".to_string())])]
+    }
+
+    #[tokio::test]
+    async fn review_repro_tagless_arithmetic_under_a_set_operator_keeps_every_row() {
+        // The tagless table has no labels of its own, so its series meets the labelled operand by
+        // timestamp and reports that operand's labels.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"tagless + labelled"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), tagless_broadcast_row());
+
+        // A set operator reports each operand's own name. Arithmetic drops the name of every
+        // sample it computes, so the name the set operator observes is not one of the arithmetic
+        // result's labels: asking the operands of `+` for a `__name__` column would turn the
+        // tagless table into an operand with a label the other side does not carry, and the pair
+        // would be dropped instead of reporting the row above.
+        for query in [
+            r#"(tagless + labelled) or missing_metric"#,
+            r#"missing_metric or (tagless + labelled)"#,
+            r#"(tagless + labelled) or on(__name__) missing_metric"#,
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), tagless_broadcast_row(), "{query}");
+        }
+
+        // The tags of the arithmetic result are the labels of the labelled operand, so a set
+        // operator beside a differently labelled metric keeps both rows — the arithmetic row
+        // unnamed, the selector row under its own name.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(tagless + labelled) or other_labelled"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![
+                (3.0, vec![("host".to_string(), "a".to_string())]),
+                (
+                    4.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "other_labelled".to_string()),
+                        ("host".to_string(), "b".to_string()),
+                    ]
+                ),
+            ]
+        );
+
+        // The tags of an arithmetic result are the left operand's labels, so a nest of arithmetic
+        // still joins the tagless pair by timestamp.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(other_tagless + tagless) + labelled"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(7.0, vec![("host".to_string(), "a".to_string())])]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_repro_explicit_name_match_keeps_materializing_both_names() {
+        // `on(__name__)` on the arithmetic itself is what asks the operands for their names: the
+        // names differ, so the two tagless series never pair up and the arithmetic is empty.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"tagless + on(__name__) other_tagless"#,
+        )
+        .await;
+        assert!(labeled_values(&batches).is_empty());
+
+        // The same request on the same table pairs the two rows and adds them up, so the
+        // materialized name is still the name the operand reports.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"tagless + on(__name__) tagless"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), vec![(2.0, Vec::new())]);
+    }
+
+    #[tokio::test]
+    async fn review_repro_name_keeping_operators_keep_the_name_under_a_set_operator() {
+        // A function that only reorders or relabels the samples it read reports the samples'
+        // labels, the metric name among them, so an `or` that matches on the name still sees one
+        // series instead of two: `label_replace` after `sort` and after `topk` each keep both the
+        // name the selector read and the labels they were given.
+        for query in [
+            r#"label_replace(sort(foo), "dst", "v", "host", "a") or on(__name__) foo"#,
+            r#"label_replace(topk(1, foo), "dst", "v", "host", "a") or on(__name__) foo"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_exact_foo_table_provider(), &[], query).await;
+            assert_eq!(
+                labeled_values(&batches),
+                vec![(
+                    1.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "foo".to_string()),
+                        ("dst".to_string(), "v".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                )],
+                "{query}"
+            );
+        }
+
+        // `topk` itself reports the samples it selected, so the name survives it and the `or`
+        // still deduplicates the right-hand `foo` against it.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"topk(1, sort(foo)) or on(__name__) foo"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), named_foo_row());
+    }
+
+    #[tokio::test]
+    async fn review_repro_name_dropping_operators_do_not_materialize_their_input() {
+        // An aggregation reports its own group keys, not the labels of the samples it read, so an
+        // observation of its result gives its input no name to materialize and the arithmetic
+        // below it still joins the tagless operand by timestamp: `count` of that one row is 1.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"count(tagless + labelled) or missing_metric"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0]);
+        assert_eq!(labeled_values(&batches).len(), 1);
+
+        // Neither a function that computes new sample values from a window nor `absent`, whose
+        // series is made up from the matchers it was written with, observes the name of its
+        // input. Neither result reports a name, and no selector below them carries a name column.
+        for (query, expected) in [
+            (
+                r#"sum_over_time(tagless[1m]) or missing_metric"#,
+                vec![(1.0, vec![])],
+            ),
+            (r#"absent(tagless) or missing_metric"#, vec![(1.0, vec![])]),
+        ] {
+            let plan = plan_union_query(build_tagless_and_labelled_table_provider(), &[], query)
+                .await
+                .unwrap();
+            let plan_str = plan.display_indent_schema().to_string();
+            assert!(!plan_str.contains("AS __name__"), "{query}: {plan_str}");
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn review_repro_heterogeneous_or_under_arithmetic_is_unchanged() {
+        // A set operator hands down one operand whose rows come from operands that do not identify
+        // their series the same way: the `missing_metric` branch is empty and the `tagless` branch
+        // has no labels of its own, so the `or` result is tagless and would broadcast by timestamp.
+        // The `or` still reports each operand's own name, so the arithmetic above reads a `__name__`
+        // column on its left-hand operand and matches label by label: the row is dropped.
+        //
+        // This is the shape `materialize_metric_name` cannot tell apart from a labelled operand —
+        // the name a set operator materializes is a label like any other, and which operand a row
+        // came from is not recoverable from the labels. The rows below are unchanged from the base
+        // this planning came from (a107c521: `[]` for both orders) and from the planning before it
+        // (749ddb9: `[]` for both orders as well), so this change neither repairs nor regresses
+        // them; repairing them needs per-row information about which operand a row was read from.
+        for query in [
+            r#"(missing_metric or tagless) + labelled"#,
+            r#"labelled + (missing_metric or tagless)"#,
+        ] {
+            let batches =
+                execute_union_query(build_tagless_and_labelled_table_provider(), &[], query).await;
+            assert!(labeled_values(&batches).is_empty(), "{query}");
+        }
+
+        // The set operator above the arithmetic result — the shape this change does repair — still
+        // reports the row, and the selector below it is the tagless table as before.
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(tagless + labelled) or missing_metric"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), tagless_broadcast_row());
     }
 
     #[tokio::test]

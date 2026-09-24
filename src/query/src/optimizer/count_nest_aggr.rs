@@ -232,19 +232,6 @@ impl CountNestAggrRule {
         }
     }
 
-    /// Inserts the unqualified name of every column the expressions read.
-    fn collect_expr_columns<'a>(
-        exprs: impl IntoIterator<Item = &'a Expr>,
-        required: &mut HashSet<String>,
-    ) {
-        for column in exprs
-            .into_iter()
-            .flat_map(|expr| expr.column_refs().into_iter().cloned())
-        {
-            let _ = required.insert(column.name);
-        }
-    }
-
     fn aggregate_if<F>(expr: &Expr, accept_name: F) -> Option<(&str, &Expr)>
     where
         F: FnOnce(&str) -> bool,
@@ -319,33 +306,6 @@ impl CountNestAggrRule {
         required_columns: &HashSet<String>,
     ) -> Result<LogicalPlan> {
         match plan {
-            // A selector projects the columns it materializes (`__name__` for a selector that
-            // names one metric table) between the manipulator and the series split. The
-            // projection has to keep its place — the split below works on the raw, per-series
-            // order — but only the columns still required above it are worth carrying, and the
-            // columns its remaining expressions read must be carried down to the split.
-            LogicalPlan::Projection(projection) => {
-                let mut required = required_columns.clone();
-                // The output names are read from the projection's own schema: an expression's
-                // `schema_name` is qualified for a column of a table, while every consumer below
-                // refers to columns by their unqualified name.
-                let exprs = projection
-                    .schema
-                    .fields()
-                    .iter()
-                    .zip(projection.expr.iter())
-                    .filter(|(field, _)| required.contains(field.name()))
-                    .map(|(_, expr)| expr.clone())
-                    .collect::<Vec<_>>();
-                if exprs.is_empty() {
-                    // Nothing above needs this projection at all; leaving it intact keeps the
-                    // schema the manipulator expects instead of building an empty projection.
-                    return Ok(plan.clone());
-                }
-                Self::collect_expr_columns(&exprs, &mut required);
-                let input = Self::prune_instant_input(projection.input.as_ref(), &required)?;
-                LogicalPlanBuilder::from(input).project(exprs)?.build()
-            }
             LogicalPlan::Extension(extension) => {
                 if let Some(normalize) = extension.node.as_any().downcast_ref::<SeriesNormalize>() {
                     let input =
