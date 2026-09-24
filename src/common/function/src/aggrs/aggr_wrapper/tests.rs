@@ -30,6 +30,7 @@ use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskCo
 use datafusion::functions_aggregate::array_agg::array_agg_udaf;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
+use datafusion::functions_aggregate::nth_value::nth_value_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::optimizer::AnalyzerRule;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
@@ -1430,4 +1431,45 @@ async fn execute_phy_plan(
         batches.push(batch?);
     }
     Ok(batches)
+}
+
+#[test]
+fn test_state_struct_array_rejects_mismatched_state() {
+    let fields = Fields::from(vec![Field::new("sum", DataType::Int64, true)]);
+    let arrays: Vec<ArrayRef> = vec![Arc::new(Float64Array::from(vec![1.0]))];
+    let err = state_struct_array(&fields, arrays).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("State field `sum` expects type Int64, but the accumulator produced Float64"),
+        "{err}"
+    );
+}
+
+#[test]
+fn test_hard_ordered_aggr_not_steppable() {
+    let order_by = vec![SortExpr::new(
+        Expr::Column(Column::new_unqualified("ts")),
+        true,
+        true,
+    )];
+    let aggr = |func: Arc<AggregateUDF>, args: Vec<Expr>| {
+        Expr::AggregateFunction(AggregateFunction::new_udf(
+            func,
+            args,
+            false,
+            None,
+            order_by.clone(),
+            None,
+        ))
+    };
+    let number = Expr::Column(Column::new_unqualified("number"));
+
+    assert!(!is_all_aggr_exprs_steppable(&[aggr(
+        nth_value_udaf(),
+        vec![number.clone(), lit(2i64)],
+    )]));
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        array_agg_udaf(),
+        vec![number]
+    )]));
 }

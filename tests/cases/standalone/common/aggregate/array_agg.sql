@@ -79,4 +79,7 @@ SELECT lat > 3 AS g, array_agg(lat ORDER BY ts DESC) FROM array_agg_partitioned 
 
 SELECT array_agg(k ORDER BY k % 10, ts DESC) FROM array_agg_partitioned;
 
+-- nth_value needs sorted input, so it isn't split into partial state and merge
+SELECT nth_value(lat, 2 ORDER BY ts), nth_value(lat, 3 ORDER BY ts DESC) FROM array_agg_partitioned;
+
 DROP TABLE array_agg_partitioned;
