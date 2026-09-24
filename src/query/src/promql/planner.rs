@@ -210,32 +210,27 @@ struct PromPlannerContext {
     tag_columns: Vec<String>,
     /// Whether the selectors planned for the current operand materialize their metric name.
     ///
-    /// PromQL reads the metric name as a label of every series a selector produces, but the name
-    /// is the table being scanned rather than one of its columns. The planner materializes it as a
-    /// constant `__name__` column only where the expression observes it: the operands of a set
-    /// operator, which report each side's own name, and of a modifier that matches on
-    /// `on(__name__)`. An operator in between stops the observation unless its own result reports
-    /// the name (see [`PromPlanner::binary_keeps_metric_name`],
-    /// [`PromPlanner::aggregate_keeps_metric_name`] and [`PromPlanner::call_keeps_metric_name`]),
-    /// so a name column never reaches an operand that discards it. Every other selector keeps the
-    /// output columns it has without a name column — a result that selects one metric table is
-    /// named by the caller from its own selector — and a table that stores a `__name__` column of
-    /// its own is only ever read, never rewritten.
+    /// PromQL reads the metric name as a label of every series a selector produces, but the name is
+    /// the table being scanned rather than one of its columns, so the planner projects it as a
+    /// constant `__name__` column only where the expression reads it: a set operator, a modifier
+    /// matching `on(__name__)`, or a call reading the name. An operator in between stops this
+    /// observation unless its own result reports the name (see
+    /// [`PromPlanner::binary_keeps_metric_name`], [`PromPlanner::aggregate_keeps_metric_name`] and
+    /// [`PromPlanner::call_keeps_metric_name`]), so a name column never reaches an operand that
+    /// discards it. A table that stores its own `__name__` column is only ever read, never
+    /// rewritten.
     materialize_metric_name: bool,
     /// Whether the `__name__` column of the plan this context was captured from is the constant
     /// name this planner projected for a selector written on one metric table.
     ///
-    /// A name materialized this way is the name of the single table the operand reads, the same
-    /// value for every row of that operand, so it is not a label the operand's series were read
-    /// with and it does not make an operand without labels a labelled one. Binary matching asks
-    /// exactly that question — an operand without a label of its own meets an operand that stores
-    /// labels by timestamp (see [`PromPlanner::prom_binary_expr_to_plan_inner`]) — while a
-    /// `__name__` column the operand reports another way is a label like any other there: a table
-    /// that stores the column, a set operator, a metric name union and every operator that builds
-    /// its result from the samples it read each report their own name column, so they leave this
-    /// false and only a selector, the filtering operators over it (a comparison without `bool`
-    /// that does not match on the name), the calls that only reorder or relabel samples and
-    /// `topk`/`bottomk` keep it set.
+    /// Such a name is the name of the single table the operand reads, the same value for every row,
+    /// so it is not a label the operand's series were read with and it does not make an operand
+    /// without labels a labelled one — the question binary matching asks (see
+    /// [`PromPlanner::prom_binary_expr_to_plan_inner`]). A `__name__` column the operand reports
+    /// another way — a stored column, a set operator, a metric name union, an operator that builds
+    /// its result from the samples it read — is a label like any other there and leaves this false;
+    /// only selectors, filtering comparisons that do not match on the name, `topk`/`bottomk`,
+    /// and calls that preserve the selector's name keep it set.
     metric_name_is_materialized: bool,
     /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
     /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
@@ -675,22 +670,15 @@ impl PromPlanner {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
         });
-        // `__tsid` is the physical series identity: it hashes the tags a row was written with,
-        // and the metric engine does not put the logical table name into it, so two logical
-        // tables whose series carry the same tag values share one `__tsid`. The name an operand
-        // materialized is therefore not implied by the tsid, and an enclosing set operator
-        // reports a different name per row of that one tsid. Keying the split on the tsid alone
-        // folds such rows into one series — `RangeManipulate` takes the tag values of the first
-        // row of a batch and applies them to every sample of it, so the other name would be lost
-        // and its samples reported under the first one. The labels the input reports, the metric
-        // name among them, are the kind of key that separates those rows; the tsid is used only
-        // for an input that reports no name label — the case it was introduced for.
-        //
-        // The name has to be a label of the rows, not just a string column that happens to carry
-        // the name: a table's own value column or time index may be named `__name__`, and the
-        // selector above it never materializes a name over that data. The planner's tag columns
-        // say which labels a series reports, and the name a selector materializes is in them by
-        // the time its consumers are planned.
+        // `__tsid` is the physical series identity: it hashes the tags a row was written with and
+        // does not encode the logical table name, so two logical tables whose series carry the same
+        // tag values share one `__tsid` while an enclosing set operator reports a different name
+        // per row of it. `RangeManipulate` takes the tag values of the first row of a batch and
+        // applies them to every sample of it, so a split keyed on the tsid alone would fold such
+        // rows into one series and lose the other name. The labels the input reports, the name
+        // among them, separate those rows; the tsid stays the key of an input that reports no name
+        // label. A table's own value column or time index may be named `__name__` without being a
+        // label of its rows, so the name has to be one of the planner's tag columns.
         let input_has_metric_name = self.ctx.tag_columns.iter().any(|tag| tag == METRIC_NAME)
             && input_schema
                 .field_with_unqualified_name(METRIC_NAME)
@@ -715,16 +703,13 @@ impl PromPlanner {
         } else {
             // Only use tag columns that survive in the inner plan's schema —
             // `ctx.tag_columns` can drift from the actual output.
-            let mut key_columns: Vec<String> = self
+            let key_columns: Vec<String> = self
                 .ctx
                 .tag_columns
                 .iter()
                 .filter(|name| input_schema.has_column_with_unqualified_name(name))
                 .cloned()
                 .collect();
-            if input_has_metric_name && !key_columns.iter().any(|name| name == METRIC_NAME) {
-                key_columns.push(METRIC_NAME.to_string());
-            }
             let sort = key_columns
                 .iter()
                 .map(|name| DfExpr::Column(Column::from_name(name)).sort(true, true))
@@ -1500,18 +1485,17 @@ impl PromPlanner {
     /// Plans a binary expression.
     ///
     /// A set operator reports each operand's own labels — the metric name among them — and a
-    /// modifier that names `on(__name__)` matches on the metric name, so the selectors both
-    /// operands read have to materialize their name as a `__name__` column. An expression above
-    /// that observes the name of this result reaches the operands only when the operator reports
-    /// the name itself (see [`PromPlanner::binary_keeps_metric_name`]): arithmetic and a `bool`
-    /// comparison compute every sample they return, so the name an operator above them observes is
-    /// not one of their labels and their operands are not asked for it. Every other binary
-    /// expression keeps the output schema it has without one.
+    /// modifier naming `on(__name__)` matches on it, so the selectors both operands read
+    /// materialize their name as a `__name__` column. An expression above that observes the name of
+    /// this result reaches them only when the operator reports the name itself (see
+    /// [`PromPlanner::binary_keeps_metric_name`]): arithmetic and a `bool` comparison compute every
+    /// sample they return, so the name is not one of their labels. Every other binary expression
+    /// keeps the output schema it has without one.
     ///
-    /// A filtering comparison this way materializes the name of the table each of its operands
-    /// reads, which is not a label of those operands' series: the matching below therefore keeps
-    /// broadcasting an operand that has no label of its own, even though it now reports a name
-    /// (see [`PromPlannerContext::metric_name_is_materialized`]).
+    /// When requested, a filtering comparison materializes each operand's table name, which is not
+    /// a label of those operands' series: matching still broadcasts an operand without its own
+    /// labels even though it now reports a name (see
+    /// [`PromPlannerContext::metric_name_is_materialized`]).
     async fn prom_binary_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
@@ -1898,12 +1882,9 @@ impl PromPlanner {
                 // A metric table without labels still produces one series per timestamp, so an
                 // operand that carries no label of its own meets an operand that stores labels by
                 // timestamp alone instead of matching label by label. The `__name__` column a
-                // filtering comparison materializes on its operands
-                // (`operand_names_are_synthetic`) is the name of the single table each operand
-                // reads, the same value for every row, so it is not one of the operand's labels
-                // and does not make a tagless operand a labelled one. Only the operand's own
-                // columns are asked for here: a name a metric name union or a set operator reports
-                // per row, or one the table stores, keeps its place as a label.
+                // filtering comparison materializes (`operand_names_are_synthetic`) is the name of
+                // the single table each operand reads, not one of its labels, so only the operand's
+                // own columns are asked for here.
                 let carries_no_labels_of_its_own = |context: &PromPlannerContext| {
                     context.tag_columns.is_empty()
                         || (operand_names_are_synthetic
@@ -2548,14 +2529,11 @@ impl PromPlanner {
     /// Plans a function call.
     ///
     /// Only the functions that report the samples they read keep the metric name (see
-    /// [`PromPlanner::call_keeps_metric_name`]); every other function computes the result it
-    /// returns, so it does not ask its arguments for a `__name__` column. A call that names
-    /// `__name__` among its own label arguments reads the name itself (see
-    /// [`PromPlanner::call_reads_metric_name`]) and materializes it for that read whatever the
-    /// expression above does with the result. An argument that observes the name itself — the
-    /// operands of a set operator, a modifier that names `on(__name__)` — still materializes it:
-    /// this boundary only stops an observation of the call's result from reaching the call's
-    /// input.
+    /// [`PromPlanner::call_keeps_metric_name`]); every other function computes its result, so it
+    /// does not ask its arguments for a `__name__` column. A call that names `__name__` among its
+    /// label arguments reads the name itself (see [`PromPlanner::call_reads_metric_name`]) and
+    /// materializes it whatever the expression above does with the result; this boundary only stops
+    /// an observation of the call's result from reaching the call's input.
     async fn prom_call_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
@@ -3032,18 +3010,13 @@ impl PromPlanner {
     /// Materializes the metric name of a selector that names one metric table as a `__name__`
     /// label column of every row it produces.
     ///
-    /// PromQL treats the metric name as a label of the series a selector reads, although the
-    /// name is the table being scanned rather than one of its columns: a set operator reports
-    /// each operand's own name, and `on(__name__, ...)` matches on it. The name is materialized
-    /// for the operands of exactly those expressions — see
-    /// [`PromPlannerContext::materialize_metric_name`] — because the output columns of a query
-    /// that never observes the name do not include it, and it is projected once, here, instead of
-    /// every consumer recovering the name from the query text. It is the same constant column a
-    /// metric name union materializes for each of its branches, and it is added above the series
-    /// key, so the rows a selector emits, their order, and the series they are split into are
-    /// unchanged. The context records that the column is this constant
-    /// (see [`PromPlannerContext::metric_name_is_materialized`]) because the name is not a label
-    /// the rows were read with.
+    /// PromQL treats the metric name as a label even though a selector reads it from the table
+    /// name, not a column. Set operators, `on(__name__, ...)` and name-reading calls need the
+    /// column (see [`PromPlannerContext::materialize_metric_name`]); project it once here rather
+    /// than recovering it from query text at every consumer. It sits above the series key, so
+    /// selector rows, ordering and splitting are unchanged. The context records that this is the
+    /// selector's constant name (see [`PromPlannerContext::metric_name_is_materialized`]), not a
+    /// label the rows were read with.
     fn materialize_selector_metric_name(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
         // The expression this selector belongs to does not observe the metric name, so the
         // selector keeps the columns it would have without one: a plain selector result reports
@@ -3465,12 +3438,10 @@ impl PromPlanner {
     /// Returns the common type of one value column across the union branches.
     ///
     /// Branches must expose the same value columns; differing numeric types are widened to
-    /// `Float64`, while equal types are retained.
-    ///
-    /// Widening `Int64`/`UInt64` to `Float64` loses precision for magnitudes above 2^53. That is
-    /// intended and consistent with the Prometheus data model (every sample is a float64) and with
-    /// [`PromPlanner::or_operator`], which widens numeric fields the same way: a value observable
-    /// through the union is the same value a single-table selector observes.
+    /// `Float64`, equal types retained. Widening `Int64`/`UInt64` to `Float64` loses precision
+    /// above 2^53, which is intended and consistent with the Prometheus data model and with
+    /// [`PromPlanner::or_operator`]: a value observable through the union is the value a
+    /// single-table selector observes.
     fn union_field_type(field: &str, branches: &[UnionBranchScan]) -> Result<ArrowDataType> {
         let mut target: Option<ArrowDataType> = None;
         for branch in branches {
@@ -3505,21 +3476,19 @@ impl PromPlanner {
 
     /// Returns the common type of the time index column across the union branches.
     ///
-    /// Every branch must expose the column under the same name. Their precisions may differ, and
+    /// Every branch must expose the column under the same name. Their precisions may differ and
     /// `UNION ALL` needs one type, so all branches are aligned to the finest candidate unit
-    /// (Second < Millisecond < Microsecond < Nanosecond). Widening is the lossless direction: the
-    /// native tick count of a coarser unit is exactly representable in a finer one, while
-    /// narrowing would truncate (and could collapse) samples of the finer table. A cast between
-    /// timestamp units only rescales the tick count per row, so the ordering the sort and the
-    /// series splitting rely on is preserved, and the manipulators keep deriving their
-    /// millisecond payloads from the native ticks of the (now common) unit. GreptimeDB time
-    /// indexes are timezone-less, and a timezone is Arrow display metadata anyway, so the common
-    /// type carries none. Aligning to the query's own unit instead would reject the finer
-    /// candidate or silently truncate its sub-unit samples, which is why the finest branch wins.
+    /// (Second < Millisecond < Microsecond < Nanosecond). Widening is the lossless direction: a
+    /// coarser unit's native ticks are exactly representable in a finer one, while narrowing would
+    /// truncate and could collapse samples of the finer table. The cast only rescales the tick count
+    /// per row, so the ordering the sort and the series splitting rely on is preserved and the
+    /// manipulators keep deriving their millisecond payloads from the native ticks. Time indexes are
+    /// timezone-less (a timezone is Arrow display metadata), so the common type carries none;
+    /// aligning to the query's own unit instead would reject the finer candidate or silently
+    /// truncate its sub-unit samples, which is why the finest branch wins.
     ///
-    /// The cast is a no-op for a single candidate (the common unit is its own unit). It can
-    /// overflow the finer unit's `i64` range for a far-future coarser sample; the cast then
-    /// reports an error rather than truncating the timestamp.
+    /// The cast is a no-op for a single candidate. A far-future coarser sample can overflow the
+    /// finer unit's `i64` range, and the cast then reports an error rather than truncating.
     fn union_time_index_type(
         time_index_column: &str,
         branches: &[UnionBranchScan],
@@ -3572,11 +3541,9 @@ impl PromPlanner {
             }
             Some(LabelModifier::Include(labels)) => {
                 if update_ctx {
-                    // A `by(...)` label can name a value field of the input instead of a tag. The
-                    // aggregate still reports it among its tag columns below, but unlike a tag it
-                    // is a group key rather than a property of a series: its value varies between
-                    // the samples of one series, so a matcher on it must stay above sample
-                    // selection (#9242). Record it, before the tag columns are overwritten.
+                    // A `by(...)` label can name a value field: record it as a group key of the
+                    // aggregate before the tag columns are overwritten
+                    // (`aggregation_field_labels`).
                     self.ctx.aggregation_field_labels = labels
                         .labels
                         .iter()
@@ -5407,13 +5374,9 @@ impl PromPlanner {
         Ok(result)
     }
 
-    /// Whether a binary expression reports the metric name of the samples it returns.
-    ///
-    /// A comparison without `bool` filters the samples of its left operand and reports their
-    /// labels, the metric name among them; arithmetic and a `bool` comparison compute new samples
-    /// and drop the name. An expression above that observes the name of a binary result therefore
-    /// observes the operands only in the first case, and every other operator answers with a result
-    /// of its own.
+    /// Whether a binary expression reports the metric name of the samples it returns: a comparison
+    /// without `bool` filters its left operand's samples and reports their labels, while arithmetic
+    /// and a `bool` comparison compute new ones and drop the name.
     fn binary_keeps_metric_name(expr: &PromBinaryExpr) -> bool {
         Self::is_token_a_comparison_op(expr.op)
             && !expr
@@ -5422,13 +5385,9 @@ impl PromPlanner {
                 .is_some_and(|modifier| modifier.return_bool)
     }
 
-    /// Whether an aggregation reports the metric name of the samples it reads.
-    ///
-    /// An aggregation reports the group keys it was asked for, not the labels of its input
-    /// samples, so the name survives it in exactly two ways: `by(__name__)` reports the name as a
-    /// group key, and `topk`/`bottomk` select samples of the input and report the labels they were
-    /// read with. Every other aggregation — `without(...)` included, which drops the name — builds
-    /// its own result from the samples, so an observation of that result must not reach its input.
+    /// Whether an aggregation reports the metric name of the samples it reads: `by(__name__)`
+    /// reports it as a group key and `topk`/`bottomk` report the labels they read, while every
+    /// other aggregation — `without(...)` included — builds its own result from the samples.
     fn aggregate_keeps_metric_name(op: &TokenType, modifier: &Option<LabelModifier>) -> bool {
         matches!(op.id(), token::T_TOPK | token::T_BOTTOMK)
             || matches!(
@@ -5438,14 +5397,10 @@ impl PromPlanner {
             )
     }
 
-    /// Whether a function call reads the metric name of its input series itself.
-    ///
-    /// `label_replace` and `label_join` copy a source label into a new one, and `sort_by_label`
-    /// sorts series by a label. A call that names `__name__` among those labels reads the metric
-    /// name whether or not anything above the call observes it, so its input has to carry a
-    /// `__name__` column for the read to see the name instead of an absent label — which promises
-    /// nothing to the caller: a function that reports the name reports it as it does for a name a
-    /// metric name union materialized, and one that computes new samples still drops it.
+    /// Whether a function call reads the metric name of its input series itself: a call that names
+    /// `__name__` among the labels `label_replace`, `label_join` or `sort_by_label` work on reads
+    /// the name whether or not anything above it observes it, so its input has to carry the
+    /// `__name__` column for the read not to see an absent label.
     fn call_reads_metric_name(call: &Call) -> bool {
         let names_metric_name = |arg: &PromExpr| {
             matches!(
@@ -5467,13 +5422,9 @@ impl PromPlanner {
         }
     }
 
-    /// Whether a function call keeps the metric name of its input series.
-    ///
-    /// Prometheus drops the name from every function that computes new sample values (`abs` and
-    /// the other math functions, `rate` and the other range functions, `timestamp`, ...), and
-    /// keeps it in the functions that only reorder series or rewrite labels, plus
-    /// `last_over_time`. A `__name__` label materialized by a metric name union has to follow
-    /// the same rule, otherwise it would survive operations that drop the name.
+    /// Whether a function call keeps the metric name of its input series: Prometheus drops it from
+    /// every function that computes new sample values and keeps it in the ones that only reorder
+    /// series or rewrite labels, plus `last_over_time`.
     fn call_keeps_metric_name(name: &str) -> bool {
         matches!(
             name,
@@ -7021,15 +6972,9 @@ impl PromPlanner {
             let _ = right_tag_columns.remove(METRIC_NAME);
         }
 
-        // A label one operand does not carry at all is absent for every series of that operand,
-        // which PromQL reads as the empty string, so `normalize_join_key_columns` compares it per
-        // row like any other label — the padding a metric name union applies to a candidate table
-        // is a NULL for the same reason. A non-string label has no empty string to compare
-        // against, though, so a key that only one operand carries at all and that is not a string
-        // there can never match: the join is empty by construction. Joining such a key would name
-        // a column the other operand does not have, so it is left out — only the labels both
-        // operands carry are keyed — and the caller forces the join empty, which keeps the result
-        // schema.
+        // PromQL reads an absent label as the empty string, so keys from either operand are
+        // compared per row. A non-string label missing from the other operand cannot match: leave
+        // it out of the join keys and force the join empty without changing its result schema.
         let missing_key_is_not_a_string =
             |mine: &BTreeSet<String>, mine_schema: &DFSchemaRef, theirs: &BTreeSet<String>| {
                 mine.difference(theirs).any(|column| {
@@ -7066,17 +7011,15 @@ impl PromPlanner {
     /// Normalizes the join keys of both operands so the join compares them per row.
     ///
     /// PromQL reads a label a series does not carry as the empty string, so a missing label, a
-    /// `NULL` and `''` are one and the same value, and whether two series match depends on their
-    /// label values rather than on their label sets as a whole. Every key that can hold a `NULL` —
-    /// or that one operand does not carry at all — is therefore replaced on both sides by
-    /// [`Self::normalized_match_key_expr`], the expression the direct-OR path builds its match keys
-    /// with: the label cast to the common string type of the two operands with `NULL` coalesced to
-    /// `''`, or that same empty value where the operand has no such column. A key both operands
-    /// carry as a non-nullable column of the same type already compares by value and is joined as
-    /// it is. The visible label columns are left alone, so a `NULL` that a metric name union padded
-    /// stays `NULL` in the result; only the returned key columns carry the normalized value. The
-    /// time index is joined as it is: it is present on both sides by construction and its name is
-    /// a property of each operand's table. A key the join cannot compare at all, one operand
+    /// `NULL` and `''` are one value and matching depends on label values rather than on label sets
+    /// as a whole. Every key that can hold a `NULL` — or that one operand does not carry — is
+    /// therefore replaced on both sides by [`Self::normalized_match_key_expr`], the expression the
+    /// direct-OR path builds its match keys with: the label cast to the common string type of the
+    /// two operands with `NULL` coalesced to `''`, or that same empty value where the operand has no
+    /// such column. A key both operands carry as a non-nullable column of the same type compares by
+    /// value as it is, and the time index is joined as it is as well. The visible label columns are
+    /// left alone, so a `NULL` a metric name union padded stays `NULL` in the result and only the
+    /// returned keys carry the normalized value. A key the join cannot compare at all, one operand
     /// lacking a non-string label of the other, is left out by
     /// [`Self::binary_join_key_columns`] together with an always-false predicate.
     fn normalize_join_key_columns(
@@ -7622,14 +7565,9 @@ impl PromPlanner {
             let _ = left_tag_col_set.remove(METRIC_NAME);
             let _ = right_tag_col_set.remove(METRIC_NAME);
         }
-        // A label one operand does not carry at all is absent for every series of that operand,
-        // which PromQL reads as the empty string, so the operands are matched on every label
-        // either of them matches on, each label compared per row (see
-        // `normalize_join_key_columns`). A label that is not a string on the operand that carries
-        // it has no empty value to compare against, though, so such a pair can never match: the
-        // label is left out of the keys and the join is rejected by an always-false predicate —
-        // AND then reports no series and UNLESS keeps every left series, exactly as a comparison
-        // that never holds does, instead of dropping rows a shared key would have matched.
+        // Missing labels compare as empty strings. A non-string label carried only by one operand
+        // cannot match: omit it from the join keys and force the join empty — AND reports no series,
+        // UNLESS keeps every left series (see `normalize_join_key_columns`).
         let mut join_key_set = left_tag_col_set
             .union(&right_tag_col_set)
             .cloned()
