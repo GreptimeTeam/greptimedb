@@ -87,6 +87,7 @@ struct Inner {
 
 impl Default for Inner {
     fn default() -> Self {
+        #[allow(deprecated)]
         Self::with_manager_and_peers(ChannelManager::new(), Vec::new(), ClientOptions::default())
     }
 }
@@ -105,6 +106,7 @@ struct Peers {
 }
 
 impl Inner {
+    #[deprecated(note = "legacy single-manager path shares its pool between lanes")]
     fn with_manager_and_peers(
         channel_manager: ChannelManager,
         peers: Vec<String>,
@@ -113,6 +115,7 @@ impl Inner {
         Self::with_managers_and_peers(channel_manager.clone(), channel_manager, peers, options)
     }
 
+    // The explicit dual-manager path keeps query and control pools independent.
     fn with_managers_and_peers(
         query_channel_manager: ChannelManager,
         control_channel_manager: ChannelManager,
@@ -222,36 +225,61 @@ fn random_initial_delay(max_delay: Duration) -> Duration {
 }
 
 impl Client {
+    /// Creates a client whose query and control lanes intentionally share the default manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn new() -> Self {
         Default::default()
     }
 
+    /// Creates a client whose query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn with_urls<U, A>(urls: A) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_urls_and_options(urls, ClientOptions::default())
     }
 
     /// Creates a client with URLs and custom options.
+    ///
+    /// The query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_urls_and_options<U, A>(urls: A, options: ClientOptions) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_manager_and_urls_and_options(ChannelManager::new(), urls, options)
     }
 
+    /// Creates a TLS client whose query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_tls_and_urls<U, A>(urls: A, client_tls: ClientTlsOption) -> Result<Self>
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_tls_and_urls_and_options(urls, client_tls, ClientOptions::default())
     }
 
     /// Creates a client with TLS URLs and custom options.
+    ///
+    /// The query and control lanes intentionally share one manager.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_tls_and_urls_and_options<U, A>(
         urls: A,
         client_tls: ClientTlsOption,
@@ -265,6 +293,7 @@ impl Client {
         let tls_config =
             load_client_tls_config(Some(client_tls)).context(error::CreateTlsChannelSnafu)?;
         let channel_manager = ChannelManager::with_config(channel_config, tls_config);
+        #[allow(deprecated)]
         Ok(Self::with_manager_and_urls_and_options(
             channel_manager,
             urls,
@@ -272,15 +301,24 @@ impl Client {
         ))
     }
 
+    /// Creates a client with one manager shared intentionally by query and control lanes.
+    #[deprecated(
+        note = "shares one manager between query and control lanes; use `with_query_and_control_managers` with independently constructed managers instead"
+    )]
     pub fn with_manager_and_urls<U, A>(channel_manager: ChannelManager, urls: A) -> Self
     where
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
+        #[allow(deprecated)]
         Self::with_manager_and_urls_and_options(channel_manager, urls, ClientOptions::default())
     }
 
-    pub(crate) fn with_managers_and_urls<U, A>(
+    /// Creates a client with query and control lanes backed by the supplied managers.
+    ///
+    /// The lanes are isolated only when the supplied managers are independently constructed;
+    /// this constructor does not enforce that they are distinct.
+    pub fn with_query_and_control_managers<U, A>(
         query_channel_manager: ChannelManager,
         control_channel_manager: ChannelManager,
         urls: A,
@@ -289,7 +327,7 @@ impl Client {
         U: AsRef<str>,
         A: AsRef<[U]>,
     {
-        Self::with_managers_and_urls_and_options(
+        Self::with_query_and_control_managers_and_options(
             query_channel_manager,
             control_channel_manager,
             urls,
@@ -297,7 +335,7 @@ impl Client {
         )
     }
 
-    fn with_managers_and_urls_and_options<U, A>(
+    fn with_query_and_control_managers_and_options<U, A>(
         query_channel_manager: ChannelManager,
         control_channel_manager: ChannelManager,
         urls: A,
@@ -323,6 +361,11 @@ impl Client {
     }
 
     /// Creates a client with a channel manager, URLs, and custom options.
+    ///
+    /// The query and control lanes intentionally share this manager and its pool.
+    #[deprecated(
+        note = "shares this manager and its pool between query and control lanes; use `with_query_and_control_managers` instead"
+    )]
     pub fn with_manager_and_urls_and_options<U, A>(
         channel_manager: ChannelManager,
         urls: A,
@@ -333,7 +376,8 @@ impl Client {
         A: AsRef<[U]>,
     {
         let channel_manager_for_query = channel_manager.clone();
-        Self::with_managers_and_urls_and_options(
+        // Legacy constructors intentionally share the manager and therefore its pool.
+        Self::with_query_and_control_managers_and_options(
             channel_manager_for_query,
             channel_manager,
             urls,
@@ -541,6 +585,23 @@ impl Client {
         Ok(())
     }
 
+    /// Returns the number of cached channels in the query and control pools for tests.
+    #[cfg(feature = "testing")]
+    pub fn channel_pool_sizes(&self) -> (usize, usize) {
+        let pool_size = |channel_manager: &ChannelManager| {
+            let mut size = 0;
+            channel_manager.retain_channel(|_, _| {
+                size += 1;
+                true
+            });
+            size
+        };
+        (
+            pool_size(&self.inner.query_channel_manager),
+            pool_size(&self.inner.control_channel_manager),
+        )
+    }
+
     /// Returns peer addresses grouped by active and inactive state for tests.
     #[cfg(feature = "testing")]
     pub fn peer_addresses_by_state(&self) -> (Vec<String>, Vec<String>) {
@@ -559,6 +620,7 @@ impl Client {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::collections::HashSet;
     use std::sync::Arc;
@@ -664,6 +726,36 @@ mod tests {
             "127.0.0.1:3002".to_string(),
             "127.0.0.1:3003".to_string(),
         ]
+    }
+
+    #[tokio::test]
+    async fn test_explicit_dual_manager_constructor_uses_isolated_reused_channel_pools() {
+        let query_channel_manager = ChannelManager::new();
+        let control_channel_manager = ChannelManager::new();
+        let client = Client::with_query_and_control_managers(
+            query_channel_manager.clone(),
+            control_channel_manager.clone(),
+            ["127.0.0.1:3001"],
+        );
+
+        client.make_flight_client(false, false).unwrap();
+        client.make_flight_client(false, false).unwrap();
+        assert_eq!(1, channel_pool_size(&query_channel_manager));
+        assert_eq!(0, channel_pool_size(&control_channel_manager));
+
+        client.make_control_flight_client(false, false).unwrap();
+        client.make_control_flight_client(false, false).unwrap();
+        assert_eq!(1, channel_pool_size(&query_channel_manager));
+        assert_eq!(1, channel_pool_size(&control_channel_manager));
+    }
+
+    fn channel_pool_size(manager: &ChannelManager) -> usize {
+        let mut size = 0;
+        manager.retain_channel(|_, _| {
+            size += 1;
+            true
+        });
+        size
     }
 
     #[test]

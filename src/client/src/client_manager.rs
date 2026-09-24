@@ -77,6 +77,7 @@ impl FlownodeManager for NodeClients {
 }
 
 impl NodeClients {
+    /// Creates node clients with independent query and control channel pools.
     pub fn new(config: ChannelConfig) -> Self {
         Self {
             query_channel_manager: ChannelManager::with_config(config.clone(), None),
@@ -91,7 +92,7 @@ impl NodeClients {
     pub async fn get_client(&self, datanode: &Peer) -> Client {
         self.clients
             .get_with_by_ref(datanode, async move {
-                Client::with_managers_and_urls(
+                Client::with_query_and_control_managers(
                     self.query_channel_manager.clone(),
                     self.control_channel_manager.clone(),
                     vec![datanode.addr.clone()],
@@ -153,6 +154,7 @@ mod tests {
         assert_pool_has_one_address(&node_clients.control_channel_manager);
 
         let manager = ChannelManager::new();
+        #[allow(deprecated)]
         let legacy = Client::with_manager_and_urls(manager.clone(), [PEER_ADDR]);
         legacy.make_flight_client(false, false).unwrap();
         legacy.make_control_flight_client(false, false).unwrap();
