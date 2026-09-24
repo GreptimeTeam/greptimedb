@@ -68,15 +68,15 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub(crate) struct BatchKey {
-    pub(crate) catalog: String,
-    pub(crate) schema: String,
-    pub(crate) physical_table: String,
-    pub(crate) skip_wal: bool,
+struct BatchKey {
+    catalog: String,
+    schema: String,
+    physical_table: String,
+    skip_wal: bool,
 }
 
 // Requests can share a batch only when their write target and WAL policy match.
-pub(crate) fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
+fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
@@ -172,20 +172,17 @@ impl LogicalTablePendingRowsBatcher {
             .map(|(rows, ())| rows)
     }
 
-    /// Returns whether the physical metric table resolved from `ctx` can use
-    /// the bulk path. The bulk encode produces millisecond timestamp batches
-    /// only, so a physical table with another time index unit (e.g. created
-    /// as `TIMESTAMP(6)`) must stay on the ordinary insert path, which
-    /// converts the requests to the physical table's unit. A missing physical
-    /// table is accepted: it is auto-created with the millisecond unit.
-    pub async fn accepts_physical_table_time_index(&self, ctx: &QueryContextRef) -> bool {
+    /// Returns the physical metric table's time index unit resolved from
+    /// `ctx`, defaulting to millisecond when the table does not exist yet
+    /// (the schema alterer auto-creates it as millisecond).
+    async fn physical_time_index_unit_or_default(&self, ctx: &QueryContextRef) -> TimeUnit {
         let key = batch_key_from_ctx(ctx);
         let Ok(Some(table)) = self
             .catalog_manager
             .table(&key.catalog, &key.schema, &key.physical_table, None)
             .await
         else {
-            return true;
+            return TimeUnit::Millisecond;
         };
         table
             .table_info()
@@ -193,8 +190,7 @@ impl LogicalTablePendingRowsBatcher {
             .schema
             .timestamp_column()
             .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
-            .map(|unit| unit == TimeUnit::Millisecond)
-            .unwrap_or(true)
+            .unwrap_or(TimeUnit::Millisecond)
     }
 
     /// Submits with request-level accounting after schema preparation and before

@@ -23,14 +23,15 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Rows, SemanticType};
 use arrow::array::{
-    ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondBuilder,
-    TimestampMillisecondBuilder, TimestampNanosecondBuilder, TimestampSecondBuilder,
-    new_null_array,
+    ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
+    TimestampNanosecondArray, TimestampSecondArray, new_null_array,
 };
 use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::TimeUnit;
 use common_query::prelude::{greptime_timestamp, greptime_value};
+use common_time::Timestamp;
+use common_time::timestamp::TimeUnit as CommonTimeUnit;
 use datatypes::data_type::DataType;
 use datatypes::prelude::ConcreteDataType;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -129,16 +130,7 @@ pub(crate) fn rows_to_aligned_record_batch(
             ArrowDataType::Float64 => {
                 source_map.insert(&target_field_name, (src_idx, src_arrow_type));
             }
-            ArrowDataType::Timestamp(unit, _) => {
-                ensure!(
-                    unit == &TimeUnit::Millisecond,
-                    error::InvalidPromRemoteRequestSnafu {
-                        msg: format!(
-                            "Unexpected remote write batch timestamp unit, expect millisecond, got: {}",
-                            unit
-                        )
-                    }
-                );
+            ArrowDataType::Timestamp(_, _) => {
                 source_map.insert(&target_ts_name, (src_idx, src_arrow_type));
             }
             ArrowDataType::Utf8 => {
@@ -156,15 +148,28 @@ pub(crate) fn rows_to_aligned_record_batch(
         }
     }
 
-    // Build columns in target schema order
+    // Build columns in target schema order. The timestamp column is built in
+    // the TARGET schema's unit; `build_arrow_array` converts the request's
+    // encoding unit (flooring on narrowing) into it.
     let mut columns = Vec::with_capacity(target_schema.fields().len());
     for target_field in target_schema.fields() {
         if let Some((src_idx, src_arrow_type)) = source_map.get(target_field.name().as_str()) {
+            let target_type = if matches!(
+                (src_arrow_type, target_field.data_type()),
+                (
+                    ArrowDataType::Timestamp(_, _),
+                    ArrowDataType::Timestamp(_, _)
+                )
+            ) {
+                target_field.data_type().clone()
+            } else {
+                src_arrow_type.clone()
+            };
             let array = build_arrow_array(
                 rows,
                 *src_idx,
                 &rows.schema[*src_idx].column_name,
-                src_arrow_type.clone(),
+                target_type,
                 row_count,
             )?;
             columns.push(array);
@@ -199,6 +204,16 @@ pub(crate) fn identify_missing_columns_from_proto(
     Ok(missing)
 }
 
+/// Converts an arrow time unit to the common time unit.
+fn arrow_time_unit(unit: TimeUnit) -> CommonTimeUnit {
+    match unit {
+        TimeUnit::Second => CommonTimeUnit::Second,
+        TimeUnit::Millisecond => CommonTimeUnit::Millisecond,
+        TimeUnit::Microsecond => CommonTimeUnit::Microsecond,
+        TimeUnit::Nanosecond => CommonTimeUnit::Nanosecond,
+    }
+}
+
 /// Build a `Vec<ColumnSchema>` suitable for creating a new Prometheus logical table
 /// directly from the proto `rows.schema`, avoiding the round-trip through Arrow schema.
 pub fn build_prom_create_table_schema_from_proto(
@@ -207,13 +222,22 @@ pub fn build_prom_create_table_schema_from_proto(
     rows_schema
         .iter()
         .map(|col| {
-            let semantic_type = if col.datatype == api::v1::ColumnDataType::TimestampMillisecond as i32 {
+            let datatype = api::v1::ColumnDataType::try_from(col.datatype).map_err(|_| {
+                error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Failed to build create table schema, column '{}' has unknown datatype {}",
+                        col.column_name, col.datatype
+                    ),
+                }
+                .build()
+            })?;
+            let semantic_type = if api::helper::timestamp_unit(datatype).is_some() {
                 SemanticType::Timestamp
-            } else if col.datatype == api::v1::ColumnDataType::Float64 as i32 {
+            } else if datatype == api::v1::ColumnDataType::Float64 {
                 SemanticType::Field
             } else {
                 // tag columns must be String type
-                ensure!(col.datatype == api::v1::ColumnDataType::String as i32, error::InvalidPromRemoteRequestSnafu{
+                ensure!(datatype == api::v1::ColumnDataType::String, error::InvalidPromRemoteRequestSnafu{
                                         msg: format!(
                         "Failed to build create table schema, tag column '{}' must be String but got datatype {}",
                         col.column_name, col.datatype
@@ -268,25 +292,63 @@ fn build_arrow_array(
             StringBuilder::with_capacity(row_count, 0),
             ValueData::StringValue(v) => v
         ),
-        arrow::datatypes::DataType::Timestamp(u, _) => match u {
-            TimeUnit::Second => build_array!(
-                TimestampSecondBuilder::with_capacity(row_count),
-                ValueData::TimestampSecondValue(v) => *v
-            ),
-            TimeUnit::Millisecond => build_array!(
-                TimestampMillisecondBuilder::with_capacity(row_count),
-                ValueData::TimestampMillisecondValue(v) => *v
-            ),
-            TimeUnit::Microsecond => build_array!(
-                TimestampMicrosecondBuilder::with_capacity(row_count),
-                ValueData::DatetimeValue(v) => *v,
-                ValueData::TimestampMicrosecondValue(v) => *v
-            ),
-            TimeUnit::Nanosecond => build_array!(
-                TimestampNanosecondBuilder::with_capacity(row_count),
-                ValueData::TimestampNanosecondValue(v) => *v
-            ),
-        },
+        arrow::datatypes::DataType::Timestamp(u, _) => {
+            // Accept any timestamp encoding and convert to the column's unit,
+            // flooring on narrowing (same semantics as `Timestamp::convert_to`
+            // on the ordinary insert path). The column type is the target
+            // region schema's, which may differ from the request's encoding
+            // unit (e.g. a millisecond remote-write request into a
+            // microsecond physical metric table).
+            let mut values = Vec::with_capacity(row_count);
+            for row in &rows.rows {
+                let value = row.values[col_idx].value_data.as_ref();
+                let converted = match value {
+                    Some(ValueData::TimestampSecondValue(v)) => {
+                        Some(Timestamp::new_second(*v).convert_to(arrow_time_unit(u)))
+                    }
+                    Some(ValueData::TimestampMillisecondValue(v)) => {
+                        Some(Timestamp::new_millisecond(*v).convert_to(arrow_time_unit(u)))
+                    }
+                    Some(ValueData::DatetimeValue(v) | ValueData::TimestampMicrosecondValue(v)) => {
+                        Some(Timestamp::new_microsecond(*v).convert_to(arrow_time_unit(u)))
+                    }
+                    Some(ValueData::TimestampNanosecondValue(v)) => {
+                        Some(Timestamp::new_nanosecond(*v).convert_to(arrow_time_unit(u)))
+                    }
+                    Some(v) => {
+                        return error::InvalidPromRemoteRequestSnafu {
+                            msg: format!("Unexpected value: {:?}", v),
+                        }
+                        .fail();
+                    }
+                    None => None,
+                };
+                values.push(match converted {
+                    Some(Some(timestamp)) => Some(timestamp.value()),
+                    Some(None) => {
+                        return error::InvalidPromRemoteRequestSnafu {
+                            msg: format!(
+                                "Timestamp value in column '{column_name}' overflows when converting to unit {u:?}"
+                            ),
+                        }
+                        .fail();
+                    }
+                    None => None,
+                });
+            }
+            match u {
+                TimeUnit::Second => Arc::new(TimestampSecondArray::from(values)) as ArrayRef,
+                TimeUnit::Millisecond => {
+                    Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
+                }
+                TimeUnit::Microsecond => {
+                    Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef
+                }
+                TimeUnit::Nanosecond => {
+                    Arc::new(TimestampNanosecondArray::from(values)) as ArrayRef
+                }
+            }
+        }
         ty => {
             return error::InvalidPromRemoteRequestSnafu {
                 msg: format!(
@@ -305,13 +367,114 @@ fn build_arrow_array(
 mod tests {
     use api::v1::value::ValueData;
     use api::v1::{ColumnDataType, ColumnSchema, Row, Rows, SemanticType, Value};
-    use arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::array::{
+        Array, Float64Array, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+    };
     use arrow::datatypes::{DataType, Field, Schema as ArrowSchema, TimeUnit};
 
     use super::{
         build_prom_create_table_schema_from_proto, identify_missing_columns_from_proto,
         rows_to_aligned_record_batch,
     };
+
+    #[test]
+    fn test_rows_to_aligned_record_batch_converts_time_units() {
+        // Microsecond-encoded rows aligned to a millisecond schema: narrowing
+        // floors towards negative infinity (-1001us -> -2ms), matching
+        // `Timestamp::convert_to` on the ordinary insert path.
+        let rows = Rows {
+            schema: vec![
+                ColumnSchema {
+                    column_name: "greptime_timestamp".to_string(),
+                    datatype: ColumnDataType::TimestampMicrosecond as i32,
+                    semantic_type: SemanticType::Timestamp as i32,
+                    ..Default::default()
+                },
+                ColumnSchema {
+                    column_name: "greptime_value".to_string(),
+                    datatype: ColumnDataType::Float64 as i32,
+                    semantic_type: SemanticType::Field as i32,
+                    ..Default::default()
+                },
+            ],
+            rows: vec![
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMicrosecondValue(1000)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(1.0)),
+                        },
+                    ],
+                },
+                Row {
+                    values: vec![
+                        Value {
+                            value_data: Some(ValueData::TimestampMicrosecondValue(-1001)),
+                        },
+                        Value {
+                            value_data: Some(ValueData::F64Value(2.0)),
+                        },
+                    ],
+                },
+            ],
+        };
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]);
+
+        let (batch, _) = rows_to_aligned_record_batch(&rows, &target)
+            .unwrap()
+            .into_parts();
+        let ts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(ts.value(0), 1);
+        assert_eq!(ts.value(1), -2);
+
+        // Millisecond-encoded rows aligned to a microsecond schema: widening
+        // is lossless.
+        let mut rows = Rows {
+            schema: vec![rows.schema[0].clone(), rows.schema[1].clone()],
+            rows: vec![Row {
+                values: vec![
+                    Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(123)),
+                    },
+                    Value {
+                        value_data: Some(ValueData::F64Value(4.0)),
+                    },
+                ],
+            }],
+        };
+        rows.schema[0].datatype = ColumnDataType::TimestampMillisecond as i32;
+        let target = ArrowSchema::new(vec![
+            Field::new(
+                "greptime_timestamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
+            Field::new("greptime_value", DataType::Float64, true),
+        ]);
+
+        let (batch, _) = rows_to_aligned_record_batch(&rows, &target)
+            .unwrap()
+            .into_parts();
+        let ts = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(ts.value(0), 123_000);
+    }
 
     #[test]
     fn test_rows_to_aligned_record_batch_renames_and_reorders() {
