@@ -2453,17 +2453,21 @@ impl PromPlanner {
     ///
     /// Only the functions that report the samples they read keep the metric name (see
     /// [`PromPlanner::call_keeps_metric_name`]); every other function computes the result it
-    /// returns, so it does not ask its arguments for a `__name__` column. An argument that
-    /// observes the name itself — the operands of a set operator, a modifier that names
-    /// `on(__name__)` — still materializes it: this boundary only stops an observation of the
-    /// call's result from reaching the call's input.
+    /// returns, so it does not ask its arguments for a `__name__` column. A call that names
+    /// `__name__` among its own label arguments reads the name itself (see
+    /// [`PromPlanner::call_reads_metric_name`]) and materializes it for that read whatever the
+    /// expression above does with the result. An argument that observes the name itself — the
+    /// operands of a set operator, a modifier that names `on(__name__)` — still materializes it:
+    /// this boundary only stops an observation of the call's result from reaching the call's
+    /// input.
     async fn prom_call_expr_to_plan(
         &mut self,
         query_engine_state: &QueryEngineState,
         call_expr: &Call,
     ) -> Result<LogicalPlan> {
-        let materialize =
-            self.ctx.materialize_metric_name && Self::call_keeps_metric_name(call_expr.func.name);
+        let materialize = (self.ctx.materialize_metric_name
+            && Self::call_keeps_metric_name(call_expr.func.name))
+            || Self::call_reads_metric_name(call_expr);
         let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
         let plan = self
             .prom_call_expr_to_plan_inner(query_engine_state, call_expr)
@@ -5314,6 +5318,35 @@ impl PromPlanner {
                 Some(LabelModifier::Include(labels))
                     if labels.labels.iter().any(|label| label == METRIC_NAME)
             )
+    }
+
+    /// Whether a function call reads the metric name of its input series itself.
+    ///
+    /// `label_replace` and `label_join` copy a source label into a new one, and `sort_by_label`
+    /// sorts series by a label. A call that names `__name__` among those labels reads the metric
+    /// name whether or not anything above the call observes it, so its input has to carry a
+    /// `__name__` column for the read to see the name instead of an absent label — which promises
+    /// nothing to the caller: a function that reports the name reports it as it does for a name a
+    /// metric name union materialized, and one that computes new samples still drops it.
+    fn call_reads_metric_name(call: &Call) -> bool {
+        let names_metric_name = |arg: &PromExpr| {
+            matches!(
+                arg,
+                PromExpr::StringLiteral(StringLiteral { val }) if val == METRIC_NAME
+            )
+        };
+        let args = &call.args.args;
+        match call.func.name {
+            // label_replace(vector, dst_label, replacement, src_label, regex)
+            "label_replace" => args.get(3).is_some_and(|arg| names_metric_name(arg)),
+            // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
+            "label_join" => args.iter().skip(3).any(|arg| names_metric_name(arg)),
+            // sort_by_label(vector, label_1, ...): the labels are the sort keys.
+            "sort_by_label" | "sort_by_label_desc" => {
+                args.iter().skip(1).any(|arg| names_metric_name(arg))
+            }
+            _ => false,
+        }
     }
 
     /// Whether a function call keeps the metric name of its input series.
@@ -18028,19 +18061,120 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
     }
 
     #[tokio::test]
+    async fn review_repro_name_reading_calls_materialize_their_input() {
+        // `label_replace` with `__name__` as its source label reads the metric name itself: the
+        // name has to reach the call whether or not an expression above it observes the name of
+        // its result. Reading an absent label instead would silently report the replacement text
+        // (`$1`) as the new label's value.
+        for (query, expected) in [
+            // The aggregation reports its own group keys, so nothing above the call observes the
+            // name; the call still reads it for the label it computes.
+            (
+                r#"sum by(dst) (label_replace(foo, "dst", "$1", "__name__", "(.*)")) or missing_metric"#,
+                vec![(1.0, vec![("dst".to_string(), "foo".to_string())])],
+            ),
+            // A function that computes new samples drops the name from its result; the read below
+            // still sees it.
+            (
+                r#"abs(label_replace(foo, "dst", "$1", "__name__", "(.*)")) or missing_metric"#,
+                vec![(
+                    1.0,
+                    vec![
+                        ("dst".to_string(), "foo".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ],
+                )],
+            ),
+            // The computed label is a matching label of an arithmetic join, so a name that never
+            // reached the call would leave the label absent and drop the pair.
+            (
+                r#"(label_replace(foo, "copy", "$1", "__name__", "(.*)") + on(copy) label_replace(foo, "copy", "foo", "host", ".*")) or missing_metric"#,
+                vec![(
+                    2.0,
+                    vec![
+                        ("copy".to_string(), "foo".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ],
+                )],
+            ),
+            // Same read through `label_join`.
+            (
+                r#"label_join(foo, "dst", "-", "__name__", "host") or missing_metric"#,
+                vec![(
+                    1.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "foo".to_string()),
+                        ("dst".to_string(), "foo-a".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ],
+                )],
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_exact_foo_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+
+        // `sort_by_label` sorts by the label it is given: naming `__name__` reads the name, and
+        // without a name column the sort has nothing to order by.
+        for (query, expected) in [
+            (
+                r#"sort_by_label(foo, "__name__") or missing_metric"#,
+                named_foo_row(),
+            ),
+            (
+                r#"abs(sort_by_label(foo, "__name__")) or missing_metric"#,
+                vec![(1.0, vec![("host".to_string(), "a".to_string())])],
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_exact_foo_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+        }
+
+        // The read is local to the call: a call that names a label the table stores does not ask
+        // for a name column, so a name-dropping expression above it still reports the columns it
+        // always did.
+        for (query, expected) in [
+            (
+                r#"abs(label_replace(foo, "dst", "v", "host", "a")) or missing_metric"#,
+                vec![(
+                    1.0,
+                    vec![
+                        ("dst".to_string(), "v".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ],
+                )],
+            ),
+            (
+                r#"sum by(dst) (label_replace(foo, "dst", "v", "host", "a")) or missing_metric"#,
+                vec![(1.0, vec![("dst".to_string(), "v".to_string())])],
+            ),
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_exact_foo_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), expected, "{query}");
+            assert!(
+                batches
+                    .iter()
+                    .all(|batch| batch.schema().index_of(METRIC_NAME).is_err()),
+                "{query}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn review_repro_heterogeneous_or_under_arithmetic_is_unchanged() {
-        // A set operator hands down one operand whose rows come from operands that do not identify
-        // their series the same way: the `missing_metric` branch is empty and the `tagless` branch
-        // has no labels of its own, so the `or` result is tagless and would broadcast by timestamp.
-        // The `or` still reports each operand's own name, so the arithmetic above reads a `__name__`
-        // column on its left-hand operand and matches label by label: the row is dropped.
+        // A set operator whose left operand is a `missing_metric or tagless` union hands the
+        // arithmetic above it one operand carrying a `__name__` column but no label of the
+        // `tagless` table's own, and the arithmetic above matches label by label: the row is
+        // dropped.
         //
-        // This is the shape `materialize_metric_name` cannot tell apart from a labelled operand —
-        // the name a set operator materializes is a label like any other, and which operand a row
-        // came from is not recoverable from the labels. The rows below are unchanged from the base
-        // this planning came from (a107c521: `[]` for both orders) and from the planning before it
-        // (749ddb9: `[]` for both orders as well), so this change neither repairs nor regresses
-        // them; repairing them needs per-row information about which operand a row was read from.
+        // This row set is unchanged by this change: the base this planning came from (a107c521)
+        // and the planning before it (749ddb9) both report `[]` for the two orders below, measured
+        // by execution. Why they are empty is a separate, pre-existing question — the synthesized
+        // name is what the arithmetic reads as a label — and it is not part of this change. It is
+        // asserted here as the current behavior, not as the intended one.
         for query in [
             r#"(missing_metric or tagless) + labelled"#,
             r#"labelled + (missing_metric or tagless)"#,
