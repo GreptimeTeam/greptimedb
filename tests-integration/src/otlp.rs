@@ -509,6 +509,122 @@ WITH(
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_logical_batcher_microsecond_physical_table() {
+        use std::time::Duration;
+
+        use common_base::Plugins;
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::TimestampMicrosecondType;
+        use frontend::server::Services;
+        use frontend::service_config::pending_rows_batcher::BatcherOptions;
+        use prost::Message;
+        use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
+        use servers::http::test_helpers::TestClient;
+        use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+        // A non-millisecond physical metric table must be able to use the
+        // logical batcher: requests are converted to the physical table's
+        // unit during batch alignment (<https://github.com/GreptimeTeam/greptimedb/issues/9342>).
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_logical_us_physical")
+            .with_logical_batcher(BatcherOptions {
+                protocols: vec![BatchingProtocol::Otlp],
+                pending_rows_flush_interval: Duration::from_millis(5),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let options = standalone.opts.clone();
+        let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+        let server = services
+            .http_server_builder(
+                &options.frontend_options(),
+                services.server_memory_limiter.clone(),
+            )
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_logical_batching_enabled(true);
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+
+        // Pre-create the physical metric table with a microsecond time index
+        // BEFORE any ingestion, so the batcher's bulk path must handle it.
+        let mut output = instance
+            .do_query(
+                "CREATE TABLE greptime_physical_table (\
+                 greptime_timestamp TIMESTAMP(6) NOT NULL, \
+                 greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')",
+                ctx.clone(),
+            )
+            .await;
+        assert!(output.remove(0).is_ok());
+
+        let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            .with_label_values(&["submit_wait_flush_result"]);
+        let before = submissions.get_sample_count();
+        for (ts, value) in [(60, 10), (120, 20)] {
+            let request = build_sum_request(
+                "us.alignment",
+                AggregationTemporality::Cumulative,
+                &[(ts, value)],
+            );
+            let response = client
+                .post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(request.encode_to_vec())
+                .send()
+                .await;
+            assert_eq!(response.status().as_u16(), 200);
+        }
+        assert_eq!(
+            submissions.get_sample_count() - before,
+            if pending_rows_batch_sync_enabled() {
+                2
+            } else {
+                0
+            },
+            "non-millisecond physical tables must use the logical batcher"
+        );
+
+        // The rows land on the microsecond physical table, converted from the
+        // nanosecond encoding: 60s -> 60_000_000us, 120s -> 120_000_000us.
+        let sql = "SELECT greptime_timestamp, greptime_value FROM us_alignment_total ORDER BY greptime_timestamp";
+        let batches = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                if batches.iter().map(|batch| batch.num_rows()).sum::<usize>() == 2 {
+                    break batches;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let batch = &batches.take()[0];
+        let timestamps = batch.column(0).as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(timestamps.value(0), 60_000_000);
+        assert_eq!(timestamps.value(1), 120_000_000);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::Float64Array>()
+            .unwrap_or_else(|| panic!("expected f64 values"));
+        assert_eq!(values.value(0), 10.0);
+        assert_eq!(values.value(1), 20.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_otlp_logical_batcher_alignment() {
         use std::time::Duration;
 

@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arrow::compute::concat_batches;
-use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema, TimeUnit};
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use metric_engine::batch_modifier::{TagColumnInfo, modify_batch_sparse};
@@ -130,7 +130,7 @@ pub(in crate::batcher::logical_table) fn columns_taxonomy(
                     essential_column_indices.push(index);
                 }
             }
-            ArrowDataType::Timestamp(TimeUnit::Millisecond, _) => {
+            ArrowDataType::Timestamp(_, _) => {
                 ensure!(
                     timestamp_index.replace(index).is_none(),
                     error::InvalidPromRemoteRequestSnafu {

@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
@@ -41,7 +40,7 @@ use table::requests::{
     SOURCE_PROMETHEUS,
 };
 
-use crate::batcher::logical_table::{LogicalTablePendingRowsBatcher, batch_key_from_ctx};
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
@@ -391,47 +390,13 @@ async fn preflight_prometheus_rows(
 ///
 /// The v2 handler uses that partial progress to return Prometheus' written
 /// sample/histogram headers even when a later table write fails.
-/// Returns whether the batcher's bulk path accepts the physical metric table
-/// resolved from every batch's context. See
-/// [`LogicalTablePendingRowsBatcher::accepts_physical_table_time_index`].
-async fn batcher_accepts_all_time_indexes(
-    batcher: &LogicalTablePendingRowsBatcher,
-    batches: impl Iterator<Item = &PromWriteBatch>,
-) -> bool {
-    // All batches of one remote write request share the write target
-    // (catalog, schema, physical table); resolve each distinct target only
-    // once instead of once per batch.
-    let mut checked = HashSet::new();
-    for (ctx, _) in batches {
-        let key = batch_key_from_ctx(ctx);
-        if !checked.insert((key.catalog, key.schema, key.physical_table)) {
-            continue;
-        }
-        if !batcher.accepts_physical_table_time_index(ctx).await {
-            return false;
-        }
-    }
-    true
-}
-
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
-    // The bulk encode produces millisecond batches only; a physical table
-    // with another time index unit must stay on the ordinary insert path,
-    // which converts the requests to the physical table's unit.
-    let batcher = match (prom_store_with_metric_engine, pending_rows_batcher) {
-        (true, Some(batcher))
-            if batcher_accepts_all_time_indexes(batcher.as_ref(), batches.iter()).await =>
-        {
-            Some(batcher)
-        }
-        _ => None,
-    };
-    if let Some(batcher) = batcher {
+    if let Some(batcher) = pending_rows_batcher.filter(|_| prom_store_with_metric_engine) {
         preflight_prometheus_rows(&prom_store_handler, &mut batches)
             .await
             .map_err(|error| PromWriteError {
@@ -518,23 +483,10 @@ async fn write_prometheus_v2_rows_with_progress(
         });
     }
 
-    let batcher_eligible = match (&pending_rows_batcher, prom_store_with_metric_engine) {
-        (Some(batcher), true) => {
-            batcher_accepts_all_time_indexes(
-                batcher,
-                sample_batches.iter().chain(&histogram_batches),
-            )
-            .await
-        }
-        _ => false,
-    };
-    if batcher_eligible {
-        // Safety: `batcher_eligible` is only true when `pending_rows_batcher`
-        // is `Some`.
-        let batcher = pending_rows_batcher.as_deref().unwrap();
+    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
         return write_batched_prometheus_v2_rows_with_progress(
             prom_store_handler,
-            batcher,
+            batcher.as_ref(),
             prom_store_with_metric_engine,
             sample_batches,
             histogram_batches,

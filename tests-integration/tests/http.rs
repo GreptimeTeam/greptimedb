@@ -168,6 +168,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
+                test_prometheus_remote_write_batched_microsecond_physical_table,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -3803,6 +3804,62 @@ async fn write_prometheus_skip_wal_sample(
 /// bypasses `PromStoreProtocolHandler::write`. Verifies the metric table is created
 /// asynchronously and still carries the Prometheus semantic identity stamped on the
 /// shared request context.
+/// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9342>:
+/// prometheus remote write uses the logical batcher against a physical
+/// metric table pre-created with a microsecond time index; the millisecond
+/// samples are widened to the physical table's unit during batch alignment.
+pub async fn test_prometheus_remote_write_batched_microsecond_physical_table(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend_batched(
+        store_type,
+        "prometheus_remote_write_batched_us_physical",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // Pre-create the default physical metric table with a microsecond time
+    // index before any remote write, so the batched bulk path must handle it.
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE greptime_physical_table \
+             (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+             TIME INDEX (greptime_timestamp)) \
+             ENGINE = metric WITH ('physical_metric_table' = 'true')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write_request = WriteRequest {
+        timeseries: vec![prom_store::mock_timeseries()[0].clone()],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // metric1 samples are 1.0@1000ms and 2.0@2000ms; on the microsecond
+    // physical table they must be stored as 1_000_000us and 2_000_000us.
+    wait_for_data(
+        &client,
+        "select greptime_timestamp, greptime_value from metric1 order by greptime_timestamp",
+        "[[1000000,1.0],[2000000,2.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
 pub async fn test_prometheus_remote_write_batched(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
