@@ -29,6 +29,7 @@ use crate::multi_dim::MultiDimPartitionRule;
 pub struct PartitionChecker<'a> {
     rule: &'a MultiDimPartitionRule,
     collider: Collider<'a>,
+    /// Sorted for binary search; indices identify matrix fields.
     dimensions: Vec<Operand>,
 }
 
@@ -180,13 +181,10 @@ impl<'a> PartitionChecker<'a> {
         let schema = batch.schema();
         for (col_index, normalized_value) in normalized_row.iter().enumerate() {
             let field_name = schema.field(col_index).name();
-            let dimension = self
-                .dimensions
-                .iter()
-                .enumerate()
-                .find_map(|(index, dimension)| {
-                    (index.to_string() == *field_name).then_some(dimension)
-                })
+            let dimension = field_name
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| self.dimensions.get(index))
                 .ok_or_else(|| {
                     crate::error::UnexpectedSnafu {
                         err_msg: format!("Unknown partition dimension: {field_name}"),

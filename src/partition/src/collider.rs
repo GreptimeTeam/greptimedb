@@ -102,8 +102,8 @@ impl NucleonExpr {
         dimensions: &[Operand],
     ) -> Result<Arc<dyn PhysicalExpr>> {
         let index = dimensions
-            .iter()
-            .position(|operand| operand == &self.column)
+            .binary_search(&self.column)
+            .ok()
             .with_context(|| error::UnexpectedSnafu {
                 err_msg: format!("Missing partition dimension: {}", self.column),
             })?;
