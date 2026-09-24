@@ -141,8 +141,9 @@ fn relation_desc_from_output(
     columns: &[ColumnSchema],
     lineage: &[Option<usize>],
     source_primary_key_indices: &[usize],
+    plan: &LogicalPlan,
 ) -> RelationDesc {
-    let keys = source_primary_key_indices
+    let mut keys = source_primary_key_indices
         .iter()
         .filter_map(|source_index| {
             lineage
@@ -150,6 +151,15 @@ fn relation_desc_from_output(
                 .position(|index| index == &Some(*source_index))
         })
         .collect_vec();
+    // A `DISTINCT` establishes the output key by itself: every non-time-index output
+    // column is part of the distinct key. When no source primary key is inherited,
+    // fall back to the DISTINCT output key so the sink relation keeps row identity.
+    if keys.is_empty() && matches!(plan, LogicalPlan::Distinct(Distinct::All(_))) {
+        keys = columns
+            .iter()
+            .positions(|column| !column.is_time_index())
+            .collect();
+    }
     let time_index = columns.iter().position(ColumnSchema::is_time_index);
     RelationDesc {
         typ: crate::repr::RelationType {
@@ -849,8 +859,12 @@ impl StreamingEngine {
         let source_primary_key_indices = source_meta.primary_key_indices;
         stateless::validate_source_scan(&flow_plan, source_table_id, &source_schema)?;
         let (inferred_schema, lineage) = output_column_schemas(&flow_plan, &source_schema)?;
-        let inferred_relation =
-            relation_desc_from_output(&inferred_schema, &lineage, &source_primary_key_indices);
+        let inferred_relation = relation_desc_from_output(
+            &inferred_schema,
+            &lineage,
+            &source_primary_key_indices,
+            &flow_plan,
+        );
         let sink_exists = self.fetch_table_pk_schema(sink_table_name).await?.is_some();
         if !sink_exists {
             validate_auto_column_names(&inferred_schema)?;
