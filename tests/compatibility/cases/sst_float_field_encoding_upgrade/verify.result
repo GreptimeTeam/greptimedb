@@ -9,3 +9,123 @@ ORDER BY ts, host;
 | 2024-02-10T00:01:00 | host_b | -2.5 | 20.25 |
 | 2024-02-10T00:02:00 | host_c |      |       |
 +---------------------+--------+------+-------+
+
+ALTER TABLE t_sst_float_field_encoding_upgrade SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Affected Rows: 0
+
+INSERT INTO t_sst_float_field_encoding_upgrade VALUES
+('2024-02-10 00:03:00+0000', 'host_d', 3.75, 30.5);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('t_sst_float_field_encoding_upgrade');
+
++---------------------------------------------------------+
+| ADMIN FLUSH_TABLE('t_sst_float_field_encoding_upgrade') |
++---------------------------------------------------------+
+| 0                                                       |
++---------------------------------------------------------+
+
+SELECT ts, host, f, d
+FROM t_sst_float_field_encoding_upgrade
+ORDER BY ts, host;
+
++---------------------+--------+------+-------+
+| ts                  | host   | f    | d     |
++---------------------+--------+------+-------+
+| 2024-02-10T00:00:00 | host_a | 1.25 | 10.5  |
+| 2024-02-10T00:01:00 | host_b | -2.5 | 20.25 |
+| 2024-02-10T00:02:00 | host_c |      |       |
+| 2024-02-10T00:03:00 | host_d | 3.75 | 30.5  |
++---------------------+--------+------+-------+
+
+SHOW CREATE TABLE t_sst_float_field_encoding_upgrade;
+
++------------------------------------+-------------------------------------------------------------------+
+| Table                              | Create Table                                                      |
++------------------------------------+-------------------------------------------------------------------+
+| t_sst_float_field_encoding_upgrade | CREATE TABLE IF NOT EXISTS "t_sst_float_field_encoding_upgrade" ( |
+|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   "host" STRING NULL,                                             |
+|                                    |   "f" FLOAT NULL,                                                 |
+|                                    |   "d" DOUBLE NULL,                                                |
+|                                    |   TIME INDEX ("ts"),                                              |
+|                                    |   PRIMARY KEY ("host")                                            |
+|                                    | )                                                                 |
+|                                    |                                                                   |
+|                                    | ENGINE=mito                                                       |
+|                                    | WITH(                                                             |
+|                                    |   experimental_sst_float_field_encoding = 'byte_stream_split'     |
+|                                    | )                                                                 |
++------------------------------------+-------------------------------------------------------------------+
+
+-- SQLNESS ARG restart=true
+SHOW CREATE TABLE t_sst_float_field_encoding_upgrade;
+
++------------------------------------+-------------------------------------------------------------------+
+| Table                              | Create Table                                                      |
++------------------------------------+-------------------------------------------------------------------+
+| t_sst_float_field_encoding_upgrade | CREATE TABLE IF NOT EXISTS "t_sst_float_field_encoding_upgrade" ( |
+|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   "host" STRING NULL,                                             |
+|                                    |   "f" FLOAT NULL,                                                 |
+|                                    |   "d" DOUBLE NULL,                                                |
+|                                    |   TIME INDEX ("ts"),                                              |
+|                                    |   PRIMARY KEY ("host")                                            |
+|                                    | )                                                                 |
+|                                    |                                                                   |
+|                                    | ENGINE=mito                                                       |
+|                                    | WITH(                                                             |
+|                                    |   experimental_sst_float_field_encoding = 'byte_stream_split'     |
+|                                    | )                                                                 |
++------------------------------------+-------------------------------------------------------------------+
+
+INSERT INTO t_sst_float_field_encoding_upgrade VALUES
+('2024-02-10 00:04:00+0000', 'host_e', 4.5, 40.25);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('t_sst_float_field_encoding_upgrade');
+
++---------------------------------------------------------+
+| ADMIN FLUSH_TABLE('t_sst_float_field_encoding_upgrade') |
++---------------------------------------------------------+
+| 0                                                       |
++---------------------------------------------------------+
+
+SELECT ts, host, f, d
+FROM t_sst_float_field_encoding_upgrade
+ORDER BY ts, host;
+
++---------------------+--------+------+-------+
+| ts                  | host   | f    | d     |
++---------------------+--------+------+-------+
+| 2024-02-10T00:00:00 | host_a | 1.25 | 10.5  |
+| 2024-02-10T00:01:00 | host_b | -2.5 | 20.25 |
+| 2024-02-10T00:02:00 | host_c |      |       |
+| 2024-02-10T00:03:00 | host_d | 3.75 | 30.5  |
+| 2024-02-10T00:04:00 | host_e | 4.5  | 40.25 |
++---------------------+--------+------+-------+
+
+ALTER TABLE t_sst_float_field_encoding_upgrade UNSET 'experimental_sst_float_field_encoding';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE t_sst_float_field_encoding_upgrade;
+
++------------------------------------+-------------------------------------------------------------------+
+| Table                              | Create Table                                                      |
++------------------------------------+-------------------------------------------------------------------+
+| t_sst_float_field_encoding_upgrade | CREATE TABLE IF NOT EXISTS "t_sst_float_field_encoding_upgrade" ( |
+|                                    |   "ts" TIMESTAMP(3) NOT NULL,                                     |
+|                                    |   "host" STRING NULL,                                             |
+|                                    |   "f" FLOAT NULL,                                                 |
+|                                    |   "d" DOUBLE NULL,                                                |
+|                                    |   TIME INDEX ("ts"),                                              |
+|                                    |   PRIMARY KEY ("host")                                            |
+|                                    | )                                                                 |
+|                                    |                                                                   |
+|                                    | ENGINE=mito                                                       |
+|                                    |                                                                   |
++------------------------------------+-------------------------------------------------------------------+

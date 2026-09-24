@@ -1,0 +1,208 @@
+CREATE TABLE mito_float_field_encoding (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE)
+ENGINE=mito WITH ('experimental_sst_float_field_encoding' = 'default');
+
+Affected Rows: 0
+
+INSERT INTO mito_float_field_encoding VALUES ('2024-01-01 00:00:00', 'host_a', 1.25);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('mito_float_field_encoding');
+
++------------------------------------------------+
+| ADMIN FLUSH_TABLE('mito_float_field_encoding') |
++------------------------------------------------+
+| 0                                              |
++------------------------------------------------+
+
+ALTER TABLE mito_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Affected Rows: 0
+
+INSERT INTO mito_float_field_encoding VALUES ('2024-01-01 00:01:00', 'host_b', 2.5);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('mito_float_field_encoding');
+
++------------------------------------------------+
+| ADMIN FLUSH_TABLE('mito_float_field_encoding') |
++------------------------------------------------+
+| 0                                              |
++------------------------------------------------+
+
+SELECT sum(val) FROM mito_float_field_encoding;
+
++------------------------------------+
+| sum(mito_float_field_encoding.val) |
++------------------------------------+
+| 3.75                               |
++------------------------------------+
+
+SELECT ts, host, val FROM mito_float_field_encoding ORDER BY ts;
+
++---------------------+--------+------+
+| ts                  | host   | val  |
++---------------------+--------+------+
+| 2024-01-01T00:00:00 | host_a | 1.25 |
+| 2024-01-01T00:01:00 | host_b | 2.5  |
++---------------------+--------+------+
+
+SHOW CREATE TABLE mito_float_field_encoding;
+
++---------------------------+---------------------------------------------------------------+
+| Table                     | Create Table                                                  |
++---------------------------+---------------------------------------------------------------+
+| mito_float_field_encoding | CREATE TABLE IF NOT EXISTS "mito_float_field_encoding" (      |
+|                           |   "ts" TIMESTAMP(3) NOT NULL,                                 |
+|                           |   "host" STRING NULL,                                         |
+|                           |   "val" DOUBLE NULL,                                          |
+|                           |   TIME INDEX ("ts"),                                          |
+|                           |   PRIMARY KEY ("host")                                        |
+|                           | )                                                             |
+|                           |                                                               |
+|                           | ENGINE=mito                                                   |
+|                           | WITH(                                                         |
+|                           |   experimental_sst_float_field_encoding = 'byte_stream_split' |
+|                           | )                                                             |
++---------------------------+---------------------------------------------------------------+
+
+ALTER TABLE mito_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'invalid';
+
+Error: 1004(InvalidArguments), Invalid set table option request: Invalid set region option request, key: experimental_sst_float_field_encoding, value: invalid
+
+ALTER TABLE mito_float_field_encoding UNSET 'experimental_sst_float_field_encoding';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE mito_float_field_encoding;
+
++---------------------------+----------------------------------------------------------+
+| Table                     | Create Table                                             |
++---------------------------+----------------------------------------------------------+
+| mito_float_field_encoding | CREATE TABLE IF NOT EXISTS "mito_float_field_encoding" ( |
+|                           |   "ts" TIMESTAMP(3) NOT NULL,                            |
+|                           |   "host" STRING NULL,                                    |
+|                           |   "val" DOUBLE NULL,                                     |
+|                           |   TIME INDEX ("ts"),                                     |
+|                           |   PRIMARY KEY ("host")                                   |
+|                           | )                                                        |
+|                           |                                                          |
+|                           | ENGINE=mito                                              |
+|                           |                                                          |
++---------------------------+----------------------------------------------------------+
+
+CREATE TABLE metric_float_field_encoding_physical (ts TIMESTAMP TIME INDEX, val DOUBLE)
+ENGINE=metric WITH ('physical_metric_table' = '', 'experimental_sst_float_field_encoding' = 'default');
+
+Affected Rows: 0
+
+CREATE TABLE metric_float_field_encoding (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val DOUBLE)
+ENGINE=metric WITH ('on_physical_table' = 'metric_float_field_encoding_physical');
+
+Affected Rows: 0
+
+INSERT INTO metric_float_field_encoding (ts, host, val) VALUES ('2024-01-01 00:00:00', 'host_a', 1.25);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('metric_float_field_encoding_physical');
+
++-----------------------------------------------------------+
+| ADMIN FLUSH_TABLE('metric_float_field_encoding_physical') |
++-----------------------------------------------------------+
+| 0                                                         |
++-----------------------------------------------------------+
+
+ALTER TABLE metric_float_field_encoding_physical SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Affected Rows: 0
+
+INSERT INTO metric_float_field_encoding (ts, host, val) VALUES ('2024-01-01 00:01:00', 'host_b', 2.5);
+
+Affected Rows: 1
+
+ADMIN FLUSH_TABLE('metric_float_field_encoding_physical');
+
++-----------------------------------------------------------+
+| ADMIN FLUSH_TABLE('metric_float_field_encoding_physical') |
++-----------------------------------------------------------+
+| 0                                                         |
++-----------------------------------------------------------+
+
+SELECT sum(val) FROM metric_float_field_encoding;
+
++--------------------------------------+
+| sum(metric_float_field_encoding.val) |
++--------------------------------------+
+| 3.75                                 |
++--------------------------------------+
+
+SELECT ts, host, val FROM metric_float_field_encoding ORDER BY ts;
+
++---------------------+--------+------+
+| ts                  | host   | val  |
++---------------------+--------+------+
+| 2024-01-01T00:00:00 | host_a | 1.25 |
+| 2024-01-01T00:01:00 | host_b | 2.5  |
++---------------------+--------+------+
+
+SHOW CREATE TABLE metric_float_field_encoding_physical;
+
++--------------------------------------+---------------------------------------------------------------------+
+| Table                                | Create Table                                                        |
++--------------------------------------+---------------------------------------------------------------------+
+| metric_float_field_encoding_physical | CREATE TABLE IF NOT EXISTS "metric_float_field_encoding_physical" ( |
+|                                      |   "ts" TIMESTAMP(3) NOT NULL,                                       |
+|                                      |   "val" DOUBLE NULL,                                                |
+|                                      |   "host" STRING NULL,                                               |
+|                                      |   TIME INDEX ("ts"),                                                |
+|                                      |   PRIMARY KEY ("host")                                              |
+|                                      | )                                                                   |
+|                                      |                                                                     |
+|                                      | ENGINE=metric                                                       |
+|                                      | WITH(                                                               |
+|                                      |   experimental_sst_float_field_encoding = 'byte_stream_split',      |
+|                                      |   physical_metric_table = ''                                        |
+|                                      | )                                                                   |
++--------------------------------------+---------------------------------------------------------------------+
+
+ALTER TABLE metric_float_field_encoding SET 'experimental_sst_float_field_encoding' = 'byte_stream_split';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+ALTER TABLE metric_float_field_encoding_physical UNSET 'experimental_sst_float_field_encoding';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE metric_float_field_encoding_physical;
+
++--------------------------------------+---------------------------------------------------------------------+
+| Table                                | Create Table                                                        |
++--------------------------------------+---------------------------------------------------------------------+
+| metric_float_field_encoding_physical | CREATE TABLE IF NOT EXISTS "metric_float_field_encoding_physical" ( |
+|                                      |   "ts" TIMESTAMP(3) NOT NULL,                                       |
+|                                      |   "val" DOUBLE NULL,                                                |
+|                                      |   "host" STRING NULL,                                               |
+|                                      |   TIME INDEX ("ts"),                                                |
+|                                      |   PRIMARY KEY ("host")                                              |
+|                                      | )                                                                   |
+|                                      |                                                                     |
+|                                      | ENGINE=metric                                                       |
+|                                      | WITH(                                                               |
+|                                      |   physical_metric_table = ''                                        |
+|                                      | )                                                                   |
++--------------------------------------+---------------------------------------------------------------------+
+
+DROP TABLE metric_float_field_encoding;
+
+Affected Rows: 0
+
+DROP TABLE metric_float_field_encoding_physical;
+
+Affected Rows: 0
+
+DROP TABLE mito_float_field_encoding;
+
+Affected Rows: 0
+

@@ -593,7 +593,7 @@ async fn test_reconcile_publishes_after_region_version_changes() {
                     // Replace the version while reconciliation is writing its captured snapshot.
                     target_region
                         .version_control
-                        .alter_options(target_region.version().options.clone());
+                        .alter_options(target_region.version().options.clone(), None);
                 }
                 inner
             }))
@@ -831,7 +831,7 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
     let (engine, region) = prepare_region(&mut env).await;
     let mut options = region.version().options.clone();
     options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(100)));
-    region.version_control.alter_options(options);
+    region.version_control.alter_options(options, None);
     let store = ObjectStore::new(Memory::default()).unwrap();
     let (purger, receiver) = series_index_channel(store.clone());
     let state = Arc::new(super::task::SeriesIndexTaskState::new());
