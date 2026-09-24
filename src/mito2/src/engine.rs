@@ -102,7 +102,7 @@ use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_stat::get_total_memory_bytes;
 use common_telemetry::{debug, info, tracing, warn};
 use common_wal::options::WalOptions;
-use datafusion::execution::memory_pool::{GreedyMemoryPool, MemoryPool, UnboundedMemoryPool};
+use datafusion::execution::memory_pool::{MemoryPool, UnboundedMemoryPool};
 use futures::future::{join_all, try_join_all};
 use futures::stream::{self, Stream, StreamExt};
 use object_store::manager::ObjectStoreManagerRef;
@@ -132,7 +132,7 @@ use tokio::sync::{Semaphore, oneshot};
 
 use crate::access_layer::RegionFilePathFactory;
 use crate::cache::{CacheManagerRef, CacheStrategy};
-use crate::config::MitoConfig;
+use crate::config::{MitoConfig, ScanMemoryMode};
 use crate::engine::puffin_index::{IndexEntryContext, collect_index_entries_from_puffin};
 use crate::error::{
     IncrementalQueryStaleSnafu, InvalidRequestSnafu, JoinSnafu, MitoManifestInfoSnafu, RecvSnafu,
@@ -238,9 +238,9 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(self.log_store));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .with_shared_pool()
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
@@ -251,6 +251,7 @@ impl<'a, S: LogStore> MitoEngineBuilder<'a, S> {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
                 })
                 .build();
+        let scan_memory_pool = scan_memory_pool(&scan_memory_tracker, config.scan_memory_mode)?;
 
         let inner = EngineInner {
             workers,
@@ -1160,6 +1161,7 @@ impl EngineInner {
         .with_query_stat_counters(region.region_stats.query_stat_counters())
         .with_max_concurrent_scan_files(self.config.max_concurrent_scan_files)
         .with_scan_memory_pool(self.scan_memory_pool.clone())
+        .with_scan_memory_tracker(self.scan_memory_tracker.clone())
         .with_experimental_series_scan_v2(self.config.experimental_series_scan_v2)
         .with_ignore_inverted_index(self.config.inverted_index.apply_on_query.disabled())
         .with_ignore_fulltext_index(self.config.fulltext_index.apply_on_query.disabled())
@@ -1451,7 +1453,8 @@ impl RegionEngine for MitoEngine {
     }
 
     fn query_memory_tracker(&self) -> Option<QueryMemoryTracker> {
-        Some(self.inner.scan_memory_tracker.clone())
+        (self.inner.config.scan_memory_mode == ScanMemoryMode::Extended)
+            .then(|| self.inner.scan_memory_tracker.clone())
     }
 
     async fn get_committed_sequence(
@@ -1616,9 +1619,9 @@ impl MitoEngine {
         let wal_raw_entry_reader = Arc::new(LogStoreRawEntryReader::new(log_store.clone()));
         let total_memory = get_total_memory_bytes().max(0) as u64;
         let scan_memory_limit = config.scan_memory_limit.resolve(total_memory) as usize;
-        let scan_memory_pool = new_scan_memory_pool(scan_memory_limit);
         let scan_memory_tracker =
             QueryMemoryTracker::builder(scan_memory_limit, config.scan_memory_on_exhausted)
+                .with_shared_pool()
                 .on_update(|usage| {
                     SCAN_MEMORY_USAGE_BYTES.set(usage as i64);
                 })
@@ -1629,6 +1632,7 @@ impl MitoEngine {
                     SCAN_REQUESTS_REJECTED_TOTAL.inc();
                 })
                 .build();
+        let scan_memory_pool = scan_memory_pool(&scan_memory_tracker, config.scan_memory_mode)?;
         Ok(MitoEngine {
             inner: Arc::new(EngineInner {
                 workers: WorkerGroup::start_for_test(
@@ -1661,11 +1665,18 @@ impl MitoEngine {
     }
 }
 
-fn new_scan_memory_pool(scan_memory_limit: usize) -> Arc<dyn MemoryPool> {
-    if scan_memory_limit == 0 {
-        Arc::new(UnboundedMemoryPool::default())
+fn scan_memory_pool(
+    tracker: &QueryMemoryTracker,
+    mode: ScanMemoryMode,
+) -> Result<Arc<dyn MemoryPool>> {
+    if mode == ScanMemoryMode::Extended {
+        tracker
+            .memory_pool()
+            .context(crate::error::UnexpectedSnafu {
+                reason: "Scan memory tracker must use the shared-pool backend",
+            })
     } else {
-        Arc::new(GreedyMemoryPool::new(scan_memory_limit))
+        Ok(Arc::new(UnboundedMemoryPool::default()))
     }
 }
 
@@ -1763,7 +1774,11 @@ mod tests {
 
     #[test]
     fn test_scan_memory_pool_is_shared_across_consumers() {
-        let pool = new_scan_memory_pool(100);
+        let tracker =
+            QueryMemoryTracker::builder(100, common_memory_manager::OnExhaustedPolicy::Fail)
+                .with_shared_pool()
+                .build();
+        let pool = scan_memory_pool(&tracker, ScanMemoryMode::Extended).unwrap();
         let cloned_pool = pool.clone();
         let first = MemoryConsumer::new("first-scan").register(&pool);
         let second = MemoryConsumer::new("second-scan").register(&cloned_pool);

@@ -17,6 +17,7 @@
 use std::ops::Range;
 
 use bytes::{Bytes, BytesMut};
+use common_recordbatch::QueryMemoryTracker;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use futures::stream::BoxStream;
@@ -25,7 +26,7 @@ use parquet::DecodeResult;
 use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
 use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageRangePart};
@@ -53,6 +54,8 @@ pub struct SstParquetRangeFetcher {
     row_group_idx: usize,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
+    /// Shared quota for decoding this fetcher's row group.
+    memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl SstParquetRangeFetcher {
@@ -72,7 +75,14 @@ impl SstParquetRangeFetcher {
             cache_strategy,
             row_group_idx,
             fetch_metrics,
+            memory_tracker: None,
         }
+    }
+
+    /// Sets the shared quota for this decoder's projected row group.
+    pub(crate) fn with_memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
+        self.memory_tracker = tracker;
+        self
     }
 
     /// Fetches byte ranges from page cache, write cache, or object store.
@@ -321,6 +331,24 @@ pub fn build_sst_parquet_record_batch_stream(
     file_path: String,
     batch_size: usize,
 ) -> Result<BoxStream<'static, Result<RecordBatch>>> {
+    let uncompressed_bytes = if fetcher.memory_tracker.is_some() {
+        let row_group = arrow_metadata.metadata().row_group(row_group_idx);
+        row_group
+            .columns()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| projection.leaf_included(*index))
+            .try_fold(0usize, |total, (_, column)| {
+                usize::try_from(column.uncompressed_size())
+                    .ok()
+                    .and_then(|size| total.checked_add(size))
+            })
+            .context(UnexpectedSnafu {
+                reason: "Invalid projected row-group uncompressed size",
+            })?
+    } else {
+        0
+    };
     let mut builder = ParquetPushDecoderBuilder::new_with_metadata(arrow_metadata)
         .with_row_groups(vec![row_group_idx])
         .with_projection(projection)
@@ -335,12 +363,17 @@ pub fn build_sst_parquet_record_batch_stream(
         .context(ReadParquetSnafu { path: &file_path })?;
 
     Ok(async_stream::try_stream! {
+        let _reservation = if let Some(tracker) = &fetcher.memory_tracker {
+            Some(tracker.reserve(uncompressed_bytes).await
+                .context(crate::error::RecordBatchSnafu)?)
+        } else {
+            None
+        };
         loop {
             match decoder.try_decode().context(ReadParquetSnafu { path: &file_path })? {
                 DecodeResult::NeedsData(ranges) => {
                     let data = fetcher.fetch_bytes_with_cache(ranges.clone()).await?;
-                    decoder
-                        .push_ranges(ranges, data)
+                    decoder.push_ranges(ranges, data)
                         .context(ReadParquetSnafu { path: &file_path })?;
                 }
                 DecodeResult::Data(batch) => yield batch,
@@ -354,6 +387,141 @@ pub fn build_sst_parquet_record_batch_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn test_decoder_memory_projection_lifetime_and_error() {
+        use std::sync::Arc;
+
+        use common_memory_manager::OnExhaustedPolicy;
+        use datatypes::arrow::array::{Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use object_store::services::Memory;
+        use parquet::arrow::ArrowWriter;
+        use parquet::arrow::arrow_reader::ArrowReaderOptions;
+        use parquet::file::properties::WriterProperties;
+
+        use crate::sst::parquet::metadata::MetadataLoader;
+        use crate::sst::parquet::reader::MetadataCacheMetrics;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Int64, false),
+            Field::new("payload", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(Int64Array::from_iter_values(0..8)),
+                Arc::new(StringArray::from_iter_values(
+                    (0..8).map(|i| format!("{i}:{}", "x".repeat(512))),
+                )),
+            ],
+        )
+        .unwrap();
+        let mut bytes = Vec::new();
+        let props = WriterProperties::builder()
+            .set_max_row_group_row_count(Some(4))
+            .build();
+        let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props)).unwrap();
+        writer.write(&batch).unwrap();
+        writer.close().unwrap();
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let file_size = bytes.len() as u64;
+        store.write("memory.parquet", bytes).await.unwrap();
+        let metadata = MetadataLoader::new(store.clone(), "memory.parquet", file_size)
+            .load(&mut MetadataCacheMetrics::default())
+            .await
+            .unwrap();
+        let sizes: Vec<_> = metadata
+            .row_groups()
+            .iter()
+            .map(|rg| rg.column(0).uncompressed_size() as usize)
+            .collect();
+        let limit = *sizes.iter().max().unwrap();
+        assert!(metadata.row_group(0).total_byte_size() as usize > limit);
+        let projection = ProjectionMask::leaves(metadata.file_metadata().schema_descr(), [0]);
+        let metadata =
+            ArrowReaderMetadata::try_new(Arc::new(metadata), ArrowReaderOptions::new()).unwrap();
+        let tracker = QueryMemoryTracker::builder(limit, OnExhaustedPolicy::Fail)
+            .with_shared_pool()
+            .build();
+        let cache = CacheStrategy::EnableAll(Arc::new(
+            crate::cache::CacheManager::builder()
+                .page_cache_size(1024 * 1024)
+                .build(),
+        ));
+        let region_file_id = RegionFileId::new(
+            store_api::storage::RegionId::new(1, 1),
+            store_api::storage::FileId::random(),
+        );
+        let build = |row_group_idx, path: &str, selection| {
+            let fetcher = SstParquetRangeFetcher::new(
+                region_file_id,
+                path.into(),
+                store.clone(),
+                if path == "memory.parquet" {
+                    cache.clone()
+                } else {
+                    CacheStrategy::Disabled
+                },
+                row_group_idx,
+                None,
+            )
+            .with_memory_tracker(Some(tracker.clone()));
+            build_sst_parquet_record_batch_stream(
+                metadata.clone(),
+                row_group_idx,
+                selection,
+                projection.clone(),
+                fetcher,
+                path.into(),
+                1,
+            )
+            .unwrap()
+        };
+        // Construction (including an unpolled stream's drop) must not reserve memory.
+        drop(build(0, "memory.parquet", None));
+        assert_eq!(0, tracker.current());
+        for (row_group_idx, size) in sizes.iter().enumerate() {
+            let mut first = build(row_group_idx, "memory.parquet", None);
+            assert_eq!(1, first.next().await.unwrap().unwrap().num_rows());
+            assert_eq!(*size, tracker.current());
+            let mut competing = build(row_group_idx, "memory.parquet", None);
+            assert!(competing.next().await.unwrap().is_err());
+            assert_eq!(*size, tracker.current());
+            // Reserve before decoding, even when the selection would require no page reads.
+            let mut skipped = build(
+                row_group_idx,
+                "memory.parquet",
+                Some(RowSelection::from(vec![
+                    parquet::arrow::arrow_reader::RowSelector::skip(4),
+                ])),
+            );
+            assert!(skipped.next().await.unwrap().is_err());
+            assert_eq!(*size, tracker.current());
+            while first.next().await.transpose().unwrap().is_some() {}
+            // Completed streams may remain alive without holding their quota.
+            assert_eq!(0, tracker.current());
+        }
+        // The second read must acquire quota even when all pages are cached.
+        store.delete("memory.parquet").await.unwrap();
+        let mut cancelled = build(0, "memory.parquet", None);
+        cancelled.next().await.unwrap().unwrap();
+        drop(cancelled);
+        assert_eq!(0, tracker.current());
+        let mut failed = build(0, "missing.parquet", None);
+        assert!(failed.next().await.unwrap().is_err());
+        drop(failed);
+        assert_eq!(0, tracker.current());
+        let mut skipped = build(
+            0,
+            "memory.parquet",
+            Some(RowSelection::from(vec![
+                parquet::arrow::arrow_reader::RowSelector::skip(4),
+            ])),
+        );
+        assert!(skipped.next().await.is_none());
+        assert_eq!(0, tracker.current());
+    }
 
     #[test]
     fn test_assemble_range_from_cached_subrange_and_fetched_tail() {

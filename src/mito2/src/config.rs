@@ -51,6 +51,17 @@ const PAGE_CACHE_SIZE_FACTOR: u64 = 8;
 /// Use `1/INDEX_CREATE_MEM_THRESHOLD_FACTOR` of OS memory size as mem threshold for creating index
 const INDEX_CREATE_MEM_THRESHOLD_FACTOR: u64 = 16;
 
+/// Memory accounted against the shared scan limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanMemoryMode {
+    /// Count projected Parquet columns' uncompressed row-group sizes.
+    #[default]
+    Basic,
+    /// Also count cumulative streamed batches and series-merge buffers.
+    Extended,
+}
+
 /// Fetch option timeout
 pub(crate) const FETCH_OPTION_TIMEOUT: Duration = Duration::from_secs(3);
 
@@ -170,14 +181,18 @@ pub struct MitoConfig {
     /// Buffer size for SST writing.
     // TODO(#9240): Support per-object-store write buffer sizes for backend-specific tuning.
     pub sst_write_buffer_size: ReadableSize,
-    /// Maximum number of SST files to scan concurrently (default 384).
+    /// Maximum number of SST files to scan concurrently when memory accounting
+    /// does not cover the scan or the limit is disabled (default 384).
     pub max_concurrent_scan_files: usize,
     /// Whether to allow stale entries read during replay.
     pub allow_stale_entries: bool,
-    /// Memory limit for table scans across all queries.
+    /// Memory limit for table scans across all queries (default: 25% of system memory).
     /// Setting it to 0 or "unlimited" disables the limit.
     /// Supports absolute size (e.g., "2GB") or percentage of system memory (e.g., "50%").
     pub scan_memory_limit: MemoryLimit,
+    /// Scan memory accounting: basic counts projected Parquet row groups;
+    /// extended also counts streamed batches and series-merge buffers.
+    pub scan_memory_mode: ScanMemoryMode,
     /// Behavior when scan memory tracking cannot acquire memory from the budget.
     /// `wait` means `wait(10s)`, not unlimited waiting.
     /// Defaults to [`OnExhaustedPolicy::Fail`], which intentionally differs from
@@ -253,7 +268,8 @@ impl Default for MitoConfig {
             sst_write_buffer_size: DEFAULT_WRITE_BUFFER_SIZE,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             allow_stale_entries: false,
-            scan_memory_limit: MemoryLimit::default(),
+            scan_memory_limit: MemoryLimit::Percentage(25),
+            scan_memory_mode: ScanMemoryMode::Basic,
             scan_memory_on_exhausted: OnExhaustedPolicy::Fail,
             index: IndexConfig::default(),
             inverted_index: InvertedIndexConfig::default(),

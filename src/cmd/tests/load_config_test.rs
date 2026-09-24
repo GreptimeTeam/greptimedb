@@ -163,7 +163,8 @@ fn test_load_datanode_example_config() {
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Unlimited,
+                    scan_memory_limit: MemoryLimit::Percentage(25),
+                    scan_memory_mode: mito2::config::ScanMemoryMode::Basic,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
@@ -402,7 +403,8 @@ fn test_load_standalone_example_config() {
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
-                    scan_memory_limit: MemoryLimit::Unlimited,
+                    scan_memory_limit: MemoryLimit::Percentage(25),
+                    scan_memory_mode: mito2::config::ScanMemoryMode::Basic,
                     ..Default::default()
                 }),
                 RegionEngineConfig::File(FileEngineConfig {}),
