@@ -110,6 +110,14 @@ pub struct QueryOptions {
     /// - `fair`: Fair divides memory available after unspillable reservations
     ///   evenly among spillable reservations and may trigger earlier spills.
     pub experimental_memory_pool_policy: QueryMemoryPoolPolicy,
+    /// Experimental: number of PromQL logical plan templates the query engine keeps.
+    /// Set to 0 to disable template reuse. Only the plan shape is cached; every
+    /// request rebinds its own evaluation range, time filters and table source.
+    /// A template measures around 30KiB, so the default holds roughly 18MiB.
+    /// One PromQL query needs about three templates on a single node. Regions of
+    /// one table share a template, so this budget is spent on query shapes
+    /// rather than on regions.
+    pub experimental_promql_plan_cache_size: usize,
 }
 
 #[allow(clippy::derivable_impls)]
@@ -125,6 +133,7 @@ impl Default for QueryOptions {
             experimental_spill_max_temp_directory_size: ReadableSize::gb(1),
             experimental_spill_compression: QuerySpillCompression::Uncompressed,
             experimental_memory_pool_policy: QueryMemoryPoolPolicy::Greedy,
+            experimental_promql_plan_cache_size: 512,
         }
     }
 }

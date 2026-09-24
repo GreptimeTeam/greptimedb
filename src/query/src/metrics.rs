@@ -49,6 +49,22 @@ enum MergeState {
 }
 
 lazy_static! {
+    /// Outcomes of PromQL logical plan template reuse: `hit`, `miss`, `insert`
+    /// and `uncacheable`. Only requests with a supported plan shape are counted.
+    pub static ref PROMQL_PLAN_CACHE: IntCounterVec = register_int_counter_vec!(
+        "greptime_promql_plan_cache_total",
+        "PromQL logical plan template cache outcomes",
+        &["outcome"]
+    )
+    .unwrap();
+    /// Templates currently retained, summed over the caches in this process.
+    /// Sitting at `query.experimental_promql_plan_cache_size` while `miss` keeps
+    /// rising means the working set does not fit and the size should be raised.
+    pub static ref PROMQL_PLAN_CACHE_ENTRIES: IntGauge = register_int_gauge!(
+        "greptime_promql_plan_cache_entries",
+        "Retained PromQL logical plan templates"
+    )
+    .unwrap();
     /// Timer of different stages in query.
     pub static ref QUERY_STAGE_ELAPSED: HistogramVec = register_histogram_vec!(
         "greptime_query_stage_elapsed",
