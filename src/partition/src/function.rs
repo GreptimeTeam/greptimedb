@@ -16,7 +16,10 @@ use std::sync::{Arc, LazyLock};
 
 use datafusion_common::{Result, ScalarValue, exec_err};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
-use datatypes::arrow::array::StringBuilder;
+use datafusion_functions::unicode::substr::get_true_start_end;
+use datatypes::arrow::array::{BooleanArray, StringBuilder};
+use datatypes::arrow::buffer::NullBuffer;
+use datatypes::arrow::compute::{CastOptions, cast_with_options, nullif};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::DataType as _;
 use datatypes::value::Value;
@@ -98,31 +101,16 @@ impl PartitionFunction {
                     let Some(length) = length
                         .as_i64()
                         .or_else(|| length.as_u64().and_then(|n| i64::try_from(n).ok()))
-                        .filter(|v| *v >= 0)
                     else {
-                        return exec_err!(
-                            "substring length must be a non-negative signed 64-bit integer"
-                        );
+                        return exec_err!("substring length is outside the signed 64-bit range");
                     };
                     Some(length)
                 } else {
                     None
                 };
-                // SQL positions count Unicode characters, including positions before 1.
-                let skip = (i128::from(start) - 1).max(0);
-                let take =
-                    length.map(|length| (i128::from(start) - 1 + i128::from(length) - skip).max(0));
-                let chars = value
-                    .as_utf8()
-                    .chars()
-                    .skip(usize::try_from(skip).unwrap_or(usize::MAX));
-                let result: String = chars
-                    .take(
-                        take.and_then(|n| usize::try_from(n).ok())
-                            .unwrap_or(usize::MAX),
-                    )
-                    .collect();
-                Ok(Value::String(result.into()))
+                let value = value.as_utf8();
+                let (start, end) = get_true_start_end(value, start, length, false)?;
+                Ok(Value::from(&value[start..end]))
             }
             Self::Hash => {
                 // Concatenate arguments using this persisted routing encoding:
@@ -193,6 +181,9 @@ impl ScalarUDFImpl for PartitionFunction {
         } else {
             args.number_rows
         };
+        if *self == Self::Substring && !all_scalar && rows > 0 {
+            return invoke_substring(args);
+        }
         let mut values = Vec::with_capacity(args.args.len());
         let mut results = StringBuilder::with_capacity(rows, 0);
         for row in 0..rows {
@@ -225,32 +216,77 @@ impl ScalarUDFImpl for PartitionFunction {
     }
 }
 
+fn invoke_substring(mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+    let arrays = ColumnarValue::values_to_arrays(&args.args)?;
+    // NULL propagation precedes range checks, including UInt64 -> Int64 casts.
+    let nulls = arrays.iter().fold(None, |nulls, array| {
+        NullBuffer::union(nulls.as_ref(), array.logical_nulls().as_ref())
+    });
+    let null_mask = nulls.map(|nulls| BooleanArray::new(!nulls.inner(), None));
+    let options = CastOptions {
+        safe: false,
+        ..Default::default()
+    };
+    args.args = arrays
+        .into_iter()
+        .enumerate()
+        .map(|(index, array)| {
+            let data_type = if index == 0 {
+                DataType::Utf8
+            } else {
+                DataType::Int64
+            };
+            let array = if array.data_type() == &data_type {
+                array
+            } else {
+                let array = if let Some(mask) = &null_mask {
+                    nullif(array.as_ref(), mask)?
+                } else {
+                    array
+                };
+                cast_with_options(array.as_ref(), &data_type, &options)?
+            };
+            Ok(ColumnarValue::Array(array))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    args.arg_fields = args
+        .arg_fields
+        .iter()
+        .zip(&args.args)
+        .map(|(field, value)| Arc::new(field.as_ref().clone().with_data_type(value.data_type())))
+        .collect();
+    datafusion_functions::unicode::substr().invoke_with_args(args)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn invoke(
+        function: PartitionFunction,
+        args: Vec<ColumnarValue>,
+        number_rows: usize,
+    ) -> Result<datatypes::arrow::array::ArrayRef> {
+        use datatypes::arrow::datatypes::Field;
+        let arg_fields = args
+            .iter()
+            .map(|arg| Arc::new(Field::new("arg", arg.data_type(), true)))
+            .collect();
+        function
+            .invoke_with_args(ScalarFunctionArgs {
+                args,
+                arg_fields,
+                number_rows,
+                return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+                config_options: Arc::new(Default::default()),
+            })?
+            .into_array(number_rows)
+    }
+
     #[test]
     fn test_batch_and_scalar_results() {
         use datatypes::arrow::array::{ArrayRef, StringArray};
-        use datatypes::arrow::datatypes::Field;
 
-        let invoke = |function: PartitionFunction, args: Vec<ColumnarValue>, number_rows| {
-            let arg_fields = args
-                .iter()
-                .map(|arg| Arc::new(Field::new("arg", arg.data_type(), true)))
-                .collect();
-            function
-                .invoke_with_args(ScalarFunctionArgs {
-                    args,
-                    arg_fields,
-                    number_rows,
-                    return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
-                    config_options: Arc::new(Default::default()),
-                })
-                .unwrap()
-                .into_array(number_rows)
-                .unwrap()
-        };
         let values = Arc::new(StringArray::from(vec![Some("abc"), None, Some("中🙂")])) as ArrayRef;
         let actual = invoke(
             PartitionFunction::Substring,
@@ -260,7 +296,8 @@ mod tests {
                 ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
             ],
             3,
-        );
+        )
+        .unwrap();
         assert_eq!(
             actual.as_any().downcast_ref::<StringArray>().unwrap(),
             &StringArray::from(vec![Some("b"), None, Some("🙂")])
@@ -272,7 +309,8 @@ mod tests {
                 ColumnarValue::Scalar(ScalarValue::Utf8(Some("bc".into()))),
             ],
             3,
-        );
+        )
+        .unwrap();
         assert_eq!(
             actual.as_any().downcast_ref::<StringArray>().unwrap(),
             &StringArray::from(vec!["8f867eea8fef54c5b939e98da8815f16"; 3])
@@ -285,8 +323,123 @@ mod tests {
                 ColumnarValue::Scalar(ScalarValue::Int64(Some(-1))),
             ],
             0,
-        );
+        )
+        .unwrap();
         assert_eq!(actual.len(), 0);
+    }
+
+    #[test]
+    fn test_substring_row_batch_semantics() {
+        use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, UInt64Array};
+
+        let text = ScalarValue::Utf8(Some("a中🙂z".into()));
+        let mut cases = Vec::new();
+        for integer in [
+            ScalarValue::Int8(Some(2)),
+            ScalarValue::Int16(Some(2)),
+            ScalarValue::Int32(Some(2)),
+            ScalarValue::Int64(Some(2)),
+            ScalarValue::UInt8(Some(2)),
+            ScalarValue::UInt16(Some(2)),
+            ScalarValue::UInt32(Some(2)),
+            ScalarValue::UInt64(Some(2)),
+        ] {
+            cases.push((vec![text.clone(), integer.clone(), integer], false));
+        }
+        for args in [
+            vec![text.clone(), ScalarValue::Int64(Some(i64::MIN))],
+            vec![
+                text.clone(),
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(-1)),
+            ],
+            vec![text.clone(), ScalarValue::UInt64(Some(u64::MAX))],
+            vec![
+                text.clone(),
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::UInt64(Some(u64::MAX)),
+            ],
+        ] {
+            cases.push((args, true));
+        }
+        for args in [
+            vec![ScalarValue::Utf8(None), ScalarValue::UInt64(Some(u64::MAX))],
+            vec![
+                text.clone(),
+                ScalarValue::UInt64(Some(u64::MAX)),
+                ScalarValue::Null,
+            ],
+            vec![
+                text.clone(),
+                ScalarValue::Null,
+                ScalarValue::UInt64(Some(u64::MAX)),
+            ],
+            vec![ScalarValue::Utf8(None), ScalarValue::Int64(Some(i64::MIN))],
+            vec![
+                ScalarValue::Utf8(None),
+                ScalarValue::Int64(Some(1)),
+                ScalarValue::Int64(Some(-1)),
+            ],
+            vec![
+                ScalarValue::Utf8View(Some("a中🙂z".into())),
+                ScalarValue::Int64(Some(2)),
+            ],
+            vec![
+                ScalarValue::LargeUtf8(Some("a中🙂z".into())),
+                ScalarValue::Int64(Some(2)),
+            ],
+        ] {
+            cases.push((args, false));
+        }
+        for (args, should_error) in cases {
+            let values = args
+                .iter()
+                .cloned()
+                .map(Value::try_from)
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            let row = PartitionFunction::Substring.evaluate(&values);
+            assert_eq!(row.is_err(), should_error, "{args:?}");
+            // Vary which argument is an array to exercise scalar broadcasting.
+            for array_index in 0..args.len() {
+                let batch_args = args
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        if index == array_index {
+                            ColumnarValue::Array(value.to_array_of_size(2).unwrap())
+                        } else {
+                            ColumnarValue::Scalar(value.clone())
+                        }
+                    })
+                    .collect();
+                let batch = invoke(PartitionFunction::Substring, batch_args, 2);
+                assert_eq!(batch.is_err(), should_error, "{args:?}");
+                if let Ok(expected) = &row {
+                    let batch = batch.unwrap();
+                    for index in 0..2 {
+                        let actual =
+                            Value::try_from(ScalarValue::try_from_array(&batch, index).unwrap())
+                                .unwrap();
+                        assert_eq!(&actual, expected, "{args:?}");
+                    }
+                }
+            }
+        }
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(vec![Some("a中🙂z"), None, Some("abc")])),
+            Arc::new(UInt64Array::from(vec![2, u64::MAX, 1])),
+            Arc::new(Int64Array::from(vec![2, -1, 0])),
+        ];
+        for offset in [0, 1] {
+            let args = arrays
+                .iter()
+                .map(|array| ColumnarValue::Array(array.slice(offset, 3 - offset)))
+                .collect();
+            let actual = invoke(PartitionFunction::Substring, args, 3 - offset).unwrap();
+            let expected = StringArray::from(vec![Some("中🙂"), None, Some("")]);
+            assert_eq!(actual.as_ref(), &expected.slice(offset, 3 - offset));
+        }
     }
 
     #[test]
@@ -300,7 +453,6 @@ mod tests {
             (-2, None, "a中🙂z"),
             (1, Some(0), ""),
             (99, None, ""),
-            (i64::MIN, Some(i64::MAX), ""),
             (i64::MAX, Some(i64::MAX), ""),
         ] {
             let mut args = vec![Value::from("a中🙂z"), Value::Int64(start)];
@@ -312,22 +464,6 @@ mod tests {
                 Value::from(expected)
             );
         }
-        assert!(
-            PartitionFunction::Substring
-                .evaluate(&[Value::from("abc"), Value::Int64(1), Value::Int64(-1)])
-                .is_err()
-        );
-        assert!(
-            PartitionFunction::Substring
-                .evaluate(&[Value::from("abc"), Value::UInt64(u64::MAX)])
-                .is_err()
-        );
-        assert_eq!(
-            PartitionFunction::Substring
-                .evaluate(&[Value::Null, Value::Int64(1)])
-                .unwrap(),
-            Value::Null
-        );
     }
 
     #[test]

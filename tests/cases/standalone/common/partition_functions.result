@@ -280,7 +280,7 @@ Affected Rows: 0
 
 INSERT INTO dynamic_substring VALUES ('abc', -1, 1);
 
-Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: substring length must be a non-negative signed 64-bit integer
+Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: negative count not allowed: -1
 
 INSERT INTO dynamic_substring VALUES ('abc', 2, 2);
 
@@ -325,7 +325,7 @@ Affected Rows: 3
 
 INSERT INTO guarded_substring VALUES ('a', -1, 5);
 
-Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: substring length must be a non-negative signed 64-bit integer
+Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: negative count not allowed: -1
 
 SELECT * FROM guarded_substring ORDER BY ts;
 

@@ -10414,6 +10414,7 @@ dependencies = [
  "criterion 0.7.0",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-functions",
  "datafusion-physical-expr",
  "datatypes",
  "md5",
