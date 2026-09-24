@@ -396,7 +396,18 @@ async fn write_prometheus_rows_with_progress(
     prom_store_with_metric_engine: bool,
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
-    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+    // The bulk encode produces millisecond batches only; a physical table
+    // The bulk encode produces millisecond batches only; write targets and
+    // existing destination tables with another time index unit must stay on
+    // the ordinary insert path, which converts the requests to each
+    // destination table's unit.
+    let batcher = match (prom_store_with_metric_engine, pending_rows_batcher) {
+        (true, Some(batcher)) if batcher.accepts_bulk_time_indexes(batches.iter()).await => {
+            Some(batcher)
+        }
+        _ => None,
+    };
+    if let Some(batcher) = batcher {
         preflight_prometheus_rows(&prom_store_handler, &mut batches)
             .await
             .map_err(|error| PromWriteError {
@@ -483,10 +494,21 @@ async fn write_prometheus_v2_rows_with_progress(
         });
     }
 
-    if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+    let batcher_eligible = match (&pending_rows_batcher, prom_store_with_metric_engine) {
+        (Some(batcher), true) => {
+            batcher
+                .accepts_bulk_time_indexes(sample_batches.iter().chain(&histogram_batches))
+                .await
+        }
+        _ => false,
+    };
+    if batcher_eligible {
+        // Safety: `batcher_eligible` is only true when `pending_rows_batcher`
+        // is `Some`.
+        let batcher = pending_rows_batcher.as_deref().unwrap();
         return write_batched_prometheus_v2_rows_with_progress(
             prom_store_handler,
-            batcher.as_ref(),
+            batcher,
             prom_store_with_metric_engine,
             sample_batches,
             histogram_batches,
