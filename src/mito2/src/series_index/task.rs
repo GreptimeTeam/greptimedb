@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
+use crate::error::{InvalidRequestSnafu, RegionBusySnafu, Result, WorkerStoppedSnafu};
 use crate::metrics::{
     SERIES_INDEX_CAPACITY_DEFERRED, SERIES_INDEX_DISK_BYTES, SERIES_INDEX_RECONCILE_TOTAL,
 };
@@ -80,18 +80,22 @@ impl SeriesIndexTaskState {
         }
     }
 
-    /// Waits for queue capacity, then returns a receiver for build completion.
-    /// Call from a spawned task so admission cannot block the region worker.
-    pub(crate) async fn reconcile(
+    /// Returns a receiver for build completion, or RegionBusy if the queue is full.
+    pub(crate) fn try_reconcile(
         &self,
         region: MitoRegionRef,
     ) -> Result<oneshot::Receiver<Result<ReconcileStats>>> {
         ensure!(self.is_running(), WorkerStoppedSnafu { id: self.worker_id });
+        let region_id = region.region_id;
         let (sender, receiver) = oneshot::channel();
         self.sender
-            .send(SeriesIndexCommand::Reconcile { region, sender })
-            .await
-            .map_err(|_| WorkerStoppedSnafu { id: self.worker_id }.build())?;
+            .try_send(SeriesIndexCommand::Reconcile { region, sender })
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => RegionBusySnafu { region_id }.build(),
+                mpsc::error::TrySendError::Closed(_) => {
+                    WorkerStoppedSnafu { id: self.worker_id }.build()
+                }
+            })?;
         Ok(receiver)
     }
 
@@ -420,20 +424,26 @@ mod tests {
         task.enable_range_index = range_enabled;
         let state = task.state.clone();
         let store = task.store.clone();
-        let first = state.reconcile(region.clone()).await.unwrap();
+        let first = state.try_reconcile(region.clone()).unwrap();
         state.wake();
         assert_eq!(1, task.receiver.len());
-        let second = state.reconcile(region.clone());
-        tokio::pin!(second);
-        // Admission waits for capacity; both builds must reuse the same publication.
-        assert!(futures::poll!(second.as_mut()).is_pending());
+        assert!(matches!(
+            state.try_reconcile(region.clone()),
+            Err(crate::error::Error::RegionBusy { .. })
+        ));
         let handle = tokio::spawn(task.run());
+        let first = tokio::time::timeout(Duration::from_secs(10), first)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        // Admission recovers after completion; both builds reuse the same publication.
+        let second = state.try_reconcile(region.clone()).unwrap();
         let second = tokio::time::timeout(Duration::from_secs(10), second)
             .await
             .unwrap()
+            .unwrap()
             .unwrap();
-        let first = first.await.unwrap().unwrap();
-        let second = second.await.unwrap().unwrap();
         assert_eq!(1, first.built_series);
         assert_eq!(if range_enabled { 4 } else { 0 }, first.built_range);
         assert_eq!(0, second.built_series);
@@ -454,7 +464,7 @@ mod tests {
         );
         state.stop();
         handle.await.unwrap();
-        assert!(state.reconcile(region).await.is_err());
+        assert!(state.try_reconcile(region).is_err());
         engine.stop().await.unwrap();
     }
 
@@ -485,19 +495,20 @@ mod tests {
         let (engine, region) = prepare_region(&mut env).await;
         let (task, _purge_receiver) = new_task(region.clone());
         let state = task.state.clone();
-        let result = state.reconcile(region.clone()).await.unwrap();
-        let waiting = state.reconcile(region.clone());
-        tokio::pin!(waiting);
-        assert!(futures::poll!(waiting.as_mut()).is_pending());
+        let result = state.try_reconcile(region.clone()).unwrap();
+        assert!(matches!(
+            state.try_reconcile(region.clone()),
+            Err(crate::error::Error::RegionBusy { .. })
+        ));
         state.stop();
+        assert!(matches!(
+            state.try_reconcile(region.clone()),
+            Err(crate::error::Error::WorkerStopped { .. })
+        ));
         tokio::time::timeout(Duration::from_secs(10), async {
             task.run().await;
             assert!(matches!(
                 result.await.unwrap(),
-                Err(crate::error::Error::WorkerStopped { .. })
-            ));
-            assert!(matches!(
-                waiting.await,
                 Err(crate::error::Error::WorkerStopped { .. })
             ));
         })
@@ -512,7 +523,7 @@ mod tests {
         let mut env = TestEnv::with_prefix("series-manual-closed").await;
         let (engine, region) = prepare_region(&mut env).await;
         let (task, _purge_receiver) = new_task(region.clone());
-        let result = task.state.reconcile(region.clone()).await.unwrap();
+        let result = task.state.try_reconcile(region.clone()).unwrap();
         task.regions.remove_region(region.region_id);
         let state = task.state.clone();
         let handle = tokio::spawn(task.run());
@@ -559,7 +570,7 @@ mod tests {
         task.store = task.store.clone().layer(layer);
         let state = task.state.clone();
         let regions = task.regions.clone();
-        let mut result = state.reconcile(region.clone()).await.unwrap();
+        let mut result = state.try_reconcile(region.clone()).unwrap();
         let handle = tokio::spawn(task.run());
         tokio::time::timeout(Duration::from_secs(10), entered.notified())
             .await
@@ -568,6 +579,15 @@ mod tests {
             result.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
+
+        // A canceled queued caller still occupies capacity while catalog I/O is blocked.
+        drop(state.try_reconcile(region.clone()).unwrap());
+        for _ in 0..3 {
+            assert!(matches!(
+                state.try_reconcile(region.clone()),
+                Err(crate::error::Error::RegionBusy { .. })
+            ));
+        }
 
         // The initial validation passed; invalidate the request during catalog I/O.
         match change {
@@ -623,8 +643,7 @@ mod tests {
             while region.series_index_version().series_indexes.is_empty() {
                 assert!(
                     state
-                        .reconcile(region.clone())
-                        .await
+                        .try_reconcile(region.clone())
                         .unwrap()
                         .await
                         .unwrap()

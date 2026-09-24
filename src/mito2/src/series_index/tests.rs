@@ -1054,8 +1054,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     );
     assert!(
         state
-            .reconcile(region.clone())
-            .await
+            .try_reconcile(region.clone())
             .unwrap()
             .await
             .unwrap()
@@ -1066,8 +1065,7 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
     assert_eq!(
         1,
         state
-            .reconcile(region)
-            .await
+            .try_reconcile(region)
             .unwrap()
             .await
             .unwrap()
