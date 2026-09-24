@@ -176,8 +176,12 @@ impl ExprPlanner for JsonExprPlanner {
             && expr.args.len() == 2
             && let Expr::Column(column) = &expr.args[0]
         {
-            let field = schema.field_from_column(column)?;
-            if let Some(path) = json_get_object_path(&expr.args[1]) {
+            // Resolving an unqualified column may require JOIN USING information unavailable
+            // in this schema. Skip hint injection if lookup fails and let DataFusion resolve
+            // the column or report the error later.
+            if let Ok(field) = schema.field_from_column(column)
+                && let Some(path) = json_get_object_path(&expr.args[1])
+            {
                 apply_json_type_hint(field, &path, &mut expr.args)?;
             }
         }
