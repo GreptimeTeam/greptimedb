@@ -52,8 +52,9 @@ use crate::prom_remote_write::validation::PromValidationMode;
 use crate::prom_remote_write::{
     REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
 };
-use crate::prom_store::snappy_decompress;
+use crate::prom_store::{MAX_DECOMPRESSED_REQUEST_SIZE, snappy_decompress_limited};
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
+use crate::request_memory_limiter::ServerMemoryLimiter;
 
 pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
@@ -75,6 +76,9 @@ pub struct PromStoreState {
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
     pub pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
+    /// Shared request-memory limiter used to charge decompressed remote
+    /// read/write bodies against the aggregate quota.
+    pub memory_limiter: ServerMemoryLimiter,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,6 +150,7 @@ async fn remote_write_v1(
         prom_store_with_metric_engine,
         prom_validation_mode,
         pending_rows_batcher,
+        memory_limiter,
     } = state;
 
     if let Some(response) = vm_proto_version_response(&params) {
@@ -173,13 +178,22 @@ async fn remote_write_v1(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut decoded =
-        decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+    // Keep the decode guards alive until the batches are built: the
+    // `TablesBuilder` retains the decompressed buffer as its raw data.
+    let (mut decoded, decode_guards) = decode_remote_write_request(
+        is_zstd,
+        body,
+        prom_validation_mode,
+        &mut processor,
+        &memory_limiter,
+    )
+    .await?;
 
     // Parsing borrows the decode buffer, but row building copies out of it: tag
     // values through `decode_string`, column names through `to_owned`, and the
     // borrowing `col_indexes` dies inside `as_insert_requests`. Nothing below
-    // references the buffer, so it need not span the write.
+    // references the buffer, so it need not span the write — the same goes for
+    // the decode guards charged against the aggregate memory quota.
     let req = if processor.use_pipeline {
         drop(decoded);
         processor.exec_pipeline().await?
@@ -188,6 +202,7 @@ async fn remote_write_v1(
         drop(decoded);
         req
     };
+    drop(decode_guards);
     let batches = into_prom_write_batches(req, query_ctx);
 
     let outcome = match write_prometheus_rows_with_progress(
@@ -227,6 +242,7 @@ async fn remote_write_v2(
         prom_store_with_metric_engine,
         prom_validation_mode: _,
         pending_rows_batcher,
+        memory_limiter,
     } = state;
 
     if let Some(response) = vm_proto_version_response(&params) {
@@ -240,7 +256,7 @@ async fn remote_write_v2(
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let req = match decode_remote_write_v2(is_zstd, body) {
+    let req = match decode_remote_write_v2(is_zstd, body, &memory_limiter).await {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
@@ -746,7 +762,7 @@ pub async fn remote_read(
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
 
-    let request = decode_remote_read_request(body).await?;
+    let request = decode_remote_read_request(body, &state.memory_limiter).await?;
 
     let query_ctx = Arc::new(query_ctx);
     let _timer = crate::metrics::METRIC_HTTP_PROM_STORE_READ_ELAPSED
@@ -756,8 +772,13 @@ pub async fn remote_read(
     state.prom_store_handler.read(request, query_ctx).await
 }
 
-async fn decode_remote_read_request(body: Bytes) -> Result<ReadRequest> {
-    let buf = snappy_decompress(&body[..])?;
+async fn decode_remote_read_request(
+    body: Bytes,
+    limiter: &ServerMemoryLimiter,
+) -> Result<ReadRequest> {
+    // Holds the memory permits for the decompressed bytes until the protobuf
+    // decoding is finished.
+    let buf = snappy_decompress_limited(&body[..], MAX_DECOMPRESSED_REQUEST_SIZE, limiter).await?;
 
     ReadRequest::decode(&buf[..]).context(error::DecodePromRemoteRequestSnafu)
 }
@@ -1011,6 +1032,7 @@ mod tests {
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
             pending_rows_batcher: None,
+            memory_limiter: ServerMemoryLimiter::default(),
         }
     }
 

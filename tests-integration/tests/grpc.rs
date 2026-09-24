@@ -133,6 +133,7 @@ macro_rules! grpc_tests {
                 test_grpc_timezone,
                 test_grpc_tls_config,
                 test_grpc_memory_limit,
+                test_grpc_compressed_memory_reservation,
             );
         )*
     };
@@ -352,6 +353,104 @@ pub async fn test_grpc_message_size_limit_send(store_type: StorageType) {
     );
     let err_msg = db.sql("show tables;").await.unwrap_err().to_string();
     assert!(err_msg.contains("message length too large"), "{}", err_msg);
+    let _ = fe_grpc_server.shutdown().await;
+}
+
+/// Transport-compressed gRPC requests reserve the worst-case decoded message
+/// size (`max_recv_message_size`) against the aggregate quota *before* tonic
+/// decompresses them. With a quota smaller than that bound, compressed
+/// requests must fail fast with `RESOURCE_EXHAUSTED` (before decoding), while
+/// uncompressed requests are still admitted through the exact post-decode
+/// charge. With the default unlimited limiter, compression keeps working.
+pub async fn test_grpc_compressed_memory_reservation(store_type: StorageType) {
+    use api::v1::query_request::Query;
+    use api::v1::{GreptimeRequest, QueryRequest};
+    use tonic::codec::CompressionEncoding;
+
+    let config = GrpcServerConfig {
+        max_recv_message_size: 1024 * 1024,
+        ..Default::default()
+    };
+    // Quota smaller than the decoding bound: compressed requests cannot be
+    // pre-admitted.
+    let memory_limiter = ServerMemoryLimiter::new(512 * 1024, OnExhaustedPolicy::Fail);
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_compressed_memory_reservation",
+        None,
+        Some(config),
+        Some(memory_limiter),
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    db.sql("CREATE TABLE grpc_quota(ts TIMESTAMP TIME INDEX, v DOUBLE)")
+        .await
+        .unwrap();
+
+    let insert_request = || {
+        tonic::Request::new(GreptimeRequest {
+            header: Some(RequestHeader {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                ..Default::default()
+            }),
+            request: Some(RequestBody::Query(QueryRequest {
+                query: Some(Query::Sql(
+                    "INSERT INTO grpc_quota VALUES (1000, 1.0)".to_string(),
+                )),
+            })),
+        })
+    };
+
+    // Compressed request: the pre-decode reservation (1 MiB) exceeds the
+    // 512 KiB quota and must be rejected before any decoding happens.
+    let mut compressed = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd);
+    let status = compressed.handle(insert_request()).await.unwrap_err();
+    assert_eq!(
+        status.code(),
+        tonic::Code::ResourceExhausted,
+        "compressed request must be pre-admitted against the quota, got: {status}"
+    );
+
+    // Uncompressed request on the same server: still admitted (its exact
+    // serialized size fits the quota).
+    let mut plain = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap();
+    plain.handle(insert_request()).await.unwrap();
+
+    let _ = fe_grpc_server.shutdown().await;
+
+    // Default (unlimited) limiter: compressed requests keep working.
+    let (_db, fe_grpc_server) = setup_grpc_server_with(
+        store_type,
+        "test_grpc_compressed_memory_reservation_unlimited",
+        None,
+        Some(GrpcServerConfig::default()),
+        None,
+    )
+    .await;
+    let addr = fe_grpc_server.bind_addr().unwrap().to_string();
+    let db = Database::new_with_dbname(
+        format!("{}-{}", DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME),
+        Client::with_urls(vec![addr.clone()]),
+    );
+    db.sql("CREATE TABLE grpc_quota(ts TIMESTAMP TIME INDEX, v DOUBLE)")
+        .await
+        .unwrap();
+    let mut compressed = GreptimeDatabaseClient::connect(format!("http://{addr}"))
+        .await
+        .unwrap()
+        .send_compressed(CompressionEncoding::Zstd);
+    compressed.handle(insert_request()).await.unwrap();
     let _ = fe_grpc_server.shutdown().await;
 }
 

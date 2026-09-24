@@ -83,8 +83,10 @@ use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
     MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
-    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
+    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_custom_options,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
+    setup_test_prom_app_with_frontend_and_memory_limiter,
     setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
@@ -159,6 +161,9 @@ macro_rules! http_tests {
                 test_prometheus_promql_api,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
+                test_prom_remote_compression_bomb_rejected,
+                test_prom_remote_write_decoded_body_charged,
+                test_influxdb_write_decoded_body_charged,
                 test_config_api,
                 test_dashboard_api,
                 test_prometheus_remote_write,
@@ -1708,6 +1713,185 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     assert!(
         data.contains("{\"__name__\":\"demo_metrics\"}")
             && !data.contains("{\"__name__\":\"demo\"}")
+    );
+
+    guard.remove_all().await;
+}
+
+/// Decompressed ingestion bodies (routes using `RequestDecompressionLayer`)
+/// must be charged against the aggregate request-memory quota as they are
+/// decoded, not only their compressed wire size.
+pub async fn test_influxdb_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let http_opts = servers::http::HttpOptions {
+        addr: format!("127.0.0.1:{}", common_test_util::ports::get_port()),
+        ..Default::default()
+    };
+    let (app, mut guard) = setup_test_http_app_with_frontend_and_custom_options(
+        store_type,
+        "test_influxdb_decoded_quota",
+        None,
+        Some(http_opts),
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A gzip member expanding to ~8 KiB of line protocol from a tiny wire body.
+    let lines: Vec<String> = (0..200)
+        .map(|i| format!("decoded_quota,host=h{} v=1.0,ts={}", i % 20, 1700000000 + i))
+        .collect();
+    let decoded = lines.join("\n");
+    assert!(decoded.len() > 4096);
+    let compressed = zstd::stream::encode_all(decoded.as_bytes(), 3).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    // Compressed write whose decoded body exceeds the quota: rejected while
+    // streaming (the extractor surfaces the aborted body as 400).
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected with 429"
+    );
+
+    // The server still serves a small compressed write within the quota.
+    let small = "decoded_quota,host=ok v=1.0,ts=1700000000";
+    let compressed_small = zstd::stream::encode_all(small.as_bytes(), 3).unwrap();
+    let res = client
+        .post("/v1/influxdb/write?db=public")
+        .header("Content-Type", "text/plain")
+        .header("Content-Encoding", "zstd")
+        .body(compressed_small)
+        .send()
+        .await;
+    assert_eq!(
+        res.status(),
+        StatusCode::NO_CONTENT,
+        "small compressed write must succeed, got: {}",
+        res.text().await
+    );
+
+    guard.remove_all().await;
+}
+
+/// A tiny compressed body must not be able to demand an unbounded decoded
+/// allocation on the Prometheus remote-storage endpoints. The five-byte raw
+/// Snappy varint (`ff ff ff ff 0f`) declares a ~4 GiB decoded length and must
+/// be rejected by the decoded-size cap.
+pub async fn test_prom_remote_compression_bomb_rejected(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend(store_type, "prom_remote_bomb").await;
+    let client = TestClient::new(app).await;
+
+    // Remote read with the five-byte varint bomb.
+    let res = client
+        .post("/v1/prometheus/read")
+        .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+
+    // Remote write v1 with the same bomb, via both codecs (exercising the
+    // fallback: the zstd attempt fails on malformed input and the snappy
+    // fallback must reject the declared size).
+    for encoding in ["snappy", "zstd"] {
+        let res = client
+            .post("/v1/prometheus/write")
+            .header("Content-Encoding", encoding)
+            .body(Vec::from([0xffu8, 0xff, 0xff, 0xff, 0x0f]))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_REQUEST,
+            "bomb with Content-Encoding {encoding} must be rejected"
+        );
+    }
+
+    // The server must still serve valid requests afterwards.
+    let write_request = WriteRequest {
+        timeseries: prom_store::mock_timeseries(),
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    guard.remove_all().await;
+}
+
+/// The decoded (not encoded) size of a Prometheus remote write body must be
+/// charged against the aggregate request-memory quota.
+pub async fn test_prom_remote_write_decoded_body_charged(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    // 4 KiB aggregate quota with fail-fast policy.
+    let memory_limiter = ServerMemoryLimiter::new(4096, OnExhaustedPolicy::Fail);
+    let (app, mut guard) = setup_test_prom_app_with_frontend_and_memory_limiter(
+        store_type,
+        "prom_remote_write_quota",
+        Some(memory_limiter),
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    // A valid write request whose decoded protobuf clearly exceeds the quota
+    // while its Snappy wire body stays far below it.
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: "__name__".to_string(),
+                    value: "quota_metric".to_string(),
+                },
+                Label {
+                    name: "payload".to_string(),
+                    // ~8 KiB decoded; compresses to a few hundred bytes.
+                    value: "p".repeat(8 * 1024),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    assert!(
+        compressed.len() < 2048,
+        "wire body must stay under the quota"
+    );
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    let status = res.status();
+    let body = res.text().await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected, got body: {body}"
     );
 
     guard.remove_all().await;
@@ -3519,7 +3703,7 @@ async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: b
     common_telemetry::init_default_ut_logging();
     let mut instance =
         MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
-    let server = build_test_prom_server(instance.frontend(), true).build();
+    let server = build_test_prom_server(instance.frontend(), true, None).build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;

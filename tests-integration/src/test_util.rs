@@ -747,7 +747,13 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
         ..Default::default()
     });
 
-    let mut http_server = HttpServerBuilder::new(http_opts)
+    // The memory limiter must be wired before the handlers: routes capture
+    // the builder's limiter at wiring time (mirrors `frontend::server`).
+    let mut http_server = HttpServerBuilder::new(http_opts);
+    if let Some(limiter) = memory_limiter {
+        http_server = http_server.with_memory_limiter(limiter);
+    }
+    let mut http_server = http_server
         .with_sql_handler(instance.fe_instance().clone())
         .with_log_ingest_handler(instance.fe_instance().clone(), None, None)
         .with_logs_handler(instance.fe_instance().clone())
@@ -760,10 +766,6 @@ pub async fn setup_test_http_app_with_frontend_and_custom_options(
 
     if let Some(user_provider) = user_provider {
         http_server = http_server.with_user_provider(user_provider);
-    }
-
-    if let Some(limiter) = memory_limiter {
-        http_server = http_server.with_memory_limiter(limiter);
     }
 
     let http_server = http_server.build();
@@ -784,7 +786,7 @@ pub async fn setup_test_prom_app_with_frontend(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, false).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, None).await
 }
 
 /// Like [`setup_test_prom_app_with_frontend`] but enables the pending-rows batcher,
@@ -794,13 +796,25 @@ pub async fn setup_test_prom_app_with_frontend_batched(
     store_type: StorageType,
     name: &str,
 ) -> (Router, TestGuard) {
-    setup_test_prom_app_with_frontend_inner(store_type, name, true).await
+    setup_test_prom_app_with_frontend_inner(store_type, name, true, None).await
+}
+
+/// Like [`setup_test_prom_app_with_frontend`] but wires a shared request-memory
+/// limiter into the server, mirroring production deployments that configure
+/// `max_in_flight_write_bytes`.
+pub async fn setup_test_prom_app_with_frontend_and_memory_limiter(
+    store_type: StorageType,
+    name: &str,
+    memory_limiter: Option<ServerMemoryLimiter>,
+) -> (Router, TestGuard) {
+    setup_test_prom_app_with_frontend_inner(store_type, name, false, memory_limiter).await
 }
 
 async fn setup_test_prom_app_with_frontend_inner(
     store_type: StorageType,
     name: &str,
     enable_batcher: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
 ) -> (Router, TestGuard) {
     unsafe {
         std::env::set_var("TZ", "UTC");
@@ -849,17 +863,24 @@ async fn setup_test_prom_app_with_frontend_inner(
     let sql = "INSERT INTO mito(host, val, ts) VALUES (1, 1.1, 0)";
     run_sql(sql, &instance).await;
 
-    let http_server = build_test_prom_server(instance.fe_instance().clone(), enable_batcher)
-        .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
-        .build();
+    let http_server = build_test_prom_server(
+        instance.fe_instance().clone(),
+        enable_batcher,
+        memory_limiter,
+    )
+    .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
+    .build();
     let app = http_server.build(http_server.make_app()).unwrap();
     (app, instance.guard)
 }
 
 /// Builds Prometheus HTTP routes for either a standalone or distributed frontend.
+/// `memory_limiter` must be set before the handlers are wired (handlers capture
+/// the limiter at wiring time, mirroring production in `frontend::server`).
 pub fn build_test_prom_server(
     frontend_ref: Arc<Instance>,
     enable_batcher: bool,
+    memory_limiter: Option<ServerMemoryLimiter>,
 ) -> HttpServerBuilder {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -886,9 +907,13 @@ pub fn build_test_prom_server(
         None
     };
     assert_eq!(pending_rows_batcher.is_some(), enable_batcher);
-    HttpServerBuilder::new(http_opts)
+    let mut builder = HttpServerBuilder::new(http_opts)
         .with_sql_handler(frontend_ref.clone())
-        .with_logs_handler(frontend_ref.clone())
+        .with_logs_handler(frontend_ref.clone());
+    if let Some(limiter) = memory_limiter {
+        builder = builder.with_memory_limiter(limiter);
+    }
+    builder
         .with_prom_handler(
             frontend_ref.clone(),
             Some(frontend_ref.clone()),
@@ -1248,7 +1273,7 @@ pub async fn setup_pg_server_with_prom_native_histogram(
     let instance = setup_standalone_instance(name, store_type).await;
 
     // Prometheus remote-write HTTP app with native histograms enabled.
-    let http_server = build_test_prom_server(instance.fe_instance().clone(), false)
+    let http_server = build_test_prom_server(instance.fe_instance().clone(), false, None)
         .with_greptime_config_options(instance.opts.datanode_options().to_toml().unwrap())
         .build();
     let app = http_server.build(http_server.make_app()).unwrap();

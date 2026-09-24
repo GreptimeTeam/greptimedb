@@ -73,4 +73,9 @@ impl ServerMemoryLimiter {
     pub fn limit_bytes(&self) -> u64 {
         self.manager.limit_bytes()
     }
+
+    /// Returns currently reserved (in-flight) bytes.
+    pub fn used_bytes(&self) -> u64 {
+        self.manager.used_bytes()
+    }
 }

@@ -108,6 +108,7 @@ pub async fn loki_ingest(
     TypedHeader(content_type): TypedHeader<ContentType>,
     LogTableName(table_name): LogTableName,
     pipeline_info: PipelineInfo,
+    Extension(memory_limiter): Extension<crate::request_memory_limiter::ServerMemoryLimiter>,
     bytes: Bytes,
 ) -> Result<HttpResponse> {
     ctx.set_channel(Channel::Loki);
@@ -127,6 +128,7 @@ pub async fn loki_ingest(
         pipeline_info,
         bytes,
         &ctx,
+        &memory_limiter,
     )
     .await?;
 
@@ -182,6 +184,7 @@ async fn build_loki_context_req(
     pipeline_info: PipelineInfo,
     bytes: Bytes,
     ctx: &QueryContextRef,
+    memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
 ) -> Result<ContextReq> {
     // A pipeline header switches Loki into the generic pipeline path; without
     // it, Loki writes directly to the target log table.
@@ -195,10 +198,12 @@ async fn build_loki_context_req(
                 pipeline_params: pipeline_info.pipeline_params,
                 bytes,
             };
-            build_loki_pipeline_context_req(handler, pipeline_req, ctx).await
+            build_loki_pipeline_context_req(handler, pipeline_req, ctx, memory_limiter).await
         }
         None => {
-            let req = build_loki_raw_insert_request(content_type, table_name, bytes)?;
+            let req =
+                build_loki_raw_insert_request(content_type, table_name, bytes, memory_limiter)
+                    .await?;
             Ok(ContextReq::default_opt_with_reqs(vec![req]))
         }
     }
@@ -208,6 +213,7 @@ async fn build_loki_pipeline_context_req(
     handler: &PipelineHandlerRef,
     pipeline_req: LokiPipelineContextReq,
     ctx: &QueryContextRef,
+    memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
 ) -> Result<ContextReq> {
     let LokiPipelineContextReq {
         content_type,
@@ -223,7 +229,8 @@ async fn build_loki_pipeline_context_req(
         PipelineDefinition::from_name(&pipeline_name, version, None).context(PipelineSnafu)?;
     let pipeline_ctx = PipelineContext::new(&def, &pipeline_params, Channel::Loki);
 
-    let values = extract_item::<LokiPipeline>(content_type, bytes)?
+    let values = extract_item::<LokiPipeline>(content_type, bytes, memory_limiter)
+        .await?
         .map(|item| item.map)
         .collect::<Vec<_>>();
 
@@ -235,14 +242,16 @@ async fn build_loki_pipeline_context_req(
     run_pipeline(handler, &pipeline_ctx, req, ctx, true).await
 }
 
-fn build_loki_raw_insert_request(
+async fn build_loki_raw_insert_request(
     content_type: ContentType,
     table_name: String,
     bytes: Bytes,
+    memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
 ) -> Result<RowInsertRequest> {
     let mut schema_info = SchemaInfo::from_schema_list(LOKI_INIT_SCHEMAS.clone());
     let mut rows = Vec::with_capacity(256);
-    for loki_row in extract_item::<LokiRawItem>(content_type, bytes)? {
+    let loki_rows = extract_item::<LokiRawItem>(content_type, bytes, memory_limiter).await?;
+    for loki_row in loki_rows {
         let mut row = init_row(
             schema_info.schema.len(),
             loki_row.ts,
@@ -275,7 +284,11 @@ fn build_loki_raw_insert_request(
 /// JSON push bodies become `LokiMiddleItem<VrlValue>`, protobuf push bodies
 /// become `LokiMiddleItem<Vec<LabelPairAdapter>>`, and the generic `Into<T>`
 /// conversion selects either direct-write `LokiRawItem` or pipeline `LokiPipeline`.
-fn extract_item<T>(content_type: ContentType, bytes: Bytes) -> Result<Box<dyn Iterator<Item = T>>>
+async fn extract_item<T>(
+    content_type: ContentType,
+    bytes: Bytes,
+    memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
+) -> Result<Box<dyn Iterator<Item = T>>>
 where
     LokiMiddleItem<VrlValue>: Into<T>,
     LokiMiddleItem<Vec<LabelPairAdapter>>: Into<T>,
@@ -285,7 +298,9 @@ where
             LokiJsonParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
         )),
         x if x == *PB_CONTENT_TYPE => Ok(Box::new(
-            LokiPbParser::from_bytes(bytes)?.flat_map(|item| item.into_iter().map(|i| i.into())),
+            LokiPbParser::from_bytes(bytes, memory_limiter)
+                .await?
+                .flat_map(|item| item.into_iter().map(|i| i.into())),
         )),
         _ => UnsupportedContentTypeSnafu { content_type }.fail(),
     }
@@ -554,8 +569,13 @@ pub struct LokiPbParser {
 }
 
 impl LokiPbParser {
-    pub fn from_bytes(bytes: Bytes) -> Result<Self> {
-        let decompressed = snappy_decompress_loki_request(&bytes)?;
+    pub async fn from_bytes(
+        bytes: Bytes,
+        memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
+    ) -> Result<Self> {
+        // `decompressed` carries the memory permits for the decoded bytes and
+        // keeps them alive until the protobuf decoding below is finished.
+        let decompressed = snappy_decompress_loki_request(&bytes, memory_limiter).await?;
         let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
             .context(DecodeLokiRequestSnafu)?;
 
@@ -565,13 +585,34 @@ impl LokiPbParser {
     }
 }
 
-fn snappy_decompress_loki_request(buf: &[u8]) -> Result<Vec<u8>> {
+async fn snappy_decompress_loki_request(
+    buf: &[u8],
+    limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
+) -> Result<crate::prom_store::ChargedBuffer> {
     // Loki's protobuf push body is Snappy-compressed independent of HTTP
     // content-encoding, so keep this decode step explicit.
+    //
+    // The decoded size is validated before the output buffer is allocated:
+    // the raw Snappy header carries the decoded length, and without this cap
+    // a tiny body could declare multiple GiB of output. The declared size is
+    // also charged to the aggregate request-memory limiter before the
+    // allocation, so concurrent Loki pushes cannot bypass the quota. The
+    // returned buffer carries the permits, keeping the reservation alive
+    // until the caller is done with the decoded bytes.
+    let decoded_len = snap::raw::decompress_len(buf).context(DecompressSnappyLokiRequestSnafu)?;
+    ensure!(
+        decoded_len <= crate::prom_store::MAX_DECOMPRESSED_REQUEST_SIZE,
+        crate::error::DecompressedBodyTooLargeSnafu {
+            size: decoded_len as u64,
+            limit: crate::prom_store::MAX_DECOMPRESSED_REQUEST_SIZE as u64,
+        }
+    );
+    let guard = limiter.acquire(decoded_len as u64).await?;
     let mut decoder = Decoder::new();
-    decoder
+    let data = decoder
         .decompress_vec(buf)
-        .context(DecompressSnappyLokiRequestSnafu)
+        .context(DecompressSnappyLokiRequestSnafu)?;
+    Ok(crate::prom_store::ChargedBuffer::new(data, vec![guard]))
 }
 
 impl Iterator for LokiPbParser {
@@ -819,6 +860,7 @@ mod tests {
     use super::*;
     use crate::error::Error::{DecompressSnappyLokiRequest, InvalidLokiLabels};
     use crate::prom_store::snappy_compress;
+    use crate::request_memory_limiter::ServerMemoryLimiter;
 
     const JSON_PAYLOAD: &[u8] = br#"{
         "streams": [
@@ -869,13 +911,15 @@ mod tests {
         assert_eq!(prost_ts_to_nano(&ts), 1731748568804293888);
     }
 
-    #[test]
-    fn test_json_direct_ingest_builds_schema_and_pads_rows() {
+    #[tokio::test]
+    async fn test_json_direct_ingest_builds_schema_and_pads_rows() {
         let request = build_loki_raw_insert_request(
             JSON_CONTENT_TYPE.clone(),
             "custom_loki".to_string(),
             Bytes::from_static(JSON_PAYLOAD),
+            &ServerMemoryLimiter::default(),
         )
+        .await
         .unwrap();
 
         assert_eq!(request.table_name, "custom_loki");
@@ -916,12 +960,14 @@ mod tests {
         assert_eq!(row_string_value(second, 5), Some("worker-0"));
     }
 
-    #[test]
-    fn test_json_pipeline_conversion_names_loki_fields() {
+    #[tokio::test]
+    async fn test_json_pipeline_conversion_names_loki_fields() {
         let items = extract_item::<LokiPipeline>(
             JSON_CONTENT_TYPE.clone(),
             Bytes::from_static(JSON_PAYLOAD),
+            &ServerMemoryLimiter::default(),
         )
+        .await
         .unwrap()
         .collect::<Vec<_>>();
 
@@ -951,8 +997,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_protobuf_parser_decodes_snappy_push_request() {
+    #[tokio::test]
+    async fn test_protobuf_parser_decodes_snappy_push_request() {
         let request = PushRequest {
             streams: vec![StreamAdapter {
                 labels: r#"{job="api"}"#.to_string(),
@@ -973,9 +1019,14 @@ mod tests {
         };
         let bytes = snappy_compress(&request.encode_to_vec()).unwrap();
 
-        let items = extract_item::<LokiRawItem>(PB_CONTENT_TYPE.clone(), Bytes::from(bytes))
-            .unwrap()
-            .collect::<Vec<_>>();
+        let items = extract_item::<LokiRawItem>(
+            PB_CONTENT_TYPE.clone(),
+            Bytes::from(bytes),
+            &ServerMemoryLimiter::default(),
+        )
+        .await
+        .unwrap()
+        .collect::<Vec<_>>();
 
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].ts, 1731748568804293888);
@@ -987,14 +1038,64 @@ mod tests {
         assert!(!items[0].structured_metadata.is_empty());
     }
 
-    #[test]
-    fn test_protobuf_parser_rejects_invalid_snappy_payload() {
-        let err = match LokiPbParser::from_bytes(Bytes::from_static(b"not-snappy")) {
+    #[tokio::test]
+    async fn test_protobuf_parser_rejects_invalid_snappy_payload() {
+        let err = match LokiPbParser::from_bytes(
+            Bytes::from_static(b"not-snappy"),
+            &ServerMemoryLimiter::default(),
+        )
+        .await
+        {
             Ok(_) => panic!("expected invalid snappy payload to fail"),
             Err(err) => err,
         };
 
         assert!(matches!(err, DecompressSnappyLokiRequest { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_protobuf_push_charges_decoded_size() {
+        use common_memory_manager::OnExhaustedPolicy;
+
+        // A valid snappy payload whose decoded size exceeds the 1 KiB quota.
+        let request = loki_proto::logproto::PushRequest {
+            streams: vec![loki_proto::logproto::StreamAdapter {
+                labels: "{job=\"quota\"}".to_string(),
+                entries: std::iter::repeat_with(|| loki_proto::logproto::EntryAdapter {
+                    timestamp: Some(Timestamp {
+                        seconds: 1,
+                        nanos: 0,
+                    }),
+                    line: "x".repeat(256),
+                    ..Default::default()
+                })
+                .take(8)
+                .collect(),
+                ..Default::default()
+            }],
+        };
+        let bytes = Bytes::from(snappy_compress(&request.encode_to_vec()).unwrap());
+
+        let limiter = ServerMemoryLimiter::new(1024, OnExhaustedPolicy::Fail);
+        let err = match LokiPbParser::from_bytes(bytes.clone(), &limiter).await {
+            Ok(_) => panic!("expected quota exhaustion to fail"),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            crate::error::Error::MemoryLimitExceeded { .. }
+        ));
+        assert_eq!(0, limiter.used_bytes(), "failed charge must be released");
+
+        // The same payload fits an adequately sized quota.
+        let limiter = ServerMemoryLimiter::new(64 * 1024, OnExhaustedPolicy::Fail);
+        let parser = LokiPbParser::from_bytes(bytes, &limiter).await.unwrap();
+        assert_eq!(1, parser.streams.len());
+        assert_eq!(
+            0,
+            limiter.used_bytes(),
+            "guards must be released after decode"
+        );
     }
 
     #[test]
