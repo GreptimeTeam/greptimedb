@@ -30,7 +30,6 @@ use promql_parser::parser::{
     VectorMatchCardinality, VectorSelector,
 };
 use snafu::ResultExt;
-use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use super::{BINARY_ISLAND_LEAF_ALIAS_PREFIX, PromPlanner, PromPlannerContext};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
@@ -130,35 +129,6 @@ struct PlannedIslandLeaf {
     ctx: PromPlannerContext,
     alias: TableReference,
     display_table: String,
-}
-
-/// Result labels a vector-vector binary operation derives from its matching modifier, projected
-/// from the operand each label belongs to.
-#[derive(Debug)]
-pub(crate) struct BinaryResultLabels {
-    pub(crate) exprs: Vec<DfExpr>,
-    pub(crate) names: Vec<String>,
-    pub(crate) aggregation_field_labels: Vec<String>,
-    /// `__tsid` column of the operand the labels come from, when that operand contributes its
-    /// whole tag set and the column still identifies the result series.
-    pub(crate) tsid: Option<DfExpr>,
-}
-
-impl BinaryResultLabels {
-    pub(crate) fn apply(&self, ctx: &mut PromPlannerContext) {
-        ctx.tag_columns = self.names.clone();
-        ctx.aggregation_field_labels = self.aggregation_field_labels.clone();
-        ctx.use_tsid = self.tsid.is_some();
-    }
-
-    /// `__tsid` is projected from whichever operand the labels come from, so it carries that
-    /// operand's qualifier. Re-qualify it as the result's own, which is what the context names
-    /// and what the enclosing expression looks the column up by.
-    pub(crate) fn tsid_projection(&self, table_ref: Option<TableReference>) -> Option<DfExpr> {
-        self.tsid
-            .clone()
-            .map(|tsid| tsid.alias_qualified(table_ref, DATA_SCHEMA_TSID_COLUMN_NAME))
-    }
 }
 
 #[derive(Debug)]

@@ -117,7 +117,6 @@ use crate::promql::error::{
     UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
     UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
-use crate::promql::planner::island::BinaryResultLabels;
 use crate::query_engine::QueryEngineState;
 
 /// `time()` function in PromQL.
@@ -201,6 +200,35 @@ pub(crate) struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+}
+
+/// Result labels a vector-vector binary operation derives from its matching modifier, projected
+/// from the operand each label belongs to.
+#[derive(Debug)]
+struct BinaryResultLabels {
+    exprs: Vec<DfExpr>,
+    names: Vec<String>,
+    aggregation_field_labels: Vec<String>,
+    /// `__tsid` column of the operand the labels come from, when that operand contributes its
+    /// whole tag set and the column still identifies the result series.
+    tsid: Option<DfExpr>,
+}
+
+impl BinaryResultLabels {
+    fn apply(&self, ctx: &mut PromPlannerContext) {
+        ctx.tag_columns = self.names.clone();
+        ctx.aggregation_field_labels = self.aggregation_field_labels.clone();
+        ctx.use_tsid = self.tsid.is_some();
+    }
+
+    /// `__tsid` is projected from whichever operand the labels come from, so it carries that
+    /// operand's qualifier. Re-qualify it as the result's own, which is what the context names
+    /// and what the enclosing expression looks the column up by.
+    fn tsid_projection(&self, table_ref: Option<TableReference>) -> Option<DfExpr> {
+        self.tsid
+            .clone()
+            .map(|tsid| tsid.alias_qualified(table_ref, DATA_SCHEMA_TSID_COLUMN_NAME))
+    }
 }
 
 impl PromPlannerContext {
