@@ -26,7 +26,7 @@ use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
-    Array, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -5406,9 +5406,9 @@ async fn test_count_values_expr() {
     let plan = PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
         .await
         .unwrap();
-    let expected = "Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]\
-        \n  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]\
-        \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
+    let expected = "Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
+        \n  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value) AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
+        \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value)]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), prom_float_to_string(prometheus_tsdb_head_series.greptime_value):Utf8;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
         \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
         \n        PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
         \n          Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
@@ -5453,10 +5453,10 @@ async fn test_value_alias() {
         .await
         .unwrap();
     let expected = r#"
-Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, greptime_timestamp:Timestamp(ms)]
-  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]
-    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Float64;N]
-      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
+Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.series, prometheus_tsdb_head_series.greptime_timestamp [my_series:Int64, ip:Utf8, series:Utf8;N, greptime_timestamp:Timestamp(ms)]
+  Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]
+    Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value) AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]
+      Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value)]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), prom_float_to_string(prometheus_tsdb_head_series.greptime_value):Utf8;N, count(prometheus_tsdb_head_series.greptime_value):Int64]
         PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
           PromSeriesDivide: tags=["ip"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
             Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]
@@ -7193,4 +7193,391 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
     let (_, batches) = execute(plan, &state).await;
     let sample_count = batches.iter().map(RecordBatch::num_rows).sum::<usize>();
     assert_eq!(sample_count, 2);
+}
+
+/// Table provider with a single metric `cv_metric` holding three series at `ts=1000`:
+/// `k="a"` and `k="c"` carry the value 1.0, `k="b"` carries 2.0.
+async fn build_count_values_table_provider() -> DfTableSourceProvider {
+    build_count_values_table_provider_with_values(&[1.0, 2.0, 1.0]).await
+}
+
+/// Table provider with a single metric `cv_metric` holding one series per given value at
+/// `ts=1000` (`k` names the series, the sample value is the given value).
+async fn build_count_values_table_provider_with_values(values: &[f64]) -> DfTableSourceProvider {
+    build_count_values_table_provider_with_value_array(Arc::new(Float64Array::from(
+        values.to_vec(),
+    )))
+    .await
+}
+
+/// Like [`build_count_values_table_provider_with_values`], but with a caller provided value
+/// column, so tests can cover value columns that are not `Float64` (e.g. `BIGINT`).
+async fn build_count_values_table_provider_with_value_array(
+    values: ArrayRef,
+) -> DfTableSourceProvider {
+    let value_data_type = ConcreteDataType::from_arrow_type(values.data_type());
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let columns = vec![
+        ColumnSchema::new("k".to_string(), ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(greptime_value().to_string(), value_data_type, true),
+    ];
+    let schema = Arc::new(Schema::new(columns));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema.clone())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = Arc::new(
+        TableInfoBuilder::default()
+            .table_id(3_001)
+            .name("cv_metric")
+            .meta(table_meta)
+            .build()
+            .unwrap(),
+    );
+    let batch = RecordBatch::try_new(
+        schema.arrow_schema().clone(),
+        vec![
+            Arc::new(StringArray::from(
+                (0..values.len())
+                    .map(|index| format!("k{index}"))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000; values.len()])),
+            values.clone(),
+        ],
+    )
+    .unwrap();
+    let backing = GreptimeMemTable::new_with_catalog(
+        "cv_metric",
+        GreptimeRecordBatch::from_df_record_batch(schema, batch),
+        3_001,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let table = Arc::new(Table::new(
+        table_info,
+        FilterPushDownType::Unsupported,
+        backing.data_source(),
+    ));
+
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "cv_metric".to_string(),
+                table_id: 3_001,
+                table,
+            })
+            .is_ok()
+    );
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Collects `(label, value)` pairs of a `count_values` result, where `label` is the
+/// PromQL label generated by `count_values` and `value` is the aggregated sample value.
+///
+/// The generated label holds the original sample value in PromQL's textual form, so it
+/// is asserted as a string: comparing it as a number would not catch formatting bugs
+/// (`1.0` instead of `1`, scientific notation, ...).
+fn count_values_rows<'a>(batches: &'a [RecordBatch], label: &str) -> Vec<(&'a str, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            // The aggregated value is the only numeric column that is not the generated label.
+            let value_index = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|field| {
+                    field.name() != label
+                        && matches!(
+                            field.data_type(),
+                            ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+                        )
+                })
+                .expect("no aggregated value column");
+            let labels = batch
+                .column_by_name(label)
+                .expect("no generated label column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the generated label must be a string column");
+            let values = datafusion::arrow::compute::cast(
+                batch.column(value_index),
+                &ArrowDataType::Float64,
+            )
+            .unwrap();
+            let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+            labels
+                .iter()
+                .zip(values.iter())
+                .map(|(label, value)| (label.unwrap(), value.unwrap()))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(right.0).then(left.1.total_cmp(&right.1)));
+    rows
+}
+
+/// Asserts that a `count_values` result holds one sample per label set and evaluation
+/// timestamp: Prometheus groups by the generated label, so a timestamp must never repeat
+/// a label set (that would mean the samples were still grouped by the overwritten input
+/// label).
+fn assert_unique_label_set_per_timestamp(batches: &[RecordBatch], label: &str) {
+    let mut seen = HashMap::<i64, HashSet<String>>::new();
+    for batch in batches {
+        let timestamp_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| matches!(field.data_type(), ArrowDataType::Timestamp(..)))
+            .expect("no timestamp column");
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column is not a millisecond timestamp");
+        let labels = batch
+            .column_by_name(label)
+            .expect("no generated label column")
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("the generated label must be a string column");
+        for (timestamp, label) in timestamps.iter().zip(labels.iter()) {
+            let timestamp = timestamp.unwrap();
+            let label = label.unwrap();
+            assert!(
+                seen.entry(timestamp).or_default().insert(label.to_string()),
+                "duplicated label set `{label}` at timestamp {timestamp}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_count_values_generated_label_survives_enclosing_expr() {
+    // https://github.com/GreptimeTeam/greptimedb/issues/9181
+    for (case, label) in [
+        (r#"count_values("v", prometheus_tsdb_head_series)"#, "v"),
+        (
+            r#"abs(count_values("v", prometheus_tsdb_head_series))"#,
+            "v",
+        ),
+        (
+            r#"round(count_values("v", prometheus_tsdb_head_series))"#,
+            "v",
+        ),
+        (r#"count_values("v", prometheus_tsdb_head_series) + 1"#, "v"),
+        (
+            r#"topk(1, count_values("v", prometheus_tsdb_head_series))"#,
+            "v",
+        ),
+        (
+            r#"sum by (v) (count_values("v", prometheus_tsdb_head_series))"#,
+            "v",
+        ),
+        (
+            r#"label_replace(count_values("v", prometheus_tsdb_head_series), "vcopy", "$1", "v", "(.*)")"#,
+            "v",
+        ),
+        (
+            r#"count_values("v", prometheus_tsdb_head_series) by (ip) + 1"#,
+            "v",
+        ),
+        // The generated label overwrites an input label with the same name.
+        (
+            r#"count_values("ip", prometheus_tsdb_head_series) by (ip)"#,
+            "ip",
+        ),
+        (
+            r#"count_values("ip", prometheus_tsdb_head_series) by (ip) + 1"#,
+            "ip",
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_test_table_provider_with_fields(
+                &[(
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "prometheus_tsdb_head_series".to_string(),
+                )],
+                &["ip"],
+            )
+            .await,
+            &build_eval_stmt(case),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap();
+
+        let label_columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() == label)
+            .count();
+        assert_eq!(
+            label_columns,
+            1,
+            "{case}: the `{label}` label must survive: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_count_values_generated_label_in_enclosing_expr_execute() {
+    // https://github.com/GreptimeTeam/greptimedb/issues/9181
+    let state = build_query_engine_state();
+    // (query, generated label, expected `(label value, aggregated value)` pairs)
+    for (query, label, expected) in [
+        (
+            r#"count_values("v", cv_metric)"#,
+            "v",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"abs(count_values("v", cv_metric))"#,
+            "v",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"round(count_values("v", cv_metric))"#,
+            "v",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"count_values("v", cv_metric) + 1"#,
+            "v",
+            vec![("1", 3.0), ("2", 2.0)],
+        ),
+        (
+            r#"sum by (v) (count_values("v", cv_metric))"#,
+            "v",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"topk(10, count_values("v", cv_metric))"#,
+            "v",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        // The generated label overwrites the input label with the same name, and the
+        // samples are grouped by the generated label only: `{k="1"}` holds the two
+        // samples of value `1.0` instead of one row per (overwritten label, value).
+        (
+            r#"count_values("k", cv_metric) by (k)"#,
+            "k",
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        assert_eq!(
+            plan.schema()
+                .fields()
+                .iter()
+                .filter(|field| field.name() == label)
+                .count(),
+            1,
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(count_values_rows(&batches, label), expected, "{query}");
+        assert_unique_label_set_per_timestamp(&batches, label);
+    }
+}
+
+#[tokio::test]
+async fn test_count_values_label_is_prometheus_formatted_value() {
+    // PromQL materializes the generated label with `strconv.FormatFloat(value, 'f', -1, 64)`:
+    // the shortest decimal form of the sample value without an exponent. The label is a
+    // label, so it must be a string column holding exactly that text: arrow's
+    // `Float64 -> Utf8` cast would render `1`/`200`/`1e21` as `1.0`/`200.0`/`1e21`.
+    let state = build_query_engine_state();
+    // Samples are grouped by that formatted text, exactly like Prometheus groups by the
+    // generated label: `-0.0` and `0.0` are two series (`-0` and `0`), while values that
+    // round to the same text share one group. `0.0` formats as "0".
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider_with_values(&[
+            -0.0, 0.0, 1.0, 0.5, 200.0, 1e21, 1e-7, 2.5,
+        ])
+        .await,
+        &operator_eval_stmt(r#"count_values("v", cv_metric)"#),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    let (_, batches) = execute(plan, &state).await;
+    assert_unique_label_set_per_timestamp(&batches, "v");
+    let mut labels = count_values_rows(&batches, "v")
+        .into_iter()
+        .map(|(label, _)| label)
+        .collect::<Vec<_>>();
+    labels.sort();
+    assert_eq!(
+        labels,
+        vec![
+            "-0",
+            "0",
+            "0.0000001",
+            "0.5",
+            "1",
+            "1000000000000000000000",
+            "2.5",
+            "200",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
+    // The grouping key of `count_values` is the formatted sample value, not the raw input
+    // value. Two `BIGINT` values that differ below the `Float64` precision (`2^53` and
+    // `2^53 + 1`) cast and format to the same label, so they must share one group and one
+    // count, exactly like Prometheus, which groups by the generated label text.
+    let state = build_query_engine_state();
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider_with_value_array(Arc::new(Int64Array::from(vec![
+            9_007_199_254_740_992_i64,
+            9_007_199_254_740_993_i64,
+        ])))
+        .await,
+        &operator_eval_stmt(r#"count_values("v", cv_metric)"#),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    let (_, batches) = execute(plan, &state).await;
+    // One timestamp must never carry the same label set twice.
+    assert_unique_label_set_per_timestamp(&batches, "v");
+    assert_eq!(
+        count_values_rows(&batches, "v"),
+        vec![("9007199254740992", 2.0)]
+    );
 }

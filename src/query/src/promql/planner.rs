@@ -545,13 +545,76 @@ impl PromPlanner {
                     let label = Self::get_param_value_as_str(*op, param)?;
                     // `count_values` must be grouped by fields,
                     // and project the fields to the new label.
-                    let count_value_exprs = prev_field_exprs.iter().map(|expr| {
-                        match expr {
-                            DfExpr::Column(column) => DfExpr::Column(column.clone()),
-                            _ => DfExpr::Column(Column::from_name(expr.schema_name().to_string())),
-                        }
-                        .alias(label)
-                    });
+                    //
+                    // The generated label is a real label (column) of the output, so it must be
+                    // registered in `ctx.tag_columns` below. Otherwise enclosing expressions
+                    // rebuild their projections from `ctx.tag_columns` and silently drop it.
+                    //
+                    // PromQL sets the generated label *before* the grouping key is built, so an
+                    // input label with the same name is overwritten by the sample value and must
+                    // not remain a grouping key either: samples are grouped by the generated
+                    // label only. Dropping it from the projected tag columns is required as well:
+                    // projecting both would emit two columns with the same name (rejected as an
+                    // ambiguous reference).
+                    self.ctx.tag_columns.retain(|tag| tag != label);
+                    group_exprs.retain(
+                        |expr| !matches!(expr, DfExpr::Column(column) if column.name == label),
+                    );
+                    // The tag columns projected below are unqualified `Column` references, so they
+                    // end up qualified with whatever qualifier they carry in the input plan. Give
+                    // the generated label the same qualifier, otherwise qualified references to it
+                    // (e.g. from an enclosing binary expression or a vector join) fail to resolve.
+                    let label_qualifier = self
+                        .ctx
+                        .time_index_column
+                        .as_deref()
+                        .and_then(|time_index| {
+                            builder
+                                .schema()
+                                .qualified_field_with_unqualified_name(time_index)
+                                .ok()
+                        })
+                        .and_then(|(qualifier, _)| qualifier.cloned());
+                    // The generated label carries the *sample value*, so it must be materialized
+                    // as a string using Prometheus' format
+                    // (`strconv.FormatFloat(value, 'f', -1, 64)`: shortest decimal form without
+                    // an exponent, `1.0` becomes "1"). Labels are inferred from string columns
+                    // when a result is converted into the Prometheus HTTP API JSON format, so a
+                    // numeric label column would be mistaken for the sample value of the series.
+                    let count_value_exprs = prev_field_exprs
+                        .iter()
+                        .map(|expr| {
+                            let value = match expr {
+                                DfExpr::Column(column) => {
+                                    let value = DfExpr::Column(column.clone());
+                                    // `prom_float_to_string` formats exactly like Prometheus,
+                                    // while arrow's `Float64 -> Utf8` cast would render `1.0`.
+                                    let value = if matches!(
+                                        builder.schema().field_with_unqualified_name(&column.name),
+                                        Ok(field) if field.data_type() == &ArrowDataType::Float64
+                                    ) {
+                                        value
+                                    } else {
+                                        DfExpr::Cast(Cast::new(
+                                            Box::new(value),
+                                            ArrowDataType::Float64,
+                                        ))
+                                    };
+                                    DfExpr::ScalarFunction(ScalarFunction {
+                                        func: Arc::new(PromqlFloatToString::scalar_udf()),
+                                        args: vec![value],
+                                    })
+                                }
+                                // The value is already formatted (e.g. a native histogram is
+                                // converted to its string form by the aggregation), and the
+                                // aggregate output names it by its schema name.
+                                _ => DfExpr::Column(Column::from_name(
+                                    expr.schema_name().to_string(),
+                                )),
+                            };
+                            DfExpr::Alias(Alias::new(value, label_qualifier.clone(), label))
+                        })
+                        .collect::<Vec<_>>();
                     let aggregate_group_exprs = group_exprs
                         .iter()
                         .cloned()
@@ -565,11 +628,14 @@ impl PromPlanner {
                         .chain(Some(self.create_time_index_column_expr()?))
                         .chain(count_value_exprs);
 
-                    builder
+                    let builder = builder
                         .aggregate(aggregate_group_exprs, aggr_exprs)
                         .context(DataFusionPlanningSnafu)?
                         .project(project_fields)
-                        .context(DataFusionPlanningSnafu)?
+                        .context(DataFusionPlanningSnafu)?;
+                    // The label only exists in the output schema from here on.
+                    self.ctx.tag_columns.push(label.to_string());
+                    builder
                 } else {
                     builder
                         .aggregate(group_exprs.clone(), aggr_exprs)
@@ -3953,9 +4019,10 @@ impl PromPlanner {
     ///
     /// Returns a tuple of `(aggregate_expressions, previous_field_expressions)` where:
     /// - `aggregate_expressions`: Expressions that apply the aggregate function to the original fields
-    /// - `previous_field_expressions`: Original field expressions before aggregation. This is non-empty
-    ///   only when the operation is `count_values`, as this operation requires preserving the original
-    ///   values for grouping.
+    /// - `previous_field_expressions`: Field expressions naming the pre-aggregation values. This is
+    ///   non-empty only when the operation is `count_values`, which groups by the sample value and
+    ///   projects it as the generated label, so these expressions are passed through the same
+    ///   formatting as that label (`prom_float_to_string`).
     ///
     fn create_aggregate_exprs(
         &mut self,
@@ -3999,14 +4066,13 @@ impl PromPlanner {
             .collect::<Result<Vec<_>>>()?;
 
         // if the aggregator is `count_values`, it must be grouped by current fields.
+        //
+        // The grouping key is the *formatted* sample value, i.e. the same expression that
+        // produces the generated label below: PromQL groups by the value, and the label is
+        // that value in Prometheus' textual form (`strconv.FormatFloat(value, 'f', -1, 64)`),
+        // so grouping by the raw value would split samples that render to one label into
+        // several groups, each emitting the same label set for one timestamp.
         let prev_field_exprs = if op.id() == token::T_COUNT_VALUES {
-            let prev_field_exprs: Vec<_> = self
-                .ctx
-                .field_columns
-                .iter()
-                .map(|col| DfExpr::Column(Column::from_name(col)))
-                .collect();
-
             ensure!(
                 self.ctx.field_columns.len() == 1,
                 UnsupportedExprSnafu {
@@ -4014,7 +4080,28 @@ impl PromPlanner {
                 }
             );
 
-            prev_field_exprs
+            self.ctx
+                .field_columns
+                .iter()
+                .map(|col| {
+                    let value = DfExpr::Column(Column::from_name(col));
+                    // Normalize non `Float64` inputs the same way the label projection does,
+                    // so both sides agree on the formatted value: `prom_float_to_string`
+                    // formats exactly like Prometheus, while arrow's `Float64 -> Utf8` cast
+                    // would render `1.0`.
+                    let value = if Self::field_column_type(input_plan.schema(), col)
+                        == Some(&ArrowDataType::Float64)
+                    {
+                        value
+                    } else {
+                        DfExpr::Cast(Cast::new(Box::new(value), ArrowDataType::Float64))
+                    };
+                    DfExpr::ScalarFunction(ScalarFunction {
+                        func: Arc::new(PromqlFloatToString::scalar_udf()),
+                        args: vec![value],
+                    })
+                })
+                .collect()
         } else {
             vec![]
         };
