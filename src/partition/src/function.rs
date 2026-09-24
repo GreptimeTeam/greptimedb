@@ -50,7 +50,7 @@ impl PartitionFunction {
             )
         };
         let valid = match self {
-            Self::Hash => !types.is_empty() && unpacked.all(string),
+            Self::Hash => !types.is_empty() && unpacked.all(|t| string(t) || t.is_integer()),
             Self::Substring => {
                 (2..=3).contains(&types.len())
                     && unpacked.next().is_some_and(string)
@@ -125,15 +125,33 @@ impl PartitionFunction {
                 Ok(Value::String(result.into()))
             }
             Self::Hash => {
-                // Length-prefixed UTF-8 keeps argument boundaries unambiguous. The
-                // encoding, byte order and MD5 algorithm must remain stable across versions.
+                // Concatenate arguments using this persisted routing encoding:
+                // 0x01 | u64 big-endian byte length | UTF-8 bytes
+                // 0x02 | i64 big-endian two's complement
+                // 0x03 | u64 big-endian
+                // Integer widths normalize within each signedness category.
+                // These tags, encodings and MD5 must remain stable across versions.
                 let mut context = md5::Context::new();
                 for arg in args {
-                    let Value::String(value) = arg else {
-                        unreachable!()
+                    let (tag, bytes): (u8, [u8; 8]) = match arg {
+                        Value::String(value) => {
+                            let bytes = value.as_utf8().as_bytes();
+                            context.consume([0x01]);
+                            context.consume((bytes.len() as u64).to_be_bytes());
+                            context.consume(bytes);
+                            continue;
+                        }
+                        Value::Int8(value) => (0x02, i64::from(*value).to_be_bytes()),
+                        Value::Int16(value) => (0x02, i64::from(*value).to_be_bytes()),
+                        Value::Int32(value) => (0x02, i64::from(*value).to_be_bytes()),
+                        Value::Int64(value) => (0x02, value.to_be_bytes()),
+                        Value::UInt8(value) => (0x03, u64::from(*value).to_be_bytes()),
+                        Value::UInt16(value) => (0x03, u64::from(*value).to_be_bytes()),
+                        Value::UInt32(value) => (0x03, u64::from(*value).to_be_bytes()),
+                        Value::UInt64(value) => (0x03, value.to_be_bytes()),
+                        _ => unreachable!(),
                     };
-                    let bytes = value.as_utf8().as_bytes();
-                    context.consume((bytes.len() as u64).to_be_bytes());
+                    context.consume([tag]);
                     context.consume(bytes);
                 }
                 Ok(Value::String(format!("{:x}", context.finalize()).into()))
@@ -257,7 +275,7 @@ mod tests {
         );
         assert_eq!(
             actual.as_any().downcast_ref::<StringArray>().unwrap(),
-            &StringArray::from(vec!["b6d6f72a44aa4f71d6e041d1c9750933"; 3])
+            &StringArray::from(vec!["8f867eea8fef54c5b939e98da8815f16"; 3])
         );
         let actual = invoke(
             PartitionFunction::Substring,
@@ -313,36 +331,114 @@ mod tests {
     }
 
     #[test]
+    fn test_hash_integer_encoding() {
+        for (values, expected) in [
+            (
+                vec![
+                    Value::Int8(42),
+                    Value::Int16(42),
+                    Value::Int32(42),
+                    Value::Int64(42),
+                ],
+                "1b445199c0b8e60824f46c7d86e180ac",
+            ),
+            (
+                vec![
+                    Value::UInt8(42),
+                    Value::UInt16(42),
+                    Value::UInt32(42),
+                    Value::UInt64(42),
+                ],
+                "0a4a10125f3a80f43632ed08f971e0c1",
+            ),
+            (
+                vec![
+                    Value::Int8(-1),
+                    Value::Int16(-1),
+                    Value::Int32(-1),
+                    Value::Int64(-1),
+                ],
+                "a47c749bf46e53ff2f7c5ce57a2d5df3",
+            ),
+            (
+                vec![Value::Int64(i64::MIN)],
+                "3c1056e64c7f1b90f975993d9233065e",
+            ),
+            (
+                vec![Value::Int64(i64::MAX)],
+                "47e2d97c5bcda90e8c26ff875d8b9c8d",
+            ),
+            (
+                vec![Value::UInt64(u64::MAX)],
+                "bdc3b69973c1a29c29e05e79e380949b",
+            ),
+        ] {
+            for value in values {
+                assert_eq!(
+                    PartitionFunction::Hash.evaluate(&[value]).unwrap(),
+                    Value::from(expected)
+                );
+            }
+        }
+        assert_eq!(
+            PartitionFunction::Hash
+                .evaluate(&[Value::Int64(42), Value::from("host"), Value::UInt64(42)])
+                .unwrap(),
+            Value::from("e7ea8e6691cb06826c104e062afb327d")
+        );
+        assert_eq!(
+            PartitionFunction::Hash
+                .evaluate(&[Value::Int64(42), Value::Null])
+                .unwrap(),
+            Value::Null
+        );
+        for data_type in [
+            DataType::Boolean,
+            DataType::Float32,
+            DataType::Float64,
+            DataType::Decimal128(20, 4),
+            DataType::Date32,
+            DataType::Timestamp(datatypes::arrow::datatypes::TimeUnit::Millisecond, None),
+        ] {
+            assert!(
+                PartitionFunction::Hash
+                    .validate(&[data_type, DataType::Null])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn test_hash_routing_contract() {
         assert_eq!(
             PartitionFunction::Hash
                 .evaluate(&[Value::from("")])
                 .unwrap(),
-            Value::from("7dea362b3fac8e00956a4952a3d4f474")
+            Value::from("53e0f9e230926c8fa946e76e40b78c84")
         );
         assert_eq!(
             PartitionFunction::Hash
                 .evaluate(&[Value::from("abc")])
                 .unwrap(),
-            Value::from("28f2a06351900a402769c453a5b8b051")
+            Value::from("771ab001e65f604d17f50242b0eee2aa")
         );
         assert_eq!(
             PartitionFunction::Hash
                 .evaluate(&[Value::from("a"), Value::from("bc")])
                 .unwrap(),
-            Value::from("b6d6f72a44aa4f71d6e041d1c9750933")
+            Value::from("8f867eea8fef54c5b939e98da8815f16")
         );
         assert_eq!(
             PartitionFunction::Hash
                 .evaluate(&[Value::from("ab"), Value::from("c")])
                 .unwrap(),
-            Value::from("fa4f70db448765d5fa0c807a97ae7749")
+            Value::from("674a210d202926e0fa536e96e3303d9d")
         );
         assert_eq!(
             PartitionFunction::Hash
                 .evaluate(&[Value::from("中"), Value::from("🙂")])
                 .unwrap(),
-            Value::from("5f5571be5e0507619c0b3cdea3e9fc58")
+            Value::from("e492b54b0d91d20fc5b82858ec8ee754")
         );
         assert_eq!(
             PartitionFunction::Hash
@@ -353,7 +449,7 @@ mod tests {
         assert!(PartitionFunction::Hash.evaluate(&[]).is_err());
         assert!(
             PartitionFunction::Hash
-                .evaluate(&[Value::Int64(1)])
+                .evaluate(&[Value::from(1.0_f64)])
                 .is_err()
         );
     }

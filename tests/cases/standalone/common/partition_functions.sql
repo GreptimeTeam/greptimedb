@@ -85,3 +85,19 @@ INSERT INTO guarded_substring VALUES ('a', -1, 5);
 SELECT * FROM guarded_substring ORDER BY ts;
 DROP TABLE substring_source;
 DROP TABLE guarded_substring;
+
+CREATE TABLE integer_hash_routes (tenant_id BIGINT, device_id BIGINT UNSIGNED, host STRING, ts TIMESTAMP TIME INDEX, v INT, PRIMARY KEY(tenant_id, device_id, host))
+PARTITION ON COLUMNS (tenant_id, device_id, host) (
+  hash(tenant_id, device_id, host) < '8',
+  hash(tenant_id, device_id, host) >= '8'
+);
+INSERT INTO integer_hash_routes VALUES (42, 42, 'a', 1, 1), (-1, 18446744073709551615, 'b', 2, 2), (-9223372036854775808, 0, '中', 3, 3), (NULL, 42, 'a', 4, 4), (42, NULL, 'a', 5, 5), (42, 42, NULL, 6, 6);
+ADMIN FLUSH_TABLE('integer_hash_routes');
+
+SHOW CREATE TABLE integer_hash_routes;
+SELECT * FROM integer_hash_routes ORDER BY ts;
+INSERT INTO integer_hash_routes VALUES (42, 42, 'a', 1, 10), (-1, 18446744073709551615, 'b', 2, 20), (-9223372036854775808, 0, '中', 3, 30), (NULL, 42, 'a', 4, 40), (42, NULL, 'a', 5, 50), (42, 42, NULL, 6, 60);
+SELECT * FROM integer_hash_routes ORDER BY ts;
+DELETE FROM integer_hash_routes WHERE tenant_id = -1;
+SELECT * FROM integer_hash_routes ORDER BY ts;
+DROP TABLE integer_hash_routes;

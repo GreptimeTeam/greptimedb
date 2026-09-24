@@ -2922,6 +2922,11 @@ fn convert_function_operand(
         Expr::Value(value) => {
             let data_type = match &value.value {
                 ParserValue::SingleQuotedString(_) => ConcreteDataType::string_datatype(),
+                ParserValue::Number(number, _)
+                    if number.parse::<u64>().is_ok_and(|n| n > i64::MAX as u64) =>
+                {
+                    ConcreteDataType::uint64_datatype()
+                }
                 ParserValue::Number(_, _) => ConcreteDataType::int64_datatype(),
                 ParserValue::Null => ConcreteDataType::null_datatype(),
                 _ => {
@@ -2933,6 +2938,19 @@ fn convert_function_operand(
             };
             let value = convert_value(&value.value, data_type.clone(), timezone, None)?;
             return Ok((Operand::Value(value), data_type));
+        }
+        Expr::UnaryOp { op, expr: inner }
+            if matches!(op, UnaryOperator::Plus | UnaryOperator::Minus)
+                && let Expr::Value(value) = inner.as_ref()
+                && let ParserValue::Number(number, long) = &value.value =>
+        {
+            // Parse the sign with the number so i64::MIN does not overflow first.
+            let value = ParserValue::Number(format!("{op}{number}"), *long);
+            return convert_function_operand(
+                &Expr::Value(value.with_empty_span()),
+                columns,
+                timezone,
+            );
         }
         Expr::UnaryOp { .. } => {
             let data_type = ConcreteDataType::int64_datatype();
@@ -3785,9 +3803,13 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
     fn test_partition_functions_conversion() {
         let host = "host".to_string();
         let count = "count".to_string();
+        let device = "device".to_string();
+        let measure = "measure".to_string();
         let columns = HashMap::from([
             (&host, ConcreteDataType::string_datatype()),
             (&count, ConcreteDataType::int64_datatype()),
+            (&device, ConcreteDataType::uint64_datatype()),
+            (&measure, ConcreteDataType::float64_datatype()),
         ]);
         let timezone = Timezone::from_tz_string("UTC").unwrap();
         let dialect = GreptimeDbDialect {};
@@ -3795,6 +3817,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
             "substring(host, 1, 2) < 'm'",
             "substring(host FROM 1 FOR 2) < 'm'",
             "hash(host, 'idc') >= '8'",
+            "hash(count, host, device) < '8'",
+            "hash(-9223372036854775808, host, 18446744073709551615) < '8'",
             "substring(hash(host), 1) < '8'",
             "hash(substring(host, 1, 1), host) < '8'",
             "substring(host, count) < 'm'",
@@ -3821,7 +3845,8 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         }
         for sql in [
             "hash() < '8'",
-            "hash(count) < '8'",
+            "hash(measure) < '8'",
+            "hash(CAST(count AS STRING)) < '8'",
             "hash(missing) < '8'",
             "hash(DISTINCT host) < '8'",
             "hash(*) < '8'",

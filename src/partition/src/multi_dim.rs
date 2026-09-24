@@ -835,6 +835,85 @@ mod tests {
     }
 
     #[test]
+    fn test_integer_hash_partition_row_batch_and_restore() {
+        use datatypes::arrow::array::{Int64Array, StringArray, UInt64Array};
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        use crate::function::PartitionFunction;
+        let hash = Operand::Function {
+            function: PartitionFunction::Hash,
+            args: ["tenant", "device", "host"]
+                .into_iter()
+                .map(|name| Operand::Column(name.into()))
+                .collect(),
+        };
+        let expressions = [
+            hash.clone().lt(Value::from("8")),
+            hash.gt_eq(Value::from("8")),
+        ]
+        .iter()
+        .map(|expr| {
+            PartitionExpr::from_json_str(&expr.as_json_str().unwrap())
+                .unwrap()
+                .unwrap()
+        })
+        .collect();
+        let rule = MultiDimPartitionRule::try_new(
+            vec!["tenant".into(), "device".into(), "host".into()],
+            vec![1, 2],
+            expressions,
+            true,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("tenant", DataType::Int64, true),
+                Field::new("device", DataType::UInt64, true),
+                Field::new("host", DataType::Utf8, true),
+            ])),
+            vec![
+                Arc::new(Int64Array::from(vec![
+                    Some(42),
+                    Some(-1),
+                    Some(i64::MIN),
+                    None,
+                    Some(42),
+                    Some(42),
+                ])),
+                Arc::new(UInt64Array::from(vec![
+                    Some(42),
+                    Some(u64::MAX),
+                    Some(0),
+                    Some(42),
+                    None,
+                    Some(42),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("a"),
+                    Some("b"),
+                    Some("中"),
+                    Some("a"),
+                    Some("a"),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+        let columns = rule.record_batch_to_cols(&batch).unwrap();
+        let physical = rule.split_record_batch(&batch).unwrap();
+        for (row, expected) in [2, 2, 1, 1, 1, 1].into_iter().enumerate() {
+            let values = columns
+                .iter()
+                .map(|column| column.get(row))
+                .collect::<Vec<_>>();
+            assert_eq!(rule.find_region(&values).unwrap(), expected);
+            for (region, mask) in &physical {
+                assert_eq!(mask.array().value(row), *region == expected);
+            }
+        }
+    }
+
+    #[test]
     fn test_find_region() {
         // PARTITION ON COLUMNS (b) (
         //     b < 'hz',
