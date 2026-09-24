@@ -185,10 +185,12 @@ TQL EVAL (100, 400, '100s') at_modifier_gauge @ end();
 
 -- 4. Range selector anchored by `@`: the call directly above the anchored range selector is
 -- evaluated once, at the start of the evaluation, and its result is reported at every step — the
--- planner's counterpart of Prometheus' `StepInvariantExpr`. The window `[0s, 300s]` holds the
--- counter going from 0 to 300 for host 'a' (1.0 per second) and from 100 to 250 for host 'b'
--- (0.5 per second); every step must report those same per-series values, and both series must be
--- there at every step.
+-- planner's counterpart of Prometheus' `StepInvariantExpr`. The window `(0s, 300s]` is left-open,
+-- so it holds 60 -> 300 for host 'a' and 130 -> 250 for host 'b', i.e. 240 and 120 units. The 60s
+-- gap to the window start is below the extrapolation threshold (1.1 x the 60s sampling interval),
+-- so `rate` adds it and divides by the 300s window: 240 * 1.25 / 300 = 1.0 and
+-- 120 * 1.25 / 300 = 0.5 per second. Every step must report those same per-series values, and both
+-- series must be there at every step.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300);
 
@@ -208,11 +210,11 @@ TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300);
 +---------------------+------------------------------------------+------+
 
 -- Consistency: every step of the query above must equal the anchored value of its own series, as a
--- separate instant query. The instant query below folds the same window `[0s, 300s]` and reports
--- the anchored values (1.0 per second for 'a', 0.5 for 'b'), and the comparisons after it must
--- therefore stay empty for the matching series: a `rate` drifting with the outer evaluation
--- timestamp would report 0.7 / 0.5 / 0.3 for host 'a' and show up in the first one, and a series
--- that lost its anchor (or was read from the wrong one) shows up in one of them as well.
+-- separate instant query. The instant query below folds the same left-open `(0s, 300s]` window and
+-- reports the anchored values (1.0 per second for 'a', 0.5 for 'b'), so the comparison after it
+-- must stay empty for the matching series: a `rate` that followed the outer evaluation timestamp
+-- instead of the anchor would report values other than 1.0 at some steps and show up there, and a
+-- series that lost its anchor (or was read from the wrong one) shows up there as well.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 300, '1s') rate(at_modifier_counter_total[5m]);
 
@@ -259,9 +261,11 @@ TQL EVAL (0, 240, '60s') rate((at_modifier_counter_total[5m] @ 300));
 
 -- The same holds for `@ start()` and `@ end()`, which are also fixed anchors: they resolve to the
 -- statement's evaluation range, so a range call using them is evaluated once as well.
--- The statement starts at 60s: the window is `[-240s, 60s]`, which holds 60 counter units over 60s
--- for host 'a' (0.2 per second with the counter-start extrapolation) and 30 units for host 'b'
--- (0.15 per second, as its counter does not start at zero).
+-- The statement starts at 60s: the window `(-240s, 60s]` holds only the samples at 0s and 60s, so
+-- host 'a' goes 0 -> 60 and host 'b' 100 -> 130. The far 240s gap to the window start is beyond the
+-- extrapolation threshold (1.1 x the 60s interval), so only half an interval (30s) is added there;
+-- host 'a' starts its counter at 0, which clamps that back: 60 / 300 = 0.2 and
+-- 30 * 1.5 / 300 = 0.15 per second.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (60, 300, '60s') rate(at_modifier_counter_total[5m] @ start());
 
@@ -291,8 +295,10 @@ TQL EVAL (60, 60, '1s') rate(at_modifier_counter_total[5m]);
 | 1970-01-01T00:01:00 | 0.2                                      | a    |
 +---------------------+------------------------------------------+------+
 
--- The statement ends at 240s: the window is `[-60s, 240s]`, which holds 240 counter units over
--- 240s for host 'a' (0.8 per second) and 120 units for host 'b' (0.5 per second).
+-- The statement ends at 240s: the window `(-60s, 240s]` holds the samples 0s to 240s, so host 'a'
+-- goes 0 -> 240 and host 'b' 100 -> 220. The 60s gap to the window start is added for both, but
+-- host 'a' starts at zero, which clamps it back (240 / 300 = 0.8 per second) while host 'b' keeps
+-- it (120 * 1.25 / 300 = 0.5 per second).
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ end());
 
@@ -338,8 +344,9 @@ TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m]);
 | 1970-01-01T00:04:00 | 0.8                                      | a    |
 +---------------------+------------------------------------------+------+
 
--- `@ start()` on a range selector: the window `[-300s, 0s]` contains a single sample per series, so
--- `count_over_time` returns 1 at every step for both of them.
+-- `@ start()` on a range selector: the window `(-300s, 0s]` is left-open, so it holds a single
+-- sample per series — the one exactly at the anchor — and `count_over_time` returns 1 at every step
+-- for both of them.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 300, '100s') count_over_time(at_modifier_counter_total[5m] @ start());
 
@@ -554,37 +561,37 @@ TQL EVAL (100, 400, '100s') abs(at_modifier_gauge @ 300);
 +---------------------+----------+------+
 
 -- 10. `predict_linear` over an anchored range selector: the regression is centered on the
--- evaluation instant of the step, not on the last sample of the window. The anchored window
--- `[0s, 300s]` of host 'a' rises by 1.0 per minute, so each step predicts 60s ahead of the trend
--- read at its own instant: 6.0 at 300s and 7.0 at 360s, not the same value twice.
+-- evaluation instant of the step, not on the last sample of the window. The window `(0s, 300s]` of
+-- host 'a' is left-open (the sample at 0s is outside it) and rises by 1.0 per minute, so each step
+-- predicts 60s ahead of the trend read at its own instant: 6.0 at 300s and 7.0 at 360s.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 360, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 300, 60);
 
-+---------------------+-------------------------------------------------------------+------+
-| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(0)) | host |
-+---------------------+-------------------------------------------------------------+------+
-| 1970-01-01T00:05:00 | 6.0                                                         | a    |
-| 1970-01-01T00:06:00 | 7.0                                                         | a    |
-+---------------------+-------------------------------------------------------------+------+
++---------------------+-----------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60)) | host |
++---------------------+-----------------------------------------------+------+
+| 1970-01-01T00:05:00 | 6.0                                           | a    |
+| 1970-01-01T00:06:00 | 7.0                                           | a    |
++---------------------+-----------------------------------------------+------+
 
--- The anchor and the start of the evaluation differ here, so the window is `[0s, 240s]` shifted
--- by `at_offset` = 300s - 240s = 60s. Every step must follow the evaluation grid (6.0 to 11.0);
--- a regression read at the wrong instant predicts 60s ahead of the window's last sample instead,
--- i.e. 5.0 at every step — the sample at 240s is 4.0 and the trend rises by 1.0 per minute — and
--- shows up as a constant here.
+-- The anchor and the start of the evaluation differ here, so the window `(-60s, 240s]` — samples 0s
+-- to 240s — is shifted by `at_offset` = 300s - 240s = 60s. Every step must follow the evaluation
+-- grid (6.0 to 11.0); a regression read at the wrong instant predicts 60s ahead of the window's
+-- last sample instead, i.e. 5.0 at every step — the sample at 240s is 4.0 and the trend rises by
+-- 1.0 per minute — and shows up as a constant here.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 600, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 240, 60);
 
-+---------------------+-----------------------------------------------------------------+------+
-| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(60000)) | host |
-+---------------------+-----------------------------------------------------------------+------+
-| 1970-01-01T00:05:00 | 6.0                                                             | a    |
-| 1970-01-01T00:06:00 | 7.0                                                             | a    |
-| 1970-01-01T00:07:00 | 8.0                                                             | a    |
-| 1970-01-01T00:08:00 | 9.0                                                             | a    |
-| 1970-01-01T00:09:00 | 10.0                                                            | a    |
-| 1970-01-01T00:10:00 | 11.0                                                            | a    |
-+---------------------+-----------------------------------------------------------------+------+
++---------------------+-----------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60)) | host |
++---------------------+-----------------------------------------------+------+
+| 1970-01-01T00:05:00 | 6.0                                           | a    |
+| 1970-01-01T00:06:00 | 7.0                                           | a    |
+| 1970-01-01T00:07:00 | 8.0                                           | a    |
+| 1970-01-01T00:08:00 | 9.0                                           | a    |
+| 1970-01-01T00:09:00 | 10.0                                          | a    |
+| 1970-01-01T00:10:00 | 11.0                                          | a    |
++---------------------+-----------------------------------------------+------+
 
 -- Control: without `@` every step folds its own window, whose last sample is up to a step older
 -- than the evaluation instant. Reading the regression off that sample reports 6.0 / 7.0 instead
@@ -592,25 +599,25 @@ TQL EVAL (300, 600, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 240,
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m], 60);
 
-+---------------------+-------------------------------------------------------------+------+
-| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(0)) | host |
-+---------------------+-------------------------------------------------------------+------+
-| 1970-01-01T00:05:30 | 6.5                                                         | a    |
-| 1970-01-01T00:06:30 | 7.5                                                         | a    |
-+---------------------+-------------------------------------------------------------+------+
++---------------------+-----------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60)) | host |
++---------------------+-----------------------------------------------+------+
+| 1970-01-01T00:05:30 | 6.5                                           | a    |
+| 1970-01-01T00:06:30 | 7.5                                           | a    |
++---------------------+-----------------------------------------------+------+
 
 -- The same holds with an `offset`, which shifts the whole window backwards without moving the
--- evaluation instants: the window of step `T` is `[T - 1m - 5m, T - 1m]`, and the trend is read
--- at `T`, i.e. one minute past its newest sample.
+-- evaluation instants: the window of step `T` is the left-open `(T - 1m - 5m, T - 1m]`, and the
+-- trend is read at `T`, i.e. one minute past its newest sample.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset 1m, 60);
 
-+---------------------+-----------------------------------------------------------------+------+
-| ts                  | prom_predict_linear(ts_range,val,Float64(60),ts + Int64(60000)) | host |
-+---------------------+-----------------------------------------------------------------+------+
-| 1970-01-01T00:05:30 | 6.5                                                             | a    |
-| 1970-01-01T00:06:30 | 7.5                                                             | a    |
-+---------------------+-----------------------------------------------------------------+------+
++---------------------+-----------------------------------------------+------+
+| ts                  | prom_predict_linear(ts_range,val,Float64(60)) | host |
++---------------------+-----------------------------------------------+------+
+| 1970-01-01T00:05:30 | 6.5                                           | a    |
+| 1970-01-01T00:06:30 | 7.5                                           | a    |
++---------------------+-----------------------------------------------+------+
 
 -- `timestamp()` of an anchored instant selector is not promoted either: its argument is an
 -- instant selector, not a range selector, so the selector anchors and replays its sample per series
