@@ -156,7 +156,7 @@ impl ExprPlanner for JsonExprPlanner {
             Expr::Column(Column::from((qualifier, field))),
             Expr::Literal(ScalarValue::Utf8(Some(path)), None),
         ];
-        apply_json_type_hint(field, &mut args)?;
+        apply_json_type_hint(field, nested_names, &mut args)?;
 
         Ok(PlannerResult::Planned(Expr::ScalarFunction(
             ScalarFunction::new_udf(json_get, args),
@@ -177,7 +177,9 @@ impl ExprPlanner for JsonExprPlanner {
             && let Expr::Column(column) = &expr.args[0]
         {
             let field = schema.field_from_column(column)?;
-            apply_json_type_hint(field, &mut expr.args)?;
+            if let Some(path) = json_get_object_path(&expr.args[1]) {
+                apply_json_type_hint(field, &path, &mut expr.args)?;
+            }
         }
         push_function_arg_types(expr.func.as_ref(), &mut expr.args)?;
         Ok(PlannerResult::Original(expr))
@@ -208,20 +210,30 @@ impl ExprPlanner for JsonExprPlanner {
 
 /// Sets the native read type for an exact hinted object path. Both SQL syntaxes use this before
 /// an enclosing expression can infer a type or push down a cast.
-fn apply_json_type_hint(field: &Field, args: &mut Vec<Expr>) -> Result<()> {
+fn apply_json_type_hint(field: &Field, path: &[String], args: &mut Vec<Expr>) -> Result<()> {
     if !is_json2_extension_type(field) || args.len() != 2 {
         return Ok(());
     }
-    let Some(Expr::Literal(value, _)) = args.get(1) else {
-        return Ok(());
-    };
-    let Some(Some(path)) = value.try_as_str() else {
-        return Ok(());
-    };
-    // Hint lookup does not replace the existing JSONPath validation and its errors.
-    let Ok(json_path) = parse_json_get_path(path) else {
-        return Ok(());
-    };
+    if let Some(json_type) = json_type_hint(field, path)? {
+        args.push(Expr::Literal(
+            ScalarValue::try_new_null(&json_type.as_arrow_type())?,
+            None,
+        ));
+    }
+    Ok(())
+}
+
+/// Resolves `json_get`'s second argument expression (the path) to object field names for type hint
+/// lookup. For example, the string literal `'$.user.age'` resolves to `["user", "age"]`.
+///
+/// Returns `None` for non-string literals, non-literal expressions, invalid JSONPaths, or paths
+/// containing array indexes, wildcards, or filters.
+/// Returning `None` only skips hint injection; the original `json_get` expression is preserved.
+fn json_get_object_path(expr: &Expr) -> Option<Vec<String>> {
+    let path = expr.as_literal()?.try_as_str().flatten()?;
+    // Invalid paths skip hint lookup here. Later planning still validates the path and reports
+    // the error, preserving the existing JSONPath error behavior.
+    let json_path = parse_json_get_path(path).ok()?;
     let mut names = Vec::new();
     for segment in json_path.paths {
         match segment {
@@ -230,16 +242,10 @@ fn apply_json_type_hint(field: &Field, args: &mut Vec<Expr>) -> Result<()> {
                 names.push(name.into_owned());
             }
             // Array indexes, wildcards and filters do not identify a hinted object path.
-            _ => return Ok(()),
+            _ => return None,
         }
     }
-    if let Some(json_type) = json_type_hint(field, &names)? {
-        args.push(Expr::Literal(
-            ScalarValue::try_new_null(&json_type.as_arrow_type())?,
-            None,
-        ));
-    }
-    Ok(())
+    Some(names)
 }
 
 /// Returns the configured native type for an exact JSON2 object path.
