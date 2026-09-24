@@ -162,6 +162,7 @@ FROM (
 
 -- On partitioned tables the aggregates are split into partial state and merge.
 -- Rows only land in two of the three partitions, the third one has an empty state.
+-- The two non-empty partitions differ in row count and mean, so vec_avg must weight by count.
 CREATE TABLE vector_aggr_partitioned (
     ts TIMESTAMP TIME INDEX,
     k INT,
@@ -173,8 +174,9 @@ PARTITION ON COLUMNS (k) (k < 10, k >= 10 AND k < 20, k >= 20);
 
 INSERT INTO vector_aggr_partitioned VALUES
     (1000, 1, 'a', '[1.0, 1.0]'),
-    (2000, 11, 'a', '[2.0, 2.0]'),
+    (2000, 11, 'a', '[8.0, 8.0]'),
     (3000, 2, 'a', '[3.0, 3.0]'),
+    (3500, 3, 'a', '[5.0, 5.0]'),
     (4000, 12, 'b', '[4.0, 4.0]');
 
 SELECT vec_to_string(vec_sum(v)), vec_to_string(vec_avg(v)), vec_to_string(vec_product(v))

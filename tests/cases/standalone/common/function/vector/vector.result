@@ -466,6 +466,7 @@ FROM (
 
 -- On partitioned tables the aggregates are split into partial state and merge.
 -- Rows only land in two of the three partitions, the third one has an empty state.
+-- The two non-empty partitions differ in row count and mean, so vec_avg must weight by count.
 CREATE TABLE vector_aggr_partitioned (
     ts TIMESTAMP TIME INDEX,
     k INT,
@@ -479,11 +480,12 @@ Affected Rows: 0
 
 INSERT INTO vector_aggr_partitioned VALUES
     (1000, 1, 'a', '[1.0, 1.0]'),
-    (2000, 11, 'a', '[2.0, 2.0]'),
+    (2000, 11, 'a', '[8.0, 8.0]'),
     (3000, 2, 'a', '[3.0, 3.0]'),
+    (3500, 3, 'a', '[5.0, 5.0]'),
     (4000, 12, 'b', '[4.0, 4.0]');
 
-Affected Rows: 4
+Affected Rows: 5
 
 SELECT vec_to_string(vec_sum(v)), vec_to_string(vec_avg(v)), vec_to_string(vec_product(v))
 FROM vector_aggr_partitioned;
@@ -491,7 +493,7 @@ FROM vector_aggr_partitioned;
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 | vec_to_string(vec_sum(vector_aggr_partitioned.v)) | vec_to_string(vec_avg(vector_aggr_partitioned.v)) | vec_to_string(vec_product(vector_aggr_partitioned.v)) |
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
-| [10,10]                                           | [2.5,2.5]                                         | [24,24]                                               |
+| [21,21]                                           | [4.2,4.2]                                         | [480,480]                                             |
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 
 SELECT g, vec_to_string(vec_sum(v)), vec_to_string(vec_avg(v)), vec_to_string(vec_product(v))
@@ -500,7 +502,7 @@ FROM vector_aggr_partitioned GROUP BY g ORDER BY g;
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 | g | vec_to_string(vec_sum(vector_aggr_partitioned.v)) | vec_to_string(vec_avg(vector_aggr_partitioned.v)) | vec_to_string(vec_product(vector_aggr_partitioned.v)) |
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
-| a | [6,6]                                             | [2,2]                                             | [6,6]                                                 |
+| a | [17,17]                                           | [4.25,4.25]                                       | [120,120]                                             |
 | b | [4,4]                                             | [4,4]                                             | [4,4]                                                 |
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 
@@ -515,7 +517,7 @@ FROM vector_aggr_partitioned;
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 | vec_to_string(vec_sum(vector_aggr_partitioned.v)) | vec_to_string(vec_avg(vector_aggr_partitioned.v)) | vec_to_string(vec_product(vector_aggr_partitioned.v)) |
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
-|                                                   | [2.5,2.5]                                         |                                                       |
+|                                                   | [4.2,4.2]                                         |                                                       |
 +---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 
 SELECT g, vec_to_string(vec_sum(v)), vec_to_string(vec_avg(v)), vec_to_string(vec_product(v))
@@ -524,7 +526,7 @@ FROM vector_aggr_partitioned GROUP BY g ORDER BY g;
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 | g | vec_to_string(vec_sum(vector_aggr_partitioned.v)) | vec_to_string(vec_avg(vector_aggr_partitioned.v)) | vec_to_string(vec_product(vector_aggr_partitioned.v)) |
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
-| a | [6,6]                                             | [2,2]                                             | [6,6]                                                 |
+| a | [17,17]                                           | [4.25,4.25]                                       | [120,120]                                             |
 | b |                                                   | [4,4]                                             |                                                       |
 +---+---------------------------------------------------+---------------------------------------------------+-------------------------------------------------------+
 
