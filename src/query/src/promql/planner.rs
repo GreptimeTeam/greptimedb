@@ -208,6 +208,16 @@ struct PromPlannerContext {
     time_index_column: Option<String>,
     field_columns: Vec<String>,
     tag_columns: Vec<String>,
+    /// Whether the selectors planned for the current operand materialize their metric name.
+    ///
+    /// PromQL reads the metric name as a label of every series a selector produces, but the name
+    /// is the table being scanned rather than one of its columns. The planner materializes it as a
+    /// constant `__name__` column only where the expression observes it: the operands of a set
+    /// operator, which report each side's own name, and of a modifier that matches on
+    /// `on(__name__)`. Every other selector keeps the output columns it has without a name column
+    /// — a result that selects one metric table is named by the caller from its own selector — and
+    /// a table that stores a `__name__` column of its own is only ever read, never rewritten.
+    materialize_metric_name: bool,
     /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
     /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
     ///
@@ -1414,7 +1424,29 @@ impl PromPlanner {
         Ok(plan)
     }
 
+    /// Plans a binary expression.
+    ///
+    /// A set operator reports each operand's own labels — the metric name among them — and a
+    /// modifier that names `on(__name__)` matches on the metric name, so the selectors both
+    /// operands read have to materialize their name as a `__name__` column. Every other binary
+    /// expression keeps the output schema it has without one.
     async fn prom_binary_expr_to_plan(
+        &mut self,
+        query_engine_state: &QueryEngineState,
+        binary_expr: &PromBinaryExpr,
+    ) -> Result<LogicalPlan> {
+        let materialize = self.ctx.materialize_metric_name
+            || Self::is_token_a_set_op(binary_expr.op)
+            || Self::on_matches_metric_name(&binary_expr.modifier);
+        let outer = std::mem::replace(&mut self.ctx.materialize_metric_name, materialize);
+        let plan = self
+            .prom_binary_expr_to_plan_inner(query_engine_state, binary_expr)
+            .await;
+        self.ctx.materialize_metric_name = outer;
+        plan
+    }
+
+    async fn prom_binary_expr_to_plan_inner(
         &mut self,
         query_engine_state: &QueryEngineState,
         binary_expr: &PromBinaryExpr,
@@ -1694,31 +1726,6 @@ impl PromPlanner {
 
                 // set op has "special" join semantics
                 if Self::is_token_a_set_op(*op) {
-                    // A metric name union materializes `__name__` as a label column, while a
-                    // selector that names one metric table carries no such column at all. A set
-                    // operator reports each operand's own labels — and `on(__name__)` compares
-                    // the name — so every operand written as a selector is extended with its own
-                    // constant name whenever its own labels do not carry the column yet,
-                    // independently of the other operand: a union that observed an empty metric
-                    // materializes no name at all, and the exact selector beside it must still
-                    // report its printed name. Only a selector written directly, possibly
-                    // parenthesized, may be extended: a derived expression keeps the context's
-                    // table name, but its labels are not that table's labels.
-                    for (expr, input, context) in [
-                        (lhs, &mut left_input, &mut left_context),
-                        (rhs, &mut right_input, &mut right_context),
-                    ] {
-                        if context
-                            .tag_columns
-                            .iter()
-                            .any(|column| column == METRIC_NAME)
-                        {
-                            continue;
-                        }
-                        if let Some(name) = Self::direct_selector_metric_name(expr) {
-                            *input = Self::extend_with_metric_name(input, &name, context)?;
-                        }
-                    }
                     return self.set_op_on_non_field_columns(
                         left_input,
                         right_input,
@@ -1956,16 +1963,19 @@ impl PromPlanner {
                         && lhs.value_type() == ValueType::Vector
                         && rhs.value_type() == ValueType::Vector
                     {
-                        let retained_before = project_context.tag_columns.len();
+                        // `__tsid` identifies the series by its tags, not by the metric name, so
+                        // a reduction that removes only the name — which `on(...)` does not name
+                        // by default — still describes the same series. Only a dropped tag makes
+                        // the reduced sample a different one than the tsid identifies.
+                        let dropped_tag = project_context
+                            .tag_columns
+                            .iter()
+                            .filter(|column| column.as_str() != METRIC_NAME)
+                            .any(|column| !on_labels.labels.iter().any(|label| label == column));
                         project_context
                             .tag_columns
                             .retain(|column| on_labels.labels.iter().any(|label| label == column));
-                        // `__tsid` identifies the labels a sample was read with. As soon as the
-                        // reduction drops a label the reported sample is no longer that series, so
-                        // a downstream join keyed on the tsid would match on the labels before the
-                        // comparison and drop rows the reduced labels still match. Keeping the tsid
-                        // is only sound while the label set is untouched.
-                        if project_context.tag_columns.len() < retained_before {
+                        if dropped_tag {
                             project_context.use_tsid = false;
                         }
                     }
@@ -2846,26 +2856,86 @@ impl PromPlanner {
         });
 
         // make series_normalize plan
-        if !is_range_selector && offset_duration == 0 {
-            return Ok(divide_plan);
-        }
-        let series_normalize = SeriesNormalize::new(
-            offset_duration,
-            self.ctx
-                .time_index_column
-                .clone()
-                .with_context(|| TimeIndexNotFoundSnafu {
-                    table: self.ctx.table_name.clone().unwrap_or_default(),
-                })?,
-            is_range_selector,
-            series_key_columns,
-            divide_plan,
-        );
-        let logical_plan = LogicalPlan::Extension(Extension {
-            node: Arc::new(series_normalize),
-        });
+        let normalized = if !is_range_selector && offset_duration == 0 {
+            divide_plan
+        } else {
+            let series_normalize = SeriesNormalize::new(
+                offset_duration,
+                self.ctx
+                    .time_index_column
+                    .clone()
+                    .with_context(|| TimeIndexNotFoundSnafu {
+                        table: self.ctx.table_name.clone().unwrap_or_default(),
+                    })?,
+                is_range_selector,
+                series_key_columns,
+                divide_plan,
+            );
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(series_normalize),
+            })
+        };
 
-        Ok(logical_plan)
+        self.materialize_selector_metric_name(normalized)
+    }
+
+    /// Materializes the metric name of a selector that names one metric table as a `__name__`
+    /// label column of every row it produces.
+    ///
+    /// PromQL treats the metric name as a label of the series a selector reads, although the
+    /// name is the table being scanned rather than one of its columns: a set operator reports
+    /// each operand's own name, and `on(__name__, ...)` matches on it. The name is materialized
+    /// for the operands of exactly those expressions — see
+    /// [`PromPlannerContext::materialize_metric_name`] — because the output columns of a query
+    /// that never observes the name do not include it, and it is projected once, here, instead of
+    /// every consumer recovering the name from the query text. It is the same constant column a
+    /// metric name union materializes for each of its branches, and it is added above the series
+    /// key, so the rows a selector emits, their order, and the series they are split into are
+    /// unchanged.
+    fn materialize_selector_metric_name(&mut self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        // The expression this selector belongs to does not observe the metric name, so the
+        // selector keeps the columns it would have without one: a plain selector result reports
+        // the value, the labels and the time index, and the caller names a single metric table
+        // from its own selector.
+        if !self.ctx.materialize_metric_name {
+            return Ok(plan);
+        }
+
+        let Some(name) = self.ctx.table_name.clone().filter(|name| !name.is_empty()) else {
+            return Ok(plan);
+        };
+        // A table may already store a column with this name. Preserve its values rather
+        // than replacing data or introducing a duplicate column.
+        if self
+            .ctx
+            .tag_columns
+            .iter()
+            .chain(self.ctx.field_columns.iter())
+            .chain(self.ctx.time_index_column.iter())
+            .any(|column| column == METRIC_NAME)
+        {
+            return Ok(plan);
+        }
+
+        let visible = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        let plan = LogicalPlanBuilder::from(plan)
+            .project(
+                visible
+                    .into_iter()
+                    .chain([lit(name).alias(METRIC_NAME)])
+                    .collect::<Vec<_>>(),
+            )
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        self.ctx.tag_columns.push(METRIC_NAME.to_string());
+        Ok(plan)
     }
 
     /// Returns the metric tables whose name matches every `__name__` matcher of a selector.
@@ -3740,7 +3810,11 @@ impl PromPlanner {
 
         let scan_table = self.table_from_source(&scan_provider)?;
 
+        // A stored `__name__` tag participates in the metric engine's TSID. Unlike the
+        // constant name added by the selector, dropping it from a matching key changes the
+        // series identity; compare the actual labels instead of the TSID in this case.
         let use_tsid = table_id_filter.is_some()
+            && !self.ctx.tag_columns.iter().any(|tag| tag == METRIC_NAME)
             && scan_table
                 .schema()
                 .column_schema_by_name(DATA_SCHEMA_TSID_COLUMN_NAME)
@@ -6930,17 +7004,23 @@ impl PromPlanner {
                     && !right_context.tag_columns.contains(label)
             }),
             Some(LabelModifier::Include(on)) => {
+                // A tsid is derived from the series' tags alone, so it can stand in for a
+                // comparison on exactly those labels — but never for a comparison on the metric
+                // name, which the tsid does not encode.
+                if on.labels.iter().any(|label| label == METRIC_NAME) {
+                    return false;
+                }
                 let on_labels = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                let left_labels = left_context
-                    .tag_columns
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                let right_labels = right_context
-                    .tag_columns
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+                let labels_of = |context: &PromPlannerContext| {
+                    context
+                        .tag_columns
+                        .iter()
+                        .filter(|label| label.as_str() != METRIC_NAME)
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                };
+                let left_labels = labels_of(left_context);
+                let right_labels = labels_of(right_context);
 
                 on_labels == left_labels && on_labels == right_labels
             }
@@ -7203,55 +7283,6 @@ impl PromPlanner {
         // `produce_one_row` is used for input-free plans that still emit one row;
         // only the false case is a statically proven empty vector.
         matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
-    }
-
-    /// The metric name of an operand written as a selector that names one metric table.
-    ///
-    /// Only a `VectorSelector` — possibly wrapped in parentheses — names a table directly: the
-    /// name in front of the matchers, or a single equality `__name__` matcher. A derived
-    /// expression keeps the name of its input table in the planner context, but its labels are
-    /// not that table's labels, so it must never be extended with a name of its own.
-    fn direct_selector_metric_name(expr: &PromExpr) -> Option<String> {
-        match expr {
-            PromExpr::Paren(ParenExpr { expr }) => Self::direct_selector_metric_name(expr),
-            PromExpr::VectorSelector(selector) => {
-                if let Some(name) = &selector.name {
-                    return Some(name.clone());
-                }
-                let mut matchers = selector.matchers.find_matchers(METRIC_NAME);
-                match matchers.pop() {
-                    Some(matcher) if matchers.is_empty() && matcher.op == MatchOp::Equal => {
-                        Some(matcher.value)
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Extends an operand with its own constant metric name.
-    ///
-    /// The name is added as one of the operand's label columns (in the plan and in `context`),
-    /// so its visible labels and values stay exactly as the selector produced them.
-    fn extend_with_metric_name(
-        plan: &LogicalPlan,
-        name: &str,
-        context: &mut PromPlannerContext,
-    ) -> Result<LogicalPlan> {
-        let visible = plan.schema().iter().map(|(qualifier, field)| {
-            DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-        });
-        context.tag_columns.push(METRIC_NAME.to_string());
-        LogicalPlanBuilder::from(plan.clone())
-            .project(
-                visible
-                    .chain([lit(name).alias(METRIC_NAME)])
-                    .collect::<Vec<_>>(),
-            )
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)
     }
 
     /// Whether the vector matching modifier explicitly matches on the metric name, i.e.
@@ -17095,40 +17126,662 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
 
     #[tokio::test]
     async fn metric_name_union_join_honors_on_and_ignoring() {
-        let candidates = &["m_union_a", "m_union_b", "m_union_c"];
-        let sorted_values = |batches: &[RecordBatch]| {
-            let mut values = float_values(batches);
-            values.sort_by(f64::total_cmp);
-            values
+        // One left-hand candidate matches m_exact in each case. Multiple left-hand series
+        // matching the same right-hand series without group_left would violate PromQL's
+        // one-to-one cardinality (the executor does not currently enforce that constraint).
+        for query in [
+            r#"{__name__=~"m_union_.*"} + on(job) m_exact"#,
+            r#"{__name__=~"m_union_.*"} + on(x, y) m_exact"#,
+            r#"{__name__=~"m_union_.*"} + ignoring(job) m_exact"#,
+        ] {
+            let batches = execute_union_query(
+                build_union_empty_label_table_provider(),
+                &["m_union_a"],
+                query,
+            )
+            .await;
+            assert_eq!(float_values(&batches), vec![3.0], "{query}");
+        }
+    }
+
+    /// One exact-name metric table `foo` with the single series `foo{host="a"}` and the value 1.
+    fn build_metric_name_exact_foo_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![union_metric_table(
+                "foo",
+                3_040,
+                &[("host", Some("a"))],
+                &[1_000],
+                &[float_field(greptime_value(), &[1.0])],
+            )],
+        )
+    }
+
+    #[tokio::test]
+    async fn review_repro_sort_or_on_name_keeps_one_named_series() {
+        // `sort` keeps the metric name, so both operands of `or` are the series
+        // `foo{host="a"}` and `on(__name__)` deduplicates the right one against the left: exactly
+        // one series `foo{host="a"}` with the value 1.
+        //
+        // The planner batches are asserted by the labels of every row. The `or` output schema
+        // carries a `__name__` column either way — the operand that lacks it is padded with NULL
+        // — so the HTTP layer's single-metric-name fallback stays off here and a duplicate row
+        // appears as a second series in the response instead of being merged away.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"sort(foo) or on(__name__) foo"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "foo".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ]
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_repro_sort_or_default_dedup_keeps_the_metric_name() {
+        // The default matching of `or` compares the labels without the metric name, so the
+        // right-hand `foo` is deduplicated against `sort(foo)`: one series, reported with the
+        // name the `sort` call kept. The name must be in the planner output: the HTTP layer's
+        // fallback only replaces a name for a result that has no `__name__` column at all, so a
+        // NULL name column is reported unnamed.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"sort(foo) or foo"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "foo".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ]
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_repro_regex_plus_on_name_and_host_matches_the_exact_selector() {
+        // `on(__name__, host)` makes the metric name a matching label of the arithmetic join, so
+        // the exact-name operand has to carry its own name into the comparison. Both operands are
+        // `foo{host="a"}` with the value 1, so they match and add up to 2. Arithmetic drops the
+        // metric name and the `on(...)` matching keeps `host`, so the single result sample is
+        // unnamed with `host="a"`. The HTTP layer never names an arithmetic result either (only
+        // set operators collect a name), so the planner batch is what the response reports.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &["foo"],
+            r#"{__name__=~"foo"} + on(__name__, host) foo"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(2.0, vec![("host".to_string(), "a".to_string())])]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_repro_nested_count_rewrite_applies_over_a_set_operator() {
+        // The set operator materializes `__name__` in a projection above the series split, so the
+        // nested-`count` rewrite reads a projection where it used to read the manipulator's input
+        // directly (see `CountNestAggrRule::prune_instant_input`). The rewrite must still apply,
+        // and it must still group by the full series key.
+        let provider = build_metric_name_foo_and_bar_table_provider();
+        let plan = build_optimized_promql_plan(
+            provider,
+            &build_eval_stmt(r#"scalar(count(count(foo or bar) by (host)))"#),
+        )
+        .await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("Aggregate: groupBy=[[foo.host, foo.timestamp]]"),
+            "{plan_str}"
+        );
+        assert!(plan_str.contains("AS __name__"), "{plan_str}");
+    }
+
+    /// The user-visible columns of a TQL EVAL statement: `StatementExecutor::plan_tql` plans the
+    /// statement and runs the query engine's extension rules, and TQL prints exactly the schema of
+    /// the resulting plan.
+    async fn tql_output_columns(table_provider: DfTableSourceProvider, query: &str) -> Vec<String> {
+        let eval_stmt = build_eval_stmt(query);
+        build_optimized_promql_plan(table_provider, &eval_stmt)
+            .await
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn review_repro_tql_output_keeps_its_columns() {
+        // TQL EVAL prints the columns of the plan itself, so a query whose expression never
+        // observes the metric name must keep the columns it has always printed: the time index,
+        // the value and the series' own labels, without a `__name__` column. The Prometheus HTTP
+        // layer names a single-table result from the selector the query was written with, so the
+        // name a response reports is unchanged as well.
+        for (query, expected) in [
+            (r#"foo"#, vec!["host", "timestamp", "greptime_value"]),
+            (r#"sort(foo)"#, vec!["timestamp", "greptime_value", "host"]),
+            (
+                r#"last_over_time(foo[1m])"#,
+                vec![
+                    "timestamp",
+                    "prom_last_over_time(timestamp_range,greptime_value)",
+                    "host",
+                ],
+            ),
+        ] {
+            assert_eq!(
+                tql_output_columns(build_metric_name_exact_foo_table_provider(), query).await,
+                expected,
+                "{query}"
+            );
+        }
+
+        // A set operator reports each operand's own name, so its own result schema carries the
+        // `__name__` column — and with it the name each operand reports.
+        assert_eq!(
+            tql_output_columns(
+                build_metric_name_exact_foo_table_provider(),
+                r#"sort(foo) or foo"#
+            )
+            .await,
+            vec!["timestamp", METRIC_NAME, "greptime_value", "host"]
+        );
+    }
+
+    /// Two exact-name metric tables whose own primary key stores a `__name__` tag, on one shared
+    /// physical table. The stored name is part of the metric engine's TSID, while PromQL matches
+    /// on the name only when `on(__name__)` names it, so the two never agree in general.
+    fn build_stored_metric_name_table_provider(with_stored_name: bool) -> DfTableSourceProvider {
+        let physical_name = "stored_name_phy";
+        let physical_table_id = 3_200;
+        let stored_columns = |name: &str| {
+            ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), true)
         };
 
-        // `on(job)` matches on `job` alone, so `m_union_b` (y="2") matches as well: 4.0 + 2.0.
-        let batches = execute_union_query(
-            build_union_empty_label_table_provider(),
-            candidates,
-            r#"{__name__=~"m_union_.*"} + on(job) m_exact"#,
+        // The physical table's TSID is a hash of the physical tag values, the stored name among
+        // them, so the two rows below carry different TSID values — exactly what the metric engine
+        // writes for two series that differ in their stored name.
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            stored_columns(METRIC_NAME),
+            stored_columns("host"),
+        ];
+        let tag_count = columns.len() - 2;
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices((0..2 + tag_count).collect())
+            .value_indices(vec![(2 + tag_count + 1) as usize])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(datafusion::arrow::array::UInt32Array::from(vec![
+                    3_201u32, 3_202,
+                ])) as Arc<dyn Array>,
+                Arc::new(datafusion::arrow::array::UInt64Array::from(vec![11u64, 22])),
+                Arc::new(StringArray::from(vec![Some("foo"), Some("bar")])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a")])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
         )
-        .await;
-        assert_eq!(sorted_values(&batches), vec![3.0, 6.0]);
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            physical_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, physical_batch),
+            physical_table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let physical_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        let physical = Arc::new(Table::new(
+            physical_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
 
-        // `on(x, y)` matches `m_union_a` and `m_union_c` on the empty `x` and the padded `y`,
-        // regardless of their `job`: 1.0 + 2.0 and 7.0 + 2.0.
-        let batches = execute_union_query(
-            build_union_empty_label_table_provider(),
-            candidates,
-            r#"{__name__=~"m_union_.*"} + on(x, y) m_exact"#,
-        )
-        .await;
-        assert_eq!(sorted_values(&batches), vec![3.0, 9.0]);
+        // `with_stored_name` controls whether the logical tables expose the stored `__name__`
+        // tag; without it both tables are ordinary one-tag metric tables on the same physical
+        // table, which is the shape the TSID binary join is meant for.
+        let logical_table = |name: &str, table_id: u32| {
+            let mut columns = Vec::new();
+            if with_stored_name {
+                columns.push(stored_columns(METRIC_NAME));
+            }
+            columns.push(stored_columns("host"));
+            columns.push(
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+            );
+            columns.push(ColumnSchema::new(
+                greptime_value().to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ));
+            let mut options = table::requests::TableOptions::default();
+            options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_name.to_string(),
+            );
+            let primary_key_len = columns.len() - 2;
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices((0..primary_key_len).collect())
+                .value_indices(vec![primary_key_len + 1])
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .options(options)
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let info = TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap();
+            EmptyTable::from_table_info(&info)
+        };
 
-        // `ignoring(job)` selects the same matching labels as `on(x, y)`.
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                physical,
+                logical_table("foo", 3_201),
+                logical_table("bar", 3_202),
+            ],
+        )
+    }
+
+    #[tokio::test]
+    async fn review_repro_stored_metric_name_tag_does_not_lose_series() {
+        // Both tables store a `__name__` tag whose value is part of the physical TSID, so the two
+        // rows carry different TSIDs while `foo + on(host) bar` must still pair them: the metric
+        // name is not a matching label unless `on(__name__)` names it. Keying the join on the TSID
+        // would silently drop both series.
         let batches = execute_union_query(
-            build_union_empty_label_table_provider(),
-            candidates,
-            r#"{__name__=~"m_union_.*"} + ignoring(job) m_exact"#,
+            build_stored_metric_name_table_provider(true),
+            &[],
+            r#"foo + on(host) bar"#,
         )
         .await;
-        assert_eq!(sorted_values(&batches), vec![3.0, 9.0]);
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(3.0, vec![("host".to_string(), "a".to_string())])]
+        );
+
+        let plan = {
+            let eval_stmt = build_eval_stmt(r#"foo + on(host) bar"#);
+            PromPlanner::stmt_to_plan(
+                build_stored_metric_name_table_provider(true),
+                &eval_stmt,
+                &build_query_engine_state(),
+            )
+            .await
+            .unwrap()
+        };
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+
+        // The same query without a stored name keeps the TSID fast path, so the guard above is
+        // what disabled it rather than the shape of the query.
+        let plan = {
+            let eval_stmt = build_eval_stmt(r#"foo + on(host) bar"#);
+            PromPlanner::stmt_to_plan(
+                build_stored_metric_name_table_provider(false),
+                &eval_stmt,
+                &build_query_engine_state(),
+            )
+            .await
+            .unwrap()
+        };
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.contains("__tsid ="), "{plan_str}");
+    }
+
+    /// Two exact-name metric tables, `foo` and `bar`, each with one series on the same `host`.
+    fn build_metric_name_foo_and_bar_table_provider() -> DfTableSourceProvider {
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                union_metric_table(
+                    "foo",
+                    3_040,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[1.0])],
+                ),
+                union_metric_table(
+                    "bar",
+                    3_041,
+                    &[("host", Some("a"))],
+                    &[1_000],
+                    &[float_field(greptime_value(), &[2.0])],
+                ),
+            ],
+        )
+    }
+
+    /// The labels `foo` reports for its single series, metric name included.
+    fn named_foo_row() -> Vec<(f64, Vec<(String, String)>)> {
+        vec![(
+            1.0,
+            vec![
+                (METRIC_NAME.to_string(), "foo".to_string()),
+                ("host".to_string(), "a".to_string()),
+            ],
+        )]
+    }
+
+    #[tokio::test]
+    async fn review_repro_exact_equal_and_regex_selectors_report_the_same_metric_name() {
+        // The three spellings of one metric table — the plain selector, the equality matcher and
+        // the regex matcher resolved to the same candidate — read the same series with the same
+        // value.
+        //
+        // The first two name one table and never observe the metric name themselves, so they keep
+        // the output columns TQL has always printed (see
+        // `review_repro_tql_output_keeps_its_columns`); the Prometheus layer names them from the
+        // selector the query was written with. The regex spelling is a metric name union: its rows
+        // come from several candidate tables, so each branch labels its rows with its own name and
+        // the union reports it.
+        let cases: &[(&[&str], &str, bool)] = &[
+            (&[], r#"sort(foo)"#, false),
+            (&[], r#"sort({__name__="foo"})"#, false),
+            (&["foo"], r#"sort({__name__=~"foo"})"#, true),
+        ];
+        for (candidates, query, has_name) in cases {
+            let batches = execute_union_query(
+                build_metric_name_exact_foo_table_provider(),
+                candidates,
+                query,
+            )
+            .await;
+            assert_eq!(
+                batches
+                    .iter()
+                    .all(|batch| batch.schema().index_of(METRIC_NAME).is_err()),
+                !has_name,
+                "{query}"
+            );
+            assert_eq!(
+                labeled_values(&batches),
+                if *has_name {
+                    named_foo_row()
+                } else {
+                    vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+                },
+                "{query}"
+            );
+        }
+
+        // A set operator observes each operand's own name, and every spelling names the same
+        // table: `on(__name__)` deduplicates one spelling against another, so the `or` reports
+        // the one named series instead of both.
+        for query in [
+            r#"foo or on(__name__) {__name__="foo"}"#,
+            r#"foo or on(__name__) {__name__=~"foo"}"#,
+            r#"{__name__="foo"} or on(__name__) {__name__=~"foo"}"#,
+        ] {
+            let batches = execute_union_query(
+                build_metric_name_exact_foo_table_provider(),
+                &["foo"],
+                query,
+            )
+            .await;
+            assert_eq!(labeled_values(&batches), named_foo_row(), "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn review_repro_arithmetic_compares_the_materialized_metric_name() {
+        // `foo` and `bar` are different metrics with the same `host`. `on(__name__, host)`
+        // requires both the name and the host to match, and the two names differ, so the series
+        // never pair up.
+        let batches = execute_union_query(
+            build_metric_name_foo_and_bar_table_provider(),
+            &[],
+            r#"foo + on(__name__, host) bar"#,
+        )
+        .await;
+        assert!(labeled_values(&batches).is_empty());
+
+        // The name is what kept them apart: matching on `host` alone pairs the two series, and the
+        // arithmetic drops the name as it does in every one-to-one operation.
+        let batches = execute_union_query(
+            build_metric_name_foo_and_bar_table_provider(),
+            &[],
+            r#"foo + on(host) bar"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![3.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+    }
+
+    #[tokio::test]
+    async fn review_repro_range_functions_keep_or_drop_the_materialized_metric_name() {
+        // `last_over_time` reports a sample the selector read, so the name survives with it: the
+        // right-hand `foo` is the same series, and the `or` keeps the left one, named.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"last_over_time(foo[1m]) or foo"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), named_foo_row());
+
+        // `sum_over_time` computes a new sample value from the window, so the name is dropped
+        // while the selector's own labels survive. The left row of the `or` is reported without a
+        // name — the right-hand `bar` matches it on its labels — so a kept name would show up as
+        // one.
+        let batches = execute_union_query(
+            build_metric_name_foo_and_bar_table_provider(),
+            &[],
+            r#"sum_over_time(foo[1m]) or bar"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+        );
+
+        // A function result that never observes the name keeps the output columns of the
+        // selector: no `__name__` column, and the selector's own labels.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"sum_over_time(foo[1m])"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0]);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+        );
+        // `rate` needs two samples in the window, and the single stored sample is not enough for
+        // one: dropping the name must not turn a missing sample into a reported one.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"rate(foo[1m])"#,
+        )
+        .await;
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+    }
+
+    #[tokio::test]
+    async fn review_repro_empty_metric_and_absent_do_not_invent_a_metric_name() {
+        // A `__name__` matcher that resolves to no candidate table observes an empty metric: no
+        // rows and no `__name__` column, so nothing claims a name for a metric that was never
+        // read.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"{__name__=~"missing_.*"}"#,
+        )
+        .await;
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.schema().index_of(METRIC_NAME).is_err())
+        );
+
+        // The empty selector beside the exact one does not erase the name of the exact selector.
+        for query in [
+            r#"{__name__=~"missing_.*"} or foo"#,
+            r#"foo or {__name__=~"missing_.*"}"#,
+        ] {
+            let batches =
+                execute_union_query(build_metric_name_exact_foo_table_provider(), &[], query).await;
+            assert_eq!(labeled_values(&batches), named_foo_row(), "{query}");
+        }
+
+        // No series of the empty operand can match a join, so the arithmetic is empty rather than
+        // an error.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"{__name__=~"missing_.*"} + on(__name__, host) foo"#,
+        )
+        .await;
+        assert!(batches.iter().all(|batch| batch.num_rows() == 0));
+
+        // `absent` synthesizes its series from the equality matchers the selector was written
+        // with. The table name of a selector is not one of those matchers, so the synthesized
+        // series reports no metric name.
+        let batches = execute_union_query(
+            build_metric_name_exact_foo_table_provider(),
+            &[],
+            r#"absent(missing_metric)"#,
+        )
+        .await;
+        assert_eq!(float_values(&batches), vec![1.0, 1.0]);
+        assert_eq!(labeled_values(&batches), vec![(1.0, vec![]), (1.0, vec![])]);
+    }
+
+    #[tokio::test]
+    async fn review_repro_metric_name_matching_disables_the_tsid_binary_join() {
+        // The materialized name is the logical table name, while the series split still keys on
+        // the stored tsid.
+        let eval_stmt = build_eval_stmt("some_metric / on(__name__, tag_0, tag_1) some_alt_metric");
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("PromSeriesDivide: tags=[\"__tsid\"]"),
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains(r#"Utf8("some_metric") AS __name__"#),
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains(r#"Utf8("some_alt_metric") AS __name__"#),
+            "{plan_str}"
+        );
+        // The tsid is derived from the tag values and does not encode the metric name, so it
+        // cannot stand in for a comparison that names `__name__`.
+        assert!(!plan_str.contains("__tsid ="), "{plan_str}");
+
+        // `on(tag_0, tag_1)` names exactly the tags the tsid is derived from, so the fast path is
+        // still available for that modifier.
+        let eval_stmt = build_eval_stmt("some_metric / on(tag_0, tag_1) some_alt_metric");
+        let table_provider = build_test_table_provider_with_tsid(
+            &[
+                (DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string()),
+                (
+                    DEFAULT_SCHEMA_NAME.to_string(),
+                    "some_alt_metric".to_string(),
+                ),
+            ],
+            2,
+            1,
+        )
+        .await;
+        let plan =
+            PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                .await
+                .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("some_metric.__tsid = some_alt_metric.__tsid"),
+            "{plan_str}"
+        );
     }
 
     #[tokio::test]
