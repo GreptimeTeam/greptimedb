@@ -1164,6 +1164,16 @@ pub fn df_plan_to_sql(plan: &LogicalPlan) -> Result<String, Error> {
     Ok(sql.to_string())
 }
 
+/// Returns whether `expr` directly renames the group by expression `group_expr`.
+///
+/// Renames are identified only by expression name. Derived unary expressions are not group
+/// keys, even when they reference a single group key column. A PromQL `count_values("label",
+/// metric)` plan lands here too: it groups by the formatted sample value
+/// (`prom_float_to_string(value)`) and projects that group key column as the generated label.
+fn is_alias_of_group_expr(group_expr: &Expr, expr: &Expr) -> DfResult<bool> {
+    Ok(group_expr.name_for_alias()? == expr.name_for_alias()?)
+}
+
 /// Helper to find the innermost group by expr in schema, return None if no group by expr
 #[derive(Debug, Clone, Default)]
 pub struct FindGroupByFinalName {
@@ -1220,24 +1230,28 @@ impl TreeNodeVisitor<'_> for FindGroupByFinalName {
         Ok(TreeNodeRecursion::Continue)
     }
 
-    /// deal with projection when going up with group exprs
+    /// Applies only direct, name-matched aliases when propagating group expressions upward.
     fn f_up(&mut self, node: &Self::Node) -> datafusion_common::Result<TreeNodeRecursion> {
         if let LogicalPlan::Projection(projection) = node {
+            // Only direct aliases of group expressions rename group keys. Derived unary
+            // expressions remain ordinary projected columns.
             for expr in &projection.expr {
                 let Some(group_exprs) = &mut self.group_exprs else {
                     return Ok(TreeNodeRecursion::Continue);
                 };
                 if let datafusion_expr::Expr::Alias(alias) = expr {
                     // if a alias exist, replace with the new alias
-                    let mut new_group_exprs = group_exprs.clone();
+                    let mut renamed_group_expr = None;
                     for group_expr in group_exprs.iter() {
-                        if group_expr.name_for_alias()? == alias.expr.name_for_alias()? {
-                            new_group_exprs.remove(group_expr);
-                            new_group_exprs.insert(expr.clone());
+                        if is_alias_of_group_expr(group_expr, alias.expr.as_ref())? {
+                            renamed_group_expr = Some(group_expr.clone());
                             break;
                         }
                     }
-                    *group_exprs = new_group_exprs;
+                    if let Some(group_expr) = renamed_group_expr {
+                        group_exprs.remove(&group_expr);
+                        group_exprs.insert(expr.clone());
+                    }
                 }
             }
         }

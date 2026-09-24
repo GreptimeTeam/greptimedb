@@ -2394,19 +2394,6 @@ providers = []"#,
         )
     };
 
-    let vector_index_config = if cfg!(feature = "vector_index") {
-        r#"
-[region_engine.mito.vector_index]
-create_on_flush = "auto"
-create_on_compaction = "auto"
-apply_on_query = "auto"
-mem_threshold_on_create = "auto"
-
-"#
-    } else {
-        "\n"
-    };
-
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
@@ -2561,6 +2548,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
@@ -2610,7 +2598,8 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-{vector_index_config}[region_engine.mito.gc]
+
+[region_engine.mito.gc]
 enable = false
 lingering_time = "1h"
 unknown_file_lingering_time = "1day"

@@ -40,6 +40,7 @@ use datafusion_expr::{
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
+use datafusion_functions::unicode::expr_fn::substring;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
@@ -528,188 +529,6 @@ fn dictionary_literals_in_values_keep_their_schema() {
     );
 }
 
-#[cfg(feature = "vector_index")]
-mod vector_search_tests {
-    use std::sync::Arc;
-
-    use common_function::function::Function;
-    use common_function::scalars::udf::create_udf;
-    use datafusion_expr::expr::ScalarFunction;
-    use datafusion_expr::{Expr, LogicalPlanBuilder, Signature, Volatility, col, lit};
-    use datatypes::schema::{ColumnSchema, SchemaBuilder};
-    use store_api::storage::ConcreteDataType;
-    use table::metadata::{FilterPushDownType, TableInfoBuilder, TableMeta, TableType};
-    use table::table::adapter::DfTableProviderAdapter;
-    use table::{Table, TableRef};
-
-    use super::*;
-    use crate::dist_plan::MergeScanLogicalPlan;
-
-    struct TestVectorFunction {
-        name: &'static str,
-        signature: Signature,
-    }
-
-    impl TestVectorFunction {
-        fn new(name: &'static str) -> Self {
-            Self {
-                name,
-                signature: Signature::any(2, Volatility::Immutable),
-            }
-        }
-    }
-
-    impl std::fmt::Display for TestVectorFunction {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "{}", self.name)
-        }
-    }
-
-    impl Function for TestVectorFunction {
-        fn name(&self) -> &str {
-            self.name
-        }
-
-        fn return_type(
-            &self,
-            _input_types: &[datatypes::arrow::datatypes::DataType],
-        ) -> datafusion_common::Result<datatypes::arrow::datatypes::DataType> {
-            Ok(datatypes::arrow::datatypes::DataType::Float32)
-        }
-
-        fn signature(&self) -> &Signature {
-            &self.signature
-        }
-
-        fn invoke_with_args(
-            &self,
-            _args: datafusion_expr::ScalarFunctionArgs,
-        ) -> datafusion_common::Result<datafusion_expr::ColumnarValue> {
-            Err(datafusion_common::DataFusionError::Execution(
-                "test udf should not be invoked".to_string(),
-            ))
-        }
-    }
-
-    fn build_vector_table(table_id: TableId) -> TableRef {
-        let schema = {
-            let columns = vec![
-                ColumnSchema::new("k0", ConcreteDataType::string_datatype(), true),
-                ColumnSchema::new(
-                    "ts",
-                    ConcreteDataType::timestamp_millisecond_datatype(),
-                    false,
-                )
-                .with_time_index(true),
-                ColumnSchema::new("v", ConcreteDataType::vector_datatype(2), false),
-            ];
-            Arc::new(
-                SchemaBuilder::try_from_columns(columns)
-                    .unwrap()
-                    .build()
-                    .unwrap(),
-            )
-        };
-
-        let table_meta = TableMeta {
-            schema: schema.clone(),
-            primary_key_indices: vec![0],
-            value_indices: vec![2],
-            engine: "test_engine".to_string(),
-            next_column_id: 3,
-            options: Default::default(),
-            created_on: Default::default(),
-            updated_on: Default::default(),
-            partition_key_indices: vec![0],
-            column_ids: vec![0, 1, 2],
-        };
-
-        let table_info = TableInfoBuilder::default()
-            .table_id(table_id)
-            .name("t".to_string())
-            .catalog_name(DEFAULT_CATALOG_NAME)
-            .schema_name(DEFAULT_SCHEMA_NAME)
-            .table_version(0)
-            .table_type(TableType::Base)
-            .meta(table_meta)
-            .build()
-            .unwrap();
-
-        let data_source = Arc::new(TestDataSource::new(schema));
-        Arc::new(Table::new(
-            Arc::new(table_info),
-            FilterPushDownType::Unsupported,
-            data_source,
-        ))
-    }
-
-    fn vector_distance_expr() -> Expr {
-        let udf = create_udf(Arc::new(TestVectorFunction::new("vec_l2sq_distance")));
-        Expr::ScalarFunction(ScalarFunction::new_udf(
-            Arc::new(udf),
-            vec![
-                col("v"),
-                lit(ScalarValue::Utf8(Some("[1.0, 2.0]".to_string()))),
-            ],
-        ))
-    }
-
-    #[test]
-    fn vector_search_rewrite_keeps_sort_in_child_plan() {
-        init_default_ut_logging();
-        let table = build_vector_table(0);
-        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table),
-        )));
-
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
-            .unwrap()
-            .limit(0, Some(5))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let config = ConfigOptions::default();
-        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-        let plan_str = result.to_string();
-        assert!(plan_str.contains("MergeSort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Sort: vec_l2sq_distance"));
-        assert!(plan_str.contains(MergeScanLogicalPlan::name()));
-    }
-
-    #[test]
-    fn vector_search_rewrite_with_filter_keeps_sort_in_child_plan() {
-        init_default_ut_logging();
-        let table = build_vector_table(0);
-        let table_source = Arc::new(DefaultTableSource::new(Arc::new(
-            DfTableProviderAdapter::new(table),
-        )));
-
-        let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
-            .unwrap()
-            .filter(col("k0").eq(lit("hello")))
-            .unwrap()
-            .sort(vec![vector_distance_expr().sort(true, false)])
-            .unwrap()
-            .limit(0, Some(5))
-            .unwrap()
-            .build()
-            .unwrap();
-
-        let config = ConfigOptions::default();
-        let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
-
-        let plan_str = result.to_string();
-        assert!(plan_str.contains("MergeSort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Sort: vec_l2sq_distance"));
-        assert!(plan_str.contains("Filter: t.k0 = Utf8(\"hello\")"));
-        assert!(plan_str.contains(MergeScanLogicalPlan::name()));
-    }
-}
-
 fn try_encode_decode_substrait(plan: &LogicalPlan, state: SessionState) {
     let sub_plan_bytes = substrait::DFLogicalSubstraitConvertor
         .encode(plan, crate::query_engine::DefaultSerializer)
@@ -1177,6 +996,40 @@ fn expand_proj_alias_aliased_part_col_aggr() {
         "  Projection: t.number, pk3 AS pk42, pk4 AS pk43",
         "    Projection: t.number, t.pk1 AS pk3, t.pk2 AS pk4",
         "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// `substr(pk1, 1, 1)` maps rows from different partitions to the same group, so the
+/// aggregate has to be merged on the frontend even though it references `pk1`.
+#[test]
+fn expand_expr_over_part_col_aggr() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            vec![substring(col("pk1"), lit(1i64), lit(1i64)), col("pk2")],
+            vec![min(col("number"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: substr(t.pk1,Int64(1),Int64(1)), t.pk2, min(t.number)",
+        "  Aggregate: groupBy=[[substr(t.pk1,Int64(1),Int64(1)), t.pk2]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[substr(t.pk1, Int64(1), Int64(1)), t.pk2]], aggr=[[__min_state(t.number)]]",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");

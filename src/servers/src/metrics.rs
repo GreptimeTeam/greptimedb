@@ -130,6 +130,13 @@ lazy_static! {
         &[METRIC_DB_LABEL, METRIC_VERSION_LABEL]
     )
     .unwrap();
+    /// OTLP exponential-histogram data points rejected during conversion, by reason.
+    pub static ref OTLP_EXPONENTIAL_HISTOGRAM_REJECTED_DATA_POINTS: IntCounterVec = register_int_counter_vec!(
+        "greptime_servers_otlp_exponential_histogram_rejected_data_points_total",
+        "Number of OTLP exponential histogram data points rejected during conversion",
+        &["reason"]
+    )
+    .unwrap();
     pub static ref PENDING_BATCHES: IntGauge = register_int_gauge!(
         "greptime_prom_store_pending_batches",
         "Number of pending batches waiting to be flushed"

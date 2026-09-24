@@ -11,7 +11,6 @@ path = "tests/main.rs"
 
 [features]
 dashboard = ["servers/dashboard"]
-vector_index = []
 enterprise = ["frontend/enterprise", "meta-srv/enterprise", "common-meta/enterprise"]
 
 [lints]

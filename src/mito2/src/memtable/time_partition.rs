@@ -43,7 +43,7 @@ use crate::memtable::{KeyValues, MemtableBuilderRef, MemtableId, MemtableRef};
 use crate::sst::{FlatSchemaOptions, to_flat_sst_arrow_schema};
 
 /// Initial time window if not specified.
-const INITIAL_TIME_WINDOW: Duration = Duration::from_days(1);
+const INITIAL_TIME_WINDOW: Duration = Duration::from_secs(86400);
 
 /// A partition holds rows with timestamps between `[min, max)`.
 #[derive(Debug, Clone)]

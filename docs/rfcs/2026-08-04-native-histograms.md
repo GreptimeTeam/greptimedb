@@ -1,6 +1,6 @@
 ---
 Feature Name: Native Histogram Support and Compatibility Decisions
-Tracking Issue: TBD
+Tracking Issue: https://github.com/GreptimeTeam/greptimedb/issues/8887
 Date: 2026-08-04
 Author: codex
 ---
@@ -34,6 +34,9 @@ continues to return scalar samples only.
 - Returning native histograms through Prometheus Remote Read.
 - Persisting Remote Write metric metadata.
 - Persisting exemplars.
+- Converting OTLP delta values to cumulative values during ingestion. Supported
+  delta metrics are stored as interval values without per-series accumulation
+  state; this also applies to the planned exponential-histogram support.
 - Providing an OTLP-specific histogram query surface or reconstructing and
   re-exporting the original OTLP point after persistence.
 - Removing mixed float/histogram handling from PromQL expressions.
@@ -123,10 +126,20 @@ explicit if sampled responses are implemented.
 OTLP/HTTP exponential histograms are accepted by default.
 OTel Arrow exponential histograms are rejected because
 the current Arrow wire format omits `zero_threshold`; accepting them would
-silently change the distribution. Cumulative temporality is required; delta and
-unspecified exponential histograms are rejected before their points are
+silently change the distribution. Currently, cumulative temporality is required;
+delta and unspecified exponential histograms are rejected before their points are
 converted. Explicit OTLP histograms keep their existing `_bucket`, `_sum`, and
-`_count` representation, including their existing delta behavior.
+`_count` representation. OTLP delta sums and explicit histograms are stored as
+raw interval values with `otlp_aggregation_temporality="delta"`. Explicit
+histogram bucket counts are prefix-summed within each point for the classic
+histogram representation, but values are never accumulated across timestamps.
+For these tagged float series, PromQL `increase()` sums the interval values
+in the query range, and `rate()` divides that sum by the range duration.
+Delta-to-cumulative conversion is intentionally out of scope, not deferred work.
+Raw-delta exponential-histogram support is planned below; delta exponential
+points remain rejected until it is implemented. See
+[Table Semantic Layer](2026-05-28-table-semantic-layer.md#conflict-and-update-semantics)
+for the per-series temporality contract.
 
 OTLP scales `-4` through `8` map directly to Prometheus schemas. Higher scales
 are downscaled to schema `8`: dense counts that collide are merged before the
@@ -156,8 +169,36 @@ for mixed batches and `INVALID_ARGUMENT` when all points are rejected. Rejection
 details are bounded, and metric metadata is emitted only for a metric that
 produced an accepted row.
 
-Minimum, maximum, and exemplars are not persisted. Delta accumulation,
-zero-run span compaction, and a dedicated rejection metric remain deferred.
+Zero-count buckets are omitted after downscaling, splitting nonzero runs into
+sparse spans without changing integer counts. Rejected data points increment
+`greptime_servers_otlp_exponential_histogram_rejected_data_points_total`, labeled
+by `reason`: `delta_temporality`, `unspecified_temporality`, or
+`invalid_data_point`. Each rejected point is counted once, including when
+resource descriptors are enabled. Minimum, maximum, and exemplars are not persisted.
+
+### Planned raw-delta exponential histograms
+
+Accept OTLP delta exponential histograms and store each point's interval counts
+and sum in the existing canonical native-histogram Struct, without accumulating
+across timestamps. Reuse the integer-count encoding, scale conversion,
+zero-threshold preservation, stale-marker handling, and partial-success path.
+OTel Arrow support remains blocked independently by its missing `zero_threshold`.
+
+Store `otlp_aggregation_temporality="delta"` as part of series identity, as for
+delta sums and explicit histograms. Use the gauge reset hint for delta histogram
+samples so decreasing interval counts are not interpreted as counter resets.
+Prometheus uses the same gauge hint for
+[raw-delta exponential-histogram ingestion](https://github.com/prometheus/prometheus/blob/9f159f6df198280b757163ec555ffde0c8bfe8e0/storage/remote/otlptranslator/prometheusremotewrite/histograms.go#L125).
+The temporality tag, rather than the gauge hint alone or table metadata,
+determines raw-delta query behavior.
+
+Extend the per-series `increase()` and `rate()` selection to native histogram
+inputs: sum interval histograms over the query range, then divide by the range
+duration for `rate()`. Do not apply cumulative reset correction, synthetic-zero
+insertion, or counter extrapolation to these delta samples. Preserve cumulative
+histogram behavior and mixed float/histogram range warnings. Acceptance coverage
+must include multiple intervals whose counts decrease, exact integer ingestion,
+stale points, partial rejection, and pure-native and mixed-range query paths.
 
 # PromQL Compatibility Decisions
 
@@ -273,7 +314,8 @@ native-histogram data remains readable.
 
 - Native-histogram Remote Read, including exact integer round-trips and streamed
   chunks with start timestamps.
-- OTLP exponential-histogram delta accumulation.
+- Raw-delta OTLP exponential-histogram storage and temporality-aware native
+  histogram queries, as described above; no delta-to-cumulative conversion.
 - Persistent Remote Write metadata and accurate help/unit updates.
 - Native-histogram exemplars and exemplar query APIs.
 - Start-timestamp overlap annotations.

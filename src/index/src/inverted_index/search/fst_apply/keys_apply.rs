@@ -68,16 +68,16 @@ impl KeysFstApplier {
     }
 
     fn split_at_in_lists(predicates: &mut [Predicate]) -> (&mut [Predicate], &mut [Predicate]) {
-        let in_list_index = predicates
-            .iter_mut()
-            .partition_in_place(|p| matches!(p, Predicate::InList(_)));
+        let in_list_index = crate::inverted_index::search::partition_in_place(predicates, |p| {
+            matches!(p, Predicate::InList(_))
+        });
         predicates.split_at_mut(in_list_index)
     }
 
     fn split_at_ranges(predicates: &mut [Predicate]) -> (&mut [Predicate], &mut [Predicate]) {
-        let range_index = predicates
-            .iter_mut()
-            .partition_in_place(|p| matches!(p, Predicate::Range(_)));
+        let range_index = crate::inverted_index::search::partition_in_place(predicates, |p| {
+            matches!(p, Predicate::Range(_))
+        });
         predicates.split_at_mut(range_index)
     }
 

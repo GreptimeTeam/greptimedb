@@ -278,6 +278,36 @@ SHOW CREATE TABLE ato;
 |       | )                                                            |
 +-------+--------------------------------------------------------------+
 
+CREATE TABLE write_buffer_size_options(
+    i INTEGER,
+    ts TIMESTAMP TIME INDEX,
+    PRIMARY KEY(i)
+);
+
+Affected Rows: 0
+
+ALTER TABLE write_buffer_size_options SET 'write_buffer_size' = '128MiB';
+
+Affected Rows: 0
+
+SHOW CREATE TABLE write_buffer_size_options;
+
++---------------------------+----------------------------------------------------------+
+| Table                     | Create Table                                             |
++---------------------------+----------------------------------------------------------+
+| write_buffer_size_options | CREATE TABLE IF NOT EXISTS "write_buffer_size_options" ( |
+|                           |   "i" INT NULL,                                          |
+|                           |   "ts" TIMESTAMP(3) NOT NULL,                            |
+|                           |   TIME INDEX ("ts"),                                     |
+|                           |   PRIMARY KEY ("i")                                      |
+|                           | )                                                        |
+|                           |                                                          |
+|                           | ENGINE=mito                                              |
+|                           | WITH(                                                    |
+|                           |   write_buffer_size = '128.0MiB'                         |
+|                           | )                                                        |
++---------------------------+----------------------------------------------------------+
+
 -- SQLNESS ARG restart=true
 SHOW CREATE TABLE ato;
 
@@ -302,6 +332,24 @@ SHOW CREATE TABLE ato;
 |       |   ttl = '1s'                                                 |
 |       | )                                                            |
 +-------+--------------------------------------------------------------+
+
+SHOW CREATE TABLE write_buffer_size_options;
+
++---------------------------+----------------------------------------------------------+
+| Table                     | Create Table                                             |
++---------------------------+----------------------------------------------------------+
+| write_buffer_size_options | CREATE TABLE IF NOT EXISTS "write_buffer_size_options" ( |
+|                           |   "i" INT NULL,                                          |
+|                           |   "ts" TIMESTAMP(3) NOT NULL,                            |
+|                           |   TIME INDEX ("ts"),                                     |
+|                           |   PRIMARY KEY ("i")                                      |
+|                           | )                                                        |
+|                           |                                                          |
+|                           | ENGINE=mito                                              |
+|                           | WITH(                                                    |
+|                           |   write_buffer_size = '128.0MiB'                         |
+|                           | )                                                        |
++---------------------------+----------------------------------------------------------+
 
 ALTER TABLE ato UNSET 'compaction.twcs.active_window.trigger_file_num';
 
@@ -363,55 +411,6 @@ SHOW CREATE TABLE ato;
 DROP TABLE ato;
 
 Affected Rows: 0
-
-CREATE TABLE write_buffer_size_options(
-    i INTEGER,
-    ts TIMESTAMP TIME INDEX,
-    PRIMARY KEY(i)
-);
-
-Affected Rows: 0
-
-ALTER TABLE write_buffer_size_options SET 'write_buffer_size' = '128MiB';
-
-Affected Rows: 0
-
-SHOW CREATE TABLE write_buffer_size_options;
-
-+---------------------------+----------------------------------------------------------+
-| Table                     | Create Table                                             |
-+---------------------------+----------------------------------------------------------+
-| write_buffer_size_options | CREATE TABLE IF NOT EXISTS "write_buffer_size_options" ( |
-|                           |   "i" INT NULL,                                          |
-|                           |   "ts" TIMESTAMP(3) NOT NULL,                            |
-|                           |   TIME INDEX ("ts"),                                     |
-|                           |   PRIMARY KEY ("i")                                      |
-|                           | )                                                        |
-|                           |                                                          |
-|                           | ENGINE=mito                                              |
-|                           | WITH(                                                    |
-|                           |   write_buffer_size = '128.0MiB'                         |
-|                           | )                                                        |
-+---------------------------+----------------------------------------------------------+
-
--- SQLNESS ARG restart=true
-SHOW CREATE TABLE write_buffer_size_options;
-
-+---------------------------+----------------------------------------------------------+
-| Table                     | Create Table                                             |
-+---------------------------+----------------------------------------------------------+
-| write_buffer_size_options | CREATE TABLE IF NOT EXISTS "write_buffer_size_options" ( |
-|                           |   "i" INT NULL,                                          |
-|                           |   "ts" TIMESTAMP(3) NOT NULL,                            |
-|                           |   TIME INDEX ("ts"),                                     |
-|                           |   PRIMARY KEY ("i")                                      |
-|                           | )                                                        |
-|                           |                                                          |
-|                           | ENGINE=mito                                              |
-|                           | WITH(                                                    |
-|                           |   write_buffer_size = '128.0MiB'                         |
-|                           | )                                                        |
-+---------------------------+----------------------------------------------------------+
 
 ALTER TABLE write_buffer_size_options UNSET 'write_buffer_size';
 
