@@ -35,7 +35,7 @@ use crate::region::opener::{
     RegionOpener, get_object_store, provider_from_wal_options, sanitize_open_request_options,
 };
 use crate::region::options::RegionOptions;
-use crate::request::OptionOutputTx;
+use crate::request::{BackgroundNotify, OptionOutputTx, WorkerRequest, WorkerRequestWithTime};
 use crate::sst::location::region_dir_from_table_dir;
 use crate::wal::entry_distributor::WalEntryReceiver;
 use crate::worker::handle_drop::{
@@ -221,11 +221,10 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         }
 
         let now = Instant::now();
-        let regions = self.regions.clone();
+        let request_sender = self.sender.clone();
         let wal = self.wal.clone();
         let config = self.config.clone();
         let opening_regions = self.opening_regions.clone();
-        let region_count = self.region_count.clone();
         let worker_id = self.id;
         let series_index_task_state = self.series_index_task_state.clone();
         opening_regions.insert_sender(region_id, sender);
@@ -239,8 +238,6 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         worker_id,
                         now.elapsed()
                     );
-                    region_count.inc();
-
                     // Notify the region hook that the region has been opened.
                     // Fires before registration; allocates nothing when no hook
                     // is registered.
@@ -248,15 +245,31 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         hook.on_region_opened(region_id, &region.metadata()).await;
                     }
 
-                    // Insert the Region into the RegionMap.
-                    regions.insert_region(region);
-                    if let Some(state) = &series_index_task_state {
+                    // The worker installs both the region and its resident scheduler state.
+                    let (registered, receiver) = tokio::sync::oneshot::channel();
+                    let sent = request_sender
+                        .send(WorkerRequestWithTime::new(WorkerRequest::Background {
+                            region_id,
+                            notify: BackgroundNotify::RegionOpened {
+                                region: region.clone(),
+                                registered,
+                            },
+                        }))
+                        .await
+                        .is_ok();
+                    let accepted = sent && receiver.await.is_ok();
+                    if !accepted {
+                        region.stop().await;
+                    } else if let Some(state) = &series_index_task_state {
                         state.wake();
                     }
-
                     let senders = opening_regions.remove_sender(region_id);
                     for sender in senders {
-                        sender.send(Ok(0));
+                        if accepted {
+                            sender.send(Ok(0));
+                        } else {
+                            sender.send(crate::error::RegionClosedSnafu { region_id }.fail());
+                        }
                     }
                 }
                 Err(err) => {
