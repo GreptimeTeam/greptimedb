@@ -583,3 +583,157 @@ fn test_load_metric_config_with_removed_sparse_primary_key_encoding() {
         Duration::from_secs(30)
     );
 }
+
+#[test]
+fn test_load_region_engine_options_from_env() {
+    // Reproduces #8620: region engine options must be overridable through
+    // environment variables, like every other nested option. The defaults are
+    // serialized as a sequence of single-key tables (`[[region_engine]]`), while
+    // the environment source produces a map keyed by engine name, so the two
+    // shapes have to be reconciled when they are merged.
+    let env_prefix = "REGION_ENGINE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let opts =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        let mito = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Mito(c) => Some(c),
+                _ => None,
+            })
+            .expect("mito engine config should be present");
+        assert_eq!(
+            mito.global_write_buffer_reject_size,
+            ReadableSize::gb(4),
+            "the environment variable should override the mito engine option"
+        );
+
+        // Options that were not overridden keep their defaults, and the other
+        // engines are still configured.
+        let defaults = MitoConfig::default();
+        assert_eq!(
+            mito.global_write_buffer_size,
+            defaults.global_write_buffer_size
+        );
+        // `DatanodeOptions::default()` only configures the `mito` and `file`
+        // engines out of the box (the `metric` engine is opt-in via config
+        // file), so the entry that must survive the merge here is `file`.
+        assert!(
+            opts.component
+                .region_engine
+                .iter()
+                .any(|c| matches!(c, RegionEngineConfig::File(_))),
+            "the file engine entry should survive the merge"
+        );
+    });
+}
+
+#[test]
+fn test_load_metric_region_engine_options_from_env() {
+    // An engine that is not part of the default list (`metric`) must still be
+    // configurable through the environment: the override is merged onto that
+    // engine's own defaults and appended, without disturbing mito/file.
+    let env_prefix = "METRIC_REGION_ENGINE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "METRIC",
+        "FLUSH_METADATA_REGION_INTERVAL",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("1m"), || {
+        let opts =
+            GreptimeOptions::<DatanodeOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        let metric = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Metric(c) => Some(c),
+                _ => None,
+            })
+            .expect("metric engine config should be appended");
+        assert_eq!(
+            metric.flush_metadata_region_interval,
+            Duration::from_secs(60)
+        );
+
+        // The engines from the default list are untouched.
+        let mito = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Mito(c) => Some(c),
+                _ => None,
+            })
+            .expect("mito engine config should be present");
+        assert_eq!(
+            mito.global_write_buffer_reject_size,
+            MitoConfig::default().global_write_buffer_reject_size
+        );
+        assert!(
+            opts.component
+                .region_engine
+                .iter()
+                .any(|c| matches!(c, RegionEngineConfig::File(_))),
+            "the file engine entry should survive the merge"
+        );
+    });
+}
+
+#[test]
+fn test_load_standalone_region_engine_options_from_env() {
+    // Same reproduction as `test_load_region_engine_options_from_env`, but for
+    // `StandaloneOptions`, which declares its own `region_engine` field and
+    // therefore needs the same `deserialize_with` applied independently.
+    let env_prefix = "STANDALONE_REGION_ENGINE_UT";
+    let env_key = [
+        env_prefix,
+        "REGION_ENGINE",
+        "MITO",
+        "GLOBAL_WRITE_BUFFER_REJECT_SIZE",
+    ]
+    .join(ENV_VAR_SEP);
+
+    temp_env::with_var(env_key, Some("4GB"), || {
+        let opts =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(None, env_prefix).unwrap();
+
+        let mito = opts
+            .component
+            .region_engine
+            .iter()
+            .find_map(|c| match c {
+                RegionEngineConfig::Mito(c) => Some(c),
+                _ => None,
+            })
+            .expect("mito engine config should be present");
+        assert_eq!(
+            mito.global_write_buffer_reject_size,
+            ReadableSize::gb(4),
+            "the environment variable should override the mito engine option"
+        );
+
+        assert!(
+            opts.component
+                .region_engine
+                .iter()
+                .any(|c| matches!(c, RegionEngineConfig::File(_))),
+            "the file engine entry should survive the merge"
+        );
+    });
+}
