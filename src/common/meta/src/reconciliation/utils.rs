@@ -85,6 +85,70 @@ pub(crate) fn check_column_metadatas_consistent(
     Some(region_metadatas[0].column_metadatas.clone())
 }
 
+/// Returns columns with tag values in primary-key order while preserving the
+/// positions of non-tag columns.
+pub(crate) fn reorder_tag_columns(
+    column_metadatas: &[ColumnMetadata],
+    primary_key: &[u32],
+) -> Result<Vec<ColumnMetadata>> {
+    let tag_count = column_metadatas
+        .iter()
+        .filter(|column| column.semantic_type == SemanticType::Tag)
+        .count();
+    ensure!(
+        primary_key.len() == tag_count,
+        UnexpectedSnafu {
+            err_msg: format!(
+                "Number of primary key columns {} does not match tag columns {}",
+                primary_key.len(),
+                tag_count,
+            ),
+        }
+    );
+
+    let mut primary_key_ids = HashSet::with_capacity(primary_key.len());
+    let mut tags = Vec::with_capacity(primary_key.len());
+    for column_id in primary_key {
+        let column = column_metadatas
+            .iter()
+            .find(|column| column.column_id == *column_id)
+            .with_context(|| UnexpectedSnafu {
+                err_msg: format!(
+                    "Primary key column {} not found in column metadata",
+                    column_id
+                ),
+            })?;
+        ensure!(
+            column.semantic_type == SemanticType::Tag,
+            UnexpectedSnafu {
+                err_msg: format!("Primary key column {} is not a tag", column_id),
+            }
+        );
+        ensure!(
+            primary_key_ids.insert(column_id),
+            UnexpectedSnafu {
+                err_msg: format!("Primary key column {} is duplicated", column_id),
+            }
+        );
+        tags.push(column);
+    }
+
+    let mut tags = tags.into_iter();
+
+    column_metadatas
+        .iter()
+        .map(|column| {
+            if column.semantic_type == SemanticType::Tag {
+                tags.next().cloned().with_context(|| UnexpectedSnafu {
+                    err_msg: "Primary key has fewer columns than tags".to_string(),
+                })
+            } else {
+                Ok(column.clone())
+            }
+        })
+        .collect()
+}
+
 /// Resolves column metadata inconsistencies among the given region metadatas
 /// by using the column metadata from the metasrv as the source of truth.
 ///
@@ -157,8 +221,13 @@ pub(crate) fn resolve_column_metadatas_with_latest(
         }
     }
 
-    // TODO(weny): verify the new column metadatas are acceptable for regions.
-    Ok((latest_region_metadata.column_metadatas.clone(), region_ids))
+    Ok((
+        reorder_tag_columns(
+            &latest_region_metadata.column_metadatas,
+            &latest_region_metadata.primary_key,
+        )?,
+        region_ids,
+    ))
 }
 
 /// Constructs a vector of [`ColumnMetadata`] from the provided table information.
@@ -204,6 +273,22 @@ pub(crate) fn build_column_metadata_from_table_info(
             })
         })
         .collect::<Result<Vec<_>>>()
+}
+
+/// Builds SyncColumns metadata with tags in the TableInfo primary-key order.
+/// Non-tag columns retain their schema positions.
+pub(crate) fn build_reconciliation_column_metadata(
+    column_schemas: &[ColumnSchema],
+    primary_key_indexes: &[usize],
+    name_to_ids: &HashMap<String, u32>,
+) -> Result<Vec<ColumnMetadata>> {
+    let column_metadatas =
+        build_column_metadata_from_table_info(column_schemas, primary_key_indexes, name_to_ids)?;
+    let primary_key = primary_key_indexes
+        .iter()
+        .map(|index| column_metadatas[*index].column_id)
+        .collect::<Vec<_>>();
+    reorder_tag_columns(&column_metadatas, &primary_key)
 }
 
 /// Checks whether the schema invariants hold between the existing and new column metadata.
@@ -1178,6 +1263,104 @@ mod tests {
         )
         .unwrap_err();
         assert_matches!(err, Error::MissingColumnInColumnMetadata { .. });
+    }
+
+    #[test]
+    fn test_reconciliation_columns_follow_primary_key_order() {
+        let columns = vec![
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_b",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 1,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new("field", ConcreteDataType::int32_datatype(), true),
+                semantic_type: SemanticType::Field,
+                column_id: 2,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "tag_a",
+                    ConcreteDataType::string_datatype(),
+                    true,
+                ),
+                semantic_type: SemanticType::Tag,
+                column_id: 3,
+            },
+            ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                semantic_type: SemanticType::Timestamp,
+                column_id: 4,
+            },
+        ];
+        let schemas = columns
+            .iter()
+            .map(|column| column.column_schema.clone())
+            .collect::<Vec<_>>();
+        let ids = columns
+            .iter()
+            .map(|column| (column.column_schema.name.clone(), column.column_id))
+            .collect();
+        let expected = vec![3, 2, 1, 4];
+        assert_eq!(
+            build_reconciliation_column_metadata(&schemas, &[2, 0], &ids)
+                .unwrap()
+                .iter()
+                .map(|column| column.column_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let mut metadata = build_region_metadata(RegionId::new(1024, 0), &columns);
+        metadata.primary_key = vec![3, 1];
+        metadata.schema_version = 2;
+
+        assert_eq!(
+            check_column_metadatas_consistent(&[metadata.clone()]).unwrap(),
+            columns
+        );
+
+        assert_eq!(
+            resolve_column_metadatas_with_latest(&[metadata])
+                .unwrap()
+                .0
+                .iter()
+                .map(|column| column.column_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
+    fn test_reorder_tag_columns_rejects_invalid_primary_key() {
+        let columns = new_test_column_metadatas();
+
+        let err = reorder_tag_columns(&columns, &[999]).unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("not found in column metadata"));
+
+        let err = reorder_tag_columns(&columns, &[]).unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("does not match tag columns"));
+
+        let err = reorder_tag_columns(&columns, &[2]).unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("is not a tag"));
+
+        let mut duplicate_tags = columns.clone();
+        duplicate_tags[2].semantic_type = SemanticType::Tag;
+        let err = reorder_tag_columns(&duplicate_tags, &[0, 0]).unwrap_err();
+        assert_matches!(err, Error::Unexpected { .. });
+        assert!(err.to_string().contains("is duplicated"));
     }
 
     #[test]

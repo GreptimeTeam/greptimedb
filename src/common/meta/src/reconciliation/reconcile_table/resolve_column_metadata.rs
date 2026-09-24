@@ -25,8 +25,8 @@ use crate::reconciliation::reconcile_table::reconcile_regions::ReconcileRegions;
 use crate::reconciliation::reconcile_table::update_table_info::UpdateTableInfo;
 use crate::reconciliation::reconcile_table::{ReconcileTableContext, State, TableMetadataState};
 use crate::reconciliation::utils::{
-    ResolveColumnMetadataResult, build_column_metadata_from_table_info,
-    check_column_metadatas_consistent, resolve_column_metadatas_with_latest,
+    ResolveColumnMetadataResult, build_reconciliation_column_metadata,
+    check_column_metadatas_consistent, reorder_tag_columns, resolve_column_metadatas_with_latest,
     resolve_column_metadatas_with_metasrv,
 };
 
@@ -92,6 +92,8 @@ impl State for ResolveColumnMetadata {
         ctx.persistent_ctx.table_info_value = Some(table_info_value);
 
         if let Some(column_metadatas) = check_column_metadatas_consistent(&self.region_metadata) {
+            let column_metadatas =
+                reorder_tag_columns(&column_metadatas, &self.region_metadata[0].primary_key)?;
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
             info!(
@@ -125,7 +127,7 @@ impl State for ResolveColumnMetadata {
                     .table_info
                     .name_to_ids()
                     .context(MissingColumnIdsSnafu)?;
-                let column_metadata = build_column_metadata_from_table_info(
+                let column_metadata = build_reconciliation_column_metadata(
                     table_info_value.table_info.meta.schema.column_schemas(),
                     &table_info_value.table_info.meta.primary_key_indices,
                     &name_to_ids,
