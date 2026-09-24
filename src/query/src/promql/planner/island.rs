@@ -291,7 +291,7 @@ impl PromPlanner {
     fn binary_island_join_contexts_supported(leaves: &[PlannedIslandLeaf]) -> bool {
         if leaves
             .iter()
-            .any(|leaf| leaf.ctx.time_index_column.is_none())
+            .any(|leaf| leaf.ctx.time_index_column.is_none() || leaf.ctx.normalized_nullable_tags)
         {
             return false;
         }

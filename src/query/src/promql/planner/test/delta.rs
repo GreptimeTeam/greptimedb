@@ -336,7 +336,12 @@ async fn empty_metric_broadcasts_over_temporality_marker() {
             results.get("single"),
             "{query}"
         );
-        assert_eq!(Some(&(None, 60.0)), results.get("cumulative"), "{query}");
+        // A missing nullable tag is exposed as the empty PromQL label.
+        assert_eq!(
+            Some(&(Some(String::new()), 60.0)),
+            results.get("cumulative"),
+            "{query}"
+        );
     }
 }
 

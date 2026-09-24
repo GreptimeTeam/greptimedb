@@ -792,15 +792,22 @@ fn assert_normal_metric_schema(plan: &LogicalPlan) {
 async fn build_test_table_provider_with_distinct_tags(
     table_tags: &[(&str, &[&str])],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_nullable_distinct_tags(table_tags, false).await
+}
+
+async fn build_test_table_provider_with_nullable_distinct_tags(
+    table_tags: &[(&str, &[&str])],
+    nullable_tags: bool,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (table_name, tags) in table_tags {
         let mut columns = tags
             .iter()
             .map(|tag| {
                 ColumnSchema::new(
-                    (*tag).to_string(),
-                    ConcreteDataType::string_datatype(),
-                    false,
+                (*tag).to_string(),
+                ConcreteDataType::string_datatype(),
+                nullable_tags,
                 )
             })
             .collect::<Vec<_>>();
@@ -4546,9 +4553,9 @@ async fn mixed_histogram_helper_preserves_native_le_and_scans_once() {
     assert_eq!(
         actual,
         vec![
-            (1_000, None, 1.0),
+            (1_000, Some(String::new()), 1.0),
             (1_000, Some("native".to_string()), 0.0),
-            (2_000, None, 1.0),
+            (2_000, Some(String::new()), 1.0),
             (2_000, Some("native".to_string()), 0.0),
         ]
     );
@@ -7444,6 +7451,64 @@ async fn binary_matching_label_filter_reaches_both_operands() {
             "{query}\n{plan}"
         );
     }
+}
+
+#[tokio::test]
+async fn nullable_tags_are_normalized_for_promql_grouping() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host", "zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("max by(host)(metric_a)"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    let normalization = display.find("coalesce(").expect(&display);
+    let selection = display.find("PromInstantManipulate").expect(&display);
+    assert!(normalization < selection, "{display}");
+    assert!(display.contains("PromSeriesDivide"), "{display}");
+}
+
+#[tokio::test]
+async fn nullable_match_groups_are_checked_even_with_all_tags_in_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["host"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains(MATCH_GROUP_COUNT_COLUMN), "{display}");
+}
+
+#[tokio::test]
+async fn missing_on_label_uses_empty_private_join_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("__promql_missing_match_"), "{display}");
+    assert!(!display.contains("Filter: false"), "{display}");
 }
 
 #[tokio::test]
