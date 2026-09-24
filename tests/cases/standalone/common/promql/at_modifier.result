@@ -183,12 +183,12 @@ TQL EVAL (100, 400, '100s') at_modifier_gauge @ end();
 | 1970-01-01T00:06:40 | 6.0  | a    |
 +---------------------+------+------+
 
--- 4. Range selector anchored by `@`: the call above the anchored selector is step-invariant, so
--- `rate` is evaluated once, at the start of the evaluation, and its result is reported at every
--- step — the planner's counterpart of Prometheus' `StepInvariantExpr`, which wraps the
--- step-invariant subtree of the query. The window `[0s, 300s]` holds the counter going from 0 to
--- 300 for host 'a' (1.0 per second) and from 100 to 250 for host 'b' (0.5 per second); every step
--- must report those same per-series values, and both series must be there at every step.
+-- 4. Range selector anchored by `@`: the call directly above the anchored range selector is
+-- evaluated once, at the start of the evaluation, and its result is reported at every step — the
+-- planner's counterpart of Prometheus' `StepInvariantExpr`. The window `[0s, 300s]` holds the
+-- counter going from 0 to 300 for host 'a' (1.0 per second) and from 100 to 250 for host 'b'
+-- (0.5 per second); every step must report those same per-series values, and both series must be
+-- there at every step.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300);
 
@@ -236,8 +236,29 @@ TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300) != 1.0;
 | 1970-01-01T00:04:00 | 0.5                                      | b    |
 +---------------------+------------------------------------------+------+
 
+-- Parentheses around the range argument are transparent: the call must be promoted exactly like
+-- the unparenthesized one above, so every step reports the same anchored values for both series
+-- (1.0 for host 'a', 0.5 for host 'b') instead of folding a window per step.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 240, '60s') rate((at_modifier_counter_total[5m] @ 300));
+
++---------------------+------------------------------------------+------+
+| ts                  | prom_rate(ts_range,val,ts,Int64(300000)) | host |
++---------------------+------------------------------------------+------+
+| 1970-01-01T00:00:00 | 0.5                                      | b    |
+| 1970-01-01T00:00:00 | 1.0                                      | a    |
+| 1970-01-01T00:01:00 | 0.5                                      | b    |
+| 1970-01-01T00:01:00 | 1.0                                      | a    |
+| 1970-01-01T00:02:00 | 0.5                                      | b    |
+| 1970-01-01T00:02:00 | 1.0                                      | a    |
+| 1970-01-01T00:03:00 | 0.5                                      | b    |
+| 1970-01-01T00:03:00 | 1.0                                      | a    |
+| 1970-01-01T00:04:00 | 0.5                                      | b    |
+| 1970-01-01T00:04:00 | 1.0                                      | a    |
++---------------------+------------------------------------------+------+
+
 -- The same holds for `@ start()` and `@ end()`, which are also fixed anchors: they resolve to the
--- statement's evaluation range, so they are step-invariant too.
+-- statement's evaluation range, so a range call using them is evaluated once as well.
 -- The statement starts at 60s: the window is `[-240s, 60s]`, which holds 60 counter units over 60s
 -- for host 'a' (0.2 per second with the counter-start extrapolation) and 30 units for host 'b'
 -- (0.15 per second, as its counter does not start at zero).
@@ -383,9 +404,10 @@ TQL EVAL (100, 100, '1s') at_modifier_gauge offset 2m;
 +----+-----+------+
 
 -- 6. `@` inside a larger expression. The anchored operand contributes the same value at every
--- step, while the plain operand still follows the evaluation step. The binary expression itself is
--- not step-invariant when one side is not anchored, and when both sides are, each side reports its
--- own anchored samples: the join runs at every step over the replayed per-series inputs.
+-- step, while the plain operand still follows the evaluation step. A binary expression is never
+-- promoted: when one side is anchored and the other is not, the anchored side replays on its own,
+-- and when both sides are anchored, each side reports its own anchored samples. The join then runs
+-- at every step over the replayed per-series inputs.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (100, 400, '100s') at_modifier_gauge @ 300 + at_modifier_gauge @ 0;
 
@@ -465,11 +487,20 @@ TQL EVAL (100, 100, '1s') at_modifier_missing @ 300;
 +------+-------+
 +------+-------+
 
--- 9. Multi-series coverage of the anchored subtree. The call above the anchored range selector is
--- evaluated once per series and replayed per series, so grouping by `host` must report both groups
--- at every step: 1.0 for host 'a' and 0.5 for host 'b'. A promoted subtree that treated the two
--- series as one timeline would report the first step from the first row of the batch and the later
--- steps from its last row, dropping or mixing a host here.
+-- The same for a range selector over a missing metric: the anchored window is folded once by the
+-- promoted call, but the scan has no row to fold, so the whole grid stays empty.
+TQL EVAL (0, 240, '60s') rate(at_modifier_missing[5m] @ 300);
+
++------+------------------------------------------------+
+| time | prom_rate(time_range,value,time,Int64(300000)) |
++------+------------------------------------------------+
++------+------------------------------------------------+
+
+-- 9. Multi-series coverage of the promoted call. The call above the anchored range selector is
+-- evaluated once per series and its result is replayed per series, so grouping by `host` must
+-- report both groups at every step: 1.0 for host 'a' and 0.5 for host 'b'. A promoted result that
+-- treated the two series as one timeline would report the first step from the first row of the
+-- batch and the later steps from its last row, dropping or mixing a host here.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300));
 
@@ -503,7 +534,9 @@ TQL EVAL (0, 240, '60s') sum by (host) (rate(at_modifier_counter_total[5m] @ 300
 | b    | 1970-01-01T00:04:00 | 0.5                                           |
 +------+---------------------+-----------------------------------------------+
 
--- A value function over an anchored selector keeps one row per series per step as well.
+-- A value function directly over an anchored instant selector is not promoted: the selector
+-- anchors and replays its sample per series, and `abs` is evaluated at every step over that replay.
+-- It must keep one row per series per step.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (100, 400, '100s') abs(at_modifier_gauge @ 300);
 
@@ -536,8 +569,9 @@ TQL EVAL (300, 360, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 300,
 
 -- The anchor and the start of the evaluation differ here, so the window is `[0s, 240s]` shifted
 -- by `at_offset` = 300s - 240s = 60s. Every step must follow the evaluation grid (6.0 to 11.0);
--- a window folded for the wrong instant reports 5.0 at every step, which is the value at the
--- window's last sample 240s, and shows up as a constant here.
+-- a regression read at the wrong instant predicts 60s ahead of the window's last sample instead,
+-- i.e. 5.0 at every step — the sample at 240s is 4.0 and the trend rises by 1.0 per minute — and
+-- shows up as a constant here.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 600, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] @ 240, 60);
 
@@ -578,11 +612,64 @@ TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset
 | 1970-01-01T00:06:30 | 7.5                                                             | a    |
 +---------------------+-----------------------------------------------------------------+------+
 
+-- `timestamp()` of an anchored instant selector is not promoted either: its argument is an
+-- instant selector, not a range selector, so the selector anchors and replays its sample per series
+-- on its own and `timestamp()` reports the timestamp of the sample the anchor selected at every
+-- step (300s here). Its plan keeps the anchored selection below the replay of the grid and projects
+-- the timestamp above it.
+--
+-- Only an `@` without an `offset` is asserted here: the value of `timestamp()` for an anchored
+-- selector that also carries an `offset` is a pre-existing question of its own, out of scope here.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
+
++---------------------+-------+------+
+| ts                  | value | host |
++---------------------+-------+------+
+| 1970-01-01T00:00:00 | 300.0 | a    |
+| 1970-01-01T00:00:00 | 300.0 | b    |
+| 1970-01-01T00:01:00 | 300.0 | a    |
+| 1970-01-01T00:01:00 | 300.0 | b    |
+| 1970-01-01T00:02:00 | 300.0 | a    |
+| 1970-01-01T00:02:00 | 300.0 | b    |
+| 1970-01-01T00:03:00 | 300.0 | a    |
+| 1970-01-01T00:03:00 | 300.0 | b    |
+| 1970-01-01T00:04:00 | 300.0 | a    |
+| 1970-01-01T00:04:00 | 300.0 | b    |
++---------------------+-------+------+
+
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (Hash.*) REDACTED
+-- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
+TQL EXPLAIN (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                      |
+|               | Projection: at_modifier_gauge.ts, value AS value, at_modifier_gauge.host                                                                                                                                                                                                             |
+|               |   Projection: at_modifier_gauge.ts, __promql_timestamp_value_ AS value, at_modifier_gauge.host                                                                                                                                                                                       |
+|               |     PromInstantManipulate: range=[0..240000], lookback=[240001], interval=[60000], time index=[ts]                                                                                                                                                                                   |
+|               |       PromInstantManipulate: range=[0..0], lookback=[300000], interval=[60000], time index=[ts]                                                                                                                                                                                      |
+|               |         Projection: at_modifier_gauge.ts, at_modifier_gauge.val, at_modifier_gauge.host, CAST(CAST(CAST(CAST(CAST(at_modifier_gauge.ts AS Int64) AS Decimal128(19, 0)) AS Decimal128(21, 0)) + Decimal128(0,19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ |
+|               |           PromSeriesNormalize: offset=[-300000], time index=[ts], filter NaN: [false]                                                                                                                                                                                                |
+|               |             PromSeriesDivide: tags=["host"]                                                                                                                                                                                                                                          |
+|               |               Sort: at_modifier_gauge.host ASC NULLS FIRST, at_modifier_gauge.ts ASC NULLS FIRST                                                                                                                                                                                     |
+|               |                 Filter: at_modifier_gauge.ts >= TimestampMillisecond(1, None) AND at_modifier_gauge.ts <= TimestampMillisecond(300000, None)                                                                                                                                         |
+|               |                   TableScan: at_modifier_gauge, partial_filters=[at_modifier_gauge.ts >= TimestampMillisecond(1, None), at_modifier_gauge.ts <= TimestampMillisecond(300000, None)]                                                                                                  |
+|               | ]]                                                                                                                                                                                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                                                                                                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
 -- 11. `label_join` above an anchored selector. The call rewrites the label the input series are
--- told apart by (`host` becomes the empty string), so it must stay above the per-series replay of
--- the selector and be evaluated at every step: both hosts are still reported, with their own
--- value, at every step. A promoted `label_join` would instead be replayed through the labels it
--- just rewrote and report the two series as a single timeline, i.e. one mixed row per step.
+-- told apart by (`host` becomes the empty string), so it is never promoted: it must stay above the
+-- per-series replay of the selector and be evaluated at every step. Both hosts are still reported,
+-- with their own value, at every step. A promoted `label_join` would instead be replayed through
+-- the labels it just rewrote and report the two series as a single timeline, i.e. one mixed row
+-- per step.
 --
 -- The invariant asserted here is scoped to the replay: it must not drop or mix the input rows.
 -- It is not a claim about the final PromQL semantics of this query: joining `host` to one value
@@ -605,8 +692,8 @@ TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "", "");
 | 1970-01-01T00:08:00 | 5.0  |      |
 +---------------------+------+------+
 
--- The same join below another call: `abs` follows it out of the promoted subtree, and both are
--- evaluated at every step over the per-series replay.
+-- The same join below another call: neither is promoted, and both are evaluated at every step over
+-- the per-series replay of the anchored selector.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "", ""));
 
@@ -623,8 +710,9 @@ TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "", "
 | 1970-01-01T00:08:00 | 5.0      |      |
 +---------------------+----------+------+
 
--- A range call below the join is still promoted on its own: the anchored window is folded once
--- per series, and the join above that replay reports the rate of both hosts at every step.
+-- A range call below the join is still promoted on its own (it is the direct call over the
+-- anchored range selector): the anchored window is folded once per series, and the join above that
+-- replay reports the rate of both hosts at every step.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "", "");
 

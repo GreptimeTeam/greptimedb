@@ -158,58 +158,6 @@ const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
 /// Threshold for scatter scan mode
 const MAX_SCATTER_POINTS: i64 = 400;
 
-/// Functions whose result can change with the evaluation timestamp even when all of their
-/// arguments are step-invariant, mirroring Prometheus' `AtModifierUnsafeFunctions`. A call to one
-/// of them is never promoted to a step-invariant subtree; see [`PromPlanner::is_step_invariant`].
-const AT_MODIFIER_UNSAFE_FUNCTIONS: [&str; 15] = [
-    "days_in_month",
-    "day_of_month",
-    "day_of_week",
-    "day_of_year",
-    "end",
-    "hour",
-    "minute",
-    "month",
-    "year",
-    "predict_linear",
-    "range",
-    "start",
-    "step",
-    "time",
-    // Uses the timestamp of the argument for the result, hence unsafe to use with the `@`
-    // modifier, unless the argument is an anchored selector; see
-    // [`PromPlanner::is_step_invariant_call`].
-    "timestamp",
-];
-
-/// Functions whose output is not a row-wise mapping of a single input series, so a call to one of
-/// them cannot be evaluated once for a whole step-invariant subtree and then replayed at every
-/// step: `sort` and friends reorder the whole vector, and the histogram helpers fold the buckets of
-/// every series into new rows. Both gather rows of different series into shared batches, which
-/// [`PromPlanner::replay_over_grid`] cannot report per series.
-///
-/// `label_join` rewrites a label of every input series, so its output rows no longer describe the
-/// series the promoted subtree was divided by ([`PromPlanner::series_divide_plan`]): joining the
-/// label that tells distinct series apart into one value (`label_join(m @ 300, "host", "-", "")`)
-/// makes the replay treat them as one timeline and report a single mixed series per step. Without
-/// the promotion the call is evaluated at every step above the per-series replay of its selector,
-/// which keeps every input row. Rejecting duplicate output label sets is a separate, pre-existing
-/// validation gap not handled here; see the sqlness case `promql/at_modifier.sql`.
-///
-/// Skipping the promotion costs no correctness: the selectors below such a call anchor themselves
-/// and are replayed per series, and the call is evaluated at every step over that replayed input.
-///
-/// See [`PromPlanner::is_row_wise_chain`].
-const REPLAY_UNSAFE_FUNCTIONS: [&str; 7] = [
-    "sort",
-    "sort_desc",
-    "sort_by_label",
-    "sort_by_label_desc",
-    "histogram_quantile",
-    "histogram_fraction",
-    "label_join",
-];
-
 /// Interval 1 hour in millisecond
 const INTERVAL_1H: i64 = 60 * 60 * 1000;
 
@@ -532,10 +480,11 @@ impl PromPlanner {
         timestamp_fn: bool,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
-        // A subtree whose samples are all anchored by `@` is step-invariant: evaluate it once, at
-        // the start of the evaluation, and report the result at every step.
+        // An anchored range call is step-invariant: evaluate it once, at the start of the
+        // evaluation, and report its result at every step; see
+        // [`Self::promote_anchored_range_call`].
         if let Some(plan) = self
-            .promote_step_invariant_subtree(prom_expr, timestamp_fn, query_engine_state)
+            .promote_anchored_range_call(prom_expr, timestamp_fn, query_engine_state)
             .await?
         {
             return Ok(plan);
@@ -2090,188 +2039,94 @@ impl PromPlanner {
         Ok(Some(self.ctx.start.saturating_sub(anchor)))
     }
 
-    /// Whether the value of `expr` is independent of the evaluation step of the enclosing query.
+    /// Whether `expr` is a call that has to be evaluated once for the whole grid, because it folds
+    /// a range selector anchored by `@` — the range argument of the call's parser signature, which
+    /// is a [`MatrixSelector`] here; only a call with such an argument can take this path, so no
+    /// function-name registry is involved.
     ///
-    /// This mirrors Prometheus' `preprocessExprHelper` (`IsStepInvariant`): a subtree reports the
-    /// same value at every step only when *every* selector below it pins its sample window with
-    /// `@`. `@ <timestamp>`, `@ start()` and `@ end()` all resolve to a fixed timestamp for the
-    /// whole statement, so all three count as fixed anchors; a selector without `@` follows the
-    /// evaluation timestamp and makes its enclosing subtree step-dependent.
+    /// This is the shape that needs Prometheus' `StepInvariantExpr` the most: a range function such
+    /// as `rate` derives its result from the evaluation instant it is called at, so folding the
+    /// window once per step would let the outer evaluation grid change the result of a window that
+    /// `@` fixed. Evaluated once, at the start of the grid, the rewritten offset of
+    /// [`Self::at_modifier_offset`] places the anchor at that instant, and [`Self::replay_over_grid`]
+    /// reports the result at every step.
     ///
-    /// Subqueries and extensions are never considered step-invariant: this planner does not
-    /// implement `@` / `offset` on subqueries, and an extension wraps an arbitrary inner plan.
-    fn is_step_invariant(expr: &PromExpr) -> bool {
-        match expr {
-            // A selector keeps its sample window only with `@`; see [`Self::at_ref_time`].
-            PromExpr::VectorSelector(VectorSelector { at, .. }) => at.is_some(),
-            // Prometheus does not treat a matrix selector itself as a node to wrap (the enclosing
-            // function is wrapped instead), but its window still has to be anchored.
-            PromExpr::MatrixSelector(MatrixSelector { vs, .. }) => vs.at.is_some(),
-            PromExpr::Paren(ParenExpr { expr }) => Self::is_step_invariant(expr),
-            PromExpr::Unary(UnaryExpr { expr }) => Self::is_step_invariant(expr),
-            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
-                Self::is_step_invariant(lhs) && Self::is_step_invariant(rhs)
-            }
-            // Like Prometheus, only the aggregated expression decides, not the aggregation
-            // parameter (which is a literal for every aggregation that takes one).
-            PromExpr::Aggregate(AggregateExpr { expr, .. }) => Self::is_step_invariant(expr),
-            PromExpr::Call(Call { func, args }) => Self::is_step_invariant_call(func.name, args),
-            // A literal is the same value at every step.
-            PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => true,
-            PromExpr::Subquery(_) | PromExpr::Extension(_) => false,
+    /// Unlike Prometheus, which wraps the whole step-invariant subtree (`preprocessExprHelper`),
+    /// only the call itself is promoted here. The operators above it are not: they are still planned
+    /// at every step over the replayed result, which is safe for the row-wise ones and keeps the
+    /// promotion root narrow. The promotion root has to stay a call over one range selector, because
+    /// the replay needs one series per batch ([`Self::series_divide_plan`]) and only such a call
+    /// guarantees that the rows it emits still describe the series it was divided by. The operators
+    /// left out — an aggregation, a join, or a label rewriting call such as `label_join` — mix or
+    /// re-label the rows of different series, so they are unsafe as promotion roots even though
+    /// evaluating them after the replay is fine. A call whose input is an anchored *instant*
+    /// selector (`abs(some_metric @ 300)`) needs no promotion either: the selector anchors and
+    /// replays its sample per series on its own, and the call above it is row-wise.
+    ///
+    /// `predict_linear` is the exception among the range functions: it predicts from the evaluation
+    /// instant of each step ([`Self::create_range_eval_ts_expr`]), so it has to stay outside the
+    /// promoted subtree and follow the grid. The remaining arguments of the call have to be
+    /// literals, since the replay of the promoted result has no second vector input to divide.
+    /// Parentheses around the range argument are transparent (`rate((m[5m] @ 300))`), so they are
+    /// looked through and the call is promoted as if they were absent. Nothing else of the subtree
+    /// is unwrapped, so an outer parenthesis promotes no operator above the call.
+    fn promotes_anchored_range_call(expr: &PromExpr) -> bool {
+        let PromExpr::Call(Call { func, args }) = expr else {
+            return false;
+        };
+        // See the doc comment: the regression of `predict_linear` follows the evaluation step.
+        if func.name == "predict_linear" {
+            return false;
         }
-    }
-
-    /// Whether a call to `name` with `args` is step-invariant.
-    ///
-    /// A function is invariant when it is not one of [`AT_MODIFIER_UNSAFE_FUNCTIONS`] and all of
-    /// its arguments are, mirroring Prometheus' `preprocessExprHelper`. `timestamp()` is the one
-    /// function whose invariance depends on the shape of its argument: it reports the timestamp of
-    /// the argument's samples, so it stays invariant only when that argument is a selector anchored
-    /// by `@` (`timestamp(metric @ 1)`), and not when the argument derives new samples
-    /// (`timestamp(abs(metric @ 1))`).
-    ///
-    /// Treating `timestamp(metric @ 1)` as invariant is a deliberate divergence from Prometheus,
-    /// which instead re-selects the anchored selector at every step
-    /// (`rangeEvalTimestampFunctionOverVectorSelector`, reached from `rangeEval` when the argument
-    /// is a vector selector with `@`): each step rewrites the selector's offset to
-    /// `eval_time - anchor` — exactly [`Self::at_modifier_offset`] — and reports the timestamp of the
-    /// sample that window selects. Both select the same window around the anchor at every step, so
-    /// evaluating it once and replaying the result is equivalent, and it is what this planner can
-    /// express.
-    fn is_step_invariant_call(name: &str, args: &PromFunctionArgs) -> bool {
-        if !AT_MODIFIER_UNSAFE_FUNCTIONS.contains(&name) {
-            return args.args.iter().all(|arg| Self::is_step_invariant(arg));
+        let mut anchored_range = false;
+        for arg in &args.args {
+            // Parentheses around the range argument are transparent, so the call is promoted the
+            // same way for `rate((m[5m] @ 300))` as for `rate(m[5m] @ 300)`. Only the parentheses
+            // directly around this one argument are looked through here: the promotion stays
+            // confined to a call over one anchored range selector instead of descending into an
+            // arbitrary parenthesized subtree.
+            let mut arg = arg.as_ref();
+            while let PromExpr::Paren(ParenExpr { expr }) = arg {
+                arg = expr;
+            }
+            match arg {
+                // The window is pinned by `@`, so every step folds the same samples.
+                PromExpr::MatrixSelector(MatrixSelector { vs, .. }) if vs.at.is_some() => {
+                    if anchored_range {
+                        return false;
+                    }
+                    anchored_range = true;
+                }
+                // A literal argument is the same value at every step.
+                arg if Self::try_build_literal_expr(arg).is_some() => {}
+                _ => return false,
+            }
         }
-        name == "timestamp"
-            && matches!(
-                args.args.as_slice(),
-                [arg] if matches!(arg.as_ref(), PromExpr::VectorSelector(VectorSelector { at: Some(_), .. }))
-            )
+        anchored_range
     }
 
-    /// Whether `expr` reads samples, i.e. whether it contains a selector or a subquery.
+    /// Plans the anchored range call `prom_expr` ([`Self::promotes_anchored_range_call`]) as a
+    /// step-invariant subtree: the call is evaluated on a single evaluation instant (`grid_start`,
+    /// the start of the outer evaluation) and its result is then reported at every step of
+    /// `[grid_start, ctx.end]` by [`Self::replay_over_grid`].
     ///
-    /// A subtree without samples (for example `vector(1)` or `time()`) is already reported at
-    /// every step by the plan that builds it, so it needs no promotion; see
-    /// [`Self::promotes_step_invariant_subtree`].
-    fn reads_samples(expr: &PromExpr) -> bool {
-        match expr {
-            PromExpr::VectorSelector(_) | PromExpr::MatrixSelector(_) | PromExpr::Subquery(_) => {
-                true
-            }
-            PromExpr::Paren(ParenExpr { expr }) => Self::reads_samples(expr),
-            PromExpr::Unary(UnaryExpr { expr }) => Self::reads_samples(expr),
-            PromExpr::Binary(PromBinaryExpr { lhs, rhs, .. }) => {
-                Self::reads_samples(lhs) || Self::reads_samples(rhs)
-            }
-            PromExpr::Aggregate(AggregateExpr { expr, param, .. }) => {
-                Self::reads_samples(expr) || param.as_deref().is_some_and(Self::reads_samples)
-            }
-            PromExpr::Call(Call { args, .. }) => {
-                args.args.iter().any(|arg| Self::reads_samples(arg))
-            }
-            PromExpr::Extension(_) => true,
-            PromExpr::NumberLiteral(_) | PromExpr::StringLiteral(_) => false,
-        }
-    }
-
-    /// Whether `expr` is the root of a subtree that must be evaluated once for the whole grid.
+    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr` for the one shape it
+    /// promotes. Evaluating the call once matters for the functions that derive their result from
+    /// the step being evaluated: `rate(m[5m] @ 300)` folds its window around the anchor once, and
+    /// the extrapolation boundaries of `rate` must be derived from that same window at every step
+    /// instead of following the outer evaluation timestamp.
     ///
-    /// Only a `Call` (and its `Unary` wrapper) can be such a root:
+    /// Only the call itself is promoted; the operators above it are planned as usual over the
+    /// replayed result. The result of the promoted call is split into one series per batch before it
+    /// is replayed ([`Self::series_divide_plan`]), because the row-wise projection of the call does
+    /// not preserve the batch layout of the selector.
     ///
-    /// - A selector is never promoted here: it already selects its anchored window once and reports
-    ///   it at every step through [`Self::replay_over_grid`]. A matrix selector is never promoted
-    ///   either, because it is only ever evaluated through the function consuming it, which is the
-    ///   node promoted instead — the same shape as Prometheus, where `preprocessExprHelper` wraps
-    ///   the enclosing call rather than the range selector.
-    /// - An aggregation or a binary expression is not promoted: the selectors below it anchor
-    ///   themselves and are replayed per step, which already gives the correct per-step result for
-    ///   any step-invariant subtree (`sum(m @ 300)`, `m @ 300 + m @ 0`). Promoting them would add
-    ///   no correctness and would report a multi-series result through [`Self::replay_over_grid`],
-    ///   whose [`InstantManipulate`] node takes every batch as one single timeline — an aggregation
-    ///   emits one row per group and a join one row per matched series, and they share batches.
-    /// - A `Call` is promoted only when it is a row-wise function of one `@` anchored selector
-    ///   ([`Self::is_row_wise_chain`]): that is the shape whose result can be replayed, once
-    ///   [`Self::series_divide_plan`] has restored the one-series-per-batch layout the replay needs
-    ///   (the row-wise projections in between do not preserve the batches of the selector). It is
-    ///   also the shape that needs the promotion most, since range functions such as `rate` derive
-    ///   their result from the evaluation timestamp themselves: without the promotion they would
-    ///   fold their window once per step instead of once around the anchor.
-    fn promotes_step_invariant_subtree(expr: &PromExpr) -> bool {
-        matches!(expr, PromExpr::Call(_) | PromExpr::Unary(_))
-            && Self::reads_samples(expr)
-            && Self::is_step_invariant(expr)
-            && Self::is_row_wise_chain(expr)
-    }
-
-    /// Whether `expr` is a chain of row-wise operators over a single selector, i.e. a subtree whose
-    /// rows can be split per series and replayed by [`Self::replay_over_grid`].
-    ///
-    /// [`InstantManipulate`] takes every input batch as one timeline, so the replay needs one
-    /// series per batch; [`Self::series_divide_plan`] restores that layout below the replay. What
-    /// matters here is the opposite direction: the subtree must not gather rows of *different*
-    /// series into one row set whose per-series split no longer describes the function result.
-    ///
-    /// A chain of `Call`s, `Unary`s and literals ending in one `@` anchored selector qualifies:
-    ///
-    /// - an instant selector selects its anchored sample per series, and the value functions above
-    ///   it map the rows of their input one by one;
-    /// - a range function folds the window of one series through [`RangeManipulate`], which (like
-    ///   [`InstantManipulate`]) reads one series per input batch, so its result is per series too;
-    /// - a `Unary` negation projects the field columns.
-    ///
-    /// Everything that merges series into shared rows disqualifies the subtree: an aggregation or a
-    /// binary expression does (`abs(sum(m @ 1))`, `abs(m @ 1 + m @ 0)`), and so do the calls listed
-    /// in [`REPLAY_UNSAFE_FUNCTIONS`] — `label_join` merges series by rewriting the very labels
-    /// they are divided by. Those shapes are correct without the promotion, since their selectors
-    /// anchor and replay per series on their own and the operator above them is evaluated at every
-    /// step.
-    fn is_row_wise_chain(expr: &PromExpr) -> bool {
-        match expr {
-            // The selector that establishes the layout, and the literals of the calls above it.
-            PromExpr::VectorSelector(_)
-            | PromExpr::MatrixSelector(_)
-            | PromExpr::NumberLiteral(_)
-            | PromExpr::StringLiteral(_) => true,
-            PromExpr::Paren(ParenExpr { expr }) => Self::is_row_wise_chain(expr),
-            PromExpr::Unary(UnaryExpr { expr }) => Self::is_row_wise_chain(expr),
-            PromExpr::Call(Call { func, args }) => {
-                !REPLAY_UNSAFE_FUNCTIONS.contains(&func.name)
-                    && args.args.iter().all(|arg| Self::is_row_wise_chain(arg))
-            }
-            // These wrap several series, or an arbitrary inner plan, in one output.
-            PromExpr::Aggregate(_)
-            | PromExpr::Binary(_)
-            | PromExpr::Subquery(_)
-            | PromExpr::Extension(_) => false,
-        }
-    }
-
-    /// Plans `prom_expr` as a step-invariant subtree: the whole subtree is planned on a single
-    /// evaluation instant (`grid_start`, the start of the outer evaluation) and its result is then
-    /// reported at every step of `[grid_start, ctx.end]` by [`Self::replay_over_grid`].
-    ///
-    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr`, which the engine
-    /// creates for the largest step-invariant subtree of the query (`preprocessExprHelper`) and
-    /// evaluates once, reusing the value of every step. Evaluating the subtree once matters for
-    /// functions that derive their result from the step being evaluated: `rate(m[5m] @ 300)` folds
-    /// its window around the anchor once, and the extrapolation boundaries of `rate` must be
-    /// derived from that same window at every step instead of following the outer evaluation
-    /// timestamp.
-    ///
-    /// Unlike Prometheus, only a `Call`/`Unary` root over a single selector is promoted (see
-    /// [`Self::promotes_step_invariant_subtree`]): the larger shapes it also wraps (aggregations,
-    /// binary expressions, reordering calls) already produce the right result step by step, and
-    /// their output cannot be replayed per series. The result of the promoted subtree is split into
-    /// one series per batch before it is replayed ([`Self::series_divide_plan`]), because the
-    /// row-wise operators of the subtree do not preserve the batch layout of the selector.
-    ///
-    /// Returns `None` when `prom_expr` is not the root of such a subtree, so that the caller plans
-    /// it as usual. The selectors inside the promoted subtree keep their own `@` anchoring (see
-    /// [`Self::at_modifier_offset`]), and a nested invariant subtree is planned with
-    /// `ctx.end == ctx.start` so that it is not replayed twice.
-    async fn promote_step_invariant_subtree(
+    /// Returns `None` when `prom_expr` is not such a call, so that the caller plans it as usual.
+    /// The selector inside the promoted call keeps its own `@` anchoring (see
+    /// [`Self::at_modifier_offset`]), and planning it with `ctx.end == ctx.start` folds its window
+    /// once for that single instant instead of expanding it over the grid, which the replay of the
+    /// call result above already does.
+    async fn promote_anchored_range_call(
         &mut self,
         prom_expr: &PromExpr,
         timestamp_fn: bool,
@@ -2280,7 +2135,7 @@ impl PromPlanner {
         let grid_start = self.ctx.start;
         let grid_end = self.ctx.end;
         // An instant query evaluates a single step, so there is nothing to promote.
-        if grid_start == grid_end || !Self::promotes_step_invariant_subtree(prom_expr) {
+        if grid_start == grid_end || !Self::promotes_anchored_range_call(prom_expr) {
             return Ok(None);
         }
 
@@ -2355,8 +2210,8 @@ impl PromPlanner {
     ///
     /// Every input batch of `anchored` must hold exactly one series, because [`InstantManipulate`]
     /// takes a batch as one timeline. A leaf-level replay (`m @ 300`) consumes the [`SeriesDivide`]
-    /// of its selector directly. A promoted subtree is guaranteed that layout by
-    /// [`Self::series_divide_plan`], which is why [`Self::promote_step_invariant_subtree`] splits
+    /// of its selector directly. A promoted call is guaranteed that layout by
+    /// [`Self::series_divide_plan`], which is why [`Self::promote_anchored_range_call`] splits
     /// its result before calling this method.
     fn replay_over_grid(
         &self,
@@ -9919,11 +9774,12 @@ mod test {
         );
     }
 
-    /// A call whose argument is one selector anchored by `@` is step-invariant: the whole call is
-    /// evaluated once, at the start of the evaluation, and its result is reported at every step.
-    /// This is the planner's counterpart of Prometheus' `StepInvariantExpr` wrapper.
+    /// A call over one range selector anchored by `@` is evaluated once, at the start of the
+    /// evaluation, and its result is reported at every step: the window is folded around the anchor
+    /// instead of following the outer evaluation grid. This is the planner's counterpart of
+    /// Prometheus' `StepInvariantExpr` wrapper; see [`PromPlanner::promotes_anchored_range_call`].
     #[tokio::test]
-    async fn at_modifier_promotes_step_invariant_subtree() {
+    async fn at_modifier_promotes_anchored_range_call() {
         let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
         let plan_str = plan.display_indent_schema().to_string();
         // The scan is limited to the anchored window (offset by `eval_start - anchor`).
@@ -9968,16 +9824,73 @@ mod test {
         );
     }
 
-    /// `@ start()` and `@ end()` are fixed anchors for the whole statement, so a call using them
-    /// is step-invariant as well.
+    /// Parentheses around the range argument are transparent: `rate((some_metric[5m] @ 300))` gets
+    /// the same fixed-window promotion as `rate(some_metric[5m] @ 300)`, with the anchored window
+    /// folded once and its result replayed at every step of the grid. Only that one argument is
+    /// looked through, so a parenthesis above the call promotes no operator of its own and a
+    /// parenthesized subtree is planned exactly like the bare one.
     #[tokio::test]
-    async fn at_modifier_promotes_start_and_end_anchored_subtree() {
+    async fn at_modifier_promotes_parenthesized_range_argument() {
+        // Each form is planned exactly like its unparenthesized counterpart: parentheses below the
+        // call are transparent, a parenthesis around the call adds nothing, and a parenthesis above
+        // it does not widen the promotion.
+        for (query, plain) in [
+            (
+                "rate((some_metric[5m] @ 300))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "rate(((some_metric[5m] @ 300)))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "(rate(some_metric[5m] @ 300))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "abs((rate(some_metric[5m] @ 300)))",
+                "abs(rate(some_metric[5m] @ 300))",
+            ),
+        ] {
+            assert_eq!(
+                build_at_modifier_plan(query, 0, 1000)
+                    .await
+                    .display_indent_schema()
+                    .to_string(),
+                build_at_modifier_plan(plain, 0, 1000)
+                    .await
+                    .display_indent_schema()
+                    .to_string(),
+                "`{query}` must be planned like `{plain}`"
+            );
+        }
+
+        // The parentheses do not push the enclosing operator into the promotion either: `abs` stays
+        // above the replay of the promoted call, exactly as it does without them. The promotion
+        // itself (one anchored fold, one replay, `rate` below it) is asserted for the
+        // unparenthesized form by `at_modifier_promotes_anchored_range_call`, and the form above is
+        // planned identically to it.
+        let plan_str = build_at_modifier_plan("abs((rate(some_metric[5m] @ 300)))", 0, 1000)
+            .await
+            .display_indent_schema()
+            .to_string();
+        let replay = plan_str
+            .find("PromInstantManipulate")
+            .expect("instant manipulate node");
+        assert!(
+            plan_str.find("abs(").expect("`abs` projection") < replay,
+            "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+        );
+    }
+
+    /// `@ start()` and `@ end()` are fixed anchors for the whole statement, so a call using them is
+    /// promoted as well.
+    #[tokio::test]
+    async fn at_modifier_promotes_start_and_end_anchored_call() {
         for query in [
             "rate(some_metric[5m] @ start())",
             "rate(some_metric[5m] @ end())",
-            // Nested calls over one anchored range selector form one promoted subtree: the inner
-            // call is planned on the same single instant, not replayed on its own.
-            "abs(max_over_time(some_metric[5m] @ end()))",
+            "max_over_time(some_metric[5m] @ end())",
         ] {
             let plan = build_at_modifier_plan(query, 0, 1000).await;
             let plan_str = plan.display_indent_schema().to_string();
@@ -9994,10 +9907,39 @@ mod test {
             );
         }
 
-        // An aggregation above the promoted call stays outside the promoted subtree: `sum`
-        // aggregates the replayed per-series rows at every step, instead of aggregating the single
-        // anchored instant and replaying the aggregation — which would also have to replay rows of
-        // several groups through the one-series-per-batch `InstantManipulate`.
+        // Only the call itself is promoted: a call above it (`abs`) is planned as usual and
+        // evaluated at every step over the replayed result of the promoted call. The window is
+        // still folded once, around the anchor.
+        let plan =
+            build_at_modifier_plan("abs(max_over_time(some_metric[5m] @ end()))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        let abs = plan_str.find("abs(").expect("`abs` projection");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            abs < replay,
+            "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+        );
+        // The window is the only one folded once, and it sits below the replay: the promoted call
+        // feeds the grid from there.
+        let fold = plan_str.find("PromRangeManipulate").expect("range fold");
+        assert!(
+            replay < fold,
+            "the anchored window must be folded below the replay:\n{plan_str}"
+        );
+
+        // An aggregation above the promoted call stays above it as well: `sum` aggregates the
+        // replayed per-series rows at every step, instead of aggregating the single anchored
+        // instant and replaying the aggregation — which would also have to replay rows of several
+        // groups through the one-series-per-batch `InstantManipulate`.
         let plan = build_at_modifier_plan("sum(rate(some_metric[5m] @ start()))", 0, 1000).await;
         let plan_str = plan.display_indent_schema().to_string();
         assert_eq!(
@@ -10033,8 +9975,49 @@ mod test {
         assert!(!plan_str.contains("lookback=[1000001]"), "{plan_str}");
     }
 
-    /// `anchored + plain`: only the anchored operand is step-invariant, so only that side is
-    /// promoted and the plain side keeps following the evaluation step.
+    /// A call or a unary operator above the anchored range call is planned as usual: the inner range
+    /// call is promoted on its own (it is the direct call over the anchored range selector), and the
+    /// operator above it is evaluated at every step over the replayed result.
+    #[tokio::test]
+    async fn at_modifier_promotes_inner_range_call_below_wrappers() {
+        for (query, wrapper) in [
+            ("abs(rate(some_metric[5m] @ 300))", "abs(prom_rate("),
+            ("-rate(some_metric[5m] @ 300)", "(- prom_rate("),
+            (
+                "abs(max_over_time(some_metric[5m] @ 300))",
+                "abs(prom_max_over_time(",
+            ),
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            // The anchored window is folded once, and the wrapper sits above its replay.
+            assert_eq!(
+                plan_str
+                    .matches("PromRangeManipulate: req range=[0..0]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str.matches("PromInstantManipulate").count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            let wrapper = plan_str
+                .find(wrapper)
+                .unwrap_or_else(|| panic!("no `{wrapper}` projection in:\n{plan_str}"));
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .expect("replay node");
+            assert!(
+                wrapper < replay,
+                "the wrapper must be evaluated above the replay of the range call:\n{plan_str}"
+            );
+        }
+    }
+
+    /// `anchored + plain`: only the binary operand that is a call over the anchored range selector
+    /// is promoted, and the plain side keeps following the evaluation step.
     #[tokio::test]
     async fn at_modifier_promotes_only_anchored_binary_operand() {
         let plan =
@@ -10093,23 +10076,57 @@ mod test {
         );
     }
 
-    /// Only a call over one anchored selector is promoted: a call whose argument merges series (an
-    /// aggregation or a join) or whose own output reorders the whole vector (`sort*`, the histogram
-    /// folds) is left to the leaf-level anchoring path, which replays every selector on its own and
-    /// keeps the one-series-per-batch layout the replay needs.
+    /// Only a direct call over an anchored range selector is promoted. A value function or a unary
+    /// operator over an anchored *instant* selector needs no promotion: the selector anchors and
+    /// replays its sample per series on its own, and the operator above it is row-wise, so it can be
+    /// evaluated at every step over that replay.
     #[tokio::test]
-    async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
-        // A call over one anchored selector, and a unary above one, are still promoted: their
-        // output layout is re-established before replay.
-        for query in ["abs(some_metric @ 300)", "-some_metric @ 300"] {
+    async fn at_modifier_does_not_promote_value_calls_over_anchored_selectors() {
+        for (query, value_expr) in [
+            ("abs(some_metric @ 300)", "abs(some_metric.field_0)"),
+            ("-some_metric @ 300", "(- some_metric.field_0)"),
+        ] {
             let plan = build_at_modifier_plan(query, 0, 1000).await;
             let plan_str = plan.display_indent_schema().to_string();
+            // The scan is limited to the anchored sample (the lookback delta of this test is 1s).
             assert!(
-                plan_str.starts_with("PromInstantManipulate"),
+                plan_str.contains(
+                    "some_metric.timestamp >= TimestampMillisecond(299001, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+                ),
                 "{query}:\n{plan_str}"
             );
+            // ... and the result is replayed at every step by the selector itself: the anchored
+            // selection, then the grid replay, with no promoted subtree on top of the operator.
+            assert!(
+                !plan_str.starts_with("PromInstantManipulate"),
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str
+                    .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .unwrap_or_else(|| panic!("replay node:\n{plan_str}"));
+            let value = plan_str
+                .find(value_expr)
+                .unwrap_or_else(|| panic!("no `{value_expr}` projection in:\n{plan_str}"));
+            assert!(
+                value < replay,
+                "`{value_expr}` must be evaluated above the per-series replay:\n{plan_str}"
+            );
         }
+    }
 
+    /// A call whose argument merges series (an aggregation or a join) or whose own output reorders
+    /// the whole vector (`sort*`, the histogram folds) is never the promoted root either: it is
+    /// planned as usual over the leaf-level anchoring of its selectors, which replays every selector
+    /// per series and keeps the one-series-per-batch layout the replay needs.
+    #[tokio::test]
+    async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
         // An aggregation below the call emits one row per group in shared batches, so the call is
         // not promoted: the replay of the anchored selector stays below the aggregate.
         let plan = build_at_modifier_plan("abs(sum(some_metric @ 300))", 0, 1000).await;
@@ -10151,17 +10168,17 @@ mod test {
         );
     }
 
-    /// `label_join` rewrites the labels of its input series, so a subtree ending in one is not
-    /// promoted: the anchored selector keeps replaying one series per batch, and the join runs at
-    /// every step above that replay. Promoting it would replay the joined rows through the labels
-    /// the join just rewrote, which merges the distinct input series into one timeline; see
-    /// [`REPLAY_UNSAFE_FUNCTIONS`].
+    /// `label_join` rewrites the labels of its input series, so it is never the promoted root: the
+    /// anchored selector keeps replaying one series per batch, and the join runs at every step above
+    /// that replay (see [`Self::promotes_anchored_range_call`]). Promoting it would replay the
+    /// joined rows through the labels the join just rewrote, which merges the distinct input series
+    /// into one timeline.
     #[tokio::test]
     async fn at_modifier_does_not_promote_label_join() {
         for query in [
             // Directly above the anchored instant selector...
             "label_join(some_metric @ 300, \"tag_0\", \"-\", \"\")",
-            // ... and below another call, which follows it out of the promoted subtree.
+            // ... and below another call, which is planned as usual over the join.
             "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"\"))",
         ] {
             let plan = build_at_modifier_plan(query, 0, 1000).await;
