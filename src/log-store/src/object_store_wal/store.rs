@@ -1391,7 +1391,6 @@ async fn start_epoch(
     }
 }
 
-/// Reads the epoch of the object under `object_seq`.
 async fn epoch_of(io: &dyn WalObjectIo, object_seq: u64) -> Result<u64> {
     let head = io.get_range(object_seq, 0, HEADER_LEN as u64).await?;
     let header = decode_header(&head).with_context(|_| InvalidWalObjectSnafu {
@@ -3603,28 +3602,33 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_create_held_when_the_store_is_dropped_never_runs() {
-        // The actor and a parked create race when the store is dropped, so
-        // the drop is repeated to cover either order.
-        for _ in 0..16 {
-            let (io, _) = RecordingIo::over(memory_store());
-            let store = open_over(io.clone(), &eager()).await;
-            store.hold_creates();
-            let append = spawn_append_batch(&store, vec![entry(&store, region(1), "a1")]);
-            store.wait_for_admitted_appends(1).await.unwrap();
-            append.abort();
-            let _ = append.await;
-            drop(store);
-            // The actor and the parked create hold the only other references
-            // to the object access; once both are gone nothing writes.
-            timeout(WAIT, async {
-                while Arc::strong_count(&io) > 1 {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-            })
-            .await
-            .unwrap();
-            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
-        }
+        let (io, _) = RecordingIo::over(memory_store());
+        let store = open_over(io.clone(), &eager()).await;
+        store.hold_creates();
+        let append = spawn_append_batch(&store, vec![entry(&store, region(1), "a1")]);
+        store.wait_for_admitted_appends(1).await.unwrap();
+        append.abort();
+        let _ = append.await;
+        // A command sender outlives the store, so the actor keeps running and
+        // the parked create completes on the closed hold channel instead of
+        // being dropped with the actor.
+        let command_tx = store.command_tx.clone();
+        let terminal_error = store.terminal_error.clone();
+        drop(store);
+        timeout(WAIT, async {
+            while terminal(&terminal_error).is_none() && object_seqs(io.as_ref()).await == [0] {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+        let error = terminal(&terminal_error).unwrap();
+        assert!(
+            matches!(error.as_ref(), Error::ObjectStoreWalStopped { .. }),
+            "unexpected error: {error:?}"
+        );
+        drop(command_tx);
     }
 
     #[tokio::test]
