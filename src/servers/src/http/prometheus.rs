@@ -3004,16 +3004,12 @@ mod tests {
         );
     }
 
-    /// An empty raw candidate set must not be answered without running the query: the discovery
-    /// selector can be part of a larger expression (`absent()` / `or vector(0)`) whose result is
-    /// non-empty. Both endpoints must still authorize the empty union, hand it to the planner as
-    /// `Some(empty)`, and execute the full expression exactly once.
-    #[tokio::test]
-    async fn empty_metric_name_union_is_authorized_and_executed() {
-        let query = r#"absent({__name__=~"missing_.*"}) or vector(0)"#;
-
-        let (handler, handler_ref) = new_test_handler(Vec::new(), None);
-        let response = instant_query(
+    /// Runs an instant Prometheus query against `handler_ref` at `time=0`.
+    async fn instant_endpoint(
+        handler_ref: PrometheusHandlerRef,
+        query: &str,
+    ) -> PrometheusJsonResponse {
+        instant_query(
             State(handler_ref),
             Query(InstantQuery {
                 query: Some(query.to_string()),
@@ -3026,7 +3022,42 @@ mod tests {
             )),
             Form(InstantQuery::default()),
         )
-        .await;
+        .await
+    }
+
+    /// Runs a range Prometheus query against `handler_ref` over `[0, 1]` with a one-second step.
+    async fn range_endpoint(
+        handler_ref: PrometheusHandlerRef,
+        query: &str,
+    ) -> PrometheusJsonResponse {
+        range_query(
+            State(handler_ref),
+            Query(RangeQuery {
+                query: Some(query.to_string()),
+                start: Some("0".to_string()),
+                end: Some("1".to_string()),
+                step: Some("1s".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(RangeQuery::default()),
+        )
+        .await
+    }
+
+    /// An empty raw candidate set must not be answered without running the query: the discovery
+    /// selector can be part of a larger expression (`absent()` / `or vector(0)`) whose result is
+    /// non-empty. Both endpoints must still authorize the empty union, hand it to the planner as
+    /// `Some(empty)`, and execute the full expression exactly once.
+    #[tokio::test]
+    async fn empty_metric_name_union_is_authorized_and_executed() {
+        let query = r#"absent({__name__=~"missing_.*"}) or vector(0)"#;
+
+        let (handler, handler_ref) = new_test_handler(Vec::new(), None);
+        let response = instant_endpoint(handler_ref, query).await;
 
         assert!(
             response.status_code.is_none(),
@@ -3043,22 +3074,7 @@ mod tests {
         assert_eq!(*handler.queries.lock().unwrap(), vec![query.to_string()]);
 
         let (handler, handler_ref) = new_test_handler(Vec::new(), None);
-        let response = range_query(
-            State(handler_ref),
-            Query(RangeQuery {
-                query: Some(query.to_string()),
-                start: Some("0".to_string()),
-                end: Some("1".to_string()),
-                step: Some("1s".to_string()),
-                ..Default::default()
-            }),
-            Extension(QueryContext::with(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-            )),
-            Form(RangeQuery::default()),
-        )
-        .await;
+        let response = range_endpoint(handler_ref, query).await;
 
         assert!(
             response.status_code.is_none(),
@@ -3093,38 +3109,10 @@ mod tests {
         });
         let handler_ref: PrometheusHandlerRef = handler.clone();
 
-        let response = instant_query(
-            State(handler_ref.clone()),
-            Query(InstantQuery {
-                query: Some(query.to_string()),
-                time: Some("0".to_string()),
-                ..Default::default()
-            }),
-            Extension(QueryContext::with(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-            )),
-            Form(InstantQuery::default()),
-        )
-        .await;
+        let response = instant_endpoint(handler_ref.clone(), query).await;
         assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
 
-        let response = range_query(
-            State(handler_ref),
-            Query(RangeQuery {
-                query: Some(query.to_string()),
-                start: Some("0".to_string()),
-                end: Some("1".to_string()),
-                step: Some("1s".to_string()),
-                ..Default::default()
-            }),
-            Extension(QueryContext::with(
-                DEFAULT_CATALOG_NAME,
-                DEFAULT_SCHEMA_NAME,
-            )),
-            Form(RangeQuery::default()),
-        )
-        .await;
+        let response = range_endpoint(handler_ref, query).await;
         assert_eq!(Some(StatusCode::PermissionDenied), response.status_code);
 
         // Neither denied query was executed.

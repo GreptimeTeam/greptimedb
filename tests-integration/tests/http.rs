@@ -70,7 +70,7 @@ use servers::http::header::constants::{
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
 use servers::http::prometheus::{
-    Column, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
+    Column, PromData, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
 };
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -1011,6 +1011,23 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+/// Asserts that `response` reports a successful HTTP and Prometheus status and returns its parsed
+/// body. `query` labels the case in assertion failures.
+async fn prom_success(response: TestResponse, query: &str) -> PrometheusJsonResponse {
+    assert_eq!(response.status(), StatusCode::OK, "{query}");
+    let body = response.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success", "{query}");
+    body
+}
+
+/// Like [`prom_success`], but unwraps the Prometheus data payload of a query response.
+async fn prom_success_data(response: TestResponse, query: &str) -> PromData {
+    let PrometheusResponse::PromData(data) = prom_success(response, query).await.data else {
+        panic!("expected prom data: {query}")
+    };
+    data
+}
+
 pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
@@ -1060,13 +1077,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     // with its own metric name. `union_c` is a `timestamp(9)` table, so the candidate set mixes
     // time index precisions: every branch is aligned to the finest one, and a millisecond sample
     // keeps its instant through that cast (all three rows sit at ts=0).
-    let res = range_query(r#"{__name__=~"union_.*"}"#).send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(body.status, "success");
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"{__name__=~"union_.*"}"#;
+    let data = prom_success_data(range_query(query).send().await, query).await;
     let PromQueryResult::Matrix(mut series) = data.result else {
         panic!("expected a matrix")
     };
@@ -1094,19 +1106,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     // `or` keeps `union_a` only once even though both sides resolve it: the regex selector and
     // the bare `union_a` selector match the same series, and each branch keeps the metric name
     // of its own metric table instead of a duplicated or merged series.
-    let res = client
-        .get(&format!(
-            "/v1/prometheus/api/v1/query?query={}&time=0",
-            encode(r#"{__name__=~"union_[ab]"} or union_a"#)
-        ))
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(body.status, "success");
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"{__name__=~"union_[ab]"} or union_a"#;
+    let data = prom_success_data(instant_query(query).send().await, query).await;
     assert_eq!(data.result_type, "vector");
     let PromQueryResult::Vector(mut vector) = data.result else {
         panic!("expected a vector")
@@ -1128,12 +1129,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
 
     // `sum` aggregates once across every matched metric table, including the nanosecond one:
     // per-metric evaluation would only ever report one of the values.
-    let res = range_query(r#"sum({__name__=~"union_.*"})"#).send().await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"sum({__name__=~"union_.*"})"#;
+    let data = prom_success_data(range_query(query).send().await, query).await;
     assert_eq!(
         data.result,
         serde_json::from_value::<PromQueryResult>(json!([
@@ -1143,14 +1140,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     );
 
     // `topk` ranks series across every matched metric table, so the globally largest series wins.
-    let res = range_query(r#"topk(1, {__name__=~"union_.*"})"#)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"topk(1, {__name__=~"union_.*"})"#;
+    let data = prom_success_data(range_query(query).send().await, query).await;
     assert_eq!(
         data.result,
         serde_json::from_value::<PromQueryResult>(json!([
@@ -1162,15 +1153,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     // A comparison with `bool` keeps the series but drops the metric name, so the per-metric
     // evaluation is visible in the labels: `union_a` (1.0 > 2 is false) reports 0 for `host=h1`
     // and `union_b` (5.0 > 2 is true) reports 1 for `idc=i1`, both without a `__name__` label.
-    let res = range_query(r#"{__name__=~"union_[ab]"} > bool 2"#)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(body.status, "success");
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"{__name__=~"union_[ab]"} > bool 2"#;
+    let data = prom_success_data(range_query(query).send().await, query).await;
     let PromQueryResult::Matrix(mut series) = data.result else {
         panic!("expected a matrix")
     };
@@ -1184,14 +1168,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     );
 
     // The metric name keeps working as a grouping label.
-    let res = range_query(r#"count by(__name__) ({__name__=~"union_.*"})"#)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    let PrometheusResponse::PromData(data) = body.data else {
-        panic!("expected prom data")
-    };
+    let query = r#"count by(__name__) ({__name__=~"union_.*"})"#;
+    let data = prom_success_data(range_query(query).send().await, query).await;
     let PromQueryResult::Matrix(mut series) = data.result else {
         panic!("expected a matrix")
     };
@@ -1214,10 +1192,7 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
         r#"absent({__name__=~"missing_union_.*"})"#,
         r#"{__name__=~"missing_union_.*"} or vector(1)"#,
     ] {
-        let res = instant_query(query).send().await;
-        assert_eq!(res.status(), StatusCode::OK, "{query}");
-        let body = res.json::<PrometheusJsonResponse>().await;
-        assert_eq!(body.status, "success", "{query}");
+        let body = prom_success(instant_query(query).send().await, query).await;
         assert_eq!(
             body.data,
             serde_json::from_value::<PrometheusResponse>(json!({
@@ -1233,13 +1208,7 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
         r#"absent({__name__=~"missing_union_.*"})"#,
         r#"{__name__=~"missing_union_.*"} or vector(1)"#,
     ] {
-        let res = range_query(query).send().await;
-        assert_eq!(res.status(), StatusCode::OK, "{query}");
-        let body = res.json::<PrometheusJsonResponse>().await;
-        assert_eq!(body.status, "success", "{query}");
-        let PrometheusResponse::PromData(data) = body.data else {
-            panic!("expected prom data")
-        };
+        let data = prom_success_data(range_query(query).send().await, query).await;
         assert_eq!(
             data.result,
             serde_json::from_value::<PromQueryResult>(json!([
@@ -1252,12 +1221,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
 
     // The bare selector over the same regex is still empty: the empty union contributes no
     // series of its own.
-    let res = instant_query(r#"{__name__=~"missing_union_.*"}"#)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(body.status, "success");
+    let query = r#"{__name__=~"missing_union_.*"}"#;
+    let body = prom_success(instant_query(query).send().await, query).await;
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(json!({
@@ -1284,10 +1249,7 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
             "2.0",
         ),
     ] {
-        let res = instant_query(query).send().await;
-        assert_eq!(res.status(), StatusCode::OK, "{query}");
-        let body = res.json::<PrometheusJsonResponse>().await;
-        assert_eq!(body.status, "success", "{query}");
+        let body = prom_success(instant_query(query).send().await, query).await;
         assert_eq!(
             body.data,
             serde_json::from_value::<PrometheusResponse>(json!({
@@ -1298,10 +1260,7 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
             "{query}"
         );
 
-        let res = range_query(query).send().await;
-        assert_eq!(res.status(), StatusCode::OK, "{query}");
-        let body = res.json::<PrometheusJsonResponse>().await;
-        assert_eq!(body.status, "success", "{query}");
+        let body = prom_success(range_query(query).send().await, query).await;
         assert_eq!(
             body.data,
             serde_json::from_value::<PrometheusResponse>(json!({
@@ -1314,12 +1273,8 @@ pub async fn test_prometheus_metric_name_union(store_type: StorageType) {
     }
 
     // A matcher that resolves to no metric table reports an empty result instead of an error.
-    let res = range_query(r#"{__name__=~"nonexistent_metric_.*"}"#)
-        .send()
-        .await;
-    assert_eq!(res.status(), StatusCode::OK);
-    let body = res.json::<PrometheusJsonResponse>().await;
-    assert_eq!(body.status, "success");
+    let query = r#"{__name__=~"nonexistent_metric_.*"}"#;
+    let body = prom_success(range_query(query).send().await, query).await;
     assert_eq!(
         body.data,
         serde_json::from_value::<PrometheusResponse>(json!({
