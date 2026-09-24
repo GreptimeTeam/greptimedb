@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use api::prom_store::remote::ReadRequest;
@@ -40,7 +41,7 @@ use table::requests::{
     SOURCE_PROMETHEUS,
 };
 
-use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
+use crate::batcher::logical_table::{LogicalTablePendingRowsBatcher, batch_key_from_ctx};
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
@@ -397,7 +398,15 @@ async fn batcher_accepts_all_time_indexes(
     batcher: &LogicalTablePendingRowsBatcher,
     batches: impl Iterator<Item = &PromWriteBatch>,
 ) -> bool {
+    // All batches of one remote write request share the write target
+    // (catalog, schema, physical table); resolve each distinct target only
+    // once instead of once per batch.
+    let mut checked = HashSet::new();
     for (ctx, _) in batches {
+        let key = batch_key_from_ctx(ctx);
+        if !checked.insert((key.catalog, key.schema, key.physical_table)) {
+            continue;
+        }
         if !batcher.accepts_physical_table_time_index(ctx).await {
             return false;
         }

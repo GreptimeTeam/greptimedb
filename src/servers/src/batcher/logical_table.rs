@@ -68,15 +68,15 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct BatchKey {
-    catalog: String,
-    schema: String,
-    physical_table: String,
-    skip_wal: bool,
+pub(crate) struct BatchKey {
+    pub(crate) catalog: String,
+    pub(crate) schema: String,
+    pub(crate) physical_table: String,
+    pub(crate) skip_wal: bool,
 }
 
 // Requests can share a batch only when their write target and WAL policy match.
-fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
+pub(crate) fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
