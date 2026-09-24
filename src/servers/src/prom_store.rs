@@ -18,14 +18,19 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{Label, Query, Sample, TimeSeries, WriteRequest};
 use api::v1::RowInsertRequests;
 use arrow::array::{
-    Array, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
+    Array, ArrayRef, AsArray, DictionaryArray, LargeStringArray, StringArray, StringViewArray,
 };
-use arrow::datatypes::{Float64Type, TimestampMillisecondType, UInt32Type};
+use arrow::compute::kernels::cast as casts;
+use arrow::datatypes::{
+    DataType, Float64Type, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+    TimestampNanosecondType, UInt32Type,
+};
 use common_grpc::precision::Precision;
 use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
@@ -398,6 +403,50 @@ fn append_recordbatch_to_timeseries(
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {
             msg: format!("missing timestamp column '{timestamp_column_name}' in query result"),
         })?;
+    // The Prometheus remote read wire format carries millisecond timestamps,
+    // while the table's time index can use any time unit (e.g. a metric
+    // physical table created with TIMESTAMP(6)). Narrowing floors towards
+    // negative infinity, consistent with `Timestamp::convert_to` on the
+    // ingestion path; arrow's cast would truncate towards zero, so a
+    // pre-epoch sample (e.g. -1001us) would round to -1ms instead of -2ms
+    // and disagree with what ingesting the same instant into a millisecond
+    // table would have stored.
+    let ts_column: ArrayRef = match ts_column.data_type() {
+        DataType::Timestamp(TimeUnit::Millisecond, _) => ts_column.clone(),
+        // Second -> millisecond is a widening (exact) conversion.
+        DataType::Timestamp(TimeUnit::Second, _) => casts::cast(
+            ts_column,
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+        )
+        .map_err(|e| {
+            error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "failed to cast timestamp column '{timestamp_column_name}' of datatype {:?} to millisecond: {e}",
+                    ts_column.data_type()
+                ),
+            }
+            .build()
+        })?,
+        DataType::Timestamp(TimeUnit::Microsecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000)),
+        ),
+        DataType::Timestamp(TimeUnit::Nanosecond, _) => Arc::new(
+            ts_column
+                .as_primitive::<TimestampNanosecondType>()
+                .unary::<_, TimestampMillisecondType>(|v| v.div_euclid(1_000_000)),
+        ),
+        _ => {
+            return error::InvalidPromRemoteReadQueryResultSnafu {
+                msg: format!(
+                    "Expect timestamp column of datatype Timestamp(Millisecond), actual {:?}",
+                    ts_column.data_type()
+                ),
+            }
+            .fail();
+        }
+    };
     let ts_column = ts_column
         .as_primitive_opt::<TimestampMillisecondType>()
         .with_context(|| error::InvalidPromRemoteReadQueryResultSnafu {

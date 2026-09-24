@@ -35,6 +35,7 @@ use common_batcher::worker_registry::WorkerRegistry;
 use common_meta::cache::TableFlownodeSetCacheRef;
 use common_meta::node_manager::NodeManagerRef;
 use common_query::prelude::GREPTIME_PHYSICAL_TABLE;
+use common_time::timestamp::TimeUnit;
 use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
@@ -67,15 +68,15 @@ const PHYSICAL_TABLE_KEY: &str = "physical_table";
 const WORKER_IDLE_TIMEOUT_MULTIPLIER: u32 = 3;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct BatchKey {
-    catalog: String,
-    schema: String,
-    physical_table: String,
-    skip_wal: bool,
+pub(crate) struct BatchKey {
+    pub(crate) catalog: String,
+    pub(crate) schema: String,
+    pub(crate) physical_table: String,
+    pub(crate) skip_wal: bool,
 }
 
 // Requests can share a batch only when their write target and WAL policy match.
-fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
+pub(crate) fn batch_key_from_ctx(ctx: &QueryContextRef) -> BatchKey {
     let physical_table = ctx
         .extension(PHYSICAL_TABLE_KEY)
         .unwrap_or(GREPTIME_PHYSICAL_TABLE)
@@ -169,6 +170,31 @@ impl LogicalTablePendingRowsBatcher {
         self.submit_with(requests, ctx, |_| ready(Ok(())))
             .await
             .map(|(rows, ())| rows)
+    }
+
+    /// Returns whether the physical metric table resolved from `ctx` can use
+    /// the bulk path. The bulk encode produces millisecond timestamp batches
+    /// only, so a physical table with another time index unit (e.g. created
+    /// as `TIMESTAMP(6)`) must stay on the ordinary insert path, which
+    /// converts the requests to the physical table's unit. A missing physical
+    /// table is accepted: it is auto-created with the millisecond unit.
+    pub async fn accepts_physical_table_time_index(&self, ctx: &QueryContextRef) -> bool {
+        let key = batch_key_from_ctx(ctx);
+        let Ok(Some(table)) = self
+            .catalog_manager
+            .table(&key.catalog, &key.schema, &key.physical_table, None)
+            .await
+        else {
+            return true;
+        };
+        table
+            .table_info()
+            .meta
+            .schema
+            .timestamp_column()
+            .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
+            .map(|unit| unit == TimeUnit::Millisecond)
+            .unwrap_or(true)
     }
 
     /// Submits with request-level accounting after schema preparation and before

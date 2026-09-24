@@ -963,9 +963,15 @@ fn write_timestamp(
     table: &mut TableData,
     row: &mut Vec<Value>,
     time_nano: i64,
-    legacy_mode: bool,
+    metric_ctx: &OtlpMetricCtx,
 ) -> Result<()> {
-    if legacy_mode {
+    // Keep the full nanosecond precision whenever the request is headed for
+    // the metric engine: `Inserter::handle_metric_row_inserts` converts the
+    // timestamps to the physical table's time index unit (which may be
+    // micro/nanosecond). Only the non-metric prometheus-compatible path is
+    // fixed to milliseconds, to keep auto-created mito tables on the
+    // millisecond time index.
+    if metric_ctx.is_legacy || metric_ctx.with_metric_engine {
         row_writer::write_ts_to_nanos(
             table,
             greptime_timestamp(),
@@ -1067,7 +1073,7 @@ fn write_tags_and_timestamp(
         )?;
     }
 
-    write_timestamp(table, row, timestamp_nanos, metric_ctx.is_legacy)?;
+    write_timestamp(table, row, timestamp_nanos, metric_ctx)?;
 
     Ok(())
 }
@@ -1504,6 +1510,7 @@ fn encode_summary(
 
 #[cfg(test)]
 mod tests {
+    use api::v1::ColumnDataType;
     use common_query::prelude::set_default_prefix;
     use otel_arrow_rust::proto::opentelemetry::common::v1::AnyValue;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
@@ -2487,6 +2494,81 @@ mod tests {
             })),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn test_metric_engine_path_keeps_nanosecond_precision() {
+        let time_unix_nano = 1_704_067_200_123_456_789u64;
+        let request = metrics_request(vec![Metric {
+            name: "my_gauge".to_string(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: vec![NumberDataPoint {
+                    time_unix_nano,
+                    value: Some(Value::AsDouble(1.0)),
+                    ..Default::default()
+                }],
+            })),
+            ..Default::default()
+        }]);
+
+        // The metric engine path keeps the full nanosecond precision here;
+        // `Inserter::handle_metric_row_inserts` converts the timestamps to
+        // the physical table's time index unit afterwards.
+        let mut metric_ctx = OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        };
+        let MetricsConversion { requests, .. } =
+            to_grpc_insert_requests(request, &mut metric_ctx).unwrap();
+
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        let ts_index = rows
+            .schema
+            .iter()
+            .position(|column| column.column_name == greptime_timestamp())
+            .unwrap();
+        assert_eq!(
+            rows.schema[ts_index].datatype,
+            ColumnDataType::TimestampNanosecond as i32
+        );
+        assert!(matches!(
+            rows.rows[0].values[ts_index].value_data,
+            Some(ValueData::TimestampNanosecondValue(
+                1_704_067_200_123_456_789
+            ))
+        ));
+
+        // The non-metric prometheus-compatible path stays millisecond so
+        // auto-created mito tables keep the millisecond time index.
+        let mut compat_ctx = OtlpMetricCtx::default();
+        let request = metrics_request(vec![Metric {
+            name: "my_gauge".to_string(),
+            data: Some(metric::Data::Gauge(Gauge {
+                data_points: vec![NumberDataPoint {
+                    time_unix_nano,
+                    value: Some(Value::AsDouble(1.0)),
+                    ..Default::default()
+                }],
+            })),
+            ..Default::default()
+        }]);
+        let MetricsConversion { requests, .. } =
+            to_grpc_insert_requests(request, &mut compat_ctx).unwrap();
+
+        let rows = requests.inserts[0].rows.as_ref().unwrap();
+        let ts_index = rows
+            .schema
+            .iter()
+            .position(|column| column.column_name == greptime_timestamp())
+            .unwrap();
+        assert_eq!(
+            rows.schema[ts_index].datatype,
+            ColumnDataType::TimestampMillisecond as i32
+        );
+        assert!(matches!(
+            rows.rows[0].values[ts_index].value_data,
+            Some(ValueData::TimestampMillisecondValue(1_704_067_200_123))
+        ));
     }
 
     #[test]

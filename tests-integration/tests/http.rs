@@ -69,7 +69,9 @@ use servers::http::header::constants::{
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
-use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    Column, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
+};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
@@ -157,6 +159,7 @@ macro_rules! http_tests {
                 test_http_analyze_stream_tql,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
                 test_config_api,
@@ -1709,6 +1712,197 @@ pub async fn test_prom_http_api(store_type: StorageType) {
         data.contains("{\"__name__\":\"demo_metrics\"}")
             && !data.contains("{\"__name__\":\"demo\"}")
     );
+
+    guard.remove_all().await;
+}
+
+/// PromQL must behave identically regardless of the physical metric table's
+/// time index unit: the same samples are remote-written into physical tables
+/// pre-created with second/micro/nano time indexes (plus a millisecond
+/// baseline), and every PromQL response must match the baseline exactly.
+/// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>.
+pub async fn test_promql_over_non_millisecond_physical_tables(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "promql_non_ms_units").await;
+    let client = TestClient::new(app).await;
+
+    let units = [
+        ("ms", "timestamp(3)"),
+        ("second", "timestamp(0)"),
+        ("micro", "timestamp(6)"),
+        ("nano", "timestamp(9)"),
+    ];
+
+    for (suffix, ts_type) in units {
+        let db = format!("promql_units_{suffix}");
+        let res = client
+            .get(&format!("/v1/sql?db=public&sql=create database {db}"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "create database {db}");
+
+        let res = client
+            .get(&format!(
+                "/v1/sql?db={db}&sql=CREATE TABLE greptime_physical_table \
+                 (greptime_timestamp {ts_type} NOT NULL, greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+            ))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "create physical table with {ts_type} in {db}"
+        );
+
+        // unit_gauge{job="demo"} = 1.0 @ 1000ms, 2.0 @ 2000ms
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "unit_gauge".to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![
+                    Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                    },
+                    Sample {
+                        value: 2.0,
+                        timestamp: 2000,
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+        let write_url = format!("/v1/prometheus/write?db={db}");
+        let res = client
+            .post(write_url.as_str())
+            .header("Content-Encoding", "snappy")
+            .body(compressed)
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NO_CONTENT,
+            "remote write into {db}"
+        );
+    }
+
+    let query_paths = [
+        "query?query=unit_gauge&time=2",
+        "query_range?query=unit_gauge&start=0&end=5&step=1",
+        "query?query=avg_over_time(unit_gauge[1m])&time=2",
+        "query?query=rate(unit_gauge[1m])&time=2",
+    ];
+    for path in query_paths {
+        let mut baseline: Option<(String, PrometheusResponse)> = None;
+        for (suffix, _) in units {
+            let db = format!("promql_units_{suffix}");
+            let res = client
+                .get(&format!("/v1/prometheus/api/v1/{path}&db={db}"))
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK, "promql `{path}` on {db}");
+            let body = res.json::<PrometheusJsonResponse>().await;
+            assert_eq!(body.status, "success", "promql `{path}` on {db}");
+            match &baseline {
+                None => baseline = Some((suffix.to_string(), body.data)),
+                Some((baseline_suffix, baseline_data)) => {
+                    assert_eq!(
+                        &body.data, baseline_data,
+                        "promql `{path}` on {db} differs from the {baseline_suffix} baseline"
+                    );
+                }
+            }
+        }
+    }
+
+    // Pin the baseline responses so the cross-unit equality above cannot pass
+    // vacuously on wrong data: the samples are 1.0@1s and 2.0@2s, and
+    // `rate(unit_gauge[1m])@2s` follows Prometheus's extrapolated rate:
+    // Δv=1 over a 1s sampled interval extrapolated to 1.5s, divided by the
+    // 60s window -> 1.5/60 = 0.025 per second.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "2.0"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?db=promql_units_ms&query=unit_gauge&start=0&end=5&step=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [
+                    [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
+                ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=avg_over_time(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "1.5"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=rate(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let rate = match body.data {
+        PrometheusResponse::PromData(data) => match data.result {
+            PromQueryResult::Vector(v) => v[0].value.as_ref().unwrap().1.clone(),
+            other => panic!("expected vector, got {other:?}"),
+        },
+        other => panic!("expected prom data, got {other:?}"),
+    };
+    assert_eq!(rate, "0.025");
 
     guard.remove_all().await;
 }
