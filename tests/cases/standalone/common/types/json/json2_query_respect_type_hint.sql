@@ -137,3 +137,13 @@ SELECT j.nested.a AS dotted_nested, json_get(j, '$.nested.a') AS direct_nested,
 FROM json2_hint_paths;
 
 DROP TABLE json2_hint_paths;
+
+-- Hint lookup must defer unqualified JOIN USING columns to DataFusion, even for legacy JSON.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r USING (j);
+
+-- Without USING, the unqualified column is genuinely ambiguous and must still fail.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r ON l.j = r.j;

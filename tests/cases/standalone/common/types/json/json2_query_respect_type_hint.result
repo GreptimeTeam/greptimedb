@@ -311,3 +311,21 @@ DROP TABLE json2_hint_paths;
 
 Affected Rows: 0
 
+-- Hint lookup must defer unqualified JOIN USING columns to DataFusion, even for legacy JSON.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r USING (j);
+
++-------+
+| value |
++-------+
+| x     |
++-------+
+
+-- Without USING, the unqualified column is genuinely ambiguous and must still fail.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r ON l.j = r.j;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Ambiguous reference to unqualified field j
+
