@@ -49,11 +49,11 @@ use futures::future::join_all;
 use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use promql_parser::label::{METRIC_NAME, MatchOp, Matcher, Matchers};
-use promql_parser::parser::token::{self};
+use promql_parser::parser::token::TokenType;
 use promql_parser::parser::value::ValueType;
 use promql_parser::parser::{
-    AggregateExpr, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier, MatrixSelector, ParenExpr,
-    SubqueryExpr, UnaryExpr, VectorSelector,
+    AggregateExpr, BinModifier, BinaryExpr, Call, Expr as PromqlExpr, LabelModifier,
+    MatrixSelector, ParenExpr, SubqueryExpr, UnaryExpr, VectorMatchCardinality, VectorSelector,
 };
 use query::parser::{DEFAULT_LOOKBACK_STRING, PromQuery, QueryLanguageParser, QueryStatement};
 use serde::de::{self, MapAccess, Visitor};
@@ -1373,6 +1373,38 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     }
 }
 
+/// Whether the left-hand metric name survives a binary operation.
+///
+/// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
+/// and comparisons keep the name, while arithmetic operators drop it. A
+/// comparison also drops it when it returns a bool or is a one-to-one
+/// `on(...)` match, which keeps only the listed labels.
+fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> bool {
+    if op.is_set_operator() {
+        return true;
+    }
+
+    if !op.is_comparison_operator() {
+        return false;
+    }
+
+    let Some(m) = modifier else {
+        return true;
+    };
+
+    if m.return_bool {
+        return false;
+    }
+
+    if m.card == VectorMatchCardinality::OneToOne
+        && let Some(LabelModifier::Include(_)) = &m.matching
+    {
+        return false;
+    }
+
+    true
+}
+
 /// Recursively collect all metric names from a PromQL expression
 fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
     match expr {
@@ -1395,13 +1427,10 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
             collect_metric_names(expr, metric_names)
         }
         PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
-        PromqlExpr::Binary(BinaryExpr { lhs, op, .. }) => {
-            if matches!(
-                op.id(),
-                token::T_LAND // INTERSECT
-                    | token::T_LOR // UNION
-                    | token::T_LUNLESS // EXCEPT
-            ) {
+        PromqlExpr::Binary(BinaryExpr {
+            lhs, op, modifier, ..
+        }) => {
+            if binary_keeps_metric_name(op, modifier.as_ref()) {
                 collect_metric_names(lhs, metric_names)
             } else {
                 metric_names.clear()
@@ -3208,6 +3237,81 @@ mod tests {
                 name: "unless with same metric",
                 promql: "cpu_usage unless cpu_usage",
                 expected_metric: Some("cpu_usage"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Arithmetic operators always drop the metric name.
+            TestCase {
+                name: "arithmetic between metrics",
+                promql: "a + b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "arithmetic with scalar",
+                promql: "a * 2",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            // Comparisons keep the left-hand metric name, except when they return
+            // a bool or are a one-to-one `on(...)` match, which keeps only the
+            // listed labels. A `group_left`/`group_right` modifier does not reduce
+            // the labels, so the name is kept.
+            TestCase {
+                name: "bool comparison between metrics",
+                promql: "a > bool b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "bool comparison with scalar",
+                promql: "a > bool 0.5",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with scalar",
+                promql: "a > 0.5",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "equality comparison with scalar",
+                promql: "up == 0",
+                expected_metric: Some("up"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison between metrics",
+                promql: "a > b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with ignoring",
+                promql: "a > ignoring(x) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on",
+                promql: "a > on(x) b",
+                expected_metric: None,
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on and group_left",
+                promql: "a > on(x) group_left b",
+                expected_metric: Some("a"),
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
