@@ -26,7 +26,8 @@ use api::v1::region::{
     AlterRequest, AlterRequests, BuildIndexRequest, BulkInsertRequest,
     CleanUpRequest as PbCleanUpRequest, CloseRequest, CompactRequest, CreateRequest,
     CreateRequests, DeleteRequests, DropRequest, DropRequests, FlushRequest, InsertRequests,
-    OpenRequest, TruncateRequest, alter_request, compact_request, region_request, truncate_request,
+    OpenRequest, TruncateRequest, alter_request, build_index_request, compact_request,
+    region_request, truncate_request,
 };
 use api::v1::{
     self, Analyzer, ArrowIpc, FulltextBackend as PbFulltextBackend, Option as PbOption, Rows,
@@ -442,7 +443,9 @@ fn make_region_build_index(index: BuildIndexRequest) -> Result<Vec<(RegionId, Re
     let region_id = index.region_id.into();
     Ok(vec![(
         region_id,
-        RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+        RegionRequest::BuildIndex(RegionBuildIndexRequest {
+            options: index.options,
+        }),
     )])
 }
 
@@ -1888,7 +1891,10 @@ impl Default for RegionCompactRequest {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct RegionBuildIndexRequest {}
+pub struct RegionBuildIndexRequest {
+    /// The index build mode. Absent options select SST indexes.
+    pub options: Option<build_index_request::Options>,
+}
 
 /// Truncate region request.
 #[derive(Debug)]
@@ -2053,6 +2059,33 @@ mod tests {
 
     use super::*;
     use crate::metadata::RegionMetadataBuilder;
+
+    #[test]
+    fn test_build_index_options_round_trip() {
+        use prost::Message;
+
+        for options in [
+            None,
+            Some(build_index_request::Options::SstIndex(Default::default())),
+            Some(build_index_request::Options::SeriesIndex(Default::default())),
+        ] {
+            let request = BuildIndexRequest {
+                region_id: 42,
+                options,
+            };
+            let decoded = BuildIndexRequest::decode(request.encode_to_vec().as_slice()).unwrap();
+            let requests = make_region_build_index(decoded).unwrap();
+            assert_eq!(1, requests.len());
+            assert_eq!(RegionId::from_u64(42), requests[0].0);
+            let RegionRequest::BuildIndex(request) = &requests[0].1 else {
+                panic!("expected build-index request");
+            };
+            assert_eq!(options, request.options);
+        }
+        // The legacy wire message contains only region_id (field 1).
+        let legacy = BuildIndexRequest::decode(&[0x08, 42][..]).unwrap();
+        assert!(legacy.options.is_none());
+    }
 
     #[test]
     fn test_make_region_puts_preserves_skip_wal() {

@@ -91,6 +91,7 @@ pub struct GreptimeDbStandaloneBuilder {
     experimental_metric_export: bool,
     logical_batcher: Option<BatcherOptions>,
     table_batcher: BatcherOptions,
+    mito_config: Option<mito2::config::MitoConfig>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -113,7 +114,15 @@ impl GreptimeDbStandaloneBuilder {
             experimental_metric_export: false,
             logical_batcher: None,
             table_batcher: BatcherOptions::default(),
+            mito_config: None,
         }
+    }
+
+    /// Overrides the Mito configuration for this test instance.
+    #[must_use]
+    pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
+        self.mito_config = Some(config);
+        self
     }
 
     /// Enables experimental Metric export for the standalone test instance.
@@ -386,7 +395,7 @@ impl GreptimeDbStandaloneBuilder {
         let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
-        let standalone_opts = StandaloneOptions {
+        let mut standalone_opts = StandaloneOptions {
             storage: opts.storage,
             procedure: procedure_config,
             metadata_store: kv_backend_config,
@@ -407,6 +416,14 @@ impl GreptimeDbStandaloneBuilder {
             },
             ..StandaloneOptions::default()
         };
+
+        if let Some(config) = &self.mito_config {
+            for engine in &mut standalone_opts.region_engine {
+                if let datanode::config::RegionEngineConfig::Mito(mito) = engine {
+                    *mito = config.clone();
+                }
+            }
+        }
 
         self.build_with(
             kv_backend,
