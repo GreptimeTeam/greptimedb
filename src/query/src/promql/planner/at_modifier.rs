@@ -25,10 +25,10 @@ use promql_parser::parser::{
 };
 use snafu::{OptionExt, ResultExt, ensure};
 
-use super::PromPlanner;
 use crate::promql::error::{
     AtModifierTimestampOutOfRangeSnafu, DataFusionPlanningSnafu, Result, TimeIndexNotFoundSnafu,
 };
+use crate::promql::planner::PromPlanner;
 use crate::query_engine::QueryEngineState;
 
 impl PromPlanner {
