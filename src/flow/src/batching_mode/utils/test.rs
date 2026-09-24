@@ -1034,6 +1034,34 @@ async fn test_find_group_by_exprs() {
 }
 
 #[tokio::test]
+async fn test_find_group_by_exprs_does_not_replace_group_key_with_derived_expr() {
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    let sql = "SELECT host, lower(host) AS host_lc, ts, SUM(val) AS total \
+        FROM (SELECT CAST(number AS STRING) AS host, ts, number AS val FROM numbers_with_ts) \
+        GROUP BY host, ts";
+
+    for optimize in [false, true] {
+        let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), sql, optimize)
+            .await
+            .unwrap();
+        let plan_display = plan.display_indent_schema().to_string();
+        let mut group_finder = FindGroupByFinalName::default();
+        plan.visit(&mut group_finder).unwrap();
+        let group_names = group_finder.get_group_expr_names().unwrap_or_default();
+
+        assert!(
+            group_names.contains("host"),
+            "optimize={optimize}, group keys {group_names:?} must keep host:\n{plan_display}"
+        );
+        assert!(
+            !group_names.contains("host_lc"),
+            "optimize={optimize}, derived host_lc must not replace host:\n{plan_display}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_analyze_incremental_aggregate_plan() {
     let query_engine = create_test_query_engine();
     let ctx = QueryContext::arc();
@@ -1241,6 +1269,64 @@ async fn test_rewrite_incremental_aggregate_allows_alias_wrapped_scan() {
         .map(|field| field.name().clone())
         .collect::<Vec<_>>();
     assert_eq!(rewritten_fields, analysis.output_field_names);
+}
+
+#[tokio::test]
+async fn test_count_values_flow_plan_keeps_generated_label_as_group_key() {
+    // PromQL `count_values("label", metric)` groups by the *formatted* sample value
+    // (`prom_float_to_string(value)`), so such a flow carries a scalar UDF inside its GROUP
+    // BY instead of the raw value column:
+    //
+    //   Projection: count(val), ts, prom_float_to_string(val) AS v
+    //     Aggregate: groupBy=[[ts, prom_float_to_string(CAST(val AS Float64))]], aggr=[[count(val)]]
+    //
+    // Two things must keep working for that shape: the TQL flow transport (a Substrait
+    // encoded insert plan) and the group-key resolution that derives the sink schema, which
+    // is what keeps the generated label a primary key of the auto-created sink table.
+    let query_engine = create_test_query_engine();
+    let ctx = QueryContext::arc();
+    for optimize in [false, true] {
+        let plan = sql_to_df_plan(
+            ctx.clone(),
+            query_engine.clone(),
+            r#"TQL EVAL (0, 15, '5s') count_values("v", numbers_with_ts)"#,
+            optimize,
+        )
+        .await
+        .unwrap();
+        let plan_display = plan.display_indent_schema().to_string();
+
+        DFLogicalSubstraitConvertor {}
+            .encode(&plan, DefaultSerializer)
+            .unwrap_or_else(|err| panic!("optimize={optimize}: {err}\n{plan_display}"));
+
+        let mut group_finder = FindGroupByFinalName::default();
+        plan.visit(&mut group_finder).unwrap();
+        let group_names = group_finder.get_group_expr_names().unwrap_or_default();
+        assert!(
+            group_names.contains("v"),
+            "optimize={optimize}, group keys {group_names:?} must keep the generated label:\n{plan_display}"
+        );
+        assert!(
+            group_names.contains("ts"),
+            "optimize={optimize}, group keys {group_names:?}:\n{plan_display}"
+        );
+
+        // The flow plan keeps the generated label as a group key name, and the plan shape
+        // (PromQL extension nodes above the aggregate) stays outside the incremental
+        // aggregate rewrite: `prepare_plan_for_incremental` only rewrites `QueryType::Sql`
+        // flows, so a `count_values` flow keeps running as a full snapshot.
+        let analysis = analyze_incremental_aggregate_plan(&plan).unwrap().unwrap();
+        assert!(
+            analysis.group_key_names.contains(&"v".to_string()),
+            "optimize={optimize}, analysis {analysis:?}:\n{plan_display}"
+        );
+        assert!(
+            !analysis.unsupported_exprs.is_empty(),
+            "optimize={optimize}, a count_values flow plan must not become an incremental \
+             aggregate rewrite candidate: {analysis:?}\n{plan_display}"
+        );
+    }
 }
 
 #[tokio::test]
