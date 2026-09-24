@@ -21,6 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
+use std::collections::HashSet;
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -172,13 +173,72 @@ impl LogicalTablePendingRowsBatcher {
             .map(|(rows, ())| rows)
     }
 
+    /// Returns whether the bulk path can accept `batches`:
+    /// - the physical metric table selected by each context must have a
+    ///   millisecond time index (or not exist yet — it is auto-created with
+    ///   the millisecond unit): new tables are created on it and the bulk
+    ///   encode produces millisecond batches;
+    /// - every existing destination table must itself have a millisecond time
+    ///   index: it may be bound to another physical table with another unit,
+    ///   and the bulk encoder would build millisecond arrays against its
+    ///   schema.
+    ///
+    /// Incompatible requests must stay on the ordinary insert path, which
+    /// converts the requests to each destination table's unit. Write targets
+    /// and destination tables are resolved once per distinct name.
+    pub(crate) async fn accepts_bulk_time_indexes(
+        &self,
+        batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
+    ) -> bool {
+        let mut checked_targets = HashSet::new();
+        let mut checked_tables = HashSet::new();
+        for (ctx, requests) in batches {
+            let key = batch_key_from_ctx(ctx);
+            if checked_targets.insert((key.catalog, key.schema, key.physical_table))
+                && !self.accepts_physical_table_time_index(ctx).await
+            {
+                return false;
+            }
+            for request in &requests.inserts {
+                if !checked_tables.insert((ctx.current_schema(), request.table_name.clone())) {
+                    continue;
+                }
+                let Ok(Some(table)) = self
+                    .catalog_manager
+                    .table(
+                        ctx.current_catalog(),
+                        &ctx.current_schema(),
+                        &request.table_name,
+                        None,
+                    )
+                    .await
+                else {
+                    // New table: governed by the selected physical table's
+                    // unit, checked above.
+                    continue;
+                };
+                if table
+                    .table_info()
+                    .meta
+                    .schema
+                    .timestamp_column()
+                    .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
+                    .is_none_or(|unit| unit != TimeUnit::Millisecond)
+                {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
     /// Returns whether the physical metric table resolved from `ctx` can use
     /// the bulk path. The bulk encode produces millisecond timestamp batches
     /// only, so a physical table with another time index unit (e.g. created
     /// as `TIMESTAMP(6)`) must stay on the ordinary insert path, which
     /// converts the requests to the physical table's unit. A missing physical
     /// table is accepted: it is auto-created with the millisecond unit.
-    pub async fn accepts_physical_table_time_index(&self, ctx: &QueryContextRef) -> bool {
+    async fn accepts_physical_table_time_index(&self, ctx: &QueryContextRef) -> bool {
         let key = batch_key_from_ctx(ctx);
         let Ok(Some(table)) = self
             .catalog_manager

@@ -168,6 +168,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
+                test_prometheus_remote_write_batched_mixed_time_index_units,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -3797,6 +3798,79 @@ async fn write_prometheus_skip_wal_sample(
         request = request.header("x-greptime-insert-skip-wal", hint);
     }
     assert_eq!(request.send().await.status(), StatusCode::NO_CONTENT);
+}
+
+/// Batched remote write against a logical table bound to a non-millisecond
+/// physical table: the bulk guard must reject the destination (the bulk
+/// encode only produces millisecond batches) and fall back to the ordinary
+/// insert path, which converts the requests to the table's unit.
+pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend_batched(store_type, "prom_rw_batched_mixed_units").await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get("/v1/sql?db=public&sql=CREATE TABLE phy_us (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, TIME INDEX (greptime_timestamp)) ENGINE = metric WITH ('physical_metric_table' = 'true')")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write = |metric: &str, value: f64, timestamp: i64| {
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: metric.to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![Sample { value, timestamp }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap()
+    };
+
+    // Create the logical table on the microsecond physical table. The bulk
+    // guard rejects the microsecond selected physical table, so this write
+    // takes the ordinary insert path.
+    let res = client
+        .post("/v1/prometheus/write?physical_table=phy_us")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 2.5, 1500))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Write the same existing table again while selecting the default
+    // (millisecond) physical table: the guard must reject the existing
+    // microsecond destination and fall back to the ordinary insert path —
+    // without the destination check the bulk path would build millisecond
+    // arrays against the microsecond schema and fail the write.
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 3.5, 2000))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Both samples are stored on the microsecond time index.
+    validate_data(
+        "prom_rw_batched_mixed_units",
+        &client,
+        "SELECT COUNT(*), MAX(greptime_value) FROM us_metric",
+        "[[2,3.5]]",
+    )
+    .await;
+
+    guard.remove_all().await;
 }
 
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which

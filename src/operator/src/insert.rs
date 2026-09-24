@@ -1778,12 +1778,14 @@ fn convert_timestamp_value_data(
         // Null or non-timestamp value; nothing to convert.
         other => return Ok(Some(other)),
     };
-    let converted = timestamp.convert_to(target_unit).context(InvalidInsertRequestSnafu {
-        reason: format!(
-            "timestamp column {column_index} value {} in unit {source_unit:?} overflows when converting to unit {target_unit:?}",
-            timestamp.value()
-        ),
-    })?;
+    let converted = timestamp
+        .convert_to(target_unit)
+        .with_context(|| InvalidInsertRequestSnafu {
+            reason: format!(
+                "timestamp column {column_index} value {} in unit {source_unit:?} overflows when converting to unit {target_unit:?}",
+                timestamp.value()
+            ),
+        })?;
     Ok(api::helper::to_grpc_value(datatypes::value::Value::Timestamp(converted)).value_data)
 }
 
