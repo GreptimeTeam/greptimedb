@@ -233,8 +233,9 @@ struct PromPlannerContext {
     /// `__name__` column the operand reports another way is a label like any other there: a table
     /// that stores the column, a set operator, a metric name union and every operator that builds
     /// its result from the samples it read each report their own name column, so they leave this
-    /// false and only a selector, the filtering operators over it (a comparison without `bool`),
-    /// the calls that only reorder or relabel samples and `topk`/`bottomk` keep it set.
+    /// false and only a selector, the filtering operators over it (a comparison without `bool`
+    /// that does not match on the name), the calls that only reorder or relabel samples and
+    /// `topk`/`bottomk` keep it set.
     metric_name_is_materialized: bool,
     /// `by(...)` labels of the aggregation that produced this operand that are not series tags of
     /// its input, i.e. value fields (or a label an inner aggregation already reported as one).
@@ -2089,6 +2090,11 @@ impl PromPlanner {
                         if dropped_tag {
                             project_context.use_tsid = false;
                         }
+                    }
+                    // Explicit name matching makes the result name a matched label, not a
+                    // synthetic selector name eligible for timestamp broadcasting.
+                    if Self::on_matches_metric_name(modifier) {
+                        project_context.metric_name_is_materialized = false;
                     }
                     self.project_binary_join_side(filtered, project_table_ref, &project_context)
                 } else {
@@ -19948,6 +19954,49 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         )
         .await;
         assert_eq!(labeled_values(&batches), vec![(1.0, Vec::new())]);
+    }
+
+    /// Nested explicit name matching must not trigger timestamp broadcasting and suppress the
+    /// `or` fallback.
+    #[tokio::test]
+    async fn review_repro_explicit_name_comparison_keeps_the_fallback_row() {
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"tagless <= on(__name__) tagless"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values_at_timestamp(&batches),
+            vec![(
+                1_000,
+                1.0,
+                vec![(METRIC_NAME.to_string(), "tagless".to_string())]
+            )]
+        );
+
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"(tagless <= on(__name__) tagless) < labelled"#,
+        )
+        .await;
+        assert!(labeled_values(&batches).is_empty());
+
+        let batches = execute_union_query(
+            build_tagless_and_labelled_table_provider(),
+            &[],
+            r#"((tagless <= on(__name__) tagless) < labelled) or other_tagless"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values_at_timestamp(&batches),
+            vec![(
+                1_000,
+                4.0,
+                vec![(METRIC_NAME.to_string(), "other_tagless".to_string())]
+            )]
+        );
     }
 
     /// A set operator's derived operand keeps the rows it always had.
