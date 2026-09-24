@@ -156,7 +156,14 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                let is_all_steppable = is_all_aggr_exprs_steppable(&aggr.aggr_expr);
+                // The state/merge split maps each group expression to one output column,
+                // which doesn't hold for grouping sets.
+                let has_grouping_set = aggr
+                    .group_expr
+                    .iter()
+                    .any(|expr| matches!(expr, Expr::GroupingSet(_)));
+                let is_all_steppable =
+                    !has_grouping_set && is_all_aggr_exprs_steppable(&aggr.aggr_expr);
                 let matches_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
                 if !matches_partition && is_all_steppable {
                     debug!("Plan is steppable: {plan}");
@@ -351,9 +358,9 @@ impl Categorizer {
     /// So only if every partition column is itself one of `exprs`, return true.
     /// Otherwise return false.
     ///
-    /// An expression that only references a partition column, like `substr(host, 3, 1)`,
-    /// `k % 2` or a grouping set, doesn't count: it can put rows from different partitions
-    /// into the same group.
+    /// An expression that only references a partition column, like `substr(host, 3, 1)`
+    /// or `k % 2`, doesn't count: it can put rows from different partitions into the same
+    /// group.
     fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
         let group_cols = exprs
             .iter()
