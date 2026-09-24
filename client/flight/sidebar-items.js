@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlightMessageKind"],"fn":["decode_flight_data"],"struct":["FlightMessageReader"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PAYLOAD_VERSION","WAL_PRUNE_EVENT_TYPE"],"struct":["WalPruneEvent","WalPrunePayload"]};

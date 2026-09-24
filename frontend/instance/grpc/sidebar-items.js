@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["fill_catalog_and_schema_from_context"]};

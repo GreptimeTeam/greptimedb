@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["META_KEY_COL","META_KEY_DATATYPE","META_KEY_NAME","META_KEY_SEMANTIC","META_KEY_SKIP"],"mod":["attribute","into_row","schema","to_row","utils"]};

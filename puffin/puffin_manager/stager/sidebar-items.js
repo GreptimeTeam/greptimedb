@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["bounded_stager"],"struct":["BoundedStager","FsBlobGuard","FsDirGuard"],"trait":["DirWriterProvider","Stager","StagerNotifier"],"type":["BoxWriter","DirWriterProviderRef","InitBlobFn","InitDirFn","WriteResult"]};

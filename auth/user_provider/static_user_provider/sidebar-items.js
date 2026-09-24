@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["STATIC_USER_PROVIDER"],"struct":["StaticUserProvider"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["REMOTE_WRITE_V1_VERSION","REMOTE_WRITE_V2_VERSION"],"fn":["decode_remote_write_request","try_decompress"],"mod":["decode","row_builder","types","v2","validation"],"struct":["PROM_WRITE_REQUEST_POOL"]};

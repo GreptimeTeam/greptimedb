@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["AVG_MERGE_NAME","AVG_STATE_NAME","ENCODED_LEN","MAGIC"],"enum":["InputKind"],"fn":["count_overflow","decode_u64","invalid_state"],"struct":["AvgAccumulator","AvgState","AvgUdaf"]};

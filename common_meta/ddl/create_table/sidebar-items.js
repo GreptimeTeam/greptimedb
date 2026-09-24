@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CreateTableState"],"fn":["build_executor_from_create_table_data"],"mod":["executor","template"],"struct":["CreateTableData","CreateTableProcedure"]};

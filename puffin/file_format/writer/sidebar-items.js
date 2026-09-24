@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["file","footer"],"struct":["Blob","PuffinFileWriter"],"trait":["AsyncWriter","SyncWriter"]};

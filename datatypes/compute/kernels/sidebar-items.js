@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cast"],"mod":["aggregate","arity","bitwise","boolean","cast","cast_utils","cmp","coalesce","comparison","concat","concat_elements","filter","interleave","length","merge","nullif","numeric","partition","rank","regexp","sort","substring","take","temporal","union_extract","window","zip"]};

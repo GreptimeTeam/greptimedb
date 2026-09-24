@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["MysqlSqlResult"],"fn":["create_mysql_client","create_postgres_client"],"struct":["MultiProtocolClient"]};

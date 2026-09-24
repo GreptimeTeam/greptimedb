@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["BitmapType","VectorDistanceMetric","VectorIndexEngine"],"struct":["BloomFilterLoc","BloomFilterMeta","InvertedIndexMeta","InvertedIndexMetas","InvertedIndexStats","VectorIndexMeta","VectorIndexStats"]};

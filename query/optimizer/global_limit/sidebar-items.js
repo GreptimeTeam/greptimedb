@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["add_global_fetch","inherited_partitioning_to_restore","partitioning_to_restore_for","provided_global_fetch","restore_required_partitioning"],"struct":["EnsureGlobalLimitForFetch","ParentContext"]};

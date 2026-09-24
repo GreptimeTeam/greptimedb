@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["preview_sql"],"struct":["DdlExecutor","DdlStatement"]};

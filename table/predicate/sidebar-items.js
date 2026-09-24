@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TimeRangeExtraction"],"fn":["build_time_range_predicate","contains_disjunction_over_column","extract_from_between_expr","extract_from_binary_expr","extract_from_in_list_expr","extract_time_range_from_expr","extract_time_range_strict","get_timestamp_filter","is_string_timestamp_literal"],"macro":["return_none_if_utf8"],"struct":["Predicate"]};

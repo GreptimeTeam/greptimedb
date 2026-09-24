@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PROCESSOR_LETTER"],"enum":["Method"],"fn":["capitalize"],"struct":["LetterProcessor"]};

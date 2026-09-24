@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["build_repeated_value_array","build_string_tag_dict_array","compute_output_arrow_schema","get_pk_value"],"struct":["BatchToRecordBatchAdapter","ProjectedPkColumn"]};

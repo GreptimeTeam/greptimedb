@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["RemoteJob","RemoteJobResult"],"struct":["CompactionJob","CompactionJobResult","DefaultNotifier","JobId","RemoteJobSchedulerError","RemoteJobSchedulerSnafu"],"trait":["Notifier","RemoteJobScheduler"],"type":["RemoteJobSchedulerRef"]};

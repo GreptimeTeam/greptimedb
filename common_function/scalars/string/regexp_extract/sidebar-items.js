@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_DFA_SIZE","MAX_PATTERN_LEN","MAX_REGEX_SIZE","MAX_SINGLE_MATCH","MAX_TOTAL_RESULT_SIZE","NAME"],"fn":["compile_regex_checked"],"struct":["RegexpExtractFunction"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StringArgument"],"fn":["is_description","numeric_answer","register","score_probabilities"],"struct":["AiFunction","AiRequest","Choice","Noul","Score"],"trait":["AiQuestion"]};
