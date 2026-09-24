@@ -432,6 +432,7 @@ impl Inserter {
                 statement_executor,
                 accommodate_existing_schema,
                 is_single_value,
+                None,
             )
             .await?;
 
@@ -572,26 +573,17 @@ impl Inserter {
             .create_physical_table_on_demand(&ctx, physical_table.clone(), statement_executor)
             .await?;
 
-        // Align each request's time index unit with the unit of the table it
-        // actually targets, before creating logical tables or writing: the
-        // metric engine requires every logical table (hence its write
-        // requests) to use the same time index unit as the logical table's
-        // physical table. Ingestion endpoints encode timestamps in a fixed
-        // unit (Prometheus remote write always uses millisecond, OTLP keeps
-        // nanosecond precision on the metric engine path), so rewrite the
-        // schema and values here: an existing destination table keeps its own
-        // unit — it may be bound to a different physical table than the one
-        // selected by this request — and only new tables use the selected
-        // physical table's unit. Converting to a coarser unit truncates the
-        // sub-unit part, following `Timestamp::convert_to`'s floor semantics.
-        self.align_metric_rows_per_destination(
-            &ctx,
-            table_time_index_unit(&physical_table_ref),
-            &mut requests,
-        )
-        .await?;
-
-        // check and create logical tables
+        // check and create logical tables; `create_or_alter_tables_on_demand`
+        // aligns each request's time index unit with the unit of the table it
+        // targets, inside its existing table lookups: existing tables keep
+        // their own unit (which matches the physical table they are bound
+        // to), and new tables use the selected physical table's unit (from
+        // `physical_table_ref`). Ingestion endpoints encode timestamps in a
+        // fixed unit (prometheus remote write always uses millisecond; OTLP
+        // keeps nanosecond precision on the metric engine path), and the
+        // metric engine requires each logical table's requests to match its
+        // time index unit. Narrowing conversions truncate the sub-unit part
+        // (floor), following `Timestamp::convert_to`.
         let CreateAlterTableResult {
             instant_table_ids,
             table_infos,
@@ -603,6 +595,7 @@ impl Inserter {
                 statement_executor,
                 true,
                 true,
+                table_time_index_unit(&physical_table_ref),
             )
             .await?;
         let name_to_info = table_infos
@@ -936,6 +929,7 @@ impl Inserter {
             statement_executor,
             false,
             false,
+            None,
         )
         .await?;
         Ok(())
@@ -953,6 +947,13 @@ impl Inserter {
     /// custom schema, and then inserts data with endpoints that have default schema setting, like prometheus
     /// remote write. This will modify the `RowInsertRequests` in place.
     /// `is_single_value` indicates whether the default schema only contains single value column so we can accommodate it.
+    ///
+    /// `align_time_index_unit` is the selected physical metric table's time
+    /// index unit; passing `Some` (metric engine path only) rewrites each
+    /// request's time index column, inside this function's existing table
+    /// lookups (no extra catalog access): existing destination tables are
+    /// converted to their own unit, and new tables to the given unit.
+    #[allow(clippy::too_many_arguments)]
     async fn create_or_alter_tables_on_demand(
         &self,
         requests: &mut RowInsertRequests,
@@ -961,6 +962,7 @@ impl Inserter {
         statement_executor: &StatementExecutor,
         accommodate_existing_schema: bool,
         is_single_value: bool,
+        align_time_index_unit: Option<TimeUnit>,
     ) -> Result<CreateAlterTableResult> {
         let _timer = crate::metrics::CREATE_ALTER_ON_DEMAND
             .with_label_values(&[auto_create_table_type.as_str()])
@@ -981,7 +983,7 @@ impl Inserter {
             && !has_auto_create_exempt_table
         {
             let mut instant_table_ids = HashSet::new();
-            for req in &requests.inserts {
+            for req in &mut requests.inserts {
                 let table = match self.get_table(catalog, &schema, &req.table_name).await? {
                     Some(table) => table,
                     // System-defined table: created canonically by the system,
@@ -1001,6 +1003,15 @@ impl Inserter {
                         .fail();
                     }
                 };
+                // Metric path: an existing destination table keeps its own
+                // time index unit (it may be bound to another physical
+                // table than the one selected by this request).
+                if align_time_index_unit.is_some()
+                    && let Some(rows) = req.rows.as_mut()
+                    && let Some(target_unit) = table_time_index_unit(&table)
+                {
+                    convert_rows_time_unit(rows, target_unit)?;
+                }
                 let table_info = table.table_info();
                 if matches!(auto_create_table_type, AutoCreateTableType::Trace { .. }) {
                     validate_trace_table_model(&table_info, ctx)?;
@@ -1035,6 +1046,15 @@ impl Inserter {
                     }
                     if table_info.is_ttl_instant_table() {
                         instant_table_ids.insert(table_info.table_id());
+                    }
+                    // Metric path: an existing destination table keeps its
+                    // own time index unit (it may be bound to another
+                    // physical table than the one selected by this request).
+                    if align_time_index_unit.is_some()
+                        && let Some(rows) = req.rows.as_mut()
+                        && let Some(target_unit) = table_time_index_unit(&table)
+                    {
+                        convert_rows_time_unit(rows, target_unit)?;
                     }
                     if auto_create_allowed
                         && let Some(alter_expr) = self.get_alter_table_expr_on_demand(
@@ -1081,6 +1101,14 @@ impl Inserter {
                     .fail();
                 }
                 None => {
+                    // Metric path: a new table uses the selected physical
+                    // table's unit; convert before the create expression is
+                    // derived from the request schema.
+                    if let Some(physical_unit) = align_time_index_unit
+                        && let Some(rows) = req.rows.as_mut()
+                    {
+                        convert_rows_time_unit(rows, physical_unit)?;
+                    }
                     let semantic_index = per_table_semantics
                         .get_or_insert_with(|| parse_per_table_semantic_index(ctx))
                         .as_ref();
@@ -1360,14 +1388,18 @@ impl Inserter {
     /// actual creation (if any) happens later in
     /// [`Inserter::handle_metric_row_inserts`].
     ///
-    /// `handle_metric_row_inserts` aligns again (a no-op after this), so
-    /// calling this is only needed before choosing a write path.
+    /// This is only needed on paths that choose a write path before
+    /// `handle_metric_row_inserts` (whose own table lookups perform the
+    /// alignment again, as a no-op after this).
     pub async fn align_metric_row_inserts_time_unit(
         &self,
         ctx: &QueryContextRef,
         physical_table: &str,
         requests: &mut RowInsertRequests,
     ) -> Result<()> {
+        // The unit conversion indexes rows by the time index position, which
+        // requires well-formed requests.
+        validate_column_count_match(requests)?;
         let physical_unit = match self
             .get_table(ctx.current_catalog(), &ctx.current_schema(), physical_table)
             .await?
@@ -1716,10 +1748,13 @@ fn convert_rows_time_unit(rows: &mut Rows, target_unit: TimeUnit) -> Result<()> 
     // Note: the schema is rewritten before the rows are converted, so an
     // overflow error mid-batch leaves this request half-converted. That is
     // harmless: the error aborts the whole insert request.
+    //
+    // `validate_column_count_match` guarantees every row carries exactly one
+    // value per schema column, so the time index position is directly in
+    // bounds; no per-value search is needed.
     for row in &mut rows.rows {
-        let Some(value) = row.values.get_mut(ts_index) else {
-            continue;
-        };
+        debug_assert_eq!(row.values.len(), rows.schema.len());
+        let value = &mut row.values[ts_index];
         let Some(value_data) = value.value_data.take() else {
             continue;
         };
@@ -2348,16 +2383,19 @@ mod tests {
         // selected physical table's microsecond unit.
         let mut inserter = batcher_test_inserter().await;
         let existing = make_metric_physical_table_ref_with_time_unit(TimeUnit::Millisecond);
+        let phy_us = make_metric_physical_table_ref_with_time_unit(TimeUnit::Microsecond);
         let catalog = MemoryCatalogManager::with_default_setup();
-        catalog
-            .register_table_sync(RegisterTableRequest {
-                catalog: DEFAULT_CATALOG_NAME.to_string(),
-                schema: DEFAULT_SCHEMA_NAME.to_string(),
-                table_name: "existing".to_string(),
-                table_id: 1,
-                table: existing.clone(),
-            })
-            .unwrap();
+        for (table_name, table_id, table) in [("existing", 1, existing), ("phy_us", 2, phy_us)] {
+            catalog
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id,
+                    table,
+                })
+                .unwrap();
+        }
         inserter.catalog_manager = catalog;
 
         let ctx = Arc::new(QueryContext::with(
@@ -2371,7 +2409,7 @@ mod tests {
             ],
         };
         inserter
-            .align_metric_rows_per_destination(&ctx, Some(TimeUnit::Microsecond), &mut requests)
+            .align_metric_row_inserts_time_unit(&ctx, "phy_us", &mut requests)
             .await
             .unwrap();
 
