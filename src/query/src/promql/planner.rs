@@ -674,7 +674,36 @@ impl PromPlanner {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
         });
-        let (series_key_columns, mut sort_exprs) = if input_has_tsid {
+        // `__tsid` is the physical series identity: it hashes the tags a row was written with,
+        // and the metric engine does not put the logical table name into it, so two logical
+        // tables whose series carry the same tag values share one `__tsid`. The name an operand
+        // materialized is therefore not implied by the tsid, and an enclosing set operator
+        // reports a different name per row of that one tsid. Keying the split on the tsid alone
+        // folds such rows into one series — `RangeManipulate` takes the tag values of the first
+        // row of a batch and applies them to every sample of it, so the other name would be lost
+        // and its samples reported under the first one. The labels the input reports, the metric
+        // name among them, are the kind of key that separates those rows; the tsid is used only
+        // for an input that reports no name label — the case it was introduced for.
+        //
+        // The name has to be a label of the rows, not just a string column that happens to carry
+        // the name: a table's own value column or time index may be named `__name__`, and the
+        // selector above it never materializes a name over that data. The planner's tag columns
+        // say which labels a series reports, and the name a selector materializes is in them by
+        // the time its consumers are planned.
+        let input_has_metric_name = self.ctx.tag_columns.iter().any(|tag| tag == METRIC_NAME)
+            && input_schema
+                .field_with_unqualified_name(METRIC_NAME)
+                .map(|field| {
+                    !self
+                        .ctx
+                        .field_columns
+                        .iter()
+                        .any(|column| column == METRIC_NAME)
+                        && self.ctx.time_index_column.as_deref() != Some(METRIC_NAME)
+                        && Self::string_value_data_type(field.data_type()).is_some()
+                })
+                .unwrap_or(false);
+        let (series_key_columns, mut sort_exprs) = if input_has_tsid && !input_has_metric_name {
             (
                 vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()],
                 vec![
@@ -685,13 +714,16 @@ impl PromPlanner {
         } else {
             // Only use tag columns that survive in the inner plan's schema —
             // `ctx.tag_columns` can drift from the actual output.
-            let key_columns: Vec<String> = self
+            let mut key_columns: Vec<String> = self
                 .ctx
                 .tag_columns
                 .iter()
                 .filter(|name| input_schema.has_column_with_unqualified_name(name))
                 .cloned()
                 .collect();
+            if input_has_metric_name && !key_columns.iter().any(|name| name == METRIC_NAME) {
+                key_columns.push(METRIC_NAME.to_string());
+            }
             let sort = key_columns
                 .iter()
                 .map(|name| DfExpr::Column(Column::from_name(name)).sort(true, true))
@@ -16545,6 +16577,67 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         rows
     }
 
+    /// The evaluation timestamp of every row of a result, in milliseconds, together with the
+    /// value and the non-NULL labels of that row (see [`labeled_values`]).
+    ///
+    /// SQLness and the HTTP layer report a PromQL result as `(timestamp, value, labels)`, and a
+    /// subquery result is one row per step, so the timestamp is part of what the query reports.
+    fn labeled_values_at_timestamp(
+        batches: &[RecordBatch],
+    ) -> Vec<(i64, f64, Vec<(String, String)>)> {
+        let mut rows = Vec::new();
+        for batch in batches {
+            let timestamp_index = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|field| {
+                    matches!(
+                        field.data_type(),
+                        ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _)
+                    )
+                })
+                .expect("a query result has a millisecond time index column");
+            let timestamps = batch
+                .column(timestamp_index)
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the time index column is a millisecond timestamp");
+            for row in 0..batch.num_rows() {
+                let mut value = None;
+                let mut labels = Vec::new();
+                for (index, column) in batch.columns().iter().enumerate() {
+                    if index == timestamp_index {
+                        continue;
+                    }
+                    let name = batch.schema().field(index).name().to_string();
+                    match column.data_type() {
+                        ArrowDataType::Utf8 => {
+                            let values = column.as_any().downcast_ref::<StringArray>().unwrap();
+                            if !values.is_null(row) {
+                                labels.push((name, values.value(row).to_string()));
+                            }
+                        }
+                        ArrowDataType::Float64 => {
+                            let values = column.as_any().downcast_ref::<Float64Array>().unwrap();
+                            value = (!values.is_null(row)).then(|| values.value(row));
+                        }
+                        _ => {}
+                    }
+                }
+                labels.sort();
+                rows.push((timestamps.value(row), value.unwrap(), labels));
+            }
+        }
+        rows.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(left.1.total_cmp(&right.1))
+                .then(left.2.cmp(&right.2))
+        });
+        rows
+    }
+
     /// Two classic histogram metric tables: each carries an `le` label, which is what
     /// `histogram_quantile` folds over.
     fn build_union_classic_histogram_table_provider() -> DfTableSourceProvider {
@@ -17716,6 +17809,477 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         };
         let plan_str = plan.display_indent_schema().to_string();
         assert!(plan_str.contains("__tsid ="), "{plan_str}");
+    }
+
+    /// Two exact-name logical tables `foo` and `bar` on one physical metric table, a single series
+    /// each on the same `host`, so every stored tag value is shared and the metric engine gives the
+    /// two rows the same `__tsid`: the physical series identity does not encode which logical table
+    /// a sample was written through.
+    ///
+    /// The fixture's physical table keeps only `__table_id` and `__tsid` as its primary key. A real
+    /// metric engine physical table also carries its tag columns there, which makes their scans
+    /// expose the tags as dictionaries; the in-memory fixture scans plain strings, so leaving the
+    /// tag out of the key keeps the plan's declared label type and the actual rows in agreement.
+    /// The metric engine's `__tsid` and `__table_id` columns, which are what this fixture is about,
+    /// are unaffected.
+    fn build_shared_tsid_metric_name_table_provider() -> DfTableSourceProvider {
+        let physical_name = "shared_tsid_phy";
+        let physical_table_id = 3_300;
+        let stored_columns = |name: &str| {
+            ColumnSchema::new(name.to_string(), ConcreteDataType::string_datatype(), true)
+        };
+
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            stored_columns("host"),
+        ];
+        columns.push(
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            // `__table_id`, `__tsid` — see the fixture comment above for why `host` is not a key.
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![4])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let physical_batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(UInt32Array::from(vec![3_301u32, 3_302])) as Arc<dyn Array>,
+                Arc::new(UInt64Array::from(vec![11u64, 11])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a")])),
+                Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            physical_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, physical_batch),
+            physical_table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let physical_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        let physical = Arc::new(Table::new(
+            physical_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+
+        let logical_table = |name: &str, table_id: u32| {
+            let columns = vec![
+                stored_columns("host"),
+                ColumnSchema::new(
+                    "timestamp".to_string(),
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new(
+                    greptime_value().to_string(),
+                    ConcreteDataType::float64_datatype(),
+                    true,
+                ),
+            ];
+            let mut options = table::requests::TableOptions::default();
+            options.extra_options.insert(
+                LOGICAL_TABLE_METADATA_KEY.to_string(),
+                physical_name.to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(Schema::new(columns)))
+                .primary_key_indices(vec![0])
+                .value_indices(vec![2])
+                .engine(METRIC_ENGINE_NAME.to_string())
+                .options(options)
+                .next_column_id(1024)
+                .build()
+                .unwrap();
+            let info = TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(meta)
+                .build()
+                .unwrap();
+            EmptyTable::from_table_info(&info)
+        };
+
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![
+                physical,
+                logical_table("foo", 3_301),
+                logical_table("bar", 3_302),
+            ],
+        )
+    }
+
+    /// The two named rows the shared-TSID fixture reports, ordered by value.
+    fn shared_tsid_named_rows() -> Vec<(f64, Vec<(String, String)>)> {
+        vec![
+            (
+                1.0,
+                vec![
+                    (METRIC_NAME.to_string(), "foo".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+            (
+                2.0,
+                vec![
+                    (METRIC_NAME.to_string(), "bar".to_string()),
+                    ("host".to_string(), "a".to_string()),
+                ],
+            ),
+        ]
+    }
+
+    #[tokio::test]
+    async fn review_repro_subquery_keeps_names_that_share_a_stored_tsid() {
+        // The names differ, so `on(__name__)` matches neither operand and the set operator reports
+        // both series, even though the two rows carry the same `__tsid`. The default matching of
+        // the whole series identity is what keeps them apart here, and a subquery may not change
+        // that.
+        let batches = execute_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"foo or on(__name__) bar"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), shared_tsid_named_rows());
+
+        // The subquery has to split those rows back into two series. Keyed on the tsid alone they
+        // are one series: the range manipulator takes the tag values of the first row and applies
+        // them to every sample of the batch, so one of the two names disappears from the result.
+        // The user-visible rows are asserted first, then the split key the plan actually uses.
+        let batches = execute_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"last_over_time((foo or on(__name__) bar)[2s:1s])"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), shared_tsid_named_rows());
+        // Both rows report the inner sample's own timestamp at the one evaluation step, each named
+        // with its own metric, so the split did not move a sample onto the other series.
+        assert_eq!(
+            labeled_values_at_timestamp(&batches),
+            vec![
+                (
+                    1_000,
+                    1.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "foo".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+                (
+                    1_000,
+                    2.0,
+                    vec![
+                        (METRIC_NAME.to_string(), "bar".to_string()),
+                        ("host".to_string(), "a".to_string()),
+                    ]
+                ),
+            ]
+        );
+
+        let plan = plan_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"last_over_time((foo or on(__name__) bar)[2s:1s])"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["__name__", "host"]"#),
+            "{plan_str}"
+        );
+
+        // An ordinary one-table subquery has no name column to split on and keeps the tsid as the
+        // series key, so the fast path is still taken.
+        let plan = plan_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"last_over_time(foo[2s:1s])"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["__tsid"]"#),
+            "{plan_str}"
+        );
+        let batches = execute_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"last_over_time(foo[2s:1s])"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values(&batches),
+            vec![(1.0, vec![("host".to_string(), "a".to_string())])]
+        );
+
+        // A subquery inside a subquery reads the named rows the inner one produced, so the outer
+        // split has to separate them by name as well.
+        let batches = execute_union_query(
+            build_shared_tsid_metric_name_table_provider(),
+            &[],
+            r#"last_over_time(last_over_time((foo or on(__name__) bar)[2s:1s])[2s:1s])"#,
+        )
+        .await;
+        assert_eq!(labeled_values(&batches), shared_tsid_named_rows());
+    }
+
+    #[tokio::test]
+    async fn review_repro_stored_metric_name_subquery_keeps_both_series() {
+        // The same two names on one physical table, this time stored as a `__name__` tag: the
+        // name is part of the physical tags, so the rows carry different tsids and the tsid path
+        // is never used for those operands. The subquery must still key its split on the labels
+        // the rows report — including the stored name — and not on a tsid it does not have.
+        let plan = plan_union_query(
+            build_stored_metric_name_table_provider(true),
+            &[],
+            r#"last_over_time((foo or on(__name__) bar)[2s:1s])"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["__name__", "host"]"#),
+            "{plan_str}"
+        );
+    }
+
+    /// A metric-engine fixture with a single logical table `collide` whose time index or value
+    /// column is named `__name__`, so the scan exposes a `__name__` column that is the table's own
+    /// data rather than a label. The physical table carries `__table_id`/`__tsid`, so the selector
+    /// takes the tsid path; as in [`build_shared_tsid_metric_name_table_provider`], only the
+    /// internal columns are the physical primary key (the in-memory scan does not dictionary encode
+    /// primary-key strings the way a real mito scan does).
+    fn build_name_column_collision_table_provider(
+        time_index_name: &str,
+        field_name: &str,
+    ) -> DfTableSourceProvider {
+        let physical_name = "collide_phy";
+        let physical_table_id = 3_400;
+
+        let mut columns = vec![
+            ColumnSchema::new(
+                DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint32_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+                ConcreteDataType::uint64_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                true,
+            ),
+        ];
+        columns.push(
+            ColumnSchema::new(
+                time_index_name.to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        columns.push(ColumnSchema::new(
+            field_name.to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let schema = Arc::new(Schema::new(columns));
+        let meta = TableMetaBuilder::empty()
+            .schema(schema.clone())
+            .primary_key_indices(vec![0, 1])
+            .value_indices(vec![3, 4])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        // Two samples of the one series, so a split that keyed on a numeric column would either
+        // fail or merge the samples and lose one.
+        let physical_batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(UInt32Array::from(vec![3_401u32, 3_401])) as Arc<dyn Array>,
+                Arc::new(UInt64Array::from(vec![11u64, 11])),
+                Arc::new(StringArray::from(vec![Some("a"), Some("a")])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, 1_000])),
+                Arc::new(Float64Array::from(vec![1.0, 2.0])),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            physical_name,
+            GreptimeRecordBatch::from_df_record_batch(schema, physical_batch),
+            physical_table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let physical_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(physical_table_id)
+                .name(physical_name)
+                .meta(meta)
+                .build()
+                .unwrap(),
+        );
+        let physical = Arc::new(Table::new(
+            physical_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+
+        let mut logical_columns = vec![ColumnSchema::new(
+            "host".to_string(),
+            ConcreteDataType::string_datatype(),
+            true,
+        )];
+        logical_columns.push(
+            ColumnSchema::new(
+                time_index_name.to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+        );
+        logical_columns.push(ColumnSchema::new(
+            field_name.to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ));
+        let mut options = table::requests::TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_name.to_string(),
+        );
+        let logical_meta = TableMetaBuilder::empty()
+            .schema(Arc::new(Schema::new(logical_columns)))
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let logical_info = TableInfoBuilder::default()
+            .table_id(3_401)
+            .name("collide")
+            .meta(logical_meta)
+            .build()
+            .unwrap();
+
+        register_tables(
+            &MemoryCatalogManager::with_default_setup(),
+            vec![physical, EmptyTable::from_table_info(&logical_info)],
+        )
+    }
+
+    #[tokio::test]
+    async fn review_repro_subquery_name_collision_keeps_the_tsid_series_key() {
+        // A value column named `__name__` is the table's own data: the selector reads it and does
+        // not materialize a metric name over it. It is not a label, so the subquery's series key
+        // must stay the tsid — keying on a float column would fail the split and lose the row.
+        let plan = plan_union_query(
+            build_name_column_collision_table_provider("timestamp", METRIC_NAME),
+            &[],
+            r#"last_over_time(collide[2s:1s])"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["__tsid"]"#),
+            "{plan_str}"
+        );
+        assert!(
+            !plan_str.contains(r#"Utf8("collide") AS __name__"#),
+            "{plan_str}"
+        );
+
+        let batches = execute_union_query(
+            build_name_column_collision_table_provider("timestamp", METRIC_NAME),
+            &[],
+            r#"last_over_time(collide[2s:1s])"#,
+        )
+        .await;
+        // Both samples of the one series survive, at their own evaluation timestamps: keying on
+        // the numeric `__name__` column would instead have failed the split.
+        assert_eq!(
+            labeled_values_at_timestamp(&batches),
+            vec![
+                (0, 1.0, vec![("host".to_string(), "a".to_string())]),
+                (1_000, 2.0, vec![("host".to_string(), "a".to_string())]),
+            ]
+        );
+
+        // The same table with its time index named `__name__`: still the table's own column, so the
+        // tsid remains the series key and both samples survive the subquery.
+        let plan = plan_union_query(
+            build_name_column_collision_table_provider(METRIC_NAME, greptime_value()),
+            &[],
+            r#"last_over_time(collide[2s:1s])"#,
+        )
+        .await
+        .unwrap();
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(r#"PromSeriesDivide: tags=["__tsid"]"#),
+            "{plan_str}"
+        );
+
+        let batches = execute_union_query(
+            build_name_column_collision_table_provider(METRIC_NAME, greptime_value()),
+            &[],
+            r#"last_over_time(collide[2s:1s])"#,
+        )
+        .await;
+        assert_eq!(
+            labeled_values_at_timestamp(&batches),
+            vec![
+                (0, 1.0, vec![("host".to_string(), "a".to_string())]),
+                (1_000, 2.0, vec![("host".to_string(), "a".to_string())]),
+            ]
+        );
     }
 
     /// Two exact-name metric tables, `foo` and `bar`, each with one series on the same `host`.
