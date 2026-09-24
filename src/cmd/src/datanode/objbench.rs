@@ -209,8 +209,6 @@ impl ObjbenchCommand {
             fulltext_index_config,
             bloom_filter_index_config: MitoConfig::default().bloom_filter_index,
             preserve_row_sequence: false,
-            #[cfg(feature = "vector_index")]
-            vector_index_config: Default::default(),
         };
 
         // Write SST

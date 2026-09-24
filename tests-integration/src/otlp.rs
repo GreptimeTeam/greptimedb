@@ -535,8 +535,7 @@ WITH(
                 .build()
                 .await;
             let instance = standalone.fe_instance();
-            let mut options = standalone.opts.clone();
-            options.otlp.experimental_enable_exponential_histogram = true;
+            let options = standalone.opts.clone();
             let services = Services::new(options.clone(), instance.clone(), Plugins::default());
             let server = services
                 .http_server_builder(

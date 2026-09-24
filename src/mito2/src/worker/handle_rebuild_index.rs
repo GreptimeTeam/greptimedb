@@ -69,8 +69,6 @@ impl<S> RegionWorkerLoop<S> {
             inverted_index_config: self.config.inverted_index.clone(),
             fulltext_index_config: self.config.fulltext_index.clone(),
             bloom_filter_index_config: self.config.bloom_filter_index.clone(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: self.config.vector_index.clone(),
             index_options: version.options.index_options.clone(),
             intermediate_manager,
             puffin_manager,

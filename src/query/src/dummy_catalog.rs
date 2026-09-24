@@ -37,9 +37,7 @@ use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_engine::RegionEngineRef;
-use store_api::storage::{
-    RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector, VectorSearchRequest,
-};
+use store_api::storage::{RegionId, ScanRequest, TimeSeriesDistribution, TimeSeriesRowSelector};
 use table::TableRef;
 use table::metadata::{TableId, TableInfoRef};
 use table::table::adapter::{dictionary_encode_string_columns, supports_pk_dictionary_encoding};
@@ -279,14 +277,6 @@ impl DummyTableProvider {
             scan_request: Arc::new(Mutex::new(self.scan_request.lock().unwrap().clone())),
             ..self.clone()
         }
-    }
-
-    pub fn with_vector_search_hint(&self, hint: VectorSearchRequest) {
-        self.scan_request.lock().unwrap().vector_search = Some(hint);
-    }
-
-    pub fn get_vector_search_hint(&self) -> Option<VectorSearchRequest> {
-        self.scan_request.lock().unwrap().vector_search.clone()
     }
 
     pub fn with_sequence(&self, sequence: u64) {

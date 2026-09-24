@@ -43,7 +43,7 @@ concurrency:
 
 jobs:
   build:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Build GreptimeDB binaries
     runs-on: ${{ matrix.os }}
     strategy:
@@ -86,7 +86,7 @@ jobs:
         # `cargo gc` will invoke `cargo build` with specified args
         run: |
           started_epoch="$(date +%s)"
-          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,vector_index,ai_functions"
+          cargo gc -- --bin greptime --bin sqlness-runner --features "pg_kvbackend,mysql_kvbackend,ai_functions"
           elapsed_secs=$(( $(date +%s) - started_epoch ))
           printf -- '- Binary build: **%ss**\n' "${elapsed_secs}" >>"${GITHUB_STEP_SUMMARY}"
       - name: Pack greptime binaries
@@ -104,7 +104,7 @@ jobs:
           version: current
 
   sqlness:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Sqlness Test (${{ matrix.mode.name }})
     needs: build
     runs-on: ${{ matrix.os }}
@@ -184,7 +184,7 @@ jobs:
           retention-days: 3
 
   export-import-v2-e2e:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Export/Import V2 E2E Test
     needs: build
     runs-on: ubuntu-latest
@@ -254,7 +254,7 @@ jobs:
           retention-days: 3
 
   run-multi-lang-tests:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Run Multi-language SDK Tests
     needs: build
     uses: ./.github/workflows/run-multi-lang-tests.yml
@@ -262,7 +262,7 @@ jobs:
       artifact-name: bins
 
   compat-updater-check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) && (github.event_name == 'merge_group' || github.event_name == 'pull_request') }}
     name: Check compat version updater
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -361,8 +361,7 @@ pub enum IndexType {
     FulltextIndex,
     /// Bloom Filter index
     BloomFilterIndex,
-    /// Vector index (HNSW).
-    #[cfg(feature = "vector_index")]
+    /// Retained for manifests written with the removed experimental vector index.
     VectorIndex,
 }
 
@@ -424,12 +423,6 @@ impl FileMeta {
     pub fn bloom_filter_index_available(&self) -> bool {
         self.available_indexes
             .contains(&IndexType::BloomFilterIndex)
-    }
-
-    /// Returns true if the file has a vector index.
-    #[cfg(feature = "vector_index")]
-    pub fn vector_index_available(&self) -> bool {
-        self.available_indexes.contains(&IndexType::VectorIndex)
     }
 
     pub fn index_file_size(&self) -> u64 {
@@ -1060,6 +1053,31 @@ mod tests {
         );
         let deserialized_file_meta: FileMeta = serde_json::from_str(json_file_meta).unwrap();
         assert_eq!(file_meta, deserialized_file_meta);
+    }
+
+    #[test]
+    fn test_deserialize_legacy_vector_index() {
+        let json = r#"{
+            "region_id": 0,
+            "file_id": "bc5896ec-e4d8-4017-a80d-f2de73188d55",
+            "time_range": [{"value":0,"unit":"Millisecond"},{"value":0,"unit":"Millisecond"}],
+            "available_indexes": ["VectorIndex", "InvertedIndex"],
+            "indexes": [{"column_id": 1, "created_indexes": ["VectorIndex"]}],
+            "level": 0
+        }"#;
+        let meta: FileMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.inverted_index_available());
+        assert!(!meta.fulltext_index_available());
+        assert!(!meta.bloom_filter_index_available());
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(
+            encoded["available_indexes"],
+            serde_json::json!(["VectorIndex", "InvertedIndex"])
+        );
+        assert_eq!(
+            encoded["indexes"][0]["created_indexes"],
+            serde_json::json!(["VectorIndex"])
+        );
     }
 
     #[test]

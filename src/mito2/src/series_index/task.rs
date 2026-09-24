@@ -15,7 +15,7 @@
 //! Worker-owned background maintenance for series indexes.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use common_telemetry::{info, warn};
@@ -27,7 +27,9 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
-use crate::metrics::SERIES_INDEX_RECONCILE_TOTAL;
+use crate::metrics::{
+    SERIES_INDEX_CAPACITY_DEFERRED, SERIES_INDEX_DISK_BYTES, SERIES_INDEX_RECONCILE_TOTAL,
+};
 use crate::read::series_candidate::is_sparse_metric_metadata;
 use crate::region::{MitoRegionRef, RegionLeaderState, RegionMapRef, RegionRoleState};
 use crate::series_index::maintenance::{ReconcileStats, reconcile_series_indexes};
@@ -112,6 +114,8 @@ pub(crate) fn spawn_series_index_tasks(
     bucket_width: Duration,
     purger: IndexFilePurger,
     purge_receiver: UnboundedReceiver<PurgeRequest>,
+    disk_usage: Arc<AtomicU64>,
+    max_size: u64,
     interval: Duration,
     time_provider: TimeProviderRef,
     enable_range_index: bool,
@@ -129,6 +133,9 @@ pub(crate) fn spawn_series_index_tasks(
             regions,
             bucket_width,
             purger,
+            disk_usage,
+            max_size,
+            reported_usage: 0,
             state,
             receiver,
             interval,
@@ -146,6 +153,9 @@ struct SeriesIndexTask {
     regions: RegionMapRef,
     bucket_width: Duration,
     purger: IndexFilePurger,
+    disk_usage: Arc<AtomicU64>,
+    max_size: u64,
+    reported_usage: u64,
     worker_id: u32,
     state: Arc<SeriesIndexTaskState>,
     receiver: Receiver<SeriesIndexCommand>,
@@ -217,14 +227,22 @@ impl SeriesIndexTask {
         Ok(())
     }
 
-    async fn reconcile_manual(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+    async fn reconcile_manual(&mut self, region: MitoRegionRef) -> Result<ReconcileStats> {
         self.validate_manual_region(&region)?;
-        let result = self.reconcile_region(region.clone()).await?;
+        self.refresh_usage();
+        let result = self.reconcile_region(region.clone()).await;
+        self.refresh_usage();
+        let result = result?;
         self.validate_manual_region(&region)?;
         Ok(result)
     }
 
     async fn reconcile_region(&self, region: MitoRegionRef) -> Result<ReconcileStats> {
+        // Full capacity defers builds, but cleanup must still reclaim published usage.
+        let allow_builds = self.disk_usage.load(Ordering::Relaxed) < self.max_size;
+        if !allow_builds {
+            SERIES_INDEX_CAPACITY_DEFERRED.inc();
+        }
         let result = reconcile_series_indexes(
             self.worker_id,
             self.store.clone(),
@@ -233,6 +251,7 @@ impl SeriesIndexTask {
             self.time_provider.current_time_millis(),
             self.purger.clone(),
             self.enable_range_index,
+            allow_builds,
         )
         .await;
         if result.is_err() {
@@ -243,8 +262,33 @@ impl SeriesIndexTask {
         result
     }
 
+    /// Each worker contributes only its open regions, refreshed at maintenance boundaries.
+    fn refresh_usage(&mut self) {
+        let usage = self
+            .regions
+            .list_regions()
+            .iter()
+            .map(|region| region.series_index_version().disk_usage())
+            .sum();
+        self.report_usage(usage);
+    }
+
+    fn report_usage(&mut self, usage: u64) {
+        if usage >= self.reported_usage {
+            let delta = usage - self.reported_usage;
+            self.disk_usage.fetch_add(delta, Ordering::Relaxed);
+            SERIES_INDEX_DISK_BYTES.add(delta as i64);
+        } else {
+            let delta = self.reported_usage - usage;
+            self.disk_usage.fetch_sub(delta, Ordering::Relaxed);
+            SERIES_INDEX_DISK_BYTES.sub(delta as i64);
+        }
+        self.reported_usage = usage;
+    }
+
     /// Runs periodic maintenance independently of incoming deletion requests.
     async fn maintain(&mut self) {
+        self.refresh_usage();
         for region in self.regions.list_regions() {
             if !self.state.is_running() {
                 break;
@@ -260,7 +304,14 @@ impl SeriesIndexTask {
             if let Err(error) = self.reconcile_region(region.clone()).await {
                 warn!(error; "Failed to reconcile series indexes, worker: {}, region: {}", self.worker_id, region.region_id);
             }
+            self.refresh_usage();
         }
+    }
+}
+
+impl Drop for SeriesIndexTask {
+    fn drop(&mut self) {
+        self.report_usage(0);
     }
 }
 
@@ -319,6 +370,9 @@ mod tests {
                 regions,
                 bucket_width: Duration::from_secs(100),
                 purger,
+                disk_usage: Arc::default(),
+                max_size: u64::MAX,
+                reported_usage: 0,
                 worker_id: 0,
                 state: Arc::new(state),
                 receiver,
@@ -405,6 +459,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_manual_reconcile_respects_capacity_and_refreshes_usage() {
+        let mut env = TestEnv::with_prefix("series-manual-capacity").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let (mut task, _purge_receiver) = new_task(region.clone());
+        task.max_size = 0;
+        task.reconcile_manual(region.clone()).await.unwrap();
+        assert_eq!(0, region.series_index_version().disk_usage());
+        assert_eq!(0, task.disk_usage.load(Ordering::Relaxed));
+
+        task.max_size = u64::MAX;
+        task.reconcile_manual(region.clone()).await.unwrap();
+        let bytes = region.series_index_version().disk_usage();
+        assert!(bytes > 0);
+        assert_eq!(bytes, task.disk_usage.load(Ordering::Relaxed));
+        let usage = task.disk_usage.clone();
+        drop(task);
+        assert_eq!(0, usage.load(Ordering::Relaxed));
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn test_shutdown_fails_queued_reconciliation() {
         let mut env = TestEnv::with_prefix("series-manual-stop").await;
         let (engine, region) = prepare_region(&mut env).await;
@@ -481,7 +556,7 @@ mod tests {
             }))
             .build()
             .unwrap();
-        task.store = task.store.layer(layer);
+        task.store = task.store.clone().layer(layer);
         let state = task.state.clone();
         let regions = task.regions.clone();
         let mut result = state.reconcile(region.clone()).await.unwrap();
@@ -594,6 +669,9 @@ mod tests {
             regions,
             bucket_width: Duration::from_secs(100),
             purger,
+            disk_usage: Arc::default(),
+            max_size: u64::MAX,
+            reported_usage: 0,
             worker_id: 0,
             state: Arc::new(state),
             receiver,
@@ -617,5 +695,243 @@ mod tests {
             assert_eq!(builds, store.exists(&path).await.unwrap());
         }
         engine.stop().await.unwrap();
+    }
+
+    #[rstest::rstest]
+    #[case::at_capacity(0, true)]
+    #[case::above_capacity(1, true)]
+    #[case::at_capacity_without_range(0, false)]
+    #[case::above_capacity_without_range(1, false)]
+    #[tokio::test]
+    async fn test_full_capacity_cleanup_and_recovery(
+        #[case] excess: u64,
+        #[case] enable_range_index: bool,
+    ) {
+        use std::sync::Mutex;
+
+        use object_store::layers::mock::MockLayerBuilder;
+
+        use crate::series_index::catalog::load_version_control;
+        use crate::series_index::tests::prepare_region_with_timestamps;
+        use crate::time_provider::mock::MockTimeProvider;
+
+        let mut env = TestEnv::with_prefix("series-capacity-cleanup").await;
+        let (engine, region) =
+            prepare_region_with_timestamps(&mut env, &[1000, 2000, 3000, 4000, 5000]).await;
+        assert_eq!(
+            5,
+            region
+                .version()
+                .ssts
+                .levels()
+                .iter()
+                .flat_map(|level| level.files())
+                .count()
+        );
+        let mut options = region.version().options.clone();
+        options.ttl = Some(common_time::TimeToLive::Duration(Duration::from_secs(100)));
+        region.version_control.alter_options(options);
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let captured = writes.clone();
+        let store = ObjectStore::new(Memory::default()).unwrap().layer(
+            MockLayerBuilder::default()
+                .writer_factory(Arc::new(move |path, _, inner| {
+                    captured.lock().unwrap().push(path.to_string());
+                    inner
+                }))
+                .build()
+                .unwrap(),
+        );
+        let (purger, mut receiver) = series_index_channel(store.clone());
+        let regions = Arc::new(RegionMap::default());
+        regions.insert_region(region.clone());
+        let clock = Arc::new(MockTimeProvider::new(0));
+        let usage = Arc::new(AtomicU64::new(0));
+        let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
+        let mut task = SeriesIndexTask {
+            store: store.clone(),
+            regions,
+            bucket_width: Duration::from_secs(100),
+            purger,
+            disk_usage: usage.clone(),
+            max_size: u64::MAX,
+            reported_usage: 0,
+            worker_id: 0,
+            state: Arc::new(state),
+            receiver: command_receiver,
+            interval: Duration::from_secs(3600),
+            time_provider: clock.clone(),
+            enable_range_index,
+        };
+        task.maintain().await;
+        let previous = region.series_index_version();
+        assert_eq!(1, previous.series_indexes.len());
+        let old_id = *previous.series_indexes.keys().next().unwrap();
+        task.max_size = previous.disk_usage() - excess;
+        writes.lock().unwrap().clear();
+        task.maintain().await;
+        assert!(Arc::ptr_eq(&previous, &region.series_index_version()));
+        assert!(writes.lock().unwrap().is_empty());
+
+        // Removing the newest SST makes range coverage obsolete and would normally
+        // trigger a series replacement over the four remaining SSTs.
+        let sources = region.version();
+        let newest = sources
+            .ssts
+            .levels()
+            .iter()
+            .flat_map(|level| level.files())
+            .max_by_key(|file| file.meta_ref().sequence)
+            .unwrap()
+            .meta_ref()
+            .clone();
+        region.version_control.apply_edit(
+            Some(crate::manifest::action::RegionEdit {
+                files_to_remove: vec![newest.clone()],
+                files_to_add: Vec::new(),
+                timestamp_ms: None,
+                compaction_time_window: None,
+                flushed_entry_id: None,
+                flushed_sequence: None,
+                committed_sequence: None,
+            }),
+            &[],
+            crate::test_util::new_noop_file_purger(),
+        );
+        task.maintain().await;
+        let cleaned = region.series_index_version();
+        assert!(!cleaned.range_indexes.contains_key(&newest.file_id));
+        assert_eq!(
+            usize::from(enable_range_index) * 4,
+            cleaned.range_indexes.len()
+        );
+        assert_eq!(previous.index_buckets, cleaned.index_buckets);
+        assert_eq!(1, cleaned.series_indexes.len());
+        assert!(cleaned.series_indexes.contains_key(&old_id));
+        assert_eq!(cleaned.disk_usage(), usage.load(Ordering::Relaxed));
+        assert_eq!(
+            previous.disk_usage()
+                - previous
+                    .range_indexes
+                    .get(&newest.file_id)
+                    .map_or(0, |e| e.file_size),
+            cleaned.disk_usage()
+        );
+        assert!(
+            writes
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|path| path == &range_catalog_path(region.region_id))
+        );
+        let restored = load_version_control(&store, region.region_id, &task.purger).await;
+        assert_eq!(cleaned.range_indexes, restored.current().range_indexes);
+        assert_eq!(cleaned.index_buckets, restored.current().index_buckets);
+        drop(restored);
+
+        // Expiration must work even when the shared estimate remains full.
+        task.max_size = cleaned.disk_usage() - excess;
+        clock.set_now(201_000);
+        writes.lock().unwrap().clear();
+        task.maintain().await;
+        let expired = region.series_index_version();
+        assert!(expired.series_indexes.is_empty());
+        assert!(expired.index_buckets.is_empty());
+        assert_eq!(cleaned.range_indexes, expired.range_indexes);
+        assert_eq!(expired.disk_usage(), usage.load(Ordering::Relaxed));
+        assert!(usage.load(Ordering::Relaxed) < task.max_size);
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![series_catalog_path(region.region_id)]
+        );
+        let restored = load_version_control(&store, region.region_id, &task.purger).await;
+        assert!(restored.current().series_indexes.is_empty());
+        assert_eq!(expired.range_indexes, restored.current().range_indexes);
+        assert!(receiver.try_recv().is_err());
+        drop(previous);
+        assert!(receiver.try_recv().is_err());
+        drop(cleaned);
+        assert_eq!(old_id, receiver.try_recv().unwrap().file_id.file_id());
+        assert!(receiver.try_recv().is_err());
+
+        // Make the remaining SSTs eligible again; reclaimed capacity admits a build
+        // without closing the region or increasing the configured limit.
+        clock.set_now(0);
+        task.maintain().await;
+        let rebuilt = region.series_index_version();
+        assert_eq!(1, rebuilt.series_indexes.len());
+        assert!(!rebuilt.series_indexes.contains_key(&old_id));
+        assert_eq!(
+            4,
+            rebuilt
+                .series_indexes
+                .values()
+                .next()
+                .unwrap()
+                .entry()
+                .source_file_ids
+                .len()
+        );
+        assert_eq!(rebuilt.disk_usage(), usage.load(Ordering::Relaxed));
+        engine.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_shared_usage_defers_builds_and_allows_overshoot() {
+        let mut env = TestEnv::with_prefix("series-approximate-usage").await;
+        let (engine, region) = prepare_region(&mut env).await;
+        let usage = Arc::new(AtomicU64::new(0));
+        let store = ObjectStore::new(Memory::default()).unwrap();
+        let make_task = || {
+            let (state, command_receiver) = SeriesIndexTaskState::new(0, 1);
+            SeriesIndexTask {
+                store: store.clone(),
+                regions: Arc::new(RegionMap::default()),
+                bucket_width: Duration::from_secs(100),
+                purger: series_index_channel(store.clone()).0,
+                disk_usage: usage.clone(),
+                max_size: 1024,
+                reported_usage: 0,
+                worker_id: 0,
+                state: Arc::new(state),
+                receiver: command_receiver,
+                interval: Duration::from_secs(3600),
+                time_provider: Arc::new(crate::time_provider::StdTimeProvider),
+                enable_range_index: true,
+            }
+        };
+        let mut task = make_task();
+        task.regions.insert_region(region.clone());
+        task.maintain().await;
+        let bytes = region.series_index_version().disk_usage();
+        assert!(
+            bytes > task.max_size,
+            "a started reconciliation may exceed the limit"
+        );
+        assert_eq!(bytes, usage.load(Ordering::Relaxed));
+        // Another worker sees the same estimate and defers builds without creating coverage.
+        let mut other_env = TestEnv::with_prefix("series-approximate-other").await;
+        let (other_engine, other_region) = prepare_region(&mut other_env).await;
+        let mut other = make_task();
+        other.regions.insert_region(other_region.clone());
+        other.max_size = bytes; // Exact equality also skips.
+        other.maintain().await;
+        assert_eq!(0, other_region.series_index_version().disk_usage());
+        assert_eq!(bytes, usage.load(Ordering::Relaxed));
+
+        // Closing a region reduces the estimate on the next pass, even while full.
+        task.regions.remove_region(region.region_id);
+        task.maintain().await;
+        assert_eq!(0, usage.load(Ordering::Relaxed));
+        other.maintain().await;
+        assert!(other_region.series_index_version().disk_usage() > 0);
+        assert_eq!(
+            other_region.series_index_version().disk_usage(),
+            usage.load(Ordering::Relaxed)
+        );
+        drop(other);
+        assert_eq!(0, usage.load(Ordering::Relaxed));
+        engine.stop().await.unwrap();
+        other_engine.stop().await.unwrap();
     }
 }

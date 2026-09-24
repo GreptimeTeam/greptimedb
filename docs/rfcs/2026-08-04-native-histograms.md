@@ -13,8 +13,8 @@ field and evaluates them as first-class PromQL samples. Prometheus Remote Write
 ingestion transport: accepted cumulative points are normalized into the same
 Struct before persistence and are queried only as native histograms.
 
-Native histograms are experimental. Prometheus Remote Write 2.0 and cumulative
-OTLP exponential histograms are supported behind separate configuration gates.
+Prometheus Remote Write 2.0 native histograms and cumulative OTLP/HTTP
+exponential histograms are enabled by default.
 Remote Write 1.0 histogram payloads are rejected instead of being acknowledged and dropped.
 Native-histogram Remote Read is deferred; the existing Remote Read path
 continues to return scalar samples only.
@@ -95,8 +95,7 @@ that send native histograms must use Remote Write 2.0.
 
 ## Remote Write 2.0
 
-Remote Write 2.0 accepts integer and float native histograms while
-`prom_store.experimental_enable_prometheus_native_histogram` is enabled. Supported
+Remote Write 2.0 accepts integer and float native histograms by default. Supported
 exponential schemas are `-4` through `8`; schema `-53` represents native
 histograms with custom buckets.
 
@@ -121,10 +120,8 @@ explicit if sampled responses are implemented.
 
 ## OTLP
 
-OTLP exponential histograms are accepted when
-`otlp.experimental_enable_exponential_histogram` is enabled. The option defaults
-to false and applies to OTLP/HTTP. Disabled points are rejected rather than
-silently acknowledged. OTel Arrow exponential histograms are rejected because
+OTLP/HTTP exponential histograms are accepted by default.
+OTel Arrow exponential histograms are rejected because
 the current Arrow wire format omits `zero_threshold`; accepting them would
 silently change the distribution. Cumulative temporality is required; delta and
 unspecified exponential histograms are rejected before their points are
@@ -284,3 +281,10 @@ native-histogram data remains readable.
 - Versioned two-phase native-histogram aggregation state.
 - Exact Prometheus summation compensation if measured precision differences
   justify the extra aggregate state.
+
+## Configuration migration
+
+The `prom_store.experimental_enable_prometheus_native_histogram` and
+`otlp.experimental_enable_exponential_histogram` options have been removed.
+Remove them from existing configurations; both ingestion paths are always enabled
+when their protocol is enabled. Old option values are ignored, including `false`.

@@ -1513,46 +1513,6 @@ async fn test_index_build_type_manual_consistency() {
 }
 
 #[tokio::test]
-async fn test_gate_index_build_listener_smoke() {
-    use store_api::storage::{FileId, RegionId};
-
-    use crate::engine::listener::{EventListener, GateIndexBuildListener};
-    use crate::sst::file::RegionFileId;
-
-    let gate = Arc::new(GateIndexBuildListener::default());
-
-    // Initial counts are zero.
-    assert_eq!(gate.begin_count(), 0);
-    assert_eq!(gate.finish_count(), 0);
-    assert_eq!(gate.abort_count(), 0);
-
-    // Spawn a task that will block in on_index_build_begin.
-    let gate_clone = gate.clone();
-    let handle = tokio::spawn(async move {
-        gate_clone
-            .on_index_build_begin(RegionFileId::new(RegionId::new(1, 1), FileId::random()))
-            .await;
-    });
-
-    // Wait for begin to arrive.
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_begin(1))
-        .await
-        .unwrap();
-    assert_eq!(gate.begin_count(), 1);
-    assert_eq!(gate.finish_count(), 0);
-    assert_eq!(gate.abort_count(), 0);
-
-    // Release the blocked begin.
-    gate.release_begin();
-
-    // The spawned task should now complete.
-    tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-        .await
-        .unwrap()
-        .unwrap();
-}
-
-#[tokio::test]
 async fn test_index_build_type_manual_duplicate_in_flight() {
     let mut env = TestEnv::with_prefix("test_index_build_type_manual_duplicate_in_flight_").await;
     let gate = Arc::new(GateIndexBuildListener::default());

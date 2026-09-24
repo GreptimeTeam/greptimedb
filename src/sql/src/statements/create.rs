@@ -18,10 +18,7 @@ use std::fmt::{Display, Formatter};
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{
-    FulltextOptions, SkippingIndexOptions, VectorDistanceMetric, VectorIndexEngineType,
-    VectorIndexOptions,
-};
+use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -131,8 +128,6 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
-    /// Vector index options for HNSW-based vector similarity search.
-    pub vector_index_options: Option<OptionMap>,
     /// JSON2-specific column options.
     pub json2_options: Option<Json2Options>,
 }
@@ -165,7 +160,7 @@ impl Json2Options {
             .map(|hint| {
                 Ok(datatypes::json::JsonTypeHint {
                     path: hint.path.clone(),
-                    data_type: json_type_hint_concrete_data_type(&hint.data_type)?,
+                    data_type: sql_data_type_to_concrete_data_type(&hint.data_type)?,
                     inverted_index: hint.inverted_index,
                 })
             })
@@ -250,14 +245,6 @@ impl Display for Column {
             }
         }
 
-        if let Some(vector_index_options) = &self.extensions.vector_index_options {
-            if !vector_index_options.is_empty() {
-                let options = vector_index_options.kv_pairs();
-                write!(f, " VECTOR INDEX WITH({})", format_list_comma!(options))?;
-            } else {
-                write!(f, " VECTOR INDEX")?;
-            }
-        }
         Ok(())
     }
 }
@@ -281,89 +268,6 @@ impl ColumnExtensions {
         Ok(Some(
             options.try_into().context(SetSkippingIndexOptionSnafu)?,
         ))
-    }
-
-    pub fn build_vector_index_options(&self) -> Result<Option<VectorIndexOptions>> {
-        let Some(options) = self.vector_index_options.as_ref() else {
-            return Ok(None);
-        };
-
-        let options_map: HashMap<String, String> = options.clone().into_map();
-        let mut result = VectorIndexOptions::default();
-
-        if let Some(s) = options_map.get("engine") {
-            result.engine = s.parse::<VectorIndexEngineType>().map_err(|e| {
-                InvalidSqlSnafu {
-                    msg: format!("invalid VECTOR INDEX engine: {e}"),
-                }
-                .build()
-            })?;
-        }
-
-        if let Some(s) = options_map.get("metric") {
-            result.metric = s.parse::<VectorDistanceMetric>().map_err(|e| {
-                InvalidSqlSnafu {
-                    msg: format!("invalid VECTOR INDEX metric: {e}"),
-                }
-                .build()
-            })?;
-        }
-
-        if let Some(s) = options_map.get("connectivity") {
-            let value = s.parse::<u32>().map_err(|_| {
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "invalid VECTOR INDEX connectivity: {s}, expected positive integer"
-                    ),
-                }
-                .build()
-            })?;
-            if !(2..=2048).contains(&value) {
-                return InvalidSqlSnafu {
-                    msg: "VECTOR INDEX connectivity must be in the range [2, 2048].".to_string(),
-                }
-                .fail();
-            }
-            result.connectivity = value;
-        }
-
-        if let Some(s) = options_map.get("expansion_add") {
-            let value = s.parse::<u32>().map_err(|_| {
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "invalid VECTOR INDEX expansion_add: {s}, expected positive integer"
-                    ),
-                }
-                .build()
-            })?;
-            if value == 0 {
-                return InvalidSqlSnafu {
-                    msg: "VECTOR INDEX expansion_add must be greater than 0".to_string(),
-                }
-                .fail();
-            }
-            result.expansion_add = value;
-        }
-
-        if let Some(s) = options_map.get("expansion_search") {
-            let value = s.parse::<u32>().map_err(|_| {
-                InvalidSqlSnafu {
-                    msg: format!(
-                        "invalid VECTOR INDEX expansion_search: {s}, expected positive integer"
-                    ),
-                }
-                .build()
-            })?;
-            if value == 0 {
-                return InvalidSqlSnafu {
-                    msg: "VECTOR INDEX expansion_search must be greater than 0".to_string(),
-                }
-                .fail();
-            }
-            result.expansion_search = value;
-        }
-
-        Ok(Some(result))
     }
 
     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {
@@ -396,47 +300,19 @@ impl ColumnExtensions {
     }
 }
 
-fn json_type_hint_concrete_data_type(data_type: &DataType) -> Result<ConcreteDataType> {
-    let data_type = sql_data_type_to_concrete_data_type(data_type)?;
-    normalize_json_type_hint_concrete_data_type(&data_type)
-}
-
-fn normalize_json_type_hint_concrete_data_type(
-    data_type: &ConcreteDataType,
-) -> Result<ConcreteDataType> {
-    let normalized = match data_type {
-        ConcreteDataType::String(_) => ConcreteDataType::string_datatype(),
-        ConcreteDataType::Int8(_)
-        | ConcreteDataType::Int16(_)
-        | ConcreteDataType::Int32(_)
-        | ConcreteDataType::Int64(_) => ConcreteDataType::int64_datatype(),
-        ConcreteDataType::UInt8(_)
-        | ConcreteDataType::UInt16(_)
-        | ConcreteDataType::UInt32(_)
-        | ConcreteDataType::UInt64(_) => ConcreteDataType::uint64_datatype(),
-        ConcreteDataType::Float32(_) | ConcreteDataType::Float64(_) => {
-            ConcreteDataType::float64_datatype()
-        }
-        ConcreteDataType::Boolean(_) => ConcreteDataType::boolean_datatype(),
-        _ => {
-            return InvalidSqlSnafu {
-                msg: format!("unsupported JSON2 type hint data type: {data_type}"),
-            }
-            .fail();
-        }
-    };
-    Ok(normalized)
-}
-
 fn json_type_hint_sql_data_type(data_type: &ConcreteDataType) -> Result<DataType> {
-    let data_type = normalize_json_type_hint_concrete_data_type(data_type)?;
     let sql_type = match data_type {
         ConcreteDataType::String(_) => DataType::String(None),
         ConcreteDataType::Int64(_) => DataType::BigInt(None),
         ConcreteDataType::UInt64(_) => DataType::BigIntUnsigned(None),
         ConcreteDataType::Float64(_) => DataType::Double(sqlparser::ast::ExactNumberInfo::None),
         ConcreteDataType::Boolean(_) => DataType::Boolean,
-        _ => unreachable!("JSON2 type hint data type should have been normalized"),
+        _ => {
+            return InvalidSqlSnafu {
+                msg: format!("unsupported JSON2 type hint data type: {data_type}"),
+            }
+            .fail();
+        }
     };
     Ok(sql_type)
 }
@@ -933,7 +809,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "service.name" STRING,
-                "a.b"."c" INT64,
+                "a.b"."c" BIGINT,
                 a."b.c" STRING
             ),
             ts TIMESTAMP TIME INDEX
@@ -977,7 +853,7 @@ ENGINE=mito
     fn test_parse_json2_max_auto_expanded_paths_option() -> Result<()> {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64,
+                status_code BIGINT,
                 max_auto_expanded_paths = 1
             ),
             ts TIMESTAMP TIME INDEX
@@ -1003,7 +879,7 @@ ENGINE=mito
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
                 "1abc" STRING,
-                a."2b" INT64
+                a."2b" BIGINT
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1045,8 +921,8 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_default() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 DEFAULT -5,
-                duration FLOAT64 DEFAULT +1.5,
+                status_code BIGINT DEFAULT -5,
+                duration DOUBLE DEFAULT +1.5,
                 error BOOLEAN DEFAULT false,
                 message STRING DEFAULT 'unknown'
             ),
@@ -1062,7 +938,7 @@ ENGINE=mito
     fn test_json2_type_hint_rejects_not_null() {
         let sql = r#"CREATE TABLE traces (
             log_json_data JSON2 (
-                status_code INT64 NOT NULL DEFAULT NULL
+                status_code BIGINT NOT NULL DEFAULT NULL
             ),
             ts TIMESTAMP TIME INDEX
         )"#;
@@ -1073,23 +949,23 @@ ENGINE=mito
     }
 
     #[test]
-    fn test_set_json_settings_normalizes_type_hint_sql_types() -> Result<()> {
+    fn test_set_json_settings_preserves_type_hint_sql_types() -> Result<()> {
         let mut extensions = super::ColumnExtensions::default();
         let settings = JsonSettings::try_new(
             vec![
                 DatatypeJsonTypeHint {
                     path: vec!["i".to_string()],
-                    data_type: ConcreteDataType::int32_datatype(),
+                    data_type: ConcreteDataType::int64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["f".to_string()],
-                    data_type: ConcreteDataType::float32_datatype(),
+                    data_type: ConcreteDataType::float64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
                     path: vec!["u".to_string()],
-                    data_type: ConcreteDataType::uint32_datatype(),
+                    data_type: ConcreteDataType::uint64_datatype(),
                     inverted_index: false,
                 },
                 DatatypeJsonTypeHint {
@@ -1314,77 +1190,5 @@ AS SELECT number FROM numbers_input where number > 10"#,
             }
             _ => unreachable!(),
         }
-    }
-
-    #[test]
-    fn test_vector_index_options_validation() {
-        use super::{ColumnExtensions, OptionMap};
-
-        // Test zero connectivity should fail
-        let extensions = ColumnExtensions {
-            vector_index_options: Some(OptionMap::from([(
-                "connectivity".to_string(),
-                "0".to_string(),
-            )])),
-            ..Default::default()
-        };
-        let result = extensions.build_vector_index_options();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("connectivity must be in the range [2, 2048]")
-        );
-
-        // Test zero expansion_add should fail
-        let extensions = ColumnExtensions {
-            vector_index_options: Some(OptionMap::from([(
-                "expansion_add".to_string(),
-                "0".to_string(),
-            )])),
-            ..Default::default()
-        };
-        let result = extensions.build_vector_index_options();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("expansion_add must be greater than 0")
-        );
-
-        // Test zero expansion_search should fail
-        let extensions = ColumnExtensions {
-            vector_index_options: Some(OptionMap::from([(
-                "expansion_search".to_string(),
-                "0".to_string(),
-            )])),
-            ..Default::default()
-        };
-        let result = extensions.build_vector_index_options();
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("expansion_search must be greater than 0")
-        );
-
-        // Test valid values should succeed
-        let extensions = ColumnExtensions {
-            vector_index_options: Some(OptionMap::from([
-                ("connectivity".to_string(), "32".to_string()),
-                ("expansion_add".to_string(), "200".to_string()),
-                ("expansion_search".to_string(), "100".to_string()),
-            ])),
-            ..Default::default()
-        };
-        let result = extensions.build_vector_index_options();
-        assert!(result.is_ok());
-        let options = result.unwrap().unwrap();
-        assert_eq!(options.connectivity, 32);
-        assert_eq!(options.expansion_add, 200);
-        assert_eq!(options.expansion_search, 100);
     }
 }

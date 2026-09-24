@@ -1,13 +1,13 @@
 name: Slash Command Dispatch
 
-# ChatOps front door: parse `/command` on PR comments, check admin
-# permission, and repository_dispatch to a per-command handler. Handlers
+# ChatOps front door: parse `/command` on PR comments, apply command-specific
+# permissions, and repository_dispatch to a per-command handler. Handlers
 # own allowlists, SHA admission, and the actual work. Same-repo dispatch
 # uses github.token with contents: write; GitHub starts the handler run
 # for GITHUB_TOKEN-created repository_dispatch events. Do not pass the
 # long-lived GH_PERSONAL_ACCESS_TOKEN into this third-party action.
 #
-# To add a command: list it under `commands` and add a workflow with
+# To add a command: add it to `config` and add a workflow with
 # `on.repository_dispatch.types: ["<command>-command"]`.
 
 on:
@@ -30,8 +30,17 @@ jobs:
         uses: peter-evans/slash-command-dispatch@9bdcd7914ec1b75590b790b844aa3b8eee7c683a # v5.0.2
         with:
           token: ${{ github.token }}
-          permission: admin
-          issue-type: pull-request
-          commands: |
-            query-regression
-            ci
+          # CI admission re-fetches the comment and checks author/member permissions.
+          config: >-
+            [
+              {"command": "query-regression", "permission": "admin", "issue_type": "pull-request"},
+              {"command": "ci", "permission": "none", "issue_type": "pull-request"}
+            ]
+      - name: Report CI dispatch failure
+        if: ${{ failure() && (github.event.comment.body == '/ci' || startsWith(github.event.comment.body, '/ci ')) }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api --method POST "/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -f "body=CI command dispatch failed. See ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} for details."

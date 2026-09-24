@@ -31,10 +31,6 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use store_api::storage::{TimeSeriesDistribution, TimeSeriesRowSelector};
 
 use crate::dummy_catalog::DummyTableProvider;
-#[cfg(feature = "vector_index")]
-mod vector_search;
-#[cfg(feature = "vector_index")]
-use vector_search::VectorSearchState;
 
 /// This rule will traverse the plan to collect necessary hints for leaf
 /// table scan node and set them in [`ScanRequest`]. Hints include:
@@ -93,24 +89,18 @@ impl ScanHintRule {
         };
         let use_last_row = rewriter.inside_single_evaluation && filters_preserve_last_row;
 
-        #[cfg(feature = "vector_index")]
-        let has_vector_hint = rewriter.vector_search.need_rewrite();
-        #[cfg(not(feature = "vector_index"))]
-        let has_vector_hint = false;
-        let has_hint = rewriter.order_expr.is_some()
-            || rewriter.ts_row_selector.is_some()
-            || use_last_row
-            || has_vector_hint;
+        let has_hint =
+            rewriter.order_expr.is_some() || rewriter.ts_row_selector.is_some() || use_last_row;
         if !has_hint {
             return Ok(Transformed::no(LogicalPlan::TableScan(table_scan)));
         }
 
         // A provider can be used by several TableScan nodes. Fork its request
         // for every hinted use-site before applying hints, rather than mutating
-        // the shared catalog provider. This keeps order/vector/legacy hints
+        // the shared catalog provider. This keeps order and aggregate hints
         // local as well as the new LastRow hint.
         let adapter = original.clone_for_scan();
-        Self::apply_hints(&adapter, rewriter, &table_scan, use_last_row);
+        Self::apply_hints(&adapter, rewriter);
         if use_last_row {
             // Apply the instant-derived hint after the aggregate hint. Both
             // select LastRow today, and this ordering preserves the existing
@@ -156,34 +146,12 @@ impl ScanHintRule {
         true
     }
 
-    fn apply_hints(
-        adapter: &DummyTableProvider,
-        rewriter: &mut ScanHintRewriter,
-        table_scan: &datafusion_expr::logical_plan::TableScan,
-        use_last_row: bool,
-    ) {
-        #[cfg(not(feature = "vector_index"))]
-        let _ = (table_scan, use_last_row);
+    fn apply_hints(adapter: &DummyTableProvider, rewriter: &mut ScanHintRewriter) {
         if let Some(order_expr) = &rewriter.order_expr {
             Self::set_order_hint(adapter, order_expr);
         }
         if let Some((group_by_cols, order_by_col)) = &rewriter.ts_row_selector {
             Self::set_time_series_row_selector_hint(adapter, group_by_cols, order_by_col);
-        }
-        #[cfg(feature = "vector_index")]
-        if use_last_row {
-            // LastRow and vector search are mutually exclusive for one scan:
-            // vector search would bypass the ordinary sort/limit path needed by
-            // the single-evaluation semantics. Still consume the queued hint so
-            // it cannot be applied to a later scan of the same table.
-            let _ = rewriter
-                .vector_search
-                .take_vector_request_from_dummy(adapter, &table_scan.table_name);
-        } else if let Some(vector_request) = rewriter
-            .vector_search
-            .take_vector_request_from_dummy(adapter, &table_scan.table_name)
-        {
-            adapter.with_vector_search_hint(vector_request);
         }
     }
 
@@ -307,8 +275,6 @@ struct ScanHintRewriter {
     ts_stack: Vec<Option<(HashSet<Column>, Column)>>,
     inside_single_evaluation: bool,
     single_evaluation_stack: Vec<bool>,
-    #[cfg(feature = "vector_index")]
-    vector_search: VectorSearchState,
 }
 
 impl TreeNodeRewriter for ScanHintRewriter {
@@ -355,44 +321,10 @@ impl TreeNodeRewriter for ScanHintRewriter {
             }
         }
 
-        #[cfg(feature = "vector_index")]
-        {
-            if let LogicalPlan::Limit(limit) = &node {
-                self.vector_search.on_limit_enter(limit);
-            }
-            if let LogicalPlan::Sort(sort) = &node {
-                self.vector_search.on_sort_enter(sort);
-            }
-            if is_branching_for_vector(&node) {
-                self.vector_search.on_branching_enter();
-            }
-            if let LogicalPlan::Filter(filter) = &node {
-                self.vector_search.on_filter_enter(&filter.predicate);
-            }
-            if let LogicalPlan::TableScan(table_scan) = &node {
-                self.vector_search.on_table_scan(table_scan);
-            }
-        }
-
         ScanHintRule::set_hints(node, self)
     }
 
     fn f_up(&mut self, node: LogicalPlan) -> Result<Transformed<LogicalPlan>> {
-        #[cfg(feature = "vector_index")]
-        {
-            match &node {
-                LogicalPlan::Limit(_) => self.vector_search.on_limit_exit(),
-                LogicalPlan::Sort(_) => self.vector_search.on_sort_exit(),
-                LogicalPlan::Filter(_) => self.vector_search.on_filter_exit(),
-                LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)
-                    if is_branching_for_vector(&node) =>
-                {
-                    self.vector_search.on_branching_exit()
-                }
-                _ if node.inputs().len() > 1 => self.vector_search.on_branching_exit(),
-                _ => {}
-            }
-        }
         if let Some(previous) = self.order_stack.pop() {
             self.order_expr = previous;
         }
@@ -508,43 +440,6 @@ impl ScanHintRewriter {
         }
         Some((group_by_cols, order_by_col))
     }
-}
-
-#[cfg(feature = "vector_index")]
-fn is_branching_for_vector(node: &LogicalPlan) -> bool {
-    if node.inputs().len() > 1 {
-        return true;
-    }
-
-    match node {
-        LogicalPlan::Subquery(subquery) => has_non_inlineable_ops(subquery.subquery.as_ref()),
-        LogicalPlan::SubqueryAlias(alias) => has_non_inlineable_ops(alias.input.as_ref()),
-        _ => false,
-    }
-}
-
-#[cfg(feature = "vector_index")]
-fn has_non_inlineable_ops(plan: &LogicalPlan) -> bool {
-    if matches!(
-        plan,
-        LogicalPlan::Limit(_)
-            | LogicalPlan::Sort(_)
-            | LogicalPlan::Distinct(_)
-            | LogicalPlan::Aggregate(_)
-            | LogicalPlan::Window(_)
-            | LogicalPlan::Union(_)
-            | LogicalPlan::Join(_)
-    ) {
-        return true;
-    }
-
-    for input in plan.inputs() {
-        if has_non_inlineable_ops(input) {
-            return true;
-        }
-    }
-
-    false
 }
 
 #[cfg(test)]

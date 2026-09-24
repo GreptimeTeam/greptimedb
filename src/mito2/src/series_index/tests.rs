@@ -48,11 +48,19 @@ pub(super) async fn prepare_region(env: &mut TestEnv) -> (MitoEngine, MitoRegion
     prepare_region_with_timestamps(env, &[1000, 2000, 3000, 4000]).await
 }
 
-async fn prepare_region_with_timestamps(
+pub(crate) async fn prepare_region_with_timestamps(
     env: &mut TestEnv,
     timestamps: &[i64],
 ) -> (MitoEngine, MitoRegionRef) {
-    prepare_region_with_config(env, timestamps, MitoConfig::default()).await
+    prepare_region_with_config(
+        env,
+        timestamps,
+        MitoConfig {
+            min_compaction_interval: Duration::from_secs(3600),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 async fn prepare_region_with_config(
@@ -101,6 +109,10 @@ async fn prepare_region_with_config(
         .handle_request(region_id, RegionRequest::Create(request))
         .await
         .unwrap();
+    // Flush completion can precede compaction scheduling. Keep background TTL
+    // cleanup from racing tests that alter options after preparing the SSTs.
+    let region = engine.get_region(region_id).unwrap();
+    region.update_schedule_compaction_millis();
     for &ts in timestamps {
         engine
             .handle_request(
@@ -130,7 +142,6 @@ async fn prepare_region_with_config(
             .unwrap();
         flush_region(&engine, region_id, None).await;
     }
-    let region = engine.get_region(region_id).unwrap();
     (engine, region)
 }
 
@@ -179,6 +190,7 @@ impl IndexTest {
             0,
             self.purger.clone(),
             enable_range_index,
+            true,
         )
         .await
     }
@@ -319,7 +331,7 @@ async fn test_reconcile_restores_and_reuses_indexes() {
     let missing_paths = [
         range_index_path(
             region.region_id,
-            *first.range_indexes.iter().next().unwrap(),
+            *first.range_indexes.keys().next().unwrap(),
         ),
         series_index_path(region.region_id, first_id),
     ];
@@ -333,6 +345,7 @@ async fn test_reconcile_restores_and_reuses_indexes() {
         .current();
     assert_eq!(first.range_indexes, restored.range_indexes);
     assert_eq!(first.index_buckets, restored.index_buckets);
+    assert_eq!(first.disk_usage(), restored.disk_usage());
     assert_eq!(
         first.series_indexes[&first_id].entry(),
         restored.series_indexes[&first_id].entry()
@@ -705,13 +718,13 @@ async fn test_failed_reconcile_retires_only_unpublished_series() {
         );
         assert_eq!(if failure == "range" { 2 } else { 3 }, plan.builds.len());
         let (bucket, entry) = &plan.builds[0];
-        let mut ranges = HashSet::new();
+        let mut ranges = HashMap::new();
         for file in &bucket.files {
-            let id = build_range_index(store, &region, &version, file.clone())
+            let entry = build_range_index(store, &region, &version, file.clone())
                 .await
                 .unwrap()
                 .unwrap();
-            ranges.insert(id);
+            ranges.insert(entry.file_id, entry);
         }
         let handle = build_series_index(store, &region, &version, bucket, entry, purger)
             .await
@@ -848,6 +861,8 @@ async fn test_maintenance_wakeup_and_timer(#[case] enable_range_index: bool) {
         Duration::from_secs(100),
         purger,
         receiver,
+        Arc::default(),
+        u64::MAX,
         Duration::from_secs(3600),
         clock.clone(),
         enable_range_index,
@@ -876,6 +891,7 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
     let store = ObjectStore::new(Memory::default()).unwrap();
     let region_id = RegionId::new(1, 1);
     let entry = SeriesIndexEntry {
+        file_size: 0,
         index_uuid: FileId::random(),
         bucket_start: Timestamp::new_second(0),
         bucket_end: Timestamp::new_second(100),
@@ -926,6 +942,8 @@ async fn test_drop_catalogs_and_retained_snapshot_after_task_stop() {
         Duration::from_secs(100),
         purger,
         receiver,
+        Arc::default(),
+        u64::MAX,
         Duration::from_secs(3600),
         Arc::new(StdTimeProvider),
         true,
@@ -1028,6 +1046,8 @@ async fn test_manual_reconcile_returns_storage_failure(#[case] catalog_failure: 
         Duration::from_secs(100),
         purger,
         purge_receiver,
+        Arc::default(),
+        u64::MAX,
         Duration::from_secs(3600),
         Arc::new(StdTimeProvider),
         false,
