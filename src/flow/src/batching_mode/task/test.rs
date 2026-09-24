@@ -20,6 +20,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use catalog::memory::MemoryCatalogManager;
+use catalog::table_source::dummy_catalog::DummyCatalogList;
 use catalog::{DeregisterTableRequest, RegisterTableRequest};
 use client::OutputWithMetrics;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
@@ -29,20 +30,28 @@ use common_error::status_code::StatusCode;
 use common_query::Output;
 use common_recordbatch::RecordBatch;
 use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
+use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
+use datafusion::execution::SessionStateBuilder;
+use datafusion::optimizer::AnalyzerRule;
+use datafusion_common::config::ConfigOptions;
+use datafusion_expr::Expr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::vectors::{
-    TimestampMillisecondVector, TimestampNanosecondVector, UInt32Vector, VectorRef,
+    TimestampMicrosecondVector, TimestampMillisecondVector, TimestampNanosecondVector,
+    TimestampSecondVector, UInt32Vector, VectorRef,
 };
 use pretty_assertions::assert_eq;
 use prost::Message;
+use query::dist_plan::{DistPlannerAnalyzer, MergeScanLogicalPlan};
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
     FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
 };
 use session::context::QueryContext;
 use snafu::ResultExt;
+use store_api::mito_engine_options::PRESERVE_ROW_SEQUENCE;
 use substrait::substrait_proto_df::proto::Plan;
 use table::Table;
 use table::metadata::FilterPushDownType;
@@ -1185,11 +1194,38 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
     }
 }
 
+/// What a recovery capture request asked the frontend to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryTimestampPlanShape {
+    /// Raw source timestamps, decoded into windows locally.
+    RawTimestampProjection,
+    /// One representative timestamp per time window, grouped remotely.
+    RemoteWindowDedup,
+}
+
+/// What a recovery capture request encoded, audited by the test frontend handlers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecoveryCaptureAudit {
+    shape: RecoveryTimestampPlanShape,
+    expiry_lower: Option<Timestamp>,
+}
+
 struct RecoveryCaptureHandler {
     output: std::sync::Mutex<Option<Output>>,
     lower: String,
+    source_table: String,
+    expects_number_filter: bool,
     expire_after: Option<i64>,
-    expiry_lower: std::sync::Mutex<Option<Timestamp>>,
+    audit: std::sync::Mutex<Option<RecoveryCaptureAudit>>,
+    /// When set, the handler decodes the request's logical plan with the frontend's
+    /// Substrait decoder and executes it for real against this engine, instead of
+    /// returning canned output.
+    execute: Option<(QueryEngineRef, QueryContextRef)>,
+    /// Number of rows the executed plan returned.
+    executed_rows: std::sync::Mutex<Option<usize>>,
+    /// Whether GreptimeDB's distributed analyzer pushed the decoded plan into a
+    /// `MergeScan` stage instead of keeping it on the frontend.
+    dist_push_down: std::sync::Mutex<Option<bool>>,
 }
 
 struct RecoveryMetricsStream {
@@ -1271,7 +1307,18 @@ fn timestamp_literal(expr: &substrait::substrait_proto_df::proto::Expression) ->
     }
 }
 
-fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Option<Timestamp> {
+/// Audits the Substrait plan the recovery capture path sends to the frontend.
+///
+/// Both capture shapes must preserve the qualified source table, the query's `WHERE`,
+/// and the recovery retention filter. The remote window dedup shape must additionally
+/// group by a `CASE` that only rebins timestamps inside the representable range and
+/// keeps an `ELSE` that falls back to the raw time index.
+fn assert_recovery_timestamp_plan(
+    plan: &Plan,
+    source_table: &str,
+    expects_number_filter: bool,
+    expire_after: Option<i64>,
+) -> RecoveryCaptureAudit {
     use substrait::substrait_proto_df::proto::plan_rel::RelType as PlanRelType;
     use substrait::substrait_proto_df::proto::rel::RelType;
 
@@ -1291,13 +1338,41 @@ fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Opt
     let Some(PlanRelType::Root(root)) = root.rel_type.as_ref() else {
         panic!("recovery capture must encode a root relation");
     };
-    assert_eq!(root.names, ["ts"]);
-    let Some(RelType::Project(project)) = root.input.as_ref().and_then(|rel| rel.rel_type.as_ref())
-    else {
-        panic!("recovery capture must project the raw timestamp");
+    assert_eq!(
+        root.names.len(),
+        1,
+        "recovery capture must return exactly one column"
+    );
+
+    let input = root.input.as_ref().and_then(|rel| rel.rel_type.as_ref());
+    let (shape, inner) = match input {
+        Some(RelType::Project(project)) => {
+            assert_eq!(root.names, ["ts"]);
+            assert_eq!(project.expressions.len(), 1);
+            assert_eq!(field_selection(&project.expressions[0]), Some(1));
+            (
+                RecoveryTimestampPlanShape::RawTimestampProjection,
+                project.input.as_ref().expect("recovery projection input"),
+            )
+        }
+        Some(RelType::Aggregate(aggregate)) => {
+            assert!(
+                aggregate.measures.is_empty(),
+                "recovery window dedup must not aggregate values"
+            );
+            let [group_expr] = aggregate.grouping_expressions.as_slice() else {
+                panic!("recovery window dedup must group by exactly one key");
+            };
+            assert_remote_window_dedup_group_expr(group_expr, &function_names);
+            (
+                RecoveryTimestampPlanShape::RemoteWindowDedup,
+                aggregate.input.as_ref().expect("recovery aggregate input"),
+            )
+        }
+        other => panic!(
+            "recovery capture must project raw timestamps or group the deduplicated window key, got {other:?}"
+        ),
     };
-    assert_eq!(project.expressions.len(), 1);
-    assert_eq!(field_selection(&project.expressions[0]), Some(1));
 
     fn visit(
         rel: &substrait::substrait_proto_df::proto::Rel,
@@ -1380,7 +1455,7 @@ fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Opt
     let mut has_number_filter = false;
     let mut expiry_lower = None;
     visit(
-        project.input.as_ref().expect("recovery projection input"),
+        inner,
         &function_names,
         &mut scans,
         &mut has_number_filter,
@@ -1391,12 +1466,131 @@ fn assert_recovery_timestamp_plan(plan: &Plan, expire_after: Option<i64>) -> Opt
         vec![vec![
             DEFAULT_CATALOG_NAME.to_string(),
             DEFAULT_SCHEMA_NAME.to_string(),
-            "numbers_with_ts".to_string(),
-        ]]
+            source_table.to_string(),
+        ]],
+        "recovery capture must scan the fully qualified source table"
     );
-    assert!(has_number_filter, "recovery capture lost WHERE number = 42");
+    assert_eq!(
+        has_number_filter, expects_number_filter,
+        "recovery capture must preserve the query WHERE clause"
+    );
     assert_eq!(expiry_lower.is_some(), expire_after.is_some());
-    expiry_lower
+    RecoveryCaptureAudit {
+        shape,
+        expiry_lower,
+    }
+}
+
+/// Asserts that `expr` is the remote window dedup key:
+/// `CASE WHEN ts >= 0 AND ts <= <max representable in the source unit>
+///      THEN date_bin(<literal interval>, ts) ELSE ts END`.
+fn assert_remote_window_dedup_group_expr(
+    expr: &substrait::substrait_proto_df::proto::Expression,
+    function_names: &HashMap<u32, &str>,
+) {
+    use substrait::substrait_proto_df::proto::expression::RexType;
+
+    fn scalar_function<'a>(
+        expr: &'a substrait::substrait_proto_df::proto::Expression,
+        function_names: &HashMap<u32, &str>,
+        expected: &str,
+    ) -> &'a substrait::substrait_proto_df::proto::expression::ScalarFunction {
+        let Some(RexType::ScalarFunction(function)) = expr.rex_type.as_ref() else {
+            panic!("recovery window dedup expects the {expected} scalar function, got {expr:?}");
+        };
+        assert_eq!(
+            function_names.get(&function.function_reference),
+            Some(&expected),
+            "recovery window dedup expects the {expected} scalar function"
+        );
+        function
+    }
+
+    fn value_args(
+        function: &substrait::substrait_proto_df::proto::expression::ScalarFunction,
+    ) -> Vec<&substrait::substrait_proto_df::proto::Expression> {
+        use substrait::substrait_proto_df::proto::function_argument::ArgType;
+
+        function
+            .arguments
+            .iter()
+            .map(|arg| match arg.arg_type.as_ref() {
+                Some(ArgType::Value(expr)) => expr,
+                _ => panic!("recovery window dedup must use value arguments"),
+            })
+            .collect()
+    }
+
+    let Some(RexType::IfThen(if_then)) = expr.rex_type.as_ref() else {
+        panic!("recovery window dedup key must be a CASE expression, got {expr:?}");
+    };
+    let [clause] = if_then.ifs.as_slice() else {
+        panic!("recovery window dedup CASE must have exactly one WHEN clause");
+    };
+
+    let condition = clause
+        .r#if
+        .as_ref()
+        .expect("recovery window dedup CASE condition");
+    let bounds = value_args(scalar_function(condition, function_names, "and"));
+    assert_eq!(bounds.len(), 2);
+    let mut literals = Vec::new();
+    for (bound, expected) in bounds.into_iter().zip(["gte", "lte"]) {
+        let args = value_args(scalar_function(bound, function_names, expected));
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            field_selection(args[0]),
+            Some(1),
+            "recovery window dedup bound must use the time index column"
+        );
+        literals.push(timestamp_literal(args[1]).expect("recovery window dedup bound literal"));
+    }
+    // The lower bound is the typed Unix epoch and the upper bound is the largest
+    // timestamp of the source unit whose nanosecond conversion still fits in `i64`.
+    assert_eq!(literals[0].value(), 0);
+    assert_eq!(literals[0].unit(), literals[1].unit());
+    assert_eq!(
+        literals[1].value(),
+        i64::MAX / i64::from(literals[1].unit().factor())
+    );
+
+    let binned = value_args(scalar_function(
+        clause
+            .then
+            .as_ref()
+            .expect("recovery window dedup THEN branch"),
+        function_names,
+        "date_bin",
+    ));
+    assert!(binned.len() >= 2);
+    assert!(
+        matches!(
+            binned[0].rex_type.as_ref(),
+            Some(RexType::Literal(literal))
+                if matches!(
+                    literal.literal_type,
+                    Some(substrait::substrait_proto_df::proto::expression::literal::LiteralType::IntervalDayToSecond(_))
+                        | Some(substrait::substrait_proto_df::proto::expression::literal::LiteralType::IntervalCompound(_))
+                )
+        ),
+        "recovery window dedup stride must stay a literal interval, got {:?}",
+        binned[0]
+    );
+    assert_eq!(
+        field_selection(binned[1]),
+        Some(1),
+        "recovery window dedup must rebin the time index column"
+    );
+
+    let fallback = if_then
+        .r#else
+        .as_ref()
+        .expect("recovery window dedup CASE must keep an ELSE branch");
+    assert_eq!(
+        field_selection(fallback),
+        Some(1),
+        "recovery window dedup CASE must fall back to the raw time index"
+    );
 }
 
 #[async_trait::async_trait]
@@ -1420,12 +1614,71 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
         let api::v1::greptime_request::Request::Query(request) = query else {
             panic!("recovery capture must issue a query request");
         };
-        let Some(api::v1::query_request::Query::LogicalPlan(plan)) = request.query else {
+        let Some(api::v1::query_request::Query::LogicalPlan(plan_bytes)) = request.query else {
             panic!("recovery capture must issue a logical plan read");
         };
-        let plan = Plan::decode(plan.as_slice()).unwrap();
-        *self.expiry_lower.lock().unwrap() =
-            assert_recovery_timestamp_plan(&plan, self.expire_after);
+        let plan = Plan::decode(plan_bytes.as_slice()).unwrap();
+        *self.audit.lock().unwrap() = Some(assert_recovery_timestamp_plan(
+            &plan,
+            &self.source_table,
+            self.expects_number_filter,
+            self.expire_after,
+        ));
+        if let Some((engine, ctx)) = &self.execute {
+            // Decode exactly like the frontend does for `Query::LogicalPlan`, then run
+            // the plan so the test observes real DataFusion execution.
+            let session_state =
+                SessionStateBuilder::new_from_existing(engine.engine_state().session_state())
+                    .with_catalog_list(Arc::new(DummyCatalogList::new_with_query_ctx(
+                        engine.engine_state().catalog_manager().clone(),
+                        ctx.clone(),
+                    )))
+                    .build();
+            let plan = DFLogicalSubstraitConvertor
+                .decode(plan_bytes.as_slice(), session_state)
+                .await
+                .unwrap();
+            // Run the same distributed analyzer the frontend registers, so a plan the
+            // analyzer rejects cannot pass this test unnoticed.
+            let analyzed = DistPlannerAnalyzer
+                .analyze(plan.clone(), &ConfigOptions::default())
+                .expect("frontend dist planner must accept the recovery dedup plan");
+            let pushed_down = analyzed
+                .exists(|node| {
+                    Ok(matches!(node, LogicalPlan::Extension(ext)
+                        if ext.node.as_any().downcast_ref::<MergeScanLogicalPlan>().is_some()))
+                })
+                .unwrap();
+            *self.dist_push_down.lock().unwrap() = Some(pushed_down);
+            if !pushed_down {
+                // Without pushdown the frontend still executes the plan on its own; keep
+                // the decoded plan so the test exercises the executable form either way.
+                common_telemetry::warn!("recovery dedup plan was not pushed down");
+            }
+            let output = engine.execute(plan, ctx.clone()).await.unwrap();
+            let OutputData::Stream(stream) = output.data else {
+                panic!("recovery capture plan must return a stream");
+            };
+            let batches = common_recordbatch::util::collect_batches(stream)
+                .await
+                .unwrap()
+                .into_iter()
+                .collect::<Vec<_>>();
+            *self.executed_rows.lock().unwrap() =
+                Some(batches.iter().map(|batch| batch.num_rows()).sum());
+            return Ok(Output::new_with_stream(Box::pin(RecoveryMetricsStream {
+                schema: recovery_timestamp_schema(),
+                batches,
+                metrics: Some(RecordBatchMetrics {
+                    region_watermarks: vec![RegionWatermarkEntry {
+                        region_id: 1,
+                        watermark: Some(10),
+                    }],
+                    ..Default::default()
+                }),
+                fail: false,
+            })));
+        }
         Ok(self.output.lock().unwrap().take().unwrap())
     }
 }
@@ -1845,7 +2098,7 @@ fn output_with_region_watermarks(
 }
 
 #[tokio::test]
-async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_where_and_expiry() {
+async fn test_capture_recovery_windows_dedups_remote_windows_with_where_and_expiry() {
     let TestTaskParts {
         mut task,
         query_engine,
@@ -1868,7 +2121,12 @@ async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_whe
         ))),
         lower: serde_json::to_string(&lower).unwrap(),
         expire_after: Some(expire_after),
-        expiry_lower: std::sync::Mutex::new(None),
+        source_table: "numbers_with_ts".to_string(),
+        expects_number_filter: true,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
     });
     let frontend = FrontendClient::from_grpc_handler(
         Arc::downgrade(
@@ -1898,7 +2156,9 @@ async fn test_capture_recovery_windows_decodes_raw_timestamp_projection_with_whe
 
     assert_eq!(high, lower);
     assert!(windows.is_empty());
-    let expiry_lower = handler.expiry_lower.lock().unwrap().unwrap();
+    let audit = handler.audit.lock().unwrap().clone().unwrap();
+    assert_eq!(audit.shape, RecoveryTimestampPlanShape::RemoteWindowDedup);
+    let expiry_lower = audit.expiry_lower.unwrap();
     let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
     // The helper and samples may straddle a window boundary.
     let aligned_expiry = |now: Timestamp| {
@@ -1940,7 +2200,12 @@ async fn test_capture_recovery_windows_since_uses_supplied_retention_lower() {
         ))),
         lower: serde_json::to_string(&lower).unwrap(),
         expire_after: Some(1),
-        expiry_lower: std::sync::Mutex::new(None),
+        source_table: "numbers_with_ts".to_string(),
+        expects_number_filter: true,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
     });
     let frontend = FrontendClient::from_grpc_handler(
         Arc::downgrade(
@@ -1957,7 +2222,9 @@ async fn test_capture_recovery_windows_since_uses_supplied_retention_lower() {
 
     assert_eq!(high, lower);
     assert!(windows.is_empty());
-    assert_eq!(*handler.expiry_lower.lock().unwrap(), Some(retention_lower));
+    let audit = handler.audit.lock().unwrap().clone().unwrap();
+    assert_eq!(audit.shape, RecoveryTimestampPlanShape::RemoteWindowDedup);
+    assert_eq!(audit.expiry_lower, Some(retention_lower));
 }
 
 #[tokio::test]
@@ -2024,7 +2291,12 @@ async fn test_capture_recovery_windows_terminal_proof_cases_leave_state_unchange
             ))),
             lower: serde_json::to_string(&case.lower).unwrap(),
             expire_after: None,
-            expiry_lower: std::sync::Mutex::new(None),
+            source_table: "numbers_with_ts".to_string(),
+            expects_number_filter: true,
+            audit: std::sync::Mutex::new(None),
+            execute: None,
+            executed_rows: std::sync::Mutex::new(None),
+            dist_push_down: std::sync::Mutex::new(None),
         });
         let handler_dyn: Arc<
             dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2072,7 +2344,12 @@ async fn test_capture_recovery_windows_streams_sorted_unique_windows() {
         ))),
         lower: serde_json::to_string(&lower).unwrap(),
         expire_after: None,
-        expiry_lower: std::sync::Mutex::new(None),
+        source_table: "numbers_with_ts".to_string(),
+        expects_number_filter: true,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2121,7 +2398,12 @@ async fn test_capture_recovery_windows_rejects_stream_error() {
         ))),
         lower: serde_json::to_string(&lower).unwrap(),
         expire_after: None,
-        expiry_lower: std::sync::Mutex::new(None),
+        source_table: "numbers_with_ts".to_string(),
+        expects_number_filter: true,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2154,7 +2436,12 @@ async fn test_capture_recovery_windows_rejects_null_timestamp() {
         ))),
         lower: serde_json::to_string(&lower).unwrap(),
         expire_after: None,
-        expiry_lower: std::sync::Mutex::new(None),
+        source_table: "numbers_with_ts".to_string(),
+        expects_number_filter: true,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2167,6 +2454,700 @@ async fn test_capture_recovery_windows_rejects_null_timestamp() {
             .await
             .is_err()
     );
+}
+
+/// Registers a `dedup_unit_table` source with the requested time index unit and rows,
+/// marks it as a sequence-range-capable mito source, and builds a batching task whose
+/// time-window expression is derived from `query`.
+async fn new_unit_time_window_test_task(
+    query: &str,
+    unit: TimeUnit,
+    rows: &[i64],
+) -> (BatchingTask, QueryEngineRef, LogicalPlan) {
+    let query_engine = create_test_query_engine();
+    let data_type = match unit {
+        TimeUnit::Second => CDT::timestamp_second_datatype(),
+        TimeUnit::Millisecond => CDT::timestamp_millisecond_datatype(),
+        TimeUnit::Microsecond => CDT::timestamp_microsecond_datatype(),
+        TimeUnit::Nanosecond => CDT::timestamp_nanosecond_datatype(),
+    };
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("number", CDT::uint32_datatype(), false),
+        ColumnSchema::new("ts", data_type, false).with_time_index(true),
+    ]));
+    let numbers = (0..rows.len() as u32).collect::<Vec<_>>();
+    let ts: VectorRef = match unit {
+        TimeUnit::Second => Arc::new(TimestampSecondVector::from_vec(rows.to_vec())),
+        TimeUnit::Millisecond => Arc::new(TimestampMillisecondVector::from_vec(rows.to_vec())),
+        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondVector::from_vec(rows.to_vec())),
+        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondVector::from_vec(rows.to_vec())),
+    };
+    let columns: Vec<VectorRef> = vec![Arc::new(UInt32Vector::from_slice(numbers)), ts];
+    let recordbatch = RecordBatch::new(schema, columns).unwrap();
+    let table = MemTable::table("dedup_unit_table", recordbatch);
+    let mut info = (*table.table_info()).clone();
+    // Recovery window capture requires a sequence-range-capable mito source.
+    info.meta.engine = "mito".to_string();
+    info.meta
+        .options
+        .extra_options
+        .insert(PRESERVE_ROW_SEQUENCE.to_string(), "true".to_string());
+    let catalog_manager = query_engine.engine_state().catalog_manager();
+    let memory_catalog = catalog_manager
+        .as_any()
+        .downcast_ref::<MemoryCatalogManager>()
+        .unwrap();
+    memory_catalog
+        .deregister_table_sync(DeregisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "dedup_unit_table".to_string(),
+        })
+        .unwrap();
+    memory_catalog
+        .register_table_sync(RegisterTableRequest {
+            catalog: DEFAULT_CATALOG_NAME.to_string(),
+            schema: DEFAULT_SCHEMA_NAME.to_string(),
+            table_name: "dedup_unit_table".to_string(),
+            table_id: 4242,
+            table: Arc::new(Table::new(
+                Arc::new(info),
+                FilterPushDownType::Unsupported,
+                table.data_source(),
+            )),
+        })
+        .unwrap();
+
+    let ctx = QueryContext::arc();
+    let plan = sql_to_df_plan(ctx.clone(), query_engine.clone(), query, true)
+        .await
+        .unwrap();
+    let (column_name, time_window_expr, _, df_schema) = find_time_window_expr(
+        &plan,
+        query_engine.engine_state().catalog_manager().clone(),
+        ctx.clone(),
+    )
+    .await
+    .unwrap();
+    let time_window_expr = time_window_expr.map(|expr| {
+        TimeWindowExpr::from_expr(
+            &expr,
+            &column_name,
+            &df_schema,
+            &query_engine.engine_state().session_state(),
+        )
+        .unwrap()
+    });
+    let (_tx, rx) = tokio::sync::oneshot::channel();
+    let task = BatchingTask::try_new(TaskArgs {
+        flow_id: 1,
+        query,
+        plan: plan.clone(),
+        time_window_expr,
+        expire_after: None,
+        sink_table_name: [
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "missing_sink".to_string(),
+        ],
+        source_table_names: vec![[
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+            "dedup_unit_table".to_string(),
+        ]],
+        query_ctx: ctx,
+        catalog_manager: query_engine.engine_state().catalog_manager().clone(),
+        shutdown_rx: rx,
+        batch_opts: incremental_batch_opts(),
+        flow_eval_interval: None,
+        eval_schedule: None,
+    })
+    .unwrap();
+
+    (task, query_engine, plan)
+}
+
+/// Runs `plan` through the test query engine and returns its single timestamp column,
+/// so tests observe real DataFusion execution instead of mocks.
+async fn execute_timestamp_plan(
+    engine: &QueryEngineRef,
+    ctx: QueryContextRef,
+    plan: LogicalPlan,
+) -> Result<Vec<Option<Timestamp>>, Error> {
+    let output = engine
+        .execute(plan, ctx)
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    let OutputData::Stream(stream) = output.data else {
+        panic!("timestamp plan must return a stream");
+    };
+    collect_timestamp_batches(stream).await
+}
+
+async fn collect_timestamp_batches(
+    stream: common_recordbatch::SendableRecordBatchStream,
+) -> Result<Vec<Option<Timestamp>>, Error> {
+    let batches = common_recordbatch::util::collect_batches(stream)
+        .await
+        .map_err(BoxedError::new)
+        .context(ExternalSnafu)?;
+    let mut values = Vec::new();
+    for batch in batches.iter() {
+        let vector = Helper::try_into_vector(batch.column(0).clone())
+            .map_err(BoxedError::new)
+            .context(ExternalSnafu)?;
+        for index in 0..vector.len() {
+            values.push(vector.get(index).as_timestamp());
+        }
+    }
+    Ok(values)
+}
+
+/// Projects the remote dedup grouping key over `input` so tests can compare what the
+/// frontend would group on with what the local window decoder derives.
+fn dedup_group_key_plan(input: &LogicalPlan, group_expr: Expr) -> LogicalPlan {
+    LogicalPlan::Projection(Projection::try_new(vec![group_expr], Arc::new(input.clone())).unwrap())
+}
+
+/// Windows the recovery decoder derives from `values` through the real decode path.
+fn decoded_windows(
+    time_window_expr: &TimeWindowExpr,
+    unit: TimeUnit,
+    values: impl IntoIterator<Item = Option<i64>>,
+) -> BTreeSet<(Timestamp, Timestamp)> {
+    let batch = timestamp_batch(unit, values);
+    let mut windows = BTreeSet::new();
+    capture_recovery_batch_windows(&batch, time_window_expr, &mut windows).unwrap();
+    windows
+}
+
+/// A one-column timestamp batch in `unit`.
+fn timestamp_batch(unit: TimeUnit, values: impl IntoIterator<Item = Option<i64>>) -> RecordBatch {
+    let values = values.into_iter().collect::<Vec<_>>();
+    let vector: VectorRef = match unit {
+        TimeUnit::Second => Arc::new(TimestampSecondVector::from(values)),
+        TimeUnit::Millisecond => Arc::new(TimestampMillisecondVector::from(values)),
+        TimeUnit::Microsecond => Arc::new(TimestampMicrosecondVector::from(values)),
+        TimeUnit::Nanosecond => Arc::new(TimestampNanosecondVector::from(values)),
+    };
+    let schema = Arc::new(Schema::new(vec![
+        ColumnSchema::new("ts", vector.data_type(), true).with_time_index(true),
+    ]));
+    RecordBatch::new(schema, vec![vector]).unwrap()
+}
+
+/// Runs recovery capture for `dedup_unit_table` with canned frontend output and
+/// returns the captured windows together with the audited plan shape.
+async fn capture_windows_with_shape(
+    task: &BatchingTask,
+    engine: &QueryEngineRef,
+    output: Output,
+) -> (BTreeSet<(Timestamp, Timestamp)>, RecoveryTimestampPlanShape) {
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(Some(output)),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        source_table: "dedup_unit_table".to_string(),
+        expects_number_filter: false,
+        audit: std::sync::Mutex::new(None),
+        execute: None,
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+    let (_, windows) = task
+        .capture_recovery_windows(engine, &frontend, &lower)
+        .await
+        .unwrap();
+    let audit = handler.audit.lock().unwrap().clone().unwrap();
+    (windows.into_iter().collect(), audit.shape)
+}
+
+/// Canned frontend output carrying raw source timestamps of `unit`.
+fn raw_timestamp_output(unit: TimeUnit, rows: &[i64]) -> Output {
+    let batch = timestamp_batch(unit, rows.iter().copied().map(Some));
+    let schema = batch.schema.clone();
+    Output::new_with_stream(Box::pin(RecoveryMetricsStream {
+        schema,
+        batches: vec![batch],
+        metrics: Some(RecordBatchMetrics {
+            region_watermarks: vec![RegionWatermarkEntry {
+                region_id: 1,
+                watermark: Some(10),
+            }],
+            ..Default::default()
+        }),
+        fail: false,
+    }))
+}
+
+/// The nanosecond stride of a recognized dedup grouping key.
+fn group_key_stride_ns(group_expr: &Expr) -> u128 {
+    let Expr::Case(case) = group_expr else {
+        panic!("dedup key must be a CASE: {group_expr:?}");
+    };
+    let (_, then) = &case.when_then_expr[0];
+    let Expr::ScalarFunction(func) = then.as_ref() else {
+        panic!("dedup key THEN branch must call date_bin: {then:?}");
+    };
+    match &func.args[0] {
+        Expr::Literal(datafusion_common::ScalarValue::IntervalMonthDayNano(Some(interval)), _) => {
+            interval.nanoseconds as u128
+        }
+        other => panic!("unexpected dedup stride literal: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn test_remote_window_dedup_group_key_matches_original_eval_for_units_and_strides() {
+    let cases = [
+        (
+            "second_5s",
+            "5 second",
+            TimeUnit::Second,
+            vec![-12_345, -1, 0, 4, 5, 7, 1_700_000_000, 1_700_000_002],
+        ),
+        (
+            "second_7s",
+            "7 second",
+            TimeUnit::Second,
+            vec![-12_345, -1, 0, 6, 7, 13, 1_700_000_000],
+        ),
+        (
+            "millisecond_5s",
+            "5 second",
+            TimeUnit::Millisecond,
+            vec![
+                -12_345_000,
+                -1,
+                0,
+                4_999,
+                5_000,
+                7_000,
+                1_700_000_000_000,
+                1_700_000_002_999,
+            ],
+        ),
+        (
+            "millisecond_7s",
+            "7 second",
+            TimeUnit::Millisecond,
+            vec![-12_345_000, -1, 0, 6_999, 7_000, 1_700_000_000_000],
+        ),
+        (
+            "microsecond_5s",
+            "5 second",
+            TimeUnit::Microsecond,
+            vec![
+                -12_345_000_000,
+                -1,
+                0,
+                4_999_999,
+                5_000_000,
+                1_700_000_000_000_000,
+            ],
+        ),
+        (
+            "microsecond_7s",
+            "7 second",
+            TimeUnit::Microsecond,
+            vec![
+                -12_345_000_000,
+                -1,
+                0,
+                6_999_999,
+                7_000_000,
+                1_700_000_000_000_000,
+            ],
+        ),
+        (
+            "nanosecond_5s",
+            "5 second",
+            TimeUnit::Nanosecond,
+            vec![
+                -12_345_000_000_000,
+                -1,
+                0,
+                4_999_999_999,
+                5_000_000_000,
+                1_700_000_000_000_000_000,
+            ],
+        ),
+        (
+            "nanosecond_7s",
+            "7 second",
+            TimeUnit::Nanosecond,
+            vec![
+                -12_345_000_000_000,
+                -1,
+                0,
+                6_999_999_999,
+                7_000_000_000,
+                1_700_000_000_000_000_000,
+            ],
+        ),
+    ];
+
+    for (name, stride, unit, rows) in cases {
+        let query = format!(
+            "SELECT max(number) AS output_value, date_bin(INTERVAL '{stride}', ts) AS output_window \
+             FROM dedup_unit_table GROUP BY output_window"
+        );
+        let (task, engine, plan) = new_unit_time_window_test_task(&query, unit, &rows).await;
+        let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+        let group_expr = time_window_expr
+            .safe_remote_dedup_group_expr()
+            .unwrap_or_else(|| {
+                panic!("{name}: epoch-anchored whole-second date_bin must be eligible")
+            });
+        assert_eq!(
+            time_window_expr
+                .time_window_size()
+                .map(|size| size.as_nanos()),
+            Some(group_key_stride_ns(&group_expr)),
+            "{name}: the recognized stride must equal the locally cached window size"
+        );
+
+        let input = recovery_aggregate_input(&plan).unwrap();
+        let ctx = task.query_context_snapshot();
+        // The grouping key is evaluated by DataFusion itself, then decoded with the
+        // same `eval` + set path recovery capture uses.
+        let keys = execute_timestamp_plan(
+            &engine,
+            ctx.clone(),
+            dedup_group_key_plan(&input, group_expr),
+        )
+        .await
+        .unwrap();
+        assert!(
+            keys.iter().all(Option::is_some),
+            "{name}: the guarded grouping key must never produce NULL"
+        );
+        let distinct_keys = keys
+            .iter()
+            .flatten()
+            .map(|key| key.value())
+            .collect::<BTreeSet<_>>();
+        assert!(
+            distinct_keys.len() < rows.len(),
+            "{name}: the deduped grouping must collapse rows that share a window"
+        );
+
+        let expected = decoded_windows(time_window_expr, unit, rows.iter().copied().map(Some));
+        assert_eq!(
+            decoded_windows(
+                time_window_expr,
+                unit,
+                keys.iter().map(|key| key.map(|k| k.value()))
+            ),
+            expected,
+            "{name}: remote representatives must decode to exactly the local eval windows"
+        );
+        assert_eq!(
+            expected.len(),
+            distinct_keys.len(),
+            "{name}: every window keeps its own remote representative"
+        );
+
+        let (captured, shape) =
+            capture_windows_with_shape(&task, &engine, raw_timestamp_output(unit, &rows)).await;
+        assert_eq!(
+            shape,
+            RecoveryTimestampPlanShape::RemoteWindowDedup,
+            "{name}"
+        );
+        assert_eq!(
+            captured, expected,
+            "{name}: capture must return the local windows"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_remote_window_dedup_group_key_bounds_extreme_timestamps() {
+    let max_representable = i64::MAX / 1_000_000;
+    let extreme = max_representable + 1;
+    let rows = vec![-1, 0, 4_999, 5_000, extreme];
+    let query = "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window \
+                 FROM dedup_unit_table GROUP BY output_window";
+    let (task, engine, plan) =
+        new_unit_time_window_test_task(query, TimeUnit::Millisecond, &rows).await;
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    let group_expr = time_window_expr.safe_remote_dedup_group_expr().unwrap();
+    let input = recovery_aggregate_input(&plan).unwrap();
+    let ctx = task.query_context_snapshot();
+
+    // An unconditional remote `date_bin` overflows to NULL on timestamps this source
+    // unit still holds, and the decoder rejects NULL.
+    let naive = sql_to_df_plan(
+        ctx.clone(),
+        engine.clone(),
+        "SELECT date_bin(INTERVAL '5 second', ts) AS output_window FROM dedup_unit_table",
+        true,
+    )
+    .await
+    .unwrap();
+    let naive_values = execute_timestamp_plan(&engine, ctx.clone(), naive)
+        .await
+        .unwrap();
+    assert_eq!(naive_values[0], Some(Timestamp::new_millisecond(-5_000)));
+    assert_eq!(naive_values[1], Some(Timestamp::new_millisecond(0)));
+    assert_eq!(naive_values[2], Some(Timestamp::new_millisecond(0)));
+    assert_eq!(naive_values[3], Some(Timestamp::new_millisecond(5_000)));
+    assert_eq!(
+        naive_values[4], None,
+        "unconditional date_bin must overflow the extreme row to NULL"
+    );
+    let mut naive_windows = BTreeSet::new();
+    let err = capture_recovery_batch_windows(
+        &timestamp_batch(
+            TimeUnit::Millisecond,
+            naive_values
+                .iter()
+                .map(|value| value.map(|value| value.value())),
+        ),
+        time_window_expr,
+        &mut naive_windows,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("null or non-timestamp"),
+        "unconditional remote date_bin must break the decoder: {err}"
+    );
+
+    // ... while the guarded grouping key passes unrepresentable rows through, so the
+    // decoder keeps working for every row.
+    let keys = execute_timestamp_plan(
+        &engine,
+        ctx.clone(),
+        dedup_group_key_plan(&input, group_expr),
+    )
+    .await
+    .unwrap();
+    assert_eq!(keys[0], Some(Timestamp::new_millisecond(-1)));
+    assert_eq!(keys[1], Some(Timestamp::new_millisecond(0)));
+    assert_eq!(keys[2], Some(Timestamp::new_millisecond(0)));
+    assert_eq!(keys[3], Some(Timestamp::new_millisecond(5_000)));
+    assert_eq!(keys[4], Some(Timestamp::new_millisecond(extreme)));
+    assert_eq!(
+        decoded_windows(
+            time_window_expr,
+            TimeUnit::Millisecond,
+            keys.iter().map(|key| key.map(|k| k.value()))
+        ),
+        decoded_windows(
+            time_window_expr,
+            TimeUnit::Millisecond,
+            rows.iter().copied().map(Some)
+        )
+    );
+}
+
+#[tokio::test]
+async fn test_remote_window_dedup_sub_second_stride_falls_back() {
+    // A 400ms stride is finer than the source unit, so `date_bin` truncates its output
+    // and the remote bins no longer match the local `eval` windows.
+    let rows = vec![-2, 1, 2, 3, 1_700_000_000];
+    let query = "SELECT max(number) AS output_value, date_bin(INTERVAL '400 millisecond', ts) AS output_window \
+                 FROM dedup_unit_table GROUP BY output_window";
+    let (task, engine, _plan) =
+        new_unit_time_window_test_task(query, TimeUnit::Second, &rows).await;
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    assert!(
+        time_window_expr.safe_remote_dedup_group_expr().is_none(),
+        "sub-second strides must not be recognized"
+    );
+    let expected = decoded_windows(
+        time_window_expr,
+        TimeUnit::Second,
+        rows.iter().copied().map(Some),
+    );
+
+    // Naive plan: group by the original time-window expression.
+    let naive_plan = sql_to_df_plan(
+        task.query_context_snapshot(),
+        engine.clone(),
+        "SELECT date_bin(INTERVAL '400 millisecond', ts) AS output_window FROM dedup_unit_table GROUP BY output_window",
+        true,
+    )
+    .await
+    .unwrap();
+    let naive_windows = decoded_windows(
+        time_window_expr,
+        TimeUnit::Second,
+        execute_timestamp_plan(&engine, task.query_context_snapshot(), naive_plan)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|value| value.map(|value| value.value())),
+    );
+    // The remote bins of a sub-second stride are sub-unit values that the local
+    // second-resolution fast path cannot represent, so the guard stays conservative.
+    assert!(
+        naive_windows.len() <= expected.len(),
+        "naive GROUP BY must not invent extra windows: naive={naive_windows:?} local={expected:?}"
+    );
+
+    let (captured, shape) = capture_windows_with_shape(
+        &task,
+        &engine,
+        raw_timestamp_output(TimeUnit::Second, &rows),
+    )
+    .await;
+    assert_eq!(shape, RecoveryTimestampPlanShape::RawTimestampProjection);
+    assert_eq!(captured, expected, "fallback must keep every local window");
+}
+
+#[tokio::test]
+async fn test_remote_window_dedup_calendar_stride_falls_back() {
+    // Calendar months are not a fixed-width epoch-anchored lattice, so `date_bin`'s
+    // month bins disagree with the local 30-day `eval` lattice used by the decoder:
+    // both rows share the `date_bin` month bin 2023-03-01, while the local lattice
+    // puts them one full window apart.
+    let rows = vec![
+        1_677_628_800_000, // 2023-03-01T00:00:00Z
+        1_680_220_800_000, // 2023-03-31T00:00:00Z
+    ];
+    let query = "SELECT max(number) AS output_value, date_bin(INTERVAL '1 month', ts) AS output_window \
+                 FROM dedup_unit_table GROUP BY output_window";
+    let (task, engine, _plan) =
+        new_unit_time_window_test_task(query, TimeUnit::Millisecond, &rows).await;
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    assert!(
+        time_window_expr.safe_remote_dedup_group_expr().is_none(),
+        "calendar strides must not be recognized"
+    );
+    let expected = decoded_windows(
+        time_window_expr,
+        TimeUnit::Millisecond,
+        rows.iter().copied().map(Some),
+    );
+
+    let naive_plan = sql_to_df_plan(
+        task.query_context_snapshot(),
+        engine.clone(),
+        "SELECT date_bin(INTERVAL '1 month', ts) AS output_window FROM dedup_unit_table GROUP BY output_window",
+        true,
+    )
+    .await
+    .unwrap();
+    let naive_windows = decoded_windows(
+        time_window_expr,
+        TimeUnit::Millisecond,
+        execute_timestamp_plan(&engine, task.query_context_snapshot(), naive_plan)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|value| value.map(|value| value.value())),
+    );
+    assert!(
+        naive_windows.len() < expected.len(),
+        "naive GROUP BY must lose windows: naive={naive_windows:?} local={expected:?}"
+    );
+
+    let (captured, shape) = capture_windows_with_shape(
+        &task,
+        &engine,
+        raw_timestamp_output(TimeUnit::Millisecond, &rows),
+    )
+    .await;
+    assert_eq!(shape, RecoveryTimestampPlanShape::RawTimestampProjection);
+    assert_eq!(captured, expected, "fallback must keep every local window");
+}
+
+#[tokio::test]
+async fn test_remote_window_dedup_non_epoch_origin_falls_back() {
+    let rows = vec![0, 4_999, 5_000, 1_700_000_000_000];
+    let query = "SELECT max(number) AS output_value, \
+                 date_bin(INTERVAL '5 second', ts, TIMESTAMP '2023-01-01 00:00:00') AS output_window \
+                 FROM dedup_unit_table GROUP BY output_window";
+    let (task, engine, _plan) =
+        new_unit_time_window_test_task(query, TimeUnit::Millisecond, &rows).await;
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    assert!(
+        time_window_expr.safe_remote_dedup_group_expr().is_none(),
+        "a non-epoch origin is not the epoch-anchored lattice the remote grouping relies on"
+    );
+
+    let expected = decoded_windows(
+        time_window_expr,
+        TimeUnit::Millisecond,
+        rows.iter().copied().map(Some),
+    );
+
+    let (captured, shape) = capture_windows_with_shape(
+        &task,
+        &engine,
+        raw_timestamp_output(TimeUnit::Millisecond, &rows),
+    )
+    .await;
+    assert_eq!(shape, RecoveryTimestampPlanShape::RawTimestampProjection);
+    assert_eq!(captured, expected, "fallback must keep every local window");
+}
+
+#[tokio::test]
+async fn test_capture_recovery_windows_executes_the_encoded_dedup_plan() {
+    let rows = vec![0, 1, 4_999, 5_000, 1_700_000_000_000, 1_700_000_002_999];
+    let query = "SELECT max(number) AS output_value, date_bin(INTERVAL '5 second', ts) AS output_window \
+                 FROM dedup_unit_table GROUP BY output_window";
+    let (task, engine, _plan) =
+        new_unit_time_window_test_task(query, TimeUnit::Millisecond, &rows).await;
+    let time_window_expr = task.config.time_window_expr.as_ref().unwrap();
+    let expected = decoded_windows(
+        time_window_expr,
+        TimeUnit::Millisecond,
+        rows.iter().copied().map(Some),
+    );
+
+    let lower = BTreeMap::from([(1, 10)]);
+    let handler = Arc::new(RecoveryCaptureHandler {
+        output: std::sync::Mutex::new(None),
+        lower: serde_json::to_string(&lower).unwrap(),
+        expire_after: None,
+        source_table: "dedup_unit_table".to_string(),
+        expects_number_filter: false,
+        audit: std::sync::Mutex::new(None),
+        // Decode the encoded plan with the frontend's Substrait decoder, run
+        // GreptimeDB's distributed analyzer over it, and execute it for real.
+        execute: Some((engine.clone(), task.query_context_snapshot())),
+        executed_rows: std::sync::Mutex::new(None),
+        dist_push_down: std::sync::Mutex::new(None),
+    });
+    let handler_dyn: Arc<
+        dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
+    > = handler.clone();
+    let frontend =
+        FrontendClient::from_grpc_handler(Arc::downgrade(&handler_dyn), QueryOptions::default());
+
+    let (_, windows) = task
+        .capture_recovery_windows(&engine, &frontend, &lower)
+        .await
+        .unwrap();
+
+    let audit = handler.audit.lock().unwrap().clone().unwrap();
+    assert_eq!(audit.shape, RecoveryTimestampPlanShape::RemoteWindowDedup);
+    assert_eq!(
+        windows.into_iter().collect::<BTreeSet<_>>(),
+        expected,
+        "windows decoded from the executed plan must match local eval"
+    );
+    assert_eq!(
+        *handler.dist_push_down.lock().unwrap(),
+        Some(true),
+        "the recovery dedup plan must be pushed down by the frontend dist planner"
+    );
+    let executed_rows = handler.executed_rows.lock().unwrap().unwrap();
+    assert!(
+        executed_rows < rows.len(),
+        "the executed plan must return deduplicated representatives, got {executed_rows} rows"
+    );
+    assert_eq!(executed_rows, expected.len());
 }
 
 #[test]
