@@ -172,17 +172,20 @@ impl ExprPlanner for JsonExprPlanner {
         mut expr: RawScalarExpr,
         schema: &DFSchema,
     ) -> Result<PlannerResult<RawScalarExpr>> {
-        if expr.func.name().eq_ignore_ascii_case(JsonGetWithType::NAME)
-            && expr.args.len() == 2
-            && let Expr::Column(column) = &expr.args[0]
-        {
-            // Resolving an unqualified column may require JOIN USING information unavailable
-            // in this schema. Skip hint injection if lookup fails and let DataFusion resolve
-            // the column or report the error later.
-            if let Ok(field) = schema.field_from_column(column)
+        if expr.func.name().eq_ignore_ascii_case(JsonGetWithType::NAME) && expr.args.len() == 2 {
+            let field = match &expr.args[0] {
+                // Resolving an unqualified column may require JOIN USING information unavailable
+                // in this schema. Skip hint injection if lookup fails and let DataFusion resolve
+                // the column or report the error later.
+                Expr::Column(column) => schema.field_from_column(column).ok().cloned(),
+                // Outer references carry their field metadata from the outer query's schema.
+                Expr::OuterReferenceColumn(field, _) => Some(Arc::clone(field)),
+                _ => None,
+            };
+            if let Some(field) = field
                 && let Some(path) = json_get_object_path(&expr.args[1])
             {
-                apply_json_type_hint(field, &path, &mut expr.args)?;
+                apply_json_type_hint(&field, &path, &mut expr.args)?;
             }
         }
         push_function_arg_types(expr.func.as_ref(), &mut expr.args)?;
