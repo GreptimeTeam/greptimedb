@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
-use api::v1::column_def::options_from_skipping;
+use api::v1::column_def::{options_from_skipping, try_as_column_def};
 use api::v1::region::{
     InsertRequest as RegionInsertRequest, InsertRequests as RegionInsertRequests,
     RegionRequestHeader,
@@ -26,6 +26,7 @@ use api::v1::{
     AlterTableExpr, ColumnDataType, ColumnSchema, CreateTableExpr, InsertRequests,
     RowInsertRequest, RowInsertRequests, Rows, SemanticType,
 };
+use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
 use catalog::CatalogManagerRef;
 use client::{OutputData, OutputMeta};
 use common_catalog::consts::{
@@ -883,6 +884,84 @@ impl Inserter {
                 table,
                 DEFAULT_EVENTS_TABLE_NAME | SLOW_QUERY_TABLE_NAME | REGION_STATS_HISTORY_TABLE_NAME
             )
+    }
+
+    /// Adds missing columns from a bulk stream's schema and returns the refreshed table.
+    /// Call once when initializing the stream, before writing its first batch.
+    /// Does not infer new nested or dictionary columns.
+    pub async fn ensure_bulk_insert_schema(
+        &self,
+        table: TableRef,
+        request_schema: &ArrowSchema,
+        ctx: &QueryContextRef,
+        statement_executor: &StatementExecutor,
+    ) -> Result<TableRef> {
+        let table_info = table.table_info();
+        if self.auto_create_disabled_reason(ctx)?.is_some()
+            && !Self::is_auto_create_exempt_private_table(&table_info.schema_name, &table_info.name)
+        {
+            return Ok(table);
+        }
+
+        let table_schema = table.schema();
+        let schema = request_schema
+            .fields()
+            .iter()
+            .filter(|field| table_schema.column_schema_by_name(field.name()).is_none())
+            .map(|field| {
+                let data_type = field.data_type();
+                // Dictionary values can reach the same infallible child-type conversion
+                // as nested types, even when Arrow's is_nested() returns false.
+                ensure!(
+                    !data_type.is_nested() && !matches!(data_type, ArrowDataType::Dictionary(..)),
+                    crate::error::NotSupportedSnafu {
+                        feat: format!(
+                            "automatically adding bulk insert column '{}' with type {:?}",
+                            field.name(),
+                            data_type
+                        ),
+                    }
+                );
+                let column = datatypes::schema::ColumnSchema::try_from(field.as_ref())
+                    .context(crate::error::ConvertSchemaSnafu)?;
+                // Arrow fields do not carry primary-key semantics. New columns are
+                // fields, unless explicitly marked as a time index.
+                let column_def =
+                    try_as_column_def(&column, false).context(crate::error::ColumnDataTypeSnafu)?;
+                Ok(ColumnSchema {
+                    column_name: column_def.name,
+                    datatype: column_def.data_type,
+                    semantic_type: column_def.semantic_type,
+                    datatype_extension: column_def.datatype_extension,
+                    options: column_def.options,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut request = RowInsertRequest {
+            table_name: table_info.name.clone(),
+            rows: Some(Rows {
+                schema,
+                rows: Vec::new(),
+            }),
+        };
+        let Some(alter_expr) =
+            self.get_alter_table_expr_on_demand(&mut request, &table, ctx, false, false, true)?
+        else {
+            return Ok(table);
+        };
+
+        statement_executor
+            .alter_table_inner(alter_expr, ctx.clone(), TriggerReason::AutoAlter)
+            .await?;
+        self.get_table(
+            &table_info.catalog_name,
+            &table_info.schema_name,
+            &table_info.name,
+        )
+        .await?
+        .with_context(|| TableNotFoundSnafu {
+            table_name: table_info.full_table_name(),
+        })
     }
 
     /// Ensures a trace table has the request-global schema without requiring a

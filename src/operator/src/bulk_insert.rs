@@ -140,6 +140,24 @@ impl Inserter {
             return Ok(0);
         }
 
+        // Bulk storage paths may discard unknown columns instead of rejecting them.
+        for field in record_batch.schema_ref().fields() {
+            ensure!(
+                table_info
+                    .meta
+                    .schema
+                    .column_schema_by_name(field.name())
+                    .is_some(),
+                error::InvalidInsertRequestSnafu {
+                    reason: format!(
+                        "Column '{}' not found in table '{}'",
+                        field.name(),
+                        table_info.full_table_name()
+                    ),
+                }
+            );
+        }
+
         // The zero value is WCU, not bytes. Bulk writes have no WCU accounting;
         // preserve that behavior while admitting their rows before dispatch.
         write_meter!(MeterRecord::new(

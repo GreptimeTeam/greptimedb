@@ -392,6 +392,7 @@ impl Instance {
         let catalog_manager = self.catalog_manager().clone();
         let plugins = self.plugins.clone();
         let inserter = self.inserter.clone();
+        let statement_executor = self.statement_executor.clone();
         let ctx = ctx.clone();
         let mut table_ref: Option<TableRef> = None;
         let mut table_checked = false;
@@ -422,25 +423,37 @@ impl Instance {
                         .context(PermissionSnafu)?;
 
                     // Resolve table reference
-                    table_ref = Some(
-                        catalog_manager
-                            .table(
-                                &table_name.catalog_name,
-                                &table_name.schema_name,
-                                &table_name.table_name,
-                                None,
-                            )
-                            .await
-                            .context(CatalogSnafu)?
-                            .with_context(|| TableNotFoundSnafu {
-                                table_name: table_name.to_string(),
-                            })?,
-                    );
+                    let table = catalog_manager
+                        .table(
+                            &table_name.catalog_name,
+                            &table_name.schema_name,
+                            &table_name.table_name,
+                            None,
+                        )
+                        .await
+                        .context(CatalogSnafu)?
+                        .with_context(|| TableNotFoundSnafu {
+                            table_name: table_name.to_string(),
+                        })?;
 
                     // Check permissions for the table
                     let interceptor_ref = plugins.get::<GrpcQueryInterceptorRef<Error>>();
                     let interceptor = interceptor_ref.as_ref();
-                    interceptor.pre_bulk_insert(table_ref.clone().unwrap(), ctx.clone())?;
+                    interceptor.pre_bulk_insert(table.clone(), ctx.clone())?;
+
+                    // The client sends the schema lazily after the stream handshake.
+                    // Reconcile it once, before writing the first batch.
+                    table_ref = Some(
+                        inserter
+                            .ensure_bulk_insert_schema(
+                                table,
+                                request.record_batch.schema().as_ref(),
+                                &ctx,
+                                statement_executor.as_ref(),
+                            )
+                            .await
+                            .context(TableOperationSnafu)?,
+                    );
 
                     table_checked = true;
                 }
