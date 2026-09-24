@@ -34,6 +34,23 @@ ORDER BY ts;
 |                  |                  | Int64       | Int64       |
 +------------------+------------------+-------------+-------------+
 
+-- An explicit third argument takes precedence over the BIGINT path hint in memtable reads.
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
++------------------+--------------------+-------------+---------------+
+| hinted_bigint    | explicit_double    | hinted_type | explicit_type |
++------------------+--------------------+-------------+---------------+
+| 9007199254740993 | 9007199254740992.0 | Int64       | Float64       |
+| 7                | 7.0                | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
++------------------+--------------------+-------------+---------------+
+
 ADMIN FLUSH_TABLE('json2_query_respect_type_hint');
 
 +----------------------------------------------------+
@@ -41,6 +58,39 @@ ADMIN FLUSH_TABLE('json2_query_respect_type_hint');
 +----------------------------------------------------+
 | 0                                                  |
 +----------------------------------------------------+
+
+-- The explicit read type also overrides the hint in the plan and SST reads.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT json_get(j, 'a', NULL::DOUBLE) AS explicit_double
+FROM json2_query_respect_type_hint;
+
++---------------+----------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                               |
++---------------+----------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                    |
+|               | Projection: json_get(json2_query_respect_type_hint.j, Utf8("a"), Float64(NULL)) AS explicit_double |
+|               |   TableScan: json2_query_respect_type_hint                                                         |
+|               | ]]                                                                                                 |
+| physical_plan | CooperativeExec                                                                                    |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------+
+
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
++------------------+--------------------+-------------+---------------+
+| hinted_bigint    | explicit_double    | hinted_type | explicit_type |
++------------------+--------------------+-------------+---------------+
+| 9007199254740993 | 9007199254740992.0 | Int64       | Float64       |
+| 7                | 7.0                | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
++------------------+--------------------+-------------+---------------+
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT j.a AS hinted_bigint, json_get(j, 'a') AS direct_bigint

@@ -21,7 +21,27 @@ SELECT j.a AS dotted, json_get(j, 'a') AS direct,
 FROM json2_query_respect_type_hint
 ORDER BY ts;
 
+-- An explicit third argument takes precedence over the BIGINT path hint in memtable reads.
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
 ADMIN FLUSH_TABLE('json2_query_respect_type_hint');
+
+-- The explicit read type also overrides the hint in the plan and SST reads.
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT json_get(j, 'a', NULL::DOUBLE) AS explicit_double
+FROM json2_query_respect_type_hint;
+
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
 
 -- SQLNESS REPLACE (peers.*) REDACTED
 EXPLAIN SELECT j.a AS hinted_bigint, json_get(j, 'a') AS direct_bigint
