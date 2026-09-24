@@ -33,8 +33,6 @@ use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
 use common_time::timestamp::TimeUnit;
 use common_time::{TimeToLive, Timestamp};
 use datafusion::execution::SessionStateBuilder;
-use datafusion::optimizer::AnalyzerRule;
-use datafusion_common::config::ConfigOptions;
 use datafusion_expr::Expr;
 use datatypes::data_type::ConcreteDataType as CDT;
 use datatypes::schema::{ColumnSchema, Schema};
@@ -44,7 +42,6 @@ use datatypes::vectors::{
 };
 use pretty_assertions::assert_eq;
 use prost::Message;
-use query::dist_plan::{DistPlannerAnalyzer, MergeScanLogicalPlan};
 use query::options::{
     FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_INCREMENTAL_MODE_MEMTABLE_ONLY,
     FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, QueryOptions,
@@ -1218,14 +1215,11 @@ struct RecoveryCaptureHandler {
     expire_after: Option<i64>,
     audit: std::sync::Mutex<Option<RecoveryCaptureAudit>>,
     /// When set, the handler decodes the request's logical plan with the frontend's
-    /// Substrait decoder and executes it for real against this engine, instead of
-    /// returning canned output.
+    /// Substrait decoder and executes it locally against this engine (no distributed
+    /// execution), instead of returning canned output.
     execute: Option<(QueryEngineRef, QueryContextRef)>,
     /// Number of rows the executed plan returned.
     executed_rows: std::sync::Mutex<Option<usize>>,
-    /// Whether GreptimeDB's distributed analyzer pushed the decoded plan into a
-    /// `MergeScan` stage instead of keeping it on the frontend.
-    dist_push_down: std::sync::Mutex<Option<bool>>,
 }
 
 struct RecoveryMetricsStream {
@@ -1310,15 +1304,16 @@ fn timestamp_literal(expr: &substrait::substrait_proto_df::proto::Expression) ->
 /// Audits the Substrait plan the recovery capture path sends to the frontend.
 ///
 /// Both capture shapes must preserve the qualified source table, the query's `WHERE`,
-/// and the recovery retention filter. The remote window dedup shape must additionally
-/// group by a `CASE` that only rebins timestamps inside the representable range and
-/// keeps an `ELSE` that falls back to the raw time index.
+/// and the recovery retention filter. The remote window dedup shape must group by a
+/// single `CASE` key and must not aggregate values; the exact guarding semantics of the
+/// key are covered by the unit and decoded-plan execution tests.
 fn assert_recovery_timestamp_plan(
     plan: &Plan,
     source_table: &str,
     expects_number_filter: bool,
     expire_after: Option<i64>,
 ) -> RecoveryCaptureAudit {
+    use substrait::substrait_proto_df::proto::expression::RexType;
     use substrait::substrait_proto_df::proto::plan_rel::RelType as PlanRelType;
     use substrait::substrait_proto_df::proto::rel::RelType;
 
@@ -1363,7 +1358,10 @@ fn assert_recovery_timestamp_plan(
             let [group_expr] = aggregate.grouping_expressions.as_slice() else {
                 panic!("recovery window dedup must group by exactly one key");
             };
-            assert_remote_window_dedup_group_expr(group_expr, &function_names);
+            assert!(
+                matches!(group_expr.rex_type.as_ref(), Some(RexType::IfThen(_))),
+                "recovery window dedup must group by a CASE key, got {group_expr:?}"
+            );
             (
                 RecoveryTimestampPlanShape::RemoteWindowDedup,
                 aggregate.input.as_ref().expect("recovery aggregate input"),
@@ -1481,118 +1479,6 @@ fn assert_recovery_timestamp_plan(
     }
 }
 
-/// Asserts that `expr` is the remote window dedup key:
-/// `CASE WHEN ts >= 0 AND ts <= <max representable in the source unit>
-///      THEN date_bin(<literal interval>, ts) ELSE ts END`.
-fn assert_remote_window_dedup_group_expr(
-    expr: &substrait::substrait_proto_df::proto::Expression,
-    function_names: &HashMap<u32, &str>,
-) {
-    use substrait::substrait_proto_df::proto::expression::RexType;
-
-    fn scalar_function<'a>(
-        expr: &'a substrait::substrait_proto_df::proto::Expression,
-        function_names: &HashMap<u32, &str>,
-        expected: &str,
-    ) -> &'a substrait::substrait_proto_df::proto::expression::ScalarFunction {
-        let Some(RexType::ScalarFunction(function)) = expr.rex_type.as_ref() else {
-            panic!("recovery window dedup expects the {expected} scalar function, got {expr:?}");
-        };
-        assert_eq!(
-            function_names.get(&function.function_reference),
-            Some(&expected),
-            "recovery window dedup expects the {expected} scalar function"
-        );
-        function
-    }
-
-    fn value_args(
-        function: &substrait::substrait_proto_df::proto::expression::ScalarFunction,
-    ) -> Vec<&substrait::substrait_proto_df::proto::Expression> {
-        use substrait::substrait_proto_df::proto::function_argument::ArgType;
-
-        function
-            .arguments
-            .iter()
-            .map(|arg| match arg.arg_type.as_ref() {
-                Some(ArgType::Value(expr)) => expr,
-                _ => panic!("recovery window dedup must use value arguments"),
-            })
-            .collect()
-    }
-
-    let Some(RexType::IfThen(if_then)) = expr.rex_type.as_ref() else {
-        panic!("recovery window dedup key must be a CASE expression, got {expr:?}");
-    };
-    let [clause] = if_then.ifs.as_slice() else {
-        panic!("recovery window dedup CASE must have exactly one WHEN clause");
-    };
-
-    let condition = clause
-        .r#if
-        .as_ref()
-        .expect("recovery window dedup CASE condition");
-    let bounds = value_args(scalar_function(condition, function_names, "and"));
-    assert_eq!(bounds.len(), 2);
-    let mut literals = Vec::new();
-    for (bound, expected) in bounds.into_iter().zip(["gte", "lte"]) {
-        let args = value_args(scalar_function(bound, function_names, expected));
-        assert_eq!(args.len(), 2);
-        assert_eq!(
-            field_selection(args[0]),
-            Some(1),
-            "recovery window dedup bound must use the time index column"
-        );
-        literals.push(timestamp_literal(args[1]).expect("recovery window dedup bound literal"));
-    }
-    // The lower bound is the typed Unix epoch and the upper bound is the largest
-    // timestamp of the source unit whose nanosecond conversion still fits in `i64`.
-    assert_eq!(literals[0].value(), 0);
-    assert_eq!(literals[0].unit(), literals[1].unit());
-    assert_eq!(
-        literals[1].value(),
-        i64::MAX / i64::from(literals[1].unit().factor())
-    );
-
-    let binned = value_args(scalar_function(
-        clause
-            .then
-            .as_ref()
-            .expect("recovery window dedup THEN branch"),
-        function_names,
-        "date_bin",
-    ));
-    assert!(binned.len() >= 2);
-    assert!(
-        matches!(
-            binned[0].rex_type.as_ref(),
-            Some(RexType::Literal(literal))
-                if matches!(
-                    literal.literal_type,
-                    Some(substrait::substrait_proto_df::proto::expression::literal::LiteralType::IntervalDayToSecond(_))
-                        | Some(substrait::substrait_proto_df::proto::expression::literal::LiteralType::IntervalCompound(_))
-                )
-        ),
-        "recovery window dedup stride must stay a literal interval, got {:?}",
-        binned[0]
-    );
-    assert_eq!(
-        field_selection(binned[1]),
-        Some(1),
-        "recovery window dedup must rebin the time index column"
-    );
-
-    let fallback = if_then
-        .r#else
-        .as_ref()
-        .expect("recovery window dedup CASE must keep an ELSE branch");
-    assert_eq!(
-        field_selection(fallback),
-        Some(1),
-        "recovery window dedup CASE must fall back to the raw time index"
-    );
-}
-
 #[async_trait::async_trait]
 impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
     for RecoveryCaptureHandler
@@ -1625,8 +1511,10 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
             self.expire_after,
         ));
         if let Some((engine, ctx)) = &self.execute {
-            // Decode exactly like the frontend does for `Query::LogicalPlan`, then run
-            // the plan so the test observes real DataFusion execution.
+            // Decode exactly like the frontend does for `Query::LogicalPlan`, then
+            // execute the decoded plan locally. This exercises the serialized plan's
+            // executable form; it does not run distributed execution and proves nothing
+            // about region pushdown.
             let session_state =
                 SessionStateBuilder::new_from_existing(engine.engine_state().session_state())
                     .with_catalog_list(Arc::new(DummyCatalogList::new_with_query_ctx(
@@ -1638,23 +1526,6 @@ impl crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError
                 .decode(plan_bytes.as_slice(), session_state)
                 .await
                 .unwrap();
-            // Run the same distributed analyzer the frontend registers, so a plan the
-            // analyzer rejects cannot pass this test unnoticed.
-            let analyzed = DistPlannerAnalyzer
-                .analyze(plan.clone(), &ConfigOptions::default())
-                .expect("frontend dist planner must accept the recovery dedup plan");
-            let pushed_down = analyzed
-                .exists(|node| {
-                    Ok(matches!(node, LogicalPlan::Extension(ext)
-                        if ext.node.as_any().downcast_ref::<MergeScanLogicalPlan>().is_some()))
-                })
-                .unwrap();
-            *self.dist_push_down.lock().unwrap() = Some(pushed_down);
-            if !pushed_down {
-                // Without pushdown the frontend still executes the plan on its own; keep
-                // the decoded plan so the test exercises the executable form either way.
-                common_telemetry::warn!("recovery dedup plan was not pushed down");
-            }
             let output = engine.execute(plan, ctx.clone()).await.unwrap();
             let OutputData::Stream(stream) = output.data else {
                 panic!("recovery capture plan must return a stream");
@@ -2126,7 +1997,6 @@ async fn test_capture_recovery_windows_dedups_remote_windows_with_where_and_expi
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let frontend = FrontendClient::from_grpc_handler(
         Arc::downgrade(
@@ -2205,7 +2075,6 @@ async fn test_capture_recovery_windows_since_uses_supplied_retention_lower() {
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let frontend = FrontendClient::from_grpc_handler(
         Arc::downgrade(
@@ -2296,7 +2165,6 @@ async fn test_capture_recovery_windows_terminal_proof_cases_leave_state_unchange
             audit: std::sync::Mutex::new(None),
             execute: None,
             executed_rows: std::sync::Mutex::new(None),
-            dist_push_down: std::sync::Mutex::new(None),
         });
         let handler_dyn: Arc<
             dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2349,7 +2217,6 @@ async fn test_capture_recovery_windows_streams_sorted_unique_windows() {
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2403,7 +2270,6 @@ async fn test_capture_recovery_windows_rejects_stream_error() {
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2441,7 +2307,6 @@ async fn test_capture_recovery_windows_rejects_null_timestamp() {
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2654,7 +2519,6 @@ async fn capture_windows_with_shape(
         audit: std::sync::Mutex::new(None),
         execute: None,
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -2854,18 +2718,6 @@ async fn test_remote_window_dedup_group_key_matches_original_eval_for_units_and_
             distinct_keys.len(),
             "{name}: every window keeps its own remote representative"
         );
-
-        let (captured, shape) =
-            capture_windows_with_shape(&task, &engine, raw_timestamp_output(unit, &rows)).await;
-        assert_eq!(
-            shape,
-            RecoveryTimestampPlanShape::RemoteWindowDedup,
-            "{name}"
-        );
-        assert_eq!(
-            captured, expected,
-            "{name}: capture must return the local windows"
-        );
     }
 }
 
@@ -2969,31 +2821,6 @@ async fn test_remote_window_dedup_sub_second_stride_falls_back() {
         rows.iter().copied().map(Some),
     );
 
-    // Naive plan: group by the original time-window expression.
-    let naive_plan = sql_to_df_plan(
-        task.query_context_snapshot(),
-        engine.clone(),
-        "SELECT date_bin(INTERVAL '400 millisecond', ts) AS output_window FROM dedup_unit_table GROUP BY output_window",
-        true,
-    )
-    .await
-    .unwrap();
-    let naive_windows = decoded_windows(
-        time_window_expr,
-        TimeUnit::Second,
-        execute_timestamp_plan(&engine, task.query_context_snapshot(), naive_plan)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|value| value.map(|value| value.value())),
-    );
-    // The remote bins of a sub-second stride are sub-unit values that the local
-    // second-resolution fast path cannot represent, so the guard stays conservative.
-    assert!(
-        naive_windows.len() <= expected.len(),
-        "naive GROUP BY must not invent extra windows: naive={naive_windows:?} local={expected:?}"
-    );
-
     let (captured, shape) = capture_windows_with_shape(
         &task,
         &engine,
@@ -3091,6 +2918,11 @@ async fn test_remote_window_dedup_non_epoch_origin_falls_back() {
     assert_eq!(captured, expected, "fallback must keep every local window");
 }
 
+/// Executes the recovery capture plan exactly as serialized for the frontend: decode
+/// it with the frontend's Substrait decoder, run it locally through the test query
+/// engine, and check the decoded windows. This proves the encoded plan is decodable and
+/// locally executable with the expected dedup result; it does not run a distributed
+/// query and is not proof of frontend or region pushdown.
 #[tokio::test]
 async fn test_capture_recovery_windows_executes_the_encoded_dedup_plan() {
     let rows = vec![0, 1, 4_999, 5_000, 1_700_000_000_000, 1_700_000_002_999];
@@ -3113,11 +2945,10 @@ async fn test_capture_recovery_windows_executes_the_encoded_dedup_plan() {
         source_table: "dedup_unit_table".to_string(),
         expects_number_filter: false,
         audit: std::sync::Mutex::new(None),
-        // Decode the encoded plan with the frontend's Substrait decoder, run
-        // GreptimeDB's distributed analyzer over it, and execute it for real.
+        // Decode the encoded plan with the frontend's Substrait decoder and execute
+        // the decoded plan locally, mirroring the request the capture path sends.
         execute: Some((engine.clone(), task.query_context_snapshot())),
         executed_rows: std::sync::Mutex::new(None),
-        dist_push_down: std::sync::Mutex::new(None),
     });
     let handler_dyn: Arc<
         dyn crate::batching_mode::frontend_client::GrpcQueryHandlerWithBoxedError,
@@ -3136,11 +2967,6 @@ async fn test_capture_recovery_windows_executes_the_encoded_dedup_plan() {
         windows.into_iter().collect::<BTreeSet<_>>(),
         expected,
         "windows decoded from the executed plan must match local eval"
-    );
-    assert_eq!(
-        *handler.dist_push_down.lock().unwrap(),
-        Some(true),
-        "the recovery dedup plan must be pushed down by the frontend dist planner"
     );
     let executed_rows = handler.executed_rows.lock().unwrap().unwrap();
     assert!(

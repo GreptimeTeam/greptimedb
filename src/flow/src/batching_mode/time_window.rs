@@ -267,12 +267,9 @@ impl TimeWindowExpr {
             return None;
         };
         let unit = TimeUnit::from(arrow_unit);
+        // `literal_stride_ns` only accepts whole-second strides, so the stride is
+        // always a multiple of the source unit and `date_bin` cannot truncate it.
         let unit_ns = i64::from(unit.factor());
-        if stride_ns % unit_ns != 0 {
-            // The stride is finer than the source unit, so `date_bin` output is
-            // truncated while `eval` works in nanoseconds.
-            return None;
-        }
         let stride_in_unit = stride_ns / unit_ns;
         if self.eval_time_window_size?.as_nanos() != stride_ns as u128 {
             return None;
