@@ -200,6 +200,37 @@ SELECT nth_value(lat, 2 ORDER BY ts), nth_value(lat, 3 ORDER BY ts DESC) FROM ar
 | 2.0                                                                                              | 5.0                                                                                                |
 +--------------------------------------------------------------------------------------------------+----------------------------------------------------------------------------------------------------+
 
+-- WITHIN GROUP aggregates don't need sorted input and are still split
+-- SQLNESS REPLACE (peers.*) REDACTED
+-- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
+-- SQLNESS REPLACE (-+) -
+-- SQLNESS REPLACE (\s\s+) _
+EXPLAIN SELECT sum(lat), approx_percentile_cont(0.75) WITHIN GROUP (ORDER BY lat DESC) FROM array_agg_partitioned;
+
++-+-+
+| plan_type_| plan_|
++-+-+
+| logical_plan_| Aggregate: groupBy=[[]], aggr=[[__sum_merge(__sum_state(array_agg_partitioned.lat)) AS sum(array_agg_partitioned.lat), __approx_percentile_cont_merge(__approx_percentile_cont_state(array_agg_partitioned.lat,Float64(0.75)) ORDER BY [array_agg_partitioned.lat DESC NULLS FIRST]) AS approx_percentile_cont(Float64(0.75)) WITHIN GROUP [array_agg_partitioned.lat DESC NULLS FIRST]]]_|
+|_|_MergeScan [is_placeholder=false, remote_input=[_|
+|_| Aggregate: groupBy=[[]], aggr=[[__sum_state(array_agg_partitioned.lat), __approx_percentile_cont_state(array_agg_partitioned.lat, Float64(0.75)) ORDER BY [array_agg_partitioned.lat DESC NULLS FIRST]]]_|
+|_|_TableScan: array_agg_partitioned_|
+|_| ]]_|
+| physical_plan | AggregateExec: mode=Final, gby=[], aggr=[__sum_merge(__sum_state(array_agg_partitioned.lat)) as sum(array_agg_partitioned.lat), __approx_percentile_cont_merge(__approx_percentile_cont_state(array_agg_partitioned.lat,Float64(0.75)) ORDER BY [array_agg_partitioned.lat DESC NULLS FIRST]) as approx_percentile_cont(Float64(0.75)) WITHIN GROUP [array_agg_partitioned.lat DESC NULLS FIRST]]_|
+|_|_CoalescePartitionsExec_|
+|_|_AggregateExec: mode=Partial, gby=[], aggr=[__sum_merge(__sum_state(array_agg_partitioned.lat)) as sum(array_agg_partitioned.lat), __approx_percentile_cont_merge(__approx_percentile_cont_state(array_agg_partitioned.lat,Float64(0.75)) ORDER BY [array_agg_partitioned.lat DESC NULLS FIRST]) as approx_percentile_cont(Float64(0.75)) WITHIN GROUP [array_agg_partitioned.lat DESC NULLS FIRST]] |
+|_|_RepartitionExec: partitioning=REDACTED
+|_|_MergeScanExec: REDACTED
+|_|_|
++-+-+
+
+SELECT sum(lat), approx_percentile_cont(0.75) WITHIN GROUP (ORDER BY lat DESC) FROM array_agg_partitioned;
+
++--------------------------------+-------------------------------------------------------------------------------------------------+
+| sum(array_agg_partitioned.lat) | approx_percentile_cont(Float64(0.75)) WITHIN GROUP [array_agg_partitioned.lat DESC NULLS FIRST] |
++--------------------------------+-------------------------------------------------------------------------------------------------+
+| 28.0                           | 2.25                                                                                            |
++--------------------------------+-------------------------------------------------------------------------------------------------+
+
 DROP TABLE array_agg_partitioned;
 
 Affected Rows: 0

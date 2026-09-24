@@ -27,6 +27,7 @@ use datafusion::catalog::{Session, TableProvider};
 use datafusion::common::tree_node::TreeNodeRecursion;
 use datafusion::datasource::DefaultTableSource;
 use datafusion::execution::{RecordBatchStream, SendableRecordBatchStream, TaskContext};
+use datafusion::functions_aggregate::approx_percentile_cont::approx_percentile_cont_udaf;
 use datafusion::functions_aggregate::array_agg::array_agg_udaf;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
@@ -1446,6 +1447,46 @@ fn test_state_struct_array_rejects_mismatched_state() {
 }
 
 #[test]
+fn test_state_struct_array_keeps_child_order() {
+    let int_field = |name: &str| Field::new(name, DataType::Int64, true);
+    // Same child types, names crossed: children must stay in place, not be matched by name.
+    let produced = StructArray::from(vec![
+        (
+            Arc::new(int_field("a")),
+            Arc::new(Int64Array::from(vec![10])) as ArrayRef,
+        ),
+        (
+            Arc::new(int_field("b")),
+            Arc::new(Int64Array::from(vec![20])) as ArrayRef,
+        ),
+    ]);
+    let declared = Fields::from(vec![Field::new(
+        "state",
+        DataType::Struct(Fields::from(vec![int_field("b"), int_field("a")])),
+        true,
+    )]);
+
+    let state = state_struct_array(&declared, vec![Arc::new(produced)]).unwrap();
+    let state = state.column(0).as_struct();
+    assert_eq!(
+        state
+            .column_by_name("b")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        10
+    );
+    assert_eq!(
+        state
+            .column_by_name("a")
+            .unwrap()
+            .as_primitive::<arrow::datatypes::Int64Type>()
+            .value(0),
+        20
+    );
+}
+
+#[test]
 fn test_hard_ordered_aggr_not_steppable() {
     let order_by = vec![SortExpr::new(
         Expr::Column(Column::new_unqualified("ts")),
@@ -1470,6 +1511,11 @@ fn test_hard_ordered_aggr_not_steppable() {
     )]));
     assert!(is_all_aggr_exprs_steppable(&[aggr(
         array_agg_udaf(),
-        vec![number]
+        vec![number.clone()]
+    )]));
+    // WITHIN GROUP (ORDER BY number)
+    assert!(is_all_aggr_exprs_steppable(&[aggr(
+        approx_percentile_cont_udaf(),
+        vec![number, lit(0.5f64)]
     )]));
 }

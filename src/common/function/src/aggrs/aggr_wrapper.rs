@@ -25,8 +25,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, StructArray};
-use arrow::compute::cast;
+use arrow::array::{ArrayData, ArrayRef, BooleanArray, StructArray, make_array};
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
@@ -87,10 +86,13 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
 
             // DataFusion only sorts the input of an aggregate with a hard ordering requirement
             // when the requirement is already satisfied or the aggregate has a reverse
-            // expression (see `get_finer_aggregate_exprs_requirement`). The state wrapper has
-            // none, so e.g. `nth_value(.. ORDER BY ..)` would read unsorted input on datanodes.
+            // expression (apache/datafusion#25676). The state wrapper has none, so e.g.
+            // `nth_value(.. ORDER BY ..)` would read unsorted input on datanodes. Ordered-set
+            // aggregates like `approx_percentile_cont(..) WITHIN GROUP (ORDER BY ..)` are
+            // exempt: their ORDER BY names the value, and they don't need sorted input.
             if !aggr_func.params.order_by.is_empty()
                 && aggr_func.func.order_sensitivity().hard_requires()
+                && !aggr_func.func.supports_within_group_clause()
             {
                 return false;
             }
@@ -612,7 +614,10 @@ fn state_struct_array(
             if array.data_type() == expected {
                 Ok(array)
             } else if array.data_type().equals_datatype(expected) {
-                Ok(cast(&array, expected)?)
+                Ok(make_array(relabel_nested_fields(
+                    array.to_data(),
+                    expected,
+                )?))
             } else {
                 Err(datafusion_common::DataFusionError::Internal(format!(
                     "State field `{}` expects type {expected}, but the accumulator produced {}",
@@ -623,6 +628,38 @@ fn state_struct_array(
         })
         .collect::<datafusion_common::Result<Vec<_>>>()?;
     Ok(StructArray::try_new(state_fields.clone(), arrays, None)?)
+}
+
+/// Rebuilds `data` with the type `target`, which must match it position by position apart
+/// from nested field names and metadata. Unlike a cast, children are never matched by name.
+fn relabel_nested_fields(
+    data: ArrayData,
+    target: &DataType,
+) -> datafusion_common::Result<ArrayData> {
+    let child_types = match target {
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => vec![field.data_type()],
+        DataType::Struct(fields) => fields.iter().map(|f| f.data_type()).collect(),
+        _ if data.child_data().is_empty() => vec![],
+        _ => {
+            return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "Relabeling nested fields of {target}"
+            )));
+        }
+    };
+    let children = data
+        .child_data()
+        .iter()
+        .zip(child_types)
+        .map(|(child, child_type)| relabel_nested_fields(child.clone(), child_type))
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
+    Ok(data
+        .into_builder()
+        .data_type(target.clone())
+        .child_data(children)
+        .build()?)
 }
 
 impl StateAccum {
