@@ -3312,3 +3312,166 @@ CREATE TABLE b (
 +-------+-----------------------------------+"#;
     check_output_stream(output, expected).await;
 }
+
+#[rstest]
+#[case::mito(false)]
+#[case::batched_metric(true)]
+#[tokio::test(flavor = "multi_thread")]
+async fn test_histogram_ingestion_storage_lifecycle(#[case] metric_engine: bool) {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram, Sample};
+    use axum::body::{Body, to_bytes};
+    use http::Request;
+    use prost::Message;
+    use servers::http::{HttpOptions, HttpServerBuilder};
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_remote_write::validation::PromValidationMode;
+    use servers::prom_store::snappy_compress;
+    use tower::ServiceExt;
+
+    use crate::cluster::GreptimeDbClusterBuilder;
+    use crate::test_util::build_test_prom_server;
+    use crate::tests::test_util::{MockInstanceBuilder, RebuildableMockInstance, TestContext};
+
+    common_telemetry::init_default_ut_logging();
+    let builder = MockInstanceBuilder::Distributed(
+        GreptimeDbClusterBuilder::new(&format!("histogram_lifecycle_{metric_engine}"))
+            .await
+            .with_datanodes(3),
+    );
+    let mut context = TestContext::new(builder).await;
+    let make_router = |frontend: Arc<Instance>| {
+        let builder = if metric_engine {
+            build_test_prom_server(frontend.clone(), true, None)
+        } else {
+            HttpServerBuilder::new(HttpOptions::default())
+                .with_sql_handler(frontend.clone())
+                .with_prometheus_handler(frontend.clone())
+                .with_prom_handler(
+                    frontend.clone(),
+                    None,
+                    false,
+                    PromValidationMode::Strict,
+                    None,
+                )
+        };
+        let server = builder.build();
+        server.build(server.make_app()).unwrap()
+    };
+    let snapshot = |frontend: Arc<Instance>| async move {
+        let mut result = Vec::new();
+        for table in ["lifecycle_sample", "lifecycle_histogram"] {
+            let output = execute_sql(
+                &frontend,
+                &format!("select * from {table} order by greptime_timestamp"),
+            )
+            .await;
+            let OutputData::Stream(stream) = output.data else {
+                panic!("expected query stream")
+            };
+            result.push(
+                util::collect_batches(stream)
+                    .await
+                    .unwrap()
+                    .pretty_print()
+                    .unwrap(),
+            );
+        }
+        result
+    };
+    let mut router = make_router(context.frontend());
+    for round in 0..2 {
+        let timestamp = 1_000 + round * 10_000;
+        let mut labels = vec![("__name__", "lifecycle_histogram"), ("job", "api")];
+        if round == 1 {
+            // Exercise schema evolution after the first SST already exists.
+            labels.push(("zone", "east"));
+        }
+        let sample = remote_write_v2::request_with_labels_and_samples(
+            vec![("__name__", "lifecycle_sample"), ("job", "api")],
+            vec![Sample {
+                value: 42.0,
+                timestamp,
+                ..Default::default()
+            }],
+        );
+        let histograms = remote_write_v2::request_with_labels_and_histograms(
+            labels,
+            vec![Histogram {
+                timestamp,
+                start_timestamp: 500,
+                count: Some(Count::CountInt(9_007_199_254_740_993)),
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                zero_threshold: 0.001,
+                sum: 12.5,
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 1,
+                }],
+                positive_deltas: vec![9_007_199_254_740_992],
+                ..Default::default()
+            }],
+        );
+        // Create the scalar table first, then add histogram storage to its physical table.
+        for request in [sample, histograms] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::post("/v1/prometheus/write")
+                        .header("Content-Encoding", "snappy")
+                        .header(
+                            "Content-Type",
+                            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                        )
+                        .body(Body::from(
+                            snappy_compress(&request.encode_to_vec()).unwrap(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                204,
+                "{:?}",
+                to_bytes(response.into_body(), usize::MAX).await.unwrap()
+            );
+        }
+
+        let expected = snapshot(context.frontend()).await;
+        assert!(expected[1].contains("9007199254740993"), "{}", expected[1]);
+        // Rebuild before flushing, including after adding fields to the physical
+        // schema: recovery must retain the columns filled into bulk writes.
+        drop(router);
+        context.rebuild().await;
+        router = make_router(context.frontend());
+        assert_eq!(snapshot(context.frontend()).await, expected, "WAL recovery");
+        let storage_tables = if metric_engine {
+            vec!["greptime_physical_table"]
+        } else {
+            vec!["lifecycle_sample", "lifecycle_histogram"]
+        };
+        for table in &storage_tables {
+            execute_sql(
+                &context.frontend(),
+                &format!("admin flush_table('{table}')"),
+            )
+            .await;
+        }
+        assert_eq!(snapshot(context.frontend()).await, expected, "SST read");
+        if round == 1 {
+            for table in &storage_tables {
+                execute_sql(
+                    &context.frontend(),
+                    &format!("admin compact_table('{table}', 'strict_window', 'window=3600')"),
+                )
+                .await;
+            }
+            assert_eq!(snapshot(context.frontend()).await, expected, "compaction");
+            drop(router);
+            context.rebuild().await;
+            router = make_router(context.frontend());
+            assert_eq!(snapshot(context.frontend()).await, expected, "SST reopen");
+        }
+    }
+}

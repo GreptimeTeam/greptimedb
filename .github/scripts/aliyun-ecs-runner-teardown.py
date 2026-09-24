@@ -47,6 +47,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from runner_utils import deregister_runner
+
 # Reuse the GitHub API client, runner lookup, and tag constants from the
 # provision script.
 _PROVISION_SPEC = importlib.util.spec_from_file_location(
@@ -157,20 +159,6 @@ def delete_instance(client, instance_id: str, region_id: str | None = None) -> b
                 continue
             print(f"Failed to delete instance {instance_id}: {error}", flush=True)
             return False
-
-
-def deregister_runner(token: str, repo: str, runner_name: str) -> bool:
-    runner = provision.find_runner_by_name(token, repo, runner_name)
-    if runner is None:
-        print(f"Runner {runner_name} is not registered", flush=True)
-        return True
-    try:
-        provision.github_api(token, "DELETE", f"/repos/{repo}/actions/runners/{runner['id']}")
-        print(f"Deregistered runner {runner_name} (id {runner['id']})", flush=True)
-        return True
-    except Exception as error:  # noqa: BLE001
-        print(f"Failed to deregister runner {runner_name}: {error}", flush=True)
-        return False
 
 
 def list_managed_instances(

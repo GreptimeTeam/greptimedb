@@ -14,7 +14,7 @@ ADMIN FLUSH_TABLE('json2_alter_type_hints_compaction_conversion');
 ALTER TABLE json2_alter_type_hints_compaction_conversion
     MODIFY COLUMN attrs JSON2 (
         to_string STRING,
-        to_int INT64
+        to_int BIGINT
     );
 
 INSERT INTO json2_alter_type_hints_compaction_conversion VALUES

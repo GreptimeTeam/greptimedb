@@ -31,7 +31,7 @@ use common_macro::stack_trace_debug;
 use datatypes::arrow;
 use datatypes::arrow::datatypes::FieldRef;
 use datatypes::extension::json::json2_metadata_with_updated_settings;
-use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef, VectorIndexOptions};
+use datatypes::schema::{ColumnSchema, FulltextOptions, Schema, SchemaRef};
 use datatypes::types::TimestampType;
 use itertools::Itertools;
 use serde::de::Error;
@@ -421,22 +421,6 @@ impl RegionMetadata {
         }
 
         inverted_index
-    }
-
-    /// Gets the column IDs that have vector indexes along with their options.
-    /// Returns a map from column ID to the vector index options.
-    pub fn vector_indexed_column_ids(&self) -> HashMap<ColumnId, VectorIndexOptions> {
-        self.column_metadatas
-            .iter()
-            .filter_map(|column| {
-                column
-                    .column_schema
-                    .vector_index_options()
-                    .ok()
-                    .flatten()
-                    .map(|options| (column.column_id, options))
-            })
-            .collect()
     }
 
     /// Checks whether the metadata is valid.

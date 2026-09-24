@@ -2232,17 +2232,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codespan-reporting"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
-dependencies = [
- "serde",
- "termcolor",
- "unicode-width 0.1.14",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3504,68 +3493,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
-]
-
-[[package]]
-name = "cxx"
-version = "1.0.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7620f6cfc4dcca21f2b085b7a890e16c60fd66f560cd69ee60594908dc72ab1"
-dependencies = [
- "cc",
- "cxx-build",
- "cxxbridge-cmd",
- "cxxbridge-flags",
- "cxxbridge-macro",
- "foldhash 0.2.0",
- "link-cplusplus",
-]
-
-[[package]]
-name = "cxx-build"
-version = "1.0.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9bc1a22964ff6a355fbec24cf68266a0ed28f8b84c0864c386474ea3d0e479"
-dependencies = [
- "cc",
- "codespan-reporting 0.13.1",
- "indexmap 2.14.2",
- "proc-macro2",
- "quote",
- "scratch",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "cxxbridge-cmd"
-version = "1.0.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f29a879d35f7906e3c9b77d7a1005a6a0787d330c09dfe4ffb5f617728cb44"
-dependencies = [
- "clap",
- "codespan-reporting 0.13.1",
- "indexmap 2.14.2",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
-]
-
-[[package]]
-name = "cxxbridge-flags"
-version = "1.0.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d67109015f93f683e364085aa6489a5b2118b4a40058482101d699936a7836d6"
-
-[[package]]
-name = "cxxbridge-macro"
-version = "1.0.190"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d187e019e7b05a1f3e69a8396b70800ee867aa9fc2ab972761173ccee03742df"
-dependencies = [
- "indexmap 2.14.2",
- "proc-macro2",
- "quote",
- "syn 2.0.117",
 ]
 
 [[package]]
@@ -5468,6 +5395,7 @@ dependencies = [
  "operator",
  "pretty_assertions",
  "prometheus 0.14.0",
+ "prost 0.14.1",
  "query",
  "rand 0.9.4",
  "serde",
@@ -6896,7 +6824,6 @@ dependencies = [
  "common-telemetry",
  "common-test-util",
  "criterion 0.7.0",
- "datatypes",
  "fastbloom",
  "fst",
  "futures",
@@ -6905,7 +6832,6 @@ dependencies = [
  "jieba-rs",
  "lazy_static",
  "mockall",
- "nalgebra",
  "pin-project",
  "prost 0.14.1",
  "puffin",
@@ -6923,7 +6849,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
- "usearch",
  "uuid",
 ]
 
@@ -7945,15 +7870,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "link-cplusplus"
-version = "1.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f78c730aaa7d0b9336a299029ea49f9ee53b0ed06e9202e8cb7db9bae7b8c82"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "link-section"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8693,7 +8609,6 @@ dependencies = [
  "rand 0.9.4",
  "rayon",
  "regex",
- "roaring",
  "rskafka",
  "rstest",
  "rstest_reuse",
@@ -13160,12 +13075,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
-name = "scratch"
-version = "1.0.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d68f2ec51b097e4c1a75b681a8bec621909b5e91f15bb7b840c4f2f7b01148b2"
-
-[[package]]
 name = "scrypt"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16101,16 +16010,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
-name = "usearch"
-version = "2.21.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cc9fc5f872a3a4f9081d5f42624d788231b763e1846c829b9968a3755ac884d"
-dependencies = [
- "cxx",
- "cxx-build",
-]
-
-[[package]]
 name = "utf8-ranges"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -16236,7 +16135,7 @@ dependencies = [
  "ciborium",
  "cidr",
  "clap",
- "codespan-reporting 0.12.0",
+ "codespan-reporting",
  "community-id",
  "convert_case 0.7.1",
  "crc",

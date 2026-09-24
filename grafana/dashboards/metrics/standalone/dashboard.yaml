@@ -1572,17 +1572,17 @@ groups:
           description: Index-related cache hits, misses, and evictions from Mito caches.
           unit: ops
           queries:
-            - expr: sum by (type) (rate(greptime_mito_cache_hit{type=~"index.*|vector_index|index_result"}[$__rate_interval]))
+            - expr: sum by (type) (rate(greptime_mito_cache_hit{type=~"index.*|index_result"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: hit-{{type}}
-            - expr: sum by (type) (rate(greptime_mito_cache_miss{type=~"index.*|vector_index|index_result"}[$__rate_interval]))
+            - expr: sum by (type) (rate(greptime_mito_cache_miss{type=~"index.*|index_result"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}
               legendFormat: miss-{{type}}
-            - expr: sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~"index.*|vector_index|index_result"}[$__rate_interval]))
+            - expr: sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~"index.*|index_result"}[$__rate_interval]))
               datasource:
                 type: prometheus
                 uid: ${metrics}

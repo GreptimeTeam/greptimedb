@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   fmt:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Rustfmt
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -50,7 +50,7 @@ jobs:
         run: make fmt-check
 
   clippy:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Clippy
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -76,7 +76,7 @@ jobs:
         run: make clippy
 
   check-udeps:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check Unused Dependencies
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -94,7 +94,7 @@ jobs:
         run: make check-udeps
 
   check-riscv64:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check riscv64 build
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -120,7 +120,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
 
   check-windows:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check Windows build
     runs-on: windows-2022
     timeout-minutes: 60
@@ -191,7 +191,7 @@ jobs:
         run: cargo nextest run --locked --workspace -F dashboard --no-fail-fast
 
   conflict-check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check for conflict
     runs-on: ubuntu-latest
     steps:
@@ -202,7 +202,7 @@ jobs:
         uses: olivernybroe/action-conflict-finder@v4.0
 
   test:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 60
     needs: [conflict-check, clippy, fmt, check-udeps]
@@ -233,7 +233,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F ai_functions
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F ai_functions
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1
@@ -290,7 +290,7 @@ jobs:
         run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
 
       - name: Run nextest cases
-        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F vector_index -F ai_functions
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F ai_functions
         env:
           CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
           RUST_BACKTRACE: 1

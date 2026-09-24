@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   check-typos-and-docs:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check typos and docs
     runs-on: ubuntu-latest
     steps:
@@ -47,7 +47,7 @@ jobs:
           || (echo "'config/config.md' is not up-to-date, please run 'make config-docs'." && exit 1)
 
   license-header-check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     runs-on: ubuntu-latest
     name: Check License Header
     steps:
@@ -63,7 +63,7 @@ jobs:
           config: licenserc-enterprise.toml
 
   github-script-tests:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: GitHub Script Tests
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -97,10 +97,11 @@ jobs:
           python3 tests/perf/test_query_regression_nightly_refs.py
           python3 tests/perf/test_query_regression_slash.py
           python3 tests/perf/test_aliyun_ecs_runner_scripts.py
+          python3 tests/perf/test_ci_runner_scripts.py
           python3 tests/perf/test_agent_observability_summary.py
 
   check:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Check
     runs-on: ${{ matrix.os }}
     strategy:
@@ -129,7 +130,7 @@ jobs:
         run: cargo check --locked --workspace --all-targets --all-features
 
   toml:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
     name: Toml Check
     runs-on: ubuntu-latest
     timeout-minutes: 60
