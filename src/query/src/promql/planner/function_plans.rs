@@ -52,7 +52,7 @@ use crate::query_engine::QueryEngineState;
 
 impl PromPlanner {
     /// Create a classic, native, or mixed histogram helper plan.
-    pub(crate) async fn create_histogram_plan(
+    pub(super) async fn create_histogram_plan(
         &mut self,
         function_name: &str,
         args: &PromFunctionArgs,
@@ -287,7 +287,7 @@ impl PromPlanner {
     }
 
     /// Create a [SPECIAL_VECTOR_FUNCTION] plan
-    pub(crate) async fn create_vector_plan(
+    pub(super) async fn create_vector_plan(
         &mut self,
         args: &PromFunctionArgs,
     ) -> Result<LogicalPlan> {
@@ -321,7 +321,7 @@ impl PromPlanner {
     }
 
     /// Create a [SCALAR_FUNCTION] plan
-    pub(crate) async fn create_scalar_plan(
+    pub(super) async fn create_scalar_plan(
         &mut self,
         args: &PromFunctionArgs,
         query_engine_state: &QueryEngineState,
@@ -404,7 +404,7 @@ impl PromPlanner {
     }
 
     /// Create a [SPECIAL_ABSENT_FUNCTION] plan
-    pub(crate) async fn create_absent_plan(
+    pub(super) async fn create_absent_plan(
         &mut self,
         args: &PromFunctionArgs,
         query_engine_state: &QueryEngineState,

@@ -36,7 +36,7 @@ use crate::promql::error::{
 impl PromPlanner {
     // TODO(ruihang): change function name
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn or_operator(
+    pub(super) fn or_operator(
         &mut self,
         left: LogicalPlan,
         right: LogicalPlan,

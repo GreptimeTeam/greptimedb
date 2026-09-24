@@ -166,7 +166,7 @@ const MAX_SCATTER_POINTS: i64 = 400;
 const INTERVAL_1H: i64 = 60 * 60 * 1000;
 
 #[derive(Default, Debug, Clone)]
-pub(crate) struct PromPlannerContext {
+struct PromPlannerContext {
     // query parameters
     start: Millisecond,
     end: Millisecond,

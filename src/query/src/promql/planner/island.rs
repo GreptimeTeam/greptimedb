@@ -207,7 +207,7 @@ impl IslandCollectEnv {
 }
 
 impl PromPlanner {
-    pub(crate) async fn try_plan_binary_island(
+    pub(super) async fn try_plan_binary_island(
         &mut self,
         binary_expr: &PromBinaryExpr,
     ) -> Result<Option<LogicalPlan>> {
