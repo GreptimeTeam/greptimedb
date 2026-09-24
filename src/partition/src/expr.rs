@@ -353,6 +353,25 @@ impl PartitionExpr {
             };
         }
 
+        if matches!(self.op, RestrictedOp::And | RestrictedOp::Or)
+            && matches!(&*self.rhs, Operand::Expr(rhs) if rhs.contains_function())
+        {
+            let lhs = self.lhs.try_as_logical_expr()?;
+            let rhs = self.rhs.try_as_logical_expr()?;
+            // AND/OR may evaluate both sides depending on batch selectivity.
+            // CASE guarantees that fallible functions only see rows requiring RHS.
+            return match self.op {
+                RestrictedOp::And => {
+                    datafusion_expr::when(lhs, rhs).otherwise(datafusion_expr::lit(false))
+                }
+                RestrictedOp::Or => {
+                    datafusion_expr::when(lhs, datafusion_expr::lit(true)).otherwise(rhs)
+                }
+                _ => unreachable!(),
+            }
+            .context(error::CreatePhysicalExprSnafu);
+        }
+
         // Special handling for null equality.
         // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
         let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));

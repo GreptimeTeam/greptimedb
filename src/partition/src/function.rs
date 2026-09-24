@@ -16,7 +16,7 @@ use std::sync::{Arc, LazyLock};
 
 use datafusion_common::{Result, ScalarValue, exec_err};
 use datafusion_expr::{ColumnarValue, ScalarFunctionArgs, ScalarUDFImpl, Signature, Volatility};
-use datatypes::arrow::array::StringArray;
+use datatypes::arrow::array::StringBuilder;
 use datatypes::arrow::datatypes::DataType;
 use datatypes::data_type::DataType as _;
 use datatypes::value::Value;
@@ -39,27 +39,22 @@ impl PartitionFunction {
 
     /// Checks types without implicit casts, which could change persisted routing.
     pub fn validate(self, types: &[DataType]) -> Result<()> {
-        let types = types
-            .iter()
-            .map(|t| match t {
-                DataType::Dictionary(_, value) => value.as_ref(),
-                _ => t,
-            })
-            .collect::<Vec<_>>();
-        let string = |t: &&DataType| {
+        let mut unpacked = types.iter().map(|t| match t {
+            DataType::Dictionary(_, value) => value.as_ref(),
+            _ => t,
+        });
+        let string = |t: &DataType| {
             matches!(
                 t,
                 DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View | DataType::Null
             )
         };
         let valid = match self {
-            Self::Hash => !types.is_empty() && types.iter().all(string),
+            Self::Hash => !types.is_empty() && unpacked.all(string),
             Self::Substring => {
                 (2..=3).contains(&types.len())
-                    && string(&types[0])
-                    && types[1..]
-                        .iter()
-                        .all(|t| t.is_integer() || **t == DataType::Null)
+                    && unpacked.next().is_some_and(string)
+                    && unpacked.all(|t| t.is_integer() || *t == DataType::Null)
             }
         };
         if !valid {
@@ -79,6 +74,12 @@ impl PartitionFunction {
                 .map(|v| v.data_type().as_arrow_type())
                 .collect::<Vec<_>>(),
         )?;
+        self.evaluate_validated(args)
+    }
+
+    // Types are checked once per batch; value-dependent errors must still be
+    // checked for every evaluated row, including scalar arguments.
+    fn evaluate_validated(self, args: &[Value]) -> Result<Value> {
         if args.iter().any(|v| matches!(v, Value::Null)) {
             return Ok(Value::Null);
         }
@@ -158,13 +159,24 @@ impl ScalarUDFImpl for PartitionFunction {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> Result<ColumnarValue> {
+        self.validate(
+            &args
+                .args
+                .iter()
+                .map(ColumnarValue::data_type)
+                .collect::<Vec<_>>(),
+        )?;
         let all_scalar = args
             .args
             .iter()
             .all(|arg| matches!(arg, ColumnarValue::Scalar(_)));
-        let rows = if all_scalar { 1 } else { args.number_rows };
+        let rows = if all_scalar && args.number_rows > 0 {
+            1
+        } else {
+            args.number_rows
+        };
         let mut values = Vec::with_capacity(args.args.len());
-        let mut results = Vec::with_capacity(rows);
+        let mut results = StringBuilder::with_capacity(rows, 0);
         for row in 0..rows {
             values.clear();
             for arg in &args.args {
@@ -177,26 +189,87 @@ impl ScalarUDFImpl for PartitionFunction {
                         .map_err(|e| datafusion_common::DataFusionError::External(Box::new(e)))?,
                 );
             }
-            let value = self.evaluate(&values)?;
-            results.push(match value {
-                Value::String(value) => Some(value.as_utf8().to_owned()),
-                Value::Null => None,
+            let value = self.evaluate_validated(&values)?;
+            if all_scalar {
+                return Ok(ColumnarValue::Scalar(ScalarValue::Utf8(match value {
+                    Value::String(value) => Some(value.as_utf8().to_owned()),
+                    Value::Null => None,
+                    _ => unreachable!(),
+                })));
+            }
+            match value {
+                Value::String(value) => results.append_value(value.as_utf8()),
+                Value::Null => results.append_null(),
                 _ => unreachable!(),
-            });
+            }
         }
-        if all_scalar {
-            Ok(ColumnarValue::Scalar(ScalarValue::Utf8(
-                results.pop().flatten(),
-            )))
-        } else {
-            Ok(ColumnarValue::Array(Arc::new(StringArray::from(results))))
-        }
+        Ok(ColumnarValue::Array(Arc::new(results.finish())))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_batch_and_scalar_results() {
+        use datatypes::arrow::array::{ArrayRef, StringArray};
+        use datatypes::arrow::datatypes::Field;
+
+        let invoke = |function: PartitionFunction, args: Vec<ColumnarValue>, number_rows| {
+            let arg_fields = args
+                .iter()
+                .map(|arg| Arc::new(Field::new("arg", arg.data_type(), true)))
+                .collect();
+            function
+                .invoke_with_args(ScalarFunctionArgs {
+                    args,
+                    arg_fields,
+                    number_rows,
+                    return_field: Arc::new(Field::new("result", DataType::Utf8, true)),
+                    config_options: Arc::new(Default::default()),
+                })
+                .unwrap()
+                .into_array(number_rows)
+                .unwrap()
+        };
+        let values = Arc::new(StringArray::from(vec![Some("abc"), None, Some("中🙂")])) as ArrayRef;
+        let actual = invoke(
+            PartitionFunction::Substring,
+            vec![
+                ColumnarValue::Array(values),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
+            ],
+            3,
+        );
+        assert_eq!(
+            actual.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(vec![Some("b"), None, Some("🙂")])
+        );
+        let actual = invoke(
+            PartitionFunction::Hash,
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("a".into()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("bc".into()))),
+            ],
+            3,
+        );
+        assert_eq!(
+            actual.as_any().downcast_ref::<StringArray>().unwrap(),
+            &StringArray::from(vec!["b6d6f72a44aa4f71d6e041d1c9750933"; 3])
+        );
+        let actual = invoke(
+            PartitionFunction::Substring,
+            vec![
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("abc".into()))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(-1))),
+            ],
+            0,
+        );
+        assert_eq!(actual.len(), 0);
+    }
 
     #[test]
     fn test_substring_unicode_and_bounds() {

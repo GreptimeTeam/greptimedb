@@ -144,10 +144,9 @@ impl MultiDimPartitionRule {
             }
             (Operand::Expr(lhs), Operand::Expr(rhs)) => {
                 let lhs = self.evaluate_expr(lhs, values)?;
-                let rhs = self.evaluate_expr(rhs, values)?;
                 match expr.op {
-                    RestrictedOp::And => Ok(lhs && rhs),
-                    RestrictedOp::Or => Ok(lhs || rhs),
+                    RestrictedOp::And => Ok(lhs && self.evaluate_expr(rhs, values)?),
+                    RestrictedOp::Or => Ok(lhs || self.evaluate_expr(rhs, values)?),
                     _ => unreachable!(),
                 }
             }
@@ -260,9 +259,10 @@ impl MultiDimPartitionRule {
         record_batch: &RecordBatch,
     ) -> Result<HashMap<RegionNumber, RegionMask>> {
         let num_rows = record_batch.num_rows();
+        let has_functions = self.exprs.iter().any(PartitionExpr::contains_function);
         // Functions can reject row values, even when every valid row belongs
         // to the same region.
-        if self.regions.len() == 1 && !self.exprs.iter().any(PartitionExpr::contains_function) {
+        if self.regions.len() == 1 && !has_functions {
             return Ok([(
                 self.regions[0],
                 RegionMask::from(BooleanArray::from(vec![true; num_rows])),
@@ -270,6 +270,23 @@ impl MultiDimPartitionRule {
             .into_iter()
             .collect());
         }
+        // Short-circuit selection must not copy unrelated payload columns.
+        let projected;
+        let record_batch = if has_functions {
+            let schema = record_batch.schema();
+            let indices = self
+                .partition_columns
+                .iter()
+                .map(|name| schema.index_of(name))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .context(error::ComputeArrowKernelSnafu)?;
+            projected = record_batch
+                .project(&indices)
+                .context(error::ComputeArrowKernelSnafu)?;
+            &projected
+        } else {
+            record_batch
+        };
         let physical_exprs = {
             let cache_read_guard = self.physical_expr_cache.read().unwrap();
             if let Some((cached_exprs, schema)) = cache_read_guard.as_ref()
@@ -292,57 +309,71 @@ impl MultiDimPartitionRule {
             }
         };
 
-        let mut result: HashMap<u32, RegionMask> = physical_exprs
+        let mut result = HashMap::new();
+        // Match row routing: once a row has a region, later predicates must not
+        // evaluate fallible functions for that row.
+        let mut remaining =
+            has_functions.then(|| BooleanArray::new(BooleanBuffer::new_set(num_rows), None));
+        // TODO(dennis): Reuse identical function results across partition predicates.
+        for ((expr, region_num), partition_expr) in physical_exprs
             .iter()
             .zip(self.regions.iter())
             .zip(self.exprs.iter())
-            .filter_map(|((expr, region_num), partition_expr)| {
-                let evaluated = expr.evaluate(record_batch);
-                let evaluated = if partition_expr.contains_function() {
-                    evaluated.context(error::EvaluatePartitionFunctionSnafu)
-                } else {
-                    evaluated.context(error::EvaluateRecordBatchSnafu)
-                };
-                let col_val = match evaluated {
-                    Ok(array) => array,
-                    Err(e) => {
-                        return Some(Err(e));
-                    }
-                };
-                let array = match columnar_value_to_boolean_array(col_val, num_rows) {
-                    Ok(array) => array,
-                    Err(e) => {
-                        return Some(Err(e));
-                    }
-                };
-                let selected_rows = array.true_count();
-                if selected_rows == 0 {
-                    // skip empty region in results.
-                    return None;
+        {
+            let evaluated = if let Some(remaining) = &remaining {
+                if remaining.true_count() == 0 {
+                    break;
                 }
-                Some(Ok((*region_num, RegionMask::new(array, selected_rows))))
-            })
-            .collect::<error::Result<_>>()?;
-
-        let selected = if result.len() == 1 {
-            result.values().next().unwrap().array().clone()
-        } else {
-            let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
-            for region_mask in result.values() {
-                selected = arrow::compute::kernels::boolean::or(&selected, region_mask.array())
+                expr.evaluate_selection(record_batch, remaining)
+            } else {
+                expr.evaluate(record_batch)
+            };
+            let col_val = match evaluated {
+                Ok(value) => value,
+                Err(err) if partition_expr.contains_function() => {
+                    return Err(err).context(error::EvaluatePartitionFunctionSnafu);
+                }
+                Err(err) => return Err(err).context(error::EvaluateRecordBatchSnafu),
+            };
+            let mut array = columnar_value_to_boolean_array(col_val, num_rows)?;
+            if let Some(remaining) = &remaining {
+                // evaluate_selection scatters NULL into rows already assigned.
+                array = arrow::compute::and_kleene(remaining, &array)
                     .context(error::ComputeArrowKernelSnafu)?;
             }
-            selected
-        };
-
-        // fast path: all rows are selected
-        if selected.true_count() == num_rows {
-            return Ok(result);
+            let selected_rows = array.true_count();
+            if selected_rows == 0 {
+                continue;
+            }
+            if let Some(remaining) = &mut remaining {
+                *remaining = arrow::compute::and_not(remaining, &array)
+                    .context(error::ComputeArrowKernelSnafu)?;
+            }
+            result.insert(*region_num, RegionMask::new(array, selected_rows));
         }
 
-        // find unselected rows and assign to default region
-        let unselected = arrow::compute::kernels::boolean::not(&selected)
-            .context(error::ComputeArrowKernelSnafu)?;
+        let unselected = if let Some(remaining) = remaining {
+            if remaining.true_count() == 0 {
+                return Ok(result);
+            }
+            remaining
+        } else {
+            let selected = if result.len() == 1 {
+                result.values().next().unwrap().array().clone()
+            } else {
+                let mut selected = BooleanArray::new(BooleanBuffer::new_unset(num_rows), None);
+                for region_mask in result.values() {
+                    selected = arrow::compute::or(&selected, region_mask.array())
+                        .context(error::ComputeArrowKernelSnafu)?;
+                }
+                selected
+            };
+            if selected.true_count() == num_rows {
+                return Ok(result);
+            }
+            arrow::compute::not(&selected).context(error::ComputeArrowKernelSnafu)?
+        };
+
         match result.entry(DEFAULT_REGION) {
             Entry::Occupied(mut o) => {
                 // merge default region with unselected rows.
@@ -465,6 +496,149 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn test_function_routing_short_circuit_and_first_match() {
+        use common_error::ext::ErrorExt;
+        use common_error::status_code::StatusCode;
+        use datatypes::arrow::array::{Array, Int64Array, StringArray};
+        use datatypes::arrow::datatypes::{DataType, Field};
+
+        use crate::function::PartitionFunction;
+        let substring = Operand::Function {
+            function: PartitionFunction::Substring,
+            args: vec![col("host"), Value::Int64(1).into(), col("length")],
+        };
+        let lower = col("host").lt(Value::from("m"));
+        let upper = col("host").gt_eq(Value::from("m"));
+        let short = substring.clone().lt(Value::from("m"));
+        let long = substring.gt_eq(Value::from("m"));
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("length", DataType::Int64, false),
+            Field::new("host", DataType::Utf8, true),
+        ]));
+        for (exprs, expected_a, expected_z) in [
+            (
+                vec![
+                    lower.clone().and(short.clone()),
+                    lower.clone().and(long.clone()),
+                    upper.clone(),
+                ],
+                1,
+                3,
+            ),
+            // Later predicates start with a fallible function, without a column guard.
+            (
+                vec![
+                    upper.clone(),
+                    short.clone().and(lower.clone()),
+                    long.clone().and(lower.clone()),
+                ],
+                2,
+                1,
+            ),
+            (
+                vec![
+                    PartitionExpr::new(
+                        Operand::Expr(upper),
+                        RestrictedOp::Or,
+                        Operand::Expr(short.and(lower.clone())),
+                    ),
+                    lower.and(long),
+                ],
+                1,
+                1,
+            ),
+        ] {
+            let rule = MultiDimPartitionRule::try_new(
+                vec!["host".into(), "length".into()],
+                (1..=exprs.len() as u32).collect(),
+                exprs,
+                true,
+            )
+            .unwrap();
+            // Exercise uniform batches and both sides of DataFusion's AND/OR
+            // pre-selection threshold, including nullable inputs.
+            for valid_rows in [0, 1, 5, 9, 10] {
+                let mut hosts = vec![Some("a"); valid_rows];
+                hosts.extend(vec![Some("z"); 10 - valid_rows]);
+                hosts.push(None);
+                let mut lengths = vec![1; valid_rows];
+                lengths.extend(vec![-1; 11 - valid_rows]);
+                let batch = RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(Int64Array::from(lengths.clone())),
+                        Arc::new(StringArray::from(hosts.clone())),
+                    ],
+                )
+                .unwrap();
+                let masks = rule.split_record_batch(&batch).unwrap();
+                for (index, host) in hosts.iter().enumerate() {
+                    let expected = if *host == Some("z") {
+                        expected_z
+                    } else {
+                        expected_a
+                    };
+                    assert_eq!(
+                        rule.find_region(&[
+                            host.map_or(Value::Null, Value::from),
+                            Value::Int64(lengths[index])
+                        ])
+                        .unwrap(),
+                        expected
+                    );
+                    for (region, mask) in &masks {
+                        assert_eq!(mask.array().null_count(), 0);
+                        assert_eq!(mask.array().value(index), *region == expected);
+                    }
+                    assert!(masks[&expected].array().value(index));
+                }
+            }
+            assert_eq!(
+                rule.find_region(&[Value::from("z"), Value::Int64(-1)])
+                    .unwrap(),
+                expected_z
+            );
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(vec![-1])),
+                    Arc::new(StringArray::from(vec!["z"])),
+                ],
+            )
+            .unwrap();
+            assert!(
+                rule.split_record_batch(&batch).unwrap()[&expected_z]
+                    .array()
+                    .value(0)
+            );
+            assert!(
+                rule.split_record_batch(&batch.slice(0, 0))
+                    .unwrap()
+                    .is_empty()
+            );
+
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(Int64Array::from(vec![-1, -1])),
+                    Arc::new(StringArray::from(vec!["z", "a"])),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                rule.find_region(&[Value::from("a"), Value::Int64(-1)])
+                    .unwrap_err()
+                    .status_code(),
+                StatusCode::InvalidArguments
+            );
+            assert_eq!(
+                rule.split_record_batch(&batch).err().unwrap().status_code(),
+                StatusCode::InvalidArguments
+            );
         }
     }
 

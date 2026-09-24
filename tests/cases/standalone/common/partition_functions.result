@@ -298,3 +298,51 @@ DROP TABLE dynamic_substring;
 
 Affected Rows: 0
 
+CREATE TABLE guarded_substring (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length))
+PARTITION ON COLUMNS (host, length) (
+  host < 'm' AND substring(host, 1, length) < 'm',
+  host < 'm' AND substring(host, 1, length) >= 'm',
+  host >= 'm'
+);
+
+Affected Rows: 0
+
+INSERT INTO guarded_substring VALUES ('z', -1, 1);
+
+Affected Rows: 1
+
+CREATE TABLE substring_source (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length));
+
+Affected Rows: 0
+
+INSERT INTO substring_source VALUES ('a', 1, 2), ('z', -1, 3), (NULL, -1, 4);
+
+Affected Rows: 3
+
+INSERT INTO guarded_substring SELECT * FROM substring_source;
+
+Affected Rows: 3
+
+INSERT INTO guarded_substring VALUES ('a', -1, 5);
+
+Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: substring length must be a non-negative signed 64-bit integer
+
+SELECT * FROM guarded_substring ORDER BY ts;
+
++------+--------+-------------------------+
+| host | length | ts                      |
++------+--------+-------------------------+
+| z    | -1     | 1970-01-01T00:00:00.001 |
+| a    | 1      | 1970-01-01T00:00:00.002 |
+| z    | -1     | 1970-01-01T00:00:00.003 |
+|      | -1     | 1970-01-01T00:00:00.004 |
++------+--------+-------------------------+
+
+DROP TABLE substring_source;
+
+Affected Rows: 0
+
+DROP TABLE guarded_substring;
+
+Affected Rows: 0
+

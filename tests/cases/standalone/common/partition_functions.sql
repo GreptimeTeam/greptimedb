@@ -69,3 +69,19 @@ INSERT INTO dynamic_substring VALUES ('abc', -1, 1);
 INSERT INTO dynamic_substring VALUES ('abc', 2, 2);
 SELECT * FROM dynamic_substring ORDER BY ts;
 DROP TABLE dynamic_substring;
+
+CREATE TABLE guarded_substring (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length))
+PARTITION ON COLUMNS (host, length) (
+  host < 'm' AND substring(host, 1, length) < 'm',
+  host < 'm' AND substring(host, 1, length) >= 'm',
+  host >= 'm'
+);
+
+INSERT INTO guarded_substring VALUES ('z', -1, 1);
+CREATE TABLE substring_source (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length));
+INSERT INTO substring_source VALUES ('a', 1, 2), ('z', -1, 3), (NULL, -1, 4);
+INSERT INTO guarded_substring SELECT * FROM substring_source;
+INSERT INTO guarded_substring VALUES ('a', -1, 5);
+SELECT * FROM guarded_substring ORDER BY ts;
+DROP TABLE substring_source;
+DROP TABLE guarded_substring;
