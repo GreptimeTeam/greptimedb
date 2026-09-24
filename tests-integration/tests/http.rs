@@ -2394,19 +2394,6 @@ providers = []"#,
         )
     };
 
-    let vector_index_config = if cfg!(feature = "vector_index") {
-        r#"
-[region_engine.mito.vector_index]
-create_on_flush = "auto"
-create_on_compaction = "auto"
-apply_on_query = "auto"
-mem_threshold_on_create = "auto"
-
-"#
-    } else {
-        "\n"
-    };
-
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
@@ -2611,7 +2598,8 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-{vector_index_config}[region_engine.mito.gc]
+
+[region_engine.mito.gc]
 enable = false
 lingering_time = "1h"
 unknown_file_lingering_time = "1day"

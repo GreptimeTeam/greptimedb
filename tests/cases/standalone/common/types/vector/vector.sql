@@ -12,6 +12,12 @@ INSERT INTO t VALUES
 (5, parse_vec('[4.0, 5.0, 6.0]')),
 (6, parse_vec('[7.0, 8.0, 9.0]'));
 
+SELECT ts FROM t WHERE ts > 1 ORDER BY vec_l2sq_distance(v, '[1.0, 2.0, 3.0]'), ts LIMIT 3;
+
+ADMIN FLUSH_TABLE('t');
+
+SELECT ts FROM t WHERE ts > 1 ORDER BY vec_l2sq_distance(v, '[1.0, 2.0, 3.0]'), ts LIMIT 3;
+
 SELECT ts, v, vec_to_string(v) FROM t;
 
 SELECT round(vec_cos_distance(v, '[0.0, 0.0, 0.0]'), 2) FROM t;

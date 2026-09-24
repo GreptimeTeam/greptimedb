@@ -10,7 +10,6 @@ test = ["common-test-util", "rstest", "rstest_reuse", "rskafka"]
 testing = ["test"]
 test-shared-fs-region-migration = []
 enterprise = []
-vector_index = ["dep:roaring", "index/vector_index"]
 
 [lints]
 workspace = true
@@ -72,7 +71,6 @@ puffin.workspace = true
 rand.workspace = true
 rayon = "1.10"
 regex.workspace = true
-roaring = { version = "0.10", optional = true }
 rskafka = { workspace = true, optional = true }
 rstest = { workspace = true, optional = true }
 rstest_reuse = { workspace = true, optional = true }

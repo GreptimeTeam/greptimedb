@@ -199,8 +199,6 @@ async fn materialized_runs_match_legacy_index_bytes_and_bloom_lookups() {
         inverted_index_config: Default::default(),
         fulltext_index_config: Default::default(),
         bloom_filter_index_config: Default::default(),
-        #[cfg(feature = "vector_index")]
-        vector_index_config: Default::default(),
     };
     let mut expected = None;
     // Demand is the union of active creators' PK columns, not their counts or
