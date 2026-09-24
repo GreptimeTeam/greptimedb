@@ -18,6 +18,7 @@ use arrow::array::{
 use arrow::buffer::OffsetBuffer;
 use arrow::datatypes::{Field, Schema, UInt32Type};
 use bytes::Bytes;
+use common_error::status_code::StatusCode;
 use common_recordbatch::{RecordBatch as GreptimeRecordBatch, RecordBatches};
 use datafusion::parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use table::test_util::EmptyTable;
@@ -137,13 +138,14 @@ async fn routes_across_batches_and_writes_empty_files() {
             vec![Some("a"), Some("b"), Some("unselected")],
         ),
     ];
-    let result = write_tables(
+    let budget = ExportWriteBudget::new(4);
+    let result = export_stream_managed(
         &unit,
         stream(batches),
         &store,
         export_limits(),
         &CancellationToken::new(),
-        &mut None,
+        budget.clone(),
     )
     .await
     .unwrap();
@@ -174,6 +176,7 @@ async fn routes_across_batches_and_writes_empty_files() {
     let (schema, requests) = read(&store, "requests.parquet").await;
     assert_eq!(schema.fields(), unit.logical_tables[&1027].schema.fields());
     assert_eq!(requests[0].column(1).null_count(), 1);
+    assert_eq!(budget.available(), (4, 64 * 1024 * 1024));
 }
 
 #[tokio::test]
@@ -211,21 +214,16 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
         ),
     ] {
         let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
-        let mut active = None;
-        let err = write_tables(
+        let err = export_stream(
             &unit,
             stream(batches),
             &store,
             limits,
             &CancellationToken::new(),
-            &mut active,
         )
         .await
         .unwrap_err();
         assert!(err.to_string().contains(message), "{err}");
-        if let Some(writer) = active {
-            writer.writer.abort().await.unwrap();
-        }
     }
 }
 
@@ -233,17 +231,17 @@ async fn rejects_invalid_order_ids_and_resource_exhaustion() {
 async fn existing_outputs_are_not_overwritten() {
     let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
     store.write("cpu.v1.parquet", "keep").await.unwrap();
-    let err = write_tables(
+    let err = export_stream(
         &unit(),
         stream(vec![batch(vec![Some(1025)], vec![None])]),
         &store,
         LogicalTableExportLimits::default(),
         &CancellationToken::new(),
-        &mut None,
     )
     .await
     .unwrap_err();
-    assert!(err.to_string().contains("already exists"));
+    let status = common_error::ext::ErrorExt::status_code(&err);
+    assert_eq!(status, StatusCode::InvalidArguments);
     assert_eq!(
         store.read("cpu.v1.parquet").await.unwrap().to_bytes(),
         Bytes::from_static(b"keep")
@@ -272,10 +270,10 @@ fn dictionary_and_nested_histogram_values_are_bounded_before_expansion() {
         ("histogram", Arc::new(histogram)),
     ])
     .unwrap();
-    assert_eq!(rows_within_budget(&batch, 0, 3, 4300).unwrap(), 1);
+    assert_eq!(rows_within_budget(&batch, 0, 3, 4300, &[]).unwrap().0, 1);
     // The dictionary and container overhead fit; the nested list elements do not.
-    assert!(rows_within_budget(&batch, 0, 3, 4180).is_err());
-    assert_eq!(rows_within_budget(&batch, 0, 3, 15000).unwrap(), 3);
+    assert!(rows_within_budget(&batch, 0, 3, 4180, &[]).is_err());
+    assert_eq!(rows_within_budget(&batch, 0, 3, 15000, &[]).unwrap().0, 3);
 }
 
 #[test]
@@ -440,63 +438,194 @@ impl object_store::layers::mock::oio::Write for PausedFileWriter {
 }
 
 #[tokio::test]
-async fn cancellation_waits_for_file_creation_before_cleanup() {
-    use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
-    let directory = common_test_util::temp_dir::create_temp_dir("metric_export_pending_open");
-    let access =
-        common_datasource::object_store::LocalFileAccess::sandboxed(directory.path()).unwrap();
-    let store = build_backend_for_write(
-        &format!("{}/", directory.path().display()),
-        &HashMap::new(),
-        &access,
-    )
-    .await
-    .unwrap();
-    let started = Arc::new(tokio::sync::Notify::new());
-    let release = Arc::new(tokio::sync::Notify::new());
-    let factory: MockWriterFactory = Arc::new({
-        let started = started.clone();
-        let release = release.clone();
-        move |_, _, inner| {
-            Box::new(PausedFileWriter {
-                inner: Some(inner),
-                started: started.clone(),
-                release: release.clone(),
-            })
+async fn cancellation_drains_storage_and_preserves_committed_files() {
+    for large in [false, true] {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+        let directory = common_test_util::temp_dir::create_temp_dir("metric_export_pending_open");
+        let access =
+            common_datasource::object_store::LocalFileAccess::sandboxed(directory.path()).unwrap();
+        let store = build_backend_for_write(
+            &format!("{}/", directory.path().display()),
+            &HashMap::new(),
+            &access,
+        )
+        .await
+        .unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let factory: MockWriterFactory = Arc::new({
+            let started = started.clone();
+            let release = release.clone();
+            move |_, _, inner| {
+                Box::new(PausedFileWriter {
+                    inner: Some(inner),
+                    started: started.clone(),
+                    release: release.clone(),
+                })
+            }
+        });
+        let store = store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+        let cancellation = CancellationToken::new();
+        let (unit, input) = if large {
+            let field = Field::new("value", DataType::Utf8, true);
+            let unit = LogicalTableExport::try_new(
+                table(
+                    1024,
+                    "phy",
+                    vec![Field::new(TABLE_ID, DataType::UInt32, false), field.clone()],
+                    true,
+                ),
+                &[table(1025, "cpu.v1", vec![field], false)],
+            )
+            .unwrap();
+            let mut state = 17u64;
+            let strings = (0..512)
+                .map(|_| {
+                    (0..32768)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            char::from(b' ' + (state % 95) as u8)
+                        })
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+            let input = RecordBatch::try_from_iter([
+                (
+                    TABLE_ID,
+                    Arc::new(UInt32Array::from(vec![1025; 512])) as ArrayRef,
+                ),
+                ("value", Arc::new(StringArray::from(strings))),
+            ])
+            .unwrap();
+            (unit, input)
+        } else {
+            (unit(), batch(vec![Some(1025)], vec![Some("a")]))
+        };
+        let budget = ExportWriteBudget::new(1);
+        let mut limits = LogicalTableExportLimits::default();
+        limits.writer.flush_threshold_bytes = 1024 * 1024;
+        let export = export_stream_managed(
+            &unit,
+            stream(vec![input]),
+            &store,
+            limits,
+            &cancellation,
+            budget.clone(),
+        );
+        tokio::pin!(export);
+        tokio::select! {
+            result = &mut export => panic!("export completed before the file open: {result:?}"),
+            _ = started.notified() => {},
         }
-    });
-    let store = store.layer(
-        MockLayerBuilder::default()
-            .writer_factory(factory)
-            .build()
-            .unwrap(),
-    );
-    let cancellation = CancellationToken::new();
-    let unit = unit();
-    let export = export_stream(
-        &unit,
-        stream(vec![batch(vec![Some(1025)], vec![Some("a")])]),
-        &store,
-        LogicalTableExportLimits::default(),
-        &cancellation,
-    );
-    tokio::pin!(export);
-    tokio::select! {
-        result = &mut export => panic!("export completed before the file open: {result:?}"),
-        _ = started.notified() => {},
+        if large {
+            assert!(budget.available().1 < 64 * 1024 * 1024);
+        }
+        let held = budget.available();
+        cancellation.cancel();
+        assert!(futures::poll!(&mut export).is_pending());
+        assert_eq!(budget.available().0, held.0);
+        if large {
+            // Cancelled admission releases its pending reservation; the worker
+            // still owns payload capacity while the storage operation is paused.
+            assert!(budget.available().1 < 64 * 1024 * 1024);
+        }
+        release.notify_one();
+        let result = export.await;
+        assert!(matches!(
+            result,
+            Err(error::Error::LogicalTableExportCancelled { .. })
+        ));
+        assert_eq!(store.exists("cpu.v1.parquet").await.unwrap(), !large);
+        if !large {
+            let (_, batches) = read(&store, "cpu.v1.parquet").await;
+            assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+        }
+        assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
     }
-    cancellation.cancel();
-    assert!(futures::poll!(&mut export).is_pending());
-    release.notify_one();
-    let result = export.await;
-    assert!(matches!(
-        result,
-        Err(error::Error::LogicalTableExportCancelled { .. })
-    ));
-    assert!(!store.exists("cpu.v1.parquet").await.unwrap());
 }
 
 struct FailedAbortWriter(object_store::layers::mock::oio::Writer);
+
+#[tokio::test]
+async fn metric_fallback_and_ordinary_preserve_ambiguous_commits() {
+    use object_store::layers::CapabilityOverrideLayer;
+    use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+
+    use crate::statement::copy_table_to::stream_to_managed_parquet;
+
+    struct AmbiguousCommit(oio::Writer);
+    impl oio::Write for AmbiguousCommit {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            self.0.write(bytes).await
+        }
+        async fn close(&mut self) -> object_store::Result<Metadata> {
+            self.0.close().await?;
+            Err(object_store::Error::new(
+                object_store::ErrorKind::Unexpected,
+                "lost close reply",
+            ))
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            Err(object_store::Error::new(
+                object_store::ErrorKind::Unsupported,
+                "cannot abort",
+            ))
+        }
+    }
+    let factory: MockWriterFactory = Arc::new(|_, args, inner| {
+        assert!(!args.if_not_exists());
+        Box::new(AmbiguousCommit(inner))
+    });
+    let store = ObjectStore::new(object_store::services::Memory::default())
+        .unwrap()
+        .layer(CapabilityOverrideLayer::new(|mut capability| {
+            capability.write_with_if_not_exists = false;
+            capability
+        }))
+        .layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+    assert!(!store.info().capability().write_with_if_not_exists);
+    let rows = || stream(vec![batch(vec![Some(1025)], vec![Some("a")])]);
+    assert!(
+        export_stream(
+            &unit(),
+            rows(),
+            &store,
+            export_limits(),
+            &CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    let budget = ExportWriteBudget::new(1);
+    assert!(
+        stream_to_managed_parquet(
+            rows(),
+            store.clone(),
+            "ordinary.parquet",
+            &budget,
+            &CancellationToken::new()
+        )
+        .await
+        .is_err()
+    );
+    for path in ["cpu.v1.parquet", "ordinary.parquet"] {
+        let (_, batches) = read(&store, path).await;
+        assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
+    }
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+}
 
 impl object_store::layers::mock::oio::Write for FailedAbortWriter {
     async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
@@ -572,5 +701,245 @@ async fn validates_membership_by_table_route() {
                 Err(error::Error::InvalidLogicalTableExport { .. })
             ));
         }
+    }
+}
+
+#[tokio::test]
+async fn retained_backing_is_reserved_before_conversion_and_until_payload_drop() {
+    let input = batch(vec![Some(1025); 8192], vec![Some("shared"); 8192]);
+    let tiny = input.slice(0, 1);
+    let schema = Arc::new(Schema::new(vec![Field::new("host", DataType::Utf8, true)]));
+    let projected = tiny.project(&[2]).unwrap();
+    let full = input.project(&[2]).unwrap().get_array_memory_size();
+    assert_eq!(projected.get_array_memory_size(), full);
+    let budget = ExportWriteBudget::new(1);
+    let token = CancellationToken::new();
+    let blocker = budget.reserve(64 * 1024 * 1024, &token).await.unwrap();
+    let convert = expand_bounded_slice(projected, schema, 0, 1, 1024, &budget, &token);
+    tokio::pin!(convert);
+    assert!(futures::poll!(&mut convert).is_pending());
+    drop(blocker);
+    let (payload, rows) = convert.await.unwrap();
+    assert_eq!(rows, 1);
+    assert!(
+        64 * 1024 * 1024 - budget.available().1 >= full + payload.batch.get_array_memory_size()
+    );
+    drop(payload);
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+    assert!(budget.reserve(64 * 1024 * 1024 + 1, &token).await.is_err());
+}
+
+#[tokio::test]
+async fn groups_and_ordinary_files_share_writer_admission_and_drain() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+    use tokio::sync::Semaphore;
+
+    use crate::statement::copy_table_to::stream_to_managed_parquet;
+
+    struct CountedWriter {
+        inner: oio::Writer,
+        active: Arc<AtomicUsize>,
+        started: Arc<Semaphore>,
+        release: Arc<Semaphore>,
+    }
+    impl Drop for CountedWriter {
+        fn drop(&mut self) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+    impl oio::Write for CountedWriter {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            self.inner.write(bytes).await
+        }
+        async fn close(&mut self) -> object_store::Result<Metadata> {
+            self.started.add_permits(1);
+            self.release.acquire().await.unwrap().forget();
+            self.inner.close().await
+        }
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.abort().await
+        }
+    }
+    for parallelism in [1, 4] {
+        for cancel in [false, true] {
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let started = Arc::new(Semaphore::new(0));
+            let release = Arc::new(Semaphore::new(0));
+            let factory: MockWriterFactory = Arc::new({
+                let (active, peak, started, release) = (
+                    active.clone(),
+                    peak.clone(),
+                    started.clone(),
+                    release.clone(),
+                );
+                move |_, args, inner| {
+                    assert_eq!(args.concurrent(), 1);
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    Box::new(CountedWriter {
+                        inner,
+                        active: active.clone(),
+                        started: started.clone(),
+                        release: release.clone(),
+                    })
+                }
+            });
+            let store = ObjectStore::new(object_store::services::Memory::default())
+                .unwrap()
+                .layer(
+                    MockLayerBuilder::default()
+                        .writer_factory(factory)
+                        .build()
+                        .unwrap(),
+                );
+            let budget = ExportWriteBudget::new(parallelism);
+            let token = CancellationToken::new();
+            let mut a = unit();
+            let mut b = unit();
+            for (group, unit) in [("a", &mut a), ("b", &mut b)] {
+                for table in unit.logical_tables.values_mut() {
+                    table.output.path = format!("{group}/{}", table.output.path);
+                }
+            }
+            let rows = || {
+                stream(vec![batch(
+                    vec![Some(1025), Some(1027)],
+                    vec![Some("a"), Some("b")],
+                )])
+            };
+            let ordinary = async {
+                let _permit = budget.writer(&token).await?;
+                stream_to_managed_parquet(
+                    rows(),
+                    store.clone(),
+                    "ordinary.parquet",
+                    &budget,
+                    &token,
+                )
+                .await
+            };
+            let work = async {
+                tokio::join!(
+                    export_stream_managed(
+                        &a,
+                        rows(),
+                        &store,
+                        export_limits(),
+                        &token,
+                        budget.clone()
+                    ),
+                    export_stream_managed(
+                        &b,
+                        rows(),
+                        &store,
+                        export_limits(),
+                        &token,
+                        budget.clone()
+                    ),
+                    ordinary,
+                )
+            };
+            tokio::pin!(work);
+            tokio::select! {
+                _ = started.acquire_many(parallelism as u32) => {},
+                result = &mut work => panic!("completed while close paused: {result:?}"),
+            }
+            assert_eq!(budget.available().0, 0);
+            assert_eq!(peak.load(Ordering::SeqCst), parallelism);
+            if cancel {
+                token.cancel();
+            }
+            assert!(futures::poll!(&mut work).is_pending());
+            release.add_permits(10);
+            let (a, b, ordinary) = work.await;
+            assert_eq!(a.is_err(), cancel);
+            assert_eq!(b.is_err(), cancel);
+            assert_eq!(ordinary.is_err(), cancel);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert!(peak.load(Ordering::SeqCst) <= parallelism);
+            assert_eq!(budget.available(), (parallelism, 64 * 1024 * 1024));
+        }
+    }
+}
+
+#[tokio::test]
+async fn nested_dictionary_conversion_limits_child_ranges_and_charges_null_parents() {
+    let values = Arc::new(DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0; 1024]),
+        Arc::new(StringArray::from(vec!["x".repeat(4096)])),
+    )) as ArrayRef;
+    let list = ListArray::new(
+        Arc::new(Field::new("item", values.data_type().clone(), true)),
+        OffsetBuffer::new(vec![0i32, 1023, 1024].into()),
+        values,
+        None,
+    );
+    let input = RecordBatch::try_from_iter([("list", Arc::new(list) as ArrayRef)]).unwrap();
+    let schema = Arc::new(Schema::new(vec![Field::new(
+        "list",
+        DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+        true,
+    )]));
+    let budget = ExportWriteBudget::new(1);
+    let (payload, rows) = expand_bounded_slice(
+        input,
+        schema,
+        1,
+        2,
+        8192,
+        &budget,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(rows, 1);
+    assert!(payload.batch.get_array_memory_size() < 16384);
+    let list = payload.batch.column(0).as_list::<i32>();
+    assert_eq!(list.value_offsets(), &[0, 1]);
+    assert_eq!(list.values().as_string::<i32>().value(0), "x".repeat(4096));
+    drop(payload);
+    assert_eq!(budget.available(), (1, 64 * 1024 * 1024));
+
+    let values = Arc::new(DictionaryArray::<UInt32Type>::new(
+        UInt32Array::from(vec![0]),
+        Arc::new(StringArray::from(vec!["x".repeat(4096)])),
+    )) as ArrayRef;
+    let structure = StructArray::new(
+        vec![Arc::new(Field::new(
+            "child",
+            values.data_type().clone(),
+            true,
+        ))]
+        .into(),
+        vec![values],
+        Some(arrow::buffer::NullBuffer::from(vec![false])),
+    );
+    let input = RecordBatch::try_from_iter([("struct", Arc::new(structure) as ArrayRef)]).unwrap();
+    assert!(rows_within_budget(&input, 0, 1, 128, &[]).is_err());
+}
+
+#[tokio::test]
+async fn completed_table_workers_are_reaped_during_admission() {
+    for parallelism in [1, 4] {
+        let mut unit = unit();
+        let file = unit.logical_tables.get_mut(&1025).unwrap();
+        let store = ObjectStore::new(object_store::services::Memory::default()).unwrap();
+        let budget = ExportWriteBudget::new(parallelism);
+        let token = CancellationToken::new();
+        let mut writers = TableWriters::new(budget.clone());
+        for id in 0..64 {
+            file.output.path = format!("empty-{id}.parquet");
+            writers
+                .open(id, file, &store, export_limits(), &token)
+                .await
+                .unwrap();
+            assert!(writers.pending_tasks() <= parallelism + 1);
+        }
+        writers.drain(Ok(()), &token).await.unwrap();
+        assert_eq!(writers.pending_tasks(), 0);
+        assert_eq!(budget.available(), (parallelism, 64 * 1024 * 1024));
     }
 }
