@@ -14,7 +14,7 @@
 
 //! Object store WAL construction, recovery and region reads.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use async_stream::try_stream;
 use bytes::Bytes;
+use common_telemetry::info;
 use common_wal::config::object_store::ObjectStoreWalConfig;
 use futures::{StreamExt, TryStreamExt};
 use object_store::ObjectStore;
@@ -36,12 +37,15 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::{
     CorruptedWalObjectSnafu, Error, InvalidProviderSnafu, InvalidWalObjectSnafu,
     InvalidWalObjectStoreSnafu, MismatchedWalPrefixSnafu, MismatchedWalRegionSnafu,
-    ObjectStoreWalSnafu, Result, UnsupportedObjectStoreWalOperationSnafu,
+    ObjectStoreWalSnafu, Result, UnconfirmedWalEpochStartSnafu,
+    UnsupportedObjectStoreWalOperationSnafu, WalObjectSequenceExhaustedSnafu,
 };
+use crate::object_store_wal::batch::OBJECT_SEQ_LIMIT;
 use crate::object_store_wal::catalog::ObjectCatalog;
 use crate::object_store_wal::format::{
-    FixedTrailer, FooterEntry, HEADER_LEN, MIN_OBJECT_LEN, TRAILER_LEN, decode_footer,
-    decode_header, decode_segment, decode_trailer, footer_range, verify_segment_ranges,
+    ChainLink, FixedTrailer, FooterEntry, HEADER_LEN, Header, MIN_OBJECT_LEN, TRAILER_LEN,
+    decode_footer, decode_header, decode_segment, decode_trailer, encode_object, footer_range,
+    verify_segment_ranges,
 };
 use crate::object_store_wal::io::{ListedObject, ObjectStoreIo, PutResult};
 
@@ -79,8 +83,9 @@ impl fmt::Debug for ObjectStoreLogStore {
 
 impl ObjectStoreLogStore {
     /// Builds the store under the node and generation prefix derived from `config`,
-    /// recovering the catalog from the objects that already exist. Recovery
-    /// fails on the first corrupted or conflicting object.
+    /// recovering the catalog from the objects that already exist and writing
+    /// the object that starts the epoch of this instance. Recovery fails on the
+    /// first corrupted or conflicting object.
     pub(crate) async fn try_new(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
@@ -108,7 +113,36 @@ impl ObjectStoreLogStore {
         );
 
         positive_bytes(config.max_batch_bytes.as_bytes(), "max batch bytes")?;
-        let (catalog, next_object_seq, durable_entry_ids) = recover(io.as_ref()).await?;
+        let Recovered {
+            mut catalog,
+            next_object_seq,
+            durable_entry_ids,
+            tip,
+            max_epoch,
+        } = recover(io.as_ref()).await?;
+        // Every epoch is one above the sequence of the start object its
+        // instance created, and every object is at or above its start object,
+        // so an epoch above the next sequence names no instance that ran.
+        ensure!(
+            max_epoch <= next_object_seq,
+            CorruptedWalObjectSnafu {
+                reason: format!(
+                    "an object carries epoch {max_epoch}, above the next sequence {next_object_seq}"
+                ),
+            }
+        );
+        let start = start_epoch(io.as_ref(), next_object_seq, tip).await?;
+        let epoch = start.epoch;
+        // The epoch identifies this instance in every object it writes.
+        info!(
+            "Opened object store WAL under {prefix} at epoch {epoch}, start object {}",
+            start.object_seq
+        );
+        catalog
+            .insert_object(start.object_seq, Vec::new())
+            .with_context(|_| InvalidWalObjectSnafu {
+                path: io.object_path(start.object_seq),
+            })?;
         let catalog = Arc::new(RwLock::new(catalog));
         let terminal_error = TerminalError::default();
         let stopped = Arc::new(AtomicBool::new(false));
@@ -118,7 +152,12 @@ impl ObjectStoreLogStore {
             stopped: stopped.clone(),
             command_rx,
             issued_entry_ids: durable_entry_ids,
-            next_object_seq: Some(next_object_seq),
+            next_object_seq: start
+                .object_seq
+                .checked_add(1)
+                .filter(|next_object_seq| *next_object_seq < OBJECT_SEQ_LIMIT),
+            epoch,
+            chain_tip: start,
             stop: Vec::new(),
         };
         common_runtime::spawn_global(actor.run());
@@ -363,6 +402,9 @@ struct Actor {
     command_rx: mpsc::Receiver<Command>,
     issued_entry_ids: HashMap<RegionId, EntryId>,
     next_object_seq: Option<u64>,
+    epoch: u64,
+    /// The object a newly sealed batch extends.
+    chain_tip: ChainLink,
     stop: Vec<oneshot::Sender<Result<()>>>,
 }
 
@@ -417,49 +459,228 @@ fn shared(error: &Arc<Error>) -> Error {
     ObjectStoreWalSnafu.into_error(error.clone())
 }
 
-/// Rebuilds the catalog from object footers,
+/// What recovery rebuilt from the objects under a prefix.
+#[derive(Debug)]
+struct Recovered {
+    catalog: ObjectCatalog,
+    /// Sequence above every present object and every id the catalog holds.
+    next_object_seq: u64,
+    durable_entry_ids: HashMap<RegionId, EntryId>,
+    /// The object the next object extends, `None` on an empty prefix.
+    tip: Option<ChainLink>,
+    /// Largest epoch any present object carries, zero on an empty prefix.
+    max_epoch: u64,
+}
+
+/// An object as recovery fetched it: its key, header and footer.
+struct FetchedObject {
+    object: ListedObject,
+    header: Header,
+    footer: Vec<FooterEntry>,
+}
+
+/// Rebuilds the catalog from object headers and footers,
 /// so recovery costs a few small reads per object however large the objects
 /// are. Segments are not read; a segment checksum is verified by the read that
 /// decodes it. Footers are fetched for up to [`RECOVERY_CONCURRENCY`] objects
 /// at a time and indexed in sequence order, so the catalog checks the entry
 /// ranges of every object against its predecessors like a sequential replay.
-async fn recover(io: &dyn WalObjectIo) -> Result<(ObjectCatalog, u64, HashMap<RegionId, EntryId>)> {
+/// Only the objects on the chain [`select_chain`] picks are indexed.
+async fn recover(io: &dyn WalObjectIo) -> Result<Recovered> {
     let objects = io.list().await?;
+    finish_recovery(fetch_footers(io, objects, RECOVERY_CONCURRENCY).await?)
+}
+
+/// Indexes the chain of `objects`, which are ordered by sequence. Objects off
+/// the chain are orphans: they are not indexed, but no later object takes
+/// their sequences.
+fn finish_recovery(objects: Vec<FetchedObject>) -> Result<Recovered> {
+    let headers = objects
+        .iter()
+        .map(|fetched| (fetched.object.object_seq, &fetched.header))
+        .collect::<BTreeMap<_, _>>();
+    let chain = select_chain(&headers);
+    // Every open writes an object that starts a chain or extends a complete
+    // one, and nothing removes objects, so present objects without any
+    // complete chain mean objects of the chain are gone.
+    ensure!(
+        headers.is_empty() || !chain.is_empty(),
+        CorruptedWalObjectSnafu {
+            reason: format!(
+                "no object among {} present objects completes a chain",
+                headers.len()
+            ),
+        }
+    );
+    let tip = chain.last().map(|object_seq| ChainLink {
+        object_seq: *object_seq,
+        epoch: headers[object_seq].epoch,
+    });
+    let max_epoch = headers
+        .values()
+        .map(|header| header.epoch)
+        .max()
+        .unwrap_or(0);
+    let after_listed = match headers.last_key_value() {
+        None => 0,
+        Some((&last_object_seq, _)) => last_object_seq
+            .checked_add(1)
+            .context(WalObjectSequenceExhaustedSnafu { last_object_seq })?,
+    };
+    let chain = chain.into_iter().collect::<HashSet<_>>();
+
     let mut catalog = ObjectCatalog::default();
-    for (object, footer) in fetch_footers(io, objects, RECOVERY_CONCURRENCY).await? {
-        catalog
-            .insert_object(object.object_seq, footer)
-            .with_context(|_| InvalidWalObjectSnafu { path: object.path })?;
+    for FetchedObject { object, footer, .. } in objects {
+        if chain.contains(&object.object_seq) {
+            catalog
+                .insert_object(object.object_seq, footer)
+                .with_context(|_| InvalidWalObjectSnafu { path: object.path })?;
+        }
     }
-    finish_recovery(catalog)
-}
-
-fn finish_recovery(
-    catalog: ObjectCatalog,
-) -> Result<(ObjectCatalog, u64, HashMap<RegionId, EntryId>)> {
-    let next_object_seq = catalog.next_object_seq()?;
+    let next_object_seq = catalog.next_object_seq()?.max(after_listed);
+    ensure!(
+        next_object_seq < OBJECT_SEQ_LIMIT,
+        WalObjectSequenceExhaustedSnafu {
+            last_object_seq: next_object_seq - 1,
+        }
+    );
     let durable_entry_ids = durable_entry_ids(&catalog);
-    Ok((catalog, next_object_seq, durable_entry_ids))
+    Ok(Recovered {
+        catalog,
+        next_object_seq,
+        durable_entry_ids,
+        tip,
+        max_epoch,
+    })
 }
 
-/// Fetches and verifies the footers of `objects`, up to `concurrency` objects
-/// at a time, and returns them ordered by object sequence whatever the order
-/// the fetches complete in. The first failure abandons the remaining fetches.
+/// Returns, in sequence order, the objects on the chain that ends at the tip:
+/// the complete object with the largest epoch, then the largest sequence.
+///
+/// An object is complete when every link on its chain holds: the chain starts
+/// at an object without a predecessor, and every other link names a present
+/// object that carries the epoch the link records. Only one instance writes
+/// under an epoch, so the epoch tells an object of the linking instance from
+/// another object under the same sequence. A create that
+/// was reported as failed may still leave its object, but every object
+/// written after that failure links past it, and every instance writes under
+/// an epoch above every object present when it opened, so neither such an
+/// object nor a late object of an earlier instance ends the chosen chain.
+fn select_chain(headers: &BTreeMap<u64, &Header>) -> Vec<u64> {
+    // A predecessor precedes its successor, so one pass in sequence order
+    // settles every object.
+    let mut complete = HashMap::with_capacity(headers.len());
+    for (&object_seq, header) in headers {
+        let holds = match header.prev {
+            None => true,
+            Some(link) if link.object_seq >= object_seq => false,
+            Some(link) => match headers.get(&link.object_seq) {
+                Some(prev) => prev.epoch == link.epoch && complete[&link.object_seq],
+                None => false,
+            },
+        };
+        complete.insert(object_seq, holds);
+    }
+    let Some(tip) = headers
+        .iter()
+        .filter(|(object_seq, _)| complete[*object_seq])
+        .max_by_key(|(object_seq, header)| (header.epoch, **object_seq))
+        .map(|(object_seq, _)| *object_seq)
+    else {
+        return Vec::new();
+    };
+    let mut chain = vec![tip];
+    while let Some(link) = headers[chain.last().expect("the chain holds the tip")].prev
+        && headers.contains_key(&link.object_seq)
+    {
+        chain.push(link.object_seq);
+    }
+    chain.reverse();
+    chain
+}
+
+/// Writes the empty object that starts the epoch of this instance at
+/// `object_seq`, linked to the recovered `tip`, and returns it as the tip
+/// later objects extend. The epoch is one above the sequence the create
+/// claims, so no two instances share one however their opens interleave, and
+/// it is above the epoch of every object recovery listed.
+///
+/// An object an earlier instance left at that sequence after recovery listed
+/// the prefix has a lower epoch and never ends a chain, so the start object
+/// moves to the next sequence and epoch. An object of an equal or later epoch
+/// belongs to another writer of the prefix, and the conflict fails the open,
+/// as does a create whose outcome is unknown: the next open counts the object
+/// in either case. So does a create that finds the same bytes present:
+/// another open that recovered the same objects writes an identical start
+/// object, so this open cannot claim the epoch even if the object is its own.
+async fn start_epoch(
+    io: &dyn WalObjectIo,
+    mut object_seq: u64,
+    tip: Option<ChainLink>,
+) -> Result<ChainLink> {
+    loop {
+        ensure!(
+            object_seq < OBJECT_SEQ_LIMIT,
+            WalObjectSequenceExhaustedSnafu {
+                last_object_seq: OBJECT_SEQ_LIMIT - 1,
+            }
+        );
+        let epoch = object_seq + 1;
+        let header = Header {
+            object_seq,
+            epoch,
+            prev: tip,
+        };
+        match io
+            .put_if_absent(object_seq, encode_object(header, &[])?.bytes)
+            .await
+        {
+            Ok(PutResult::Created) => return Ok(ChainLink { object_seq, epoch }),
+            Ok(PutResult::AlreadyPresent) => {
+                return UnconfirmedWalEpochStartSnafu {
+                    path: io.object_path(object_seq),
+                    epoch,
+                }
+                .fail();
+            }
+            Err(error @ Error::WalObjectConflict { .. }) => {
+                let head = io.get_range(object_seq, 0, HEADER_LEN as u64).await?;
+                let existing = decode_header(&head).with_context(|_| InvalidWalObjectSnafu {
+                    path: io.object_path(object_seq),
+                })?;
+                if existing.epoch >= epoch {
+                    return Err(error);
+                }
+                object_seq += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Fetches and verifies the headers and footers of `objects`, up to
+/// `concurrency` objects at a time, and returns them ordered by object sequence
+/// whatever the order the fetches complete in. The first failure abandons the
+/// remaining fetches.
 async fn fetch_footers(
     io: &dyn WalObjectIo,
     objects: Vec<ListedObject>,
     concurrency: usize,
-) -> Result<Vec<(ListedObject, Vec<FooterEntry>)>> {
-    let mut footers = futures::stream::iter(objects)
+) -> Result<Vec<FetchedObject>> {
+    let mut fetched = futures::stream::iter(objects)
         .map(|object| async move {
-            let footer = fetch_footer(io, &object).await?;
-            Ok((object, footer))
+            let (header, footer) = fetch_footer(io, &object).await?;
+            Ok(FetchedObject {
+                object,
+                header,
+                footer,
+            })
         })
         .buffer_unordered(concurrency)
         .try_collect::<Vec<_>>()
         .await?;
-    footers.sort_unstable_by_key(|(object, _)| object.object_seq);
-    Ok(footers)
+    fetched.sort_unstable_by_key(|fetched| fetched.object.object_seq);
+    Ok(fetched)
 }
 
 /// Reads the header, trailer and footer of `object` and verifies them: the
@@ -470,7 +691,10 @@ async fn fetch_footers(
 /// A short object is read whole. Otherwise the header and a window at the end
 /// of the object are read concurrently, and the footer is read separately only
 /// when it starts before the window.
-async fn fetch_footer(io: &dyn WalObjectIo, object: &ListedObject) -> Result<Vec<FooterEntry>> {
+async fn fetch_footer(
+    io: &dyn WalObjectIo,
+    object: &ListedObject,
+) -> Result<(Header, Vec<FooterEntry>)> {
     let ListedObject {
         object_seq, size, ..
     } = *object;
@@ -514,7 +738,7 @@ async fn fetch_footer(io: &dyn WalObjectIo, object: &ListedObject) -> Result<Vec
         ));
     }
 
-    let (trailer, footer_range) =
+    let (header, trailer, footer_range) =
         locate_footer(object_seq, object_len, &head, &tail).map_err(invalid)?;
     let footer = if footer_range.start >= tail_start {
         tail.slice(footer_range.start - tail_start..footer_range.end - tail_start)
@@ -528,18 +752,18 @@ async fn fetch_footer(io: &dyn WalObjectIo, object: &ListedObject) -> Result<Vec
     };
     let footer = decode_footer(&footer, trailer).map_err(invalid)?;
     verify_segment_ranges(&footer, footer_range.start).map_err(invalid)?;
-    Ok(footer)
+    Ok((header, footer))
 }
 
 /// Verifies the header and trailer of the object `object_seq` of `object_len`
 /// bytes from its first bytes `head` and its last bytes `tail`, and returns
-/// the trailer with the range the footer occupies in the object.
+/// the header and the trailer with the range the footer occupies in the object.
 fn locate_footer(
     object_seq: u64,
     object_len: usize,
     head: &[u8],
     tail: &[u8],
-) -> Result<(FixedTrailer, Range<usize>)> {
+) -> Result<(Header, FixedTrailer, Range<usize>)> {
     let header = decode_header(head)?;
     ensure!(
         header.object_seq == object_seq,
@@ -552,7 +776,7 @@ fn locate_footer(
     );
     let trailer = decode_trailer(&tail[tail.len() - TRAILER_LEN..])?;
     let footer_range = footer_range(trailer, object_len)?;
-    Ok((trailer, footer_range))
+    Ok((header, trailer, footer_range))
 }
 
 fn durable_entry_ids(catalog: &ObjectCatalog) -> HashMap<RegionId, EntryId> {
@@ -693,26 +917,21 @@ mod tests {
         let config = ObjectStoreWalConfig::default();
         let identities = [(1, 2), (3, 2), (1, 4)];
         for (index, (node_id, generation)) in identities.iter().enumerate() {
-            let encoded = encode_object(
-                Header {
-                    object_seq: 0,
-                    writer_instance: [0; 16],
-                },
+            let io = ObjectStoreIo::new(
+                object_store.clone(),
+                config.node_prefix(*node_id, *generation),
+            )
+            .unwrap();
+            put_fixture(
+                &io,
+                0,
                 &[Record {
                     region_id: region(1),
                     entry_id: index as u64 + 1,
                     payload: Bytes::from_static(b"entry"),
                 }],
             )
-            .unwrap();
-            ObjectStoreIo::new(
-                object_store.clone(),
-                config.node_prefix(*node_id, *generation),
-            )
-            .unwrap()
-            .put_if_absent(0, encoded.bytes)
-            .await
-            .unwrap();
+            .await;
         }
         // A root-level object must not be part of any node's recovery.
         let root_io = ObjectStoreIo::new(object_store.clone(), &config.prefix).unwrap();
@@ -749,31 +968,44 @@ mod tests {
     }
 
     /// Rebuilds the catalog by decoding whole objects as a recovery oracle.
-    async fn recover_by_decoding(
-        io: &dyn WalObjectIo,
-    ) -> Result<(ObjectCatalog, u64, HashMap<RegionId, EntryId>)> {
-        let mut catalog = ObjectCatalog::default();
-        for ListedObject {
-            object_seq, path, ..
-        } in io.list().await?
-        {
-            let bytes = io.get(object_seq).await?;
-            decode_object(&bytes)
+    async fn recover_by_decoding(io: &dyn WalObjectIo) -> Result<Recovered> {
+        let mut objects = Vec::new();
+        for object in io.list().await? {
+            let bytes = io.get(object.object_seq).await?;
+            let decoded = decode_object(&bytes)
                 .and_then(|decoded| {
                     ensure!(
-                        decoded.header.object_seq == object_seq,
+                        decoded.header.object_seq == object.object_seq,
                         CorruptedWalObjectSnafu {
                             reason: format!(
-                                "header sequence {} does not match key sequence {object_seq}",
-                                decoded.header.object_seq
+                                "header sequence {} does not match key sequence {}",
+                                decoded.header.object_seq, object.object_seq
                             ),
                         }
                     );
-                    catalog.insert_object(object_seq, decoded.footer)
+                    Ok(decoded)
                 })
-                .with_context(|_| InvalidWalObjectSnafu { path })?;
+                .with_context(|_| InvalidWalObjectSnafu {
+                    path: object.path.clone(),
+                })?;
+            objects.push(FetchedObject {
+                object,
+                header: decoded.header,
+                footer: decoded.footer,
+            });
         }
-        finish_recovery(catalog)
+        finish_recovery(objects)
+    }
+
+    fn assert_same_recovery(expected: &Recovered, actual: &Recovered) {
+        assert_eq!(
+            catalog_contents(&expected.catalog),
+            catalog_contents(&actual.catalog)
+        );
+        assert_eq!(expected.next_object_seq, actual.next_object_seq);
+        assert_eq!(expected.durable_entry_ids, actual.durable_entry_ids);
+        assert_eq!(expected.tip, actual.tip);
+        assert_eq!(expected.max_epoch, actual.max_epoch);
     }
 
     fn catalog_contents(catalog: &ObjectCatalog) -> Vec<(u64, Vec<FooterEntry>)> {
@@ -798,19 +1030,45 @@ mod tests {
     }
 
     async fn put_records(object_store: &ObjectStore, object_seq: u64, records: &[Record]) {
-        let encoded = encode_object(
-            Header {
-                object_seq,
-                writer_instance: [0; 16],
-            },
-            records,
-        )
-        .unwrap();
-        ObjectStoreIo::new(object_store.clone(), PREFIX)
-            .unwrap()
-            .put_if_absent(object_seq, encoded.bytes)
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_fixture(&io, object_seq, records).await;
+    }
+
+    /// The header of a fixture object at `object_seq`, which extends the
+    /// present object right below it under the epoch of that object, so the
+    /// fixtures a test writes in sequence order form one chain.
+    async fn fixture_header(io: &ObjectStoreIo, object_seq: u64) -> Header {
+        let below = io
+            .list()
             .await
-            .unwrap();
+            .unwrap()
+            .into_iter()
+            .map(|object| object.object_seq)
+            .filter(|seq| *seq < object_seq)
+            .max();
+        let prev = match below {
+            Some(seq) => Some(decode_header(&io.get(seq).await.unwrap()).unwrap()),
+            None => None,
+        };
+        Header {
+            object_seq,
+            epoch: prev.as_ref().map_or(1, |prev| prev.epoch),
+            prev: prev.map(|prev| ChainLink {
+                object_seq: prev.object_seq,
+                epoch: prev.epoch,
+            }),
+        }
+    }
+
+    async fn put_fixture(io: &ObjectStoreIo, object_seq: u64, records: &[Record]) {
+        let header = fixture_header(io, object_seq).await;
+        put_object_with_header(io, header, records).await;
+    }
+
+    async fn put_object_with_header(io: &ObjectStoreIo, header: Header, records: &[Record]) {
+        let object_seq = header.object_seq;
+        let encoded = encode_object(header, records).unwrap();
+        io.put_if_absent(object_seq, encoded.bytes).await.unwrap();
     }
 
     fn object_path(object_store: &ObjectStore, object_seq: u64) -> String {
@@ -862,18 +1120,13 @@ mod tests {
         populate(&object_store, 40, 5).await;
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
 
-        let (catalog, next_object_seq, durable) = recover(&io).await.unwrap();
-        let (expected_catalog, expected_next_object_seq, expected_durable) =
-            recover_by_decoding(&io).await.unwrap();
+        let recovered = recover(&io).await.unwrap();
+        let expected = recover_by_decoding(&io).await.unwrap();
 
-        assert_eq!(40, catalog_contents(&catalog).len());
-        assert_eq!(
-            catalog_contents(&expected_catalog),
-            catalog_contents(&catalog)
-        );
-        assert_eq!(expected_next_object_seq, next_object_seq);
-        assert_eq!(40, next_object_seq);
-        assert_eq!(expected_durable, durable);
+        assert_eq!(40, catalog_contents(&recovered.catalog).len());
+        assert_same_recovery(&expected, &recovered);
+        assert_eq!(40, recovered.next_object_seq);
+        let durable = recovered.durable_entry_ids;
         assert_eq!(5, durable.len());
 
         let store = open(object_store, &eager()).await;
@@ -934,10 +1187,7 @@ mod tests {
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         let encoded = encode_object(
-            Header {
-                object_seq: 0,
-                writer_instance: [0; 16],
-            },
+            fixture_header(&io, 0).await,
             &[Record {
                 region_id: region(1),
                 entry_id: 1,
@@ -1036,16 +1286,10 @@ mod tests {
         let (trailer, _) = footer_of(&object_store.read(&wide.path).await.unwrap().to_vec());
         assert!(trailer.footer_len > RECOVERY_TAIL_WINDOW as u64);
 
-        let (catalog, next_object_seq, durable) = recover(io.as_ref()).await.unwrap();
-        let (expected_catalog, expected_next_object_seq, expected_durable) =
-            recover_by_decoding(io.as_ref()).await.unwrap();
-        assert_eq!(
-            catalog_contents(&expected_catalog),
-            catalog_contents(&catalog)
-        );
-        assert_eq!(expected_next_object_seq, next_object_seq);
-        assert_eq!(expected_durable, durable);
-        assert_eq!(regions as usize, durable.len());
+        let recovered = recover(io.as_ref()).await.unwrap();
+        let expected = recover_by_decoding(io.as_ref()).await.unwrap();
+        assert_same_recovery(&expected, &recovered);
+        assert_eq!(regions as usize, recovered.durable_entry_ids.len());
 
         // The wide object took the header, the tail window and the footer;
         // the narrow one was read whole.
@@ -1096,36 +1340,24 @@ mod tests {
                 payload: Bytes::from(format!("e{entry_id}")),
             })
             .collect::<Vec<_>>();
-        let encoded = encode_object(
-            Header {
-                object_seq,
-                writer_instance: [0; 16],
-            },
-            &records,
-        )
-        .unwrap();
-        ObjectStoreIo::new(object_store.clone(), PREFIX)
-            .unwrap()
-            .put_if_absent(object_seq, encoded.bytes)
-            .await
-            .unwrap();
+        put_records(object_store, object_seq, &records).await;
     }
 
     #[tokio::test]
     async fn test_store_resumes_sequence_and_durable_ids() {
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
-        let (_, next, durable) = recover(&io).await.unwrap();
-        assert_eq!(0, next);
-        assert!(durable.is_empty());
+        let recovered = recover(&io).await.unwrap();
+        assert_eq!(0, recovered.next_object_seq);
+        assert!(recovered.durable_entry_ids.is_empty());
 
         put_object(&object_store, 2, region(1), &[1, id(5, 7)]).await;
         put_object(&object_store, 4, region(2), &[8]).await;
-        let (_, next, durable) = recover(&io).await.unwrap();
-        assert_eq!(6, next);
+        let recovered = recover(&io).await.unwrap();
+        assert_eq!(6, recovered.next_object_seq);
         assert_eq!(
             HashMap::from([(region(1), id(5, 7)), (region(2), 8)]),
-            durable
+            recovered.durable_entry_ids
         );
         let store = open(object_store, &eager()).await;
         assert_eq!(id(5, 7), latest(&store, region(1)));
@@ -1288,7 +1520,7 @@ mod tests {
                     .await
                     .unwrap()
                     .into_iter()
-                    .map(|(object, _)| object.object_seq)
+                    .map(|fetched| fetched.object.object_seq)
                     .collect::<Vec<_>>()
             })
         };
@@ -1356,7 +1588,8 @@ mod tests {
         assert!(parked.try_recv().is_err());
         let store = open(object_store, &eager()).await;
         assert_eq!(id(15, 1), latest(&store, region(1)));
-        assert_eq!(16, store.catalog.read().unwrap().next_object_seq().unwrap());
+        // Sequence 16 holds the object that started the epoch of the store.
+        assert_eq!(17, store.catalog.read().unwrap().next_object_seq().unwrap());
         store.stop().await.unwrap();
     }
 
@@ -1674,6 +1907,465 @@ mod tests {
             *reads.lock().unwrap()
         );
         store.stop().await.unwrap();
+    }
+
+    fn chain_header(object_seq: u64, epoch: u64, prev: Option<(u64, u64)>) -> Header {
+        Header {
+            object_seq,
+            epoch,
+            prev: prev.map(|(object_seq, epoch)| ChainLink { object_seq, epoch }),
+        }
+    }
+
+    fn chain_of(headers: &[Header]) -> Vec<u64> {
+        select_chain(
+            &headers
+                .iter()
+                .map(|header| (header.object_seq, header))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn test_store_selects_the_chain_of_the_latest_complete_object() {
+        assert!(chain_of(&[]).is_empty());
+        // A linear chain is replayed whole.
+        assert_eq!(
+            vec![0, 1, 2],
+            chain_of(&[
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(2, 1, Some((1, 1))),
+            ])
+        );
+        // Object 1 was reported as failed and object 2 links past it.
+        assert_eq!(
+            vec![0, 2],
+            chain_of(&[
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(2, 1, Some((0, 1))),
+            ])
+        );
+        // Object 3 extends object 2, which never landed, so object 1 is the
+        // tip although object 3 has a higher sequence.
+        assert_eq!(
+            vec![0, 1],
+            chain_of(&[
+                chain_header(0, 1, None),
+                chain_header(1, 1, Some((0, 1))),
+                chain_header(3, 1, Some((2, 1))),
+            ])
+        );
+        // Object 1 links to an object of epoch 2 at sequence 0, where an
+        // object of epoch 1 is.
+        assert_eq!(
+            vec![0],
+            chain_of(&[chain_header(0, 1, None), chain_header(1, 2, Some((0, 2))),])
+        );
+        // Instance A left object 2 behind after instance B, a later epoch,
+        // acknowledged object 1: the later epoch ends the chain.
+        assert_eq!(
+            vec![0, 1],
+            chain_of(&[
+                chain_header(0, 1, None),
+                chain_header(1, 2, Some((0, 1))),
+                chain_header(2, 1, Some((0, 1))),
+            ])
+        );
+        // A missing predecessor breaks the link, whether or not it lies below
+        // every present object, so an object that lands late below it cannot
+        // change which links hold.
+        assert!(
+            chain_of(&[
+                chain_header(3, 1, Some((2, 1))),
+                chain_header(4, 1, Some((3, 1))),
+            ])
+            .is_empty()
+        );
+        assert!(
+            chain_of(&[
+                chain_header(2, 1, Some((1, 1))),
+                chain_header(4, 2, Some((3, 1))),
+                chain_header(5, 2, Some((4, 2))),
+            ])
+            .is_empty()
+        );
+        assert_eq!(
+            vec![1],
+            chain_of(&[chain_header(1, 1, None), chain_header(3, 1, Some((2, 1))),])
+        );
+        // A predecessor at or above the object itself never holds.
+        assert!(chain_of(&[chain_header(5, 1, Some((5, 1)))]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_indexes_only_the_chain() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        let record = |entry_id: EntryId, data: &'static str| Record {
+            region_id: region(1),
+            entry_id,
+            payload: Bytes::from_static(data.as_bytes()),
+        };
+        put_fixture(&io, 0, &[record(1, "a")]).await;
+        let first = fixture_header(&io, 1).await;
+        // Object 1 was reported as failed; object 2 reused its row sequences
+        // and links past it.
+        put_object_with_header(&io, first.clone(), &[record(id(1, 1), "old")]).await;
+        let second = Header {
+            object_seq: 2,
+            ..first
+        };
+        put_object_with_header(&io, second, &[record(id(2, 1), "new")]).await;
+
+        for restart in 0..2 {
+            let store = open(object_store.clone(), &eager()).await;
+            assert_eq!(
+                expected_entries(region(1), &[(1, "a"), (id(2, 1), "new")]),
+                read_entries(&store, region(1), 0).await
+            );
+            assert_eq!(id(2, 1), latest(&store, region(1)));
+            store.stop().await.unwrap();
+            // Every open starts the epoch one above the sequence of its start
+            // object, and the first restart's start object extends the chain
+            // the second restart replays.
+            let start = decode_header(&io.get(3 + restart).await.unwrap()).unwrap();
+            assert_eq!(4 + restart, start.epoch);
+            assert_eq!(Some(2 + restart), start.prev.map(|prev| prev.object_seq));
+        }
+        assert_eq!(vec![0, 1, 2, 3, 4], object_seqs(&io).await);
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_never_reuses_the_sequence_of_an_orphan() {
+        let io = ObjectStoreIo::new(memory_store(), PREFIX).unwrap();
+        put_fixture(&io, 0, &[]).await;
+        // Object 2 extends object 1, which never landed.
+        let orphan = Header {
+            prev: Some(ChainLink {
+                object_seq: 1,
+                epoch: 1,
+            }),
+            ..fixture_header(&io, 2).await
+        };
+        put_object_with_header(&io, orphan, &[]).await;
+        let recovered = recover(&io).await.unwrap();
+        assert_eq!(Some(0), recovered.tip.map(|tip| tip.object_seq));
+        assert_eq!(3, recovered.next_object_seq);
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_rejects_objects_without_a_complete_chain() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        // Object 1 extends object 0, which is gone.
+        put_object_with_header(&io, chain_header(1, 1, Some((0, 1))), &[]).await;
+        let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::CorruptedWalObject { reason, .. }
+                if reason.contains("no object among 1 present objects completes a chain")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![1], object_seqs(&io).await);
+    }
+
+    #[tokio::test]
+    async fn test_store_recovery_keeps_the_later_epoch_over_a_late_object() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        let record = |entry_id: EntryId, data: &'static str| Record {
+            region_id: region(1),
+            entry_id,
+            payload: Bytes::from_static(data.as_bytes()),
+        };
+        put_object_with_header(&io, chain_header(0, 1, None), &[record(1, "a")]).await;
+        // Instance B acknowledged object 1 before the create instance A issued
+        // for object 2 landed.
+        put_object_with_header(
+            &io,
+            chain_header(1, 2, Some((0, 1))),
+            &[record(id(1, 1), "b")],
+        )
+        .await;
+        put_object_with_header(
+            &io,
+            chain_header(2, 1, Some((0, 1))),
+            &[record(id(2, 1), "late")],
+        )
+        .await;
+
+        let store = open(object_store, &eager()).await;
+        assert_eq!(
+            expected_entries(region(1), &[(1, "a"), (id(1, 1), "b")]),
+            read_entries(&store, region(1), 0).await
+        );
+        store.stop().await.unwrap();
+        let start = decode_header(&io.get(3).await.unwrap()).unwrap();
+        assert_eq!(4, start.epoch);
+        assert_eq!(
+            Some(ChainLink {
+                object_seq: 1,
+                epoch: 2,
+            }),
+            start.prev
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_open_starts_the_first_epoch_on_an_empty_prefix() {
+        let object_store = memory_store();
+        let store = open(object_store.clone(), &eager()).await;
+        store.stop().await.unwrap();
+        let io = ObjectStoreIo::new(object_store, PREFIX).unwrap();
+        let start = decode_header(&io.get(0).await.unwrap()).unwrap();
+        assert_eq!(1, start.epoch);
+        assert_eq!(None, start.prev);
+        assert_eq!(vec![0], object_seqs(&io).await);
+    }
+
+    #[tokio::test]
+    async fn test_store_start_object_moves_past_an_earlier_epoch_only() {
+        for (epoch, moves) in [(1, true), (2, false)] {
+            let object_store = memory_store();
+            let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+            put_fixture(&fixtures, 0, &[]).await;
+            // An object lands at the sequence of the start object after
+            // recovery listed the prefix.
+            let late = encode_object(chain_header(1, epoch, None), &[])
+                .unwrap()
+                .bytes;
+            let io = Arc::new(RacingIo {
+                inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
+                late: Mutex::new(Some((1, late))),
+            });
+            let result = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string()).await;
+            if moves {
+                result.unwrap().stop().await.unwrap();
+                let start = decode_header(&fixtures.get(2).await.unwrap()).unwrap();
+                assert_eq!(3, start.epoch);
+                assert_eq!(Some(0), start.prev.map(|prev| prev.object_seq));
+            } else {
+                let error = result.unwrap_err();
+                assert!(
+                    matches!(&error, Error::WalObjectConflict { path, .. } if path == &fixtures.object_path(1)),
+                    "unexpected error: {error:?}"
+                );
+                assert_eq!(vec![0, 1], object_seqs(&fixtures).await);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_open_fails_when_its_start_object_is_already_present() {
+        // On an empty prefix and after object 0 of epoch 1, another open that
+        // recovered the same objects wrote the very start object this open
+        // writes.
+        for present in [false, true] {
+            let object_store = memory_store();
+            let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+            let (start_seq, epoch, tip) = if present {
+                put_fixture(&fixtures, 0, &[]).await;
+                (1, 2, Some((0, 1)))
+            } else {
+                (0, 1, None)
+            };
+            let same = encode_object(chain_header(start_seq, epoch, tip), &[])
+                .unwrap()
+                .bytes;
+            let io = Arc::new(RacingIo {
+                inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
+                late: Mutex::new(Some((start_seq, same))),
+            });
+            let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&error, Error::UnconfirmedWalEpochStart { epoch: actual, path, .. }
+                    if *actual == epoch && path == &fixtures.object_path(start_seq)),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(RetryHint::Retryable, error.retry_hint());
+
+            // The next open counts that object and starts a later epoch.
+            open(object_store, &eager()).await.stop().await.unwrap();
+            let start = decode_header(&fixtures.get(start_seq + 1).await.unwrap()).unwrap();
+            assert_eq!(epoch + 1, start.epoch);
+            assert_eq!(
+                Some(ChainLink {
+                    object_seq: start_seq,
+                    epoch,
+                }),
+                start.prev
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_store_opens_racing_across_a_late_object_take_distinct_epochs() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_fixture(&io, 0, &[]).await;
+        // Open A recovers object 0 and pauses before its start object.
+        let recovered = recover(&io).await.unwrap();
+        // A late object of epoch 1 lands at sequence 2, across the gap at
+        // sequence 1, and open B, which lists it, completes.
+        put_object_with_header(&io, chain_header(2, 1, Some((0, 1))), &[]).await;
+        open(object_store, &eager()).await.stop().await.unwrap();
+        let b = decode_header(&io.get(3).await.unwrap()).unwrap();
+        assert_eq!(4, b.epoch);
+
+        // Open A resumes at the sequence it recovered: the epoch follows from
+        // the sequence it claims, so it differs from the epoch of open B.
+        let a = start_epoch(&io, recovered.next_object_seq, recovered.tip)
+            .await
+            .unwrap();
+        assert_eq!(
+            ChainLink {
+                object_seq: 1,
+                epoch: 2,
+            },
+            a
+        );
+    }
+
+    #[tokio::test]
+    async fn test_store_open_rejects_an_epoch_above_the_next_sequence() {
+        let object_store = memory_store();
+        let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        // No instance that starts at or below sequence 0 writes epoch 5.
+        put_object_with_header(&io, chain_header(0, 5, None), &[]).await;
+        let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, Error::CorruptedWalObject { reason, .. }
+                if reason.contains("carries epoch 5, above the next sequence 1")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![0], object_seqs(&io).await);
+    }
+
+    async fn object_seqs(io: &ObjectStoreIo) -> Vec<u64> {
+        io.list()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.object_seq)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn test_store_open_fails_when_its_start_object_lands_with_an_unknown_outcome() {
+        let object_store = memory_store();
+        let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_fixture(&fixtures, 0, &[]).await;
+        // The start object is stored, but its create reports an error.
+        let io = Arc::new(LostResponseIo {
+            inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
+            lose_next: AtomicBool::new(true),
+        });
+        let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::WalObjectStore { .. }),
+            "unexpected error: {error:?}"
+        );
+        // The open does not move to another sequence.
+        assert_eq!(vec![0, 1], object_seqs(&fixtures).await);
+        let stored = decode_header(&fixtures.get(1).await.unwrap()).unwrap();
+        assert_eq!(2, stored.epoch);
+
+        // The next open counts the stored start object and claims a later
+        // epoch.
+        open(object_store, &eager()).await.stop().await.unwrap();
+        let start = decode_header(&fixtures.get(2).await.unwrap()).unwrap();
+        assert_eq!(3, start.epoch);
+        assert_eq!(
+            Some(ChainLink {
+                object_seq: 1,
+                epoch: 2,
+            }),
+            start.prev
+        );
+    }
+
+    /// Object access whose next create stores the object but reports a
+    /// transient failure, as a create whose response is lost.
+    struct LostResponseIo {
+        inner: ObjectStoreIo,
+        lose_next: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl WalObjectIo for LostResponseIo {
+        async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+            let result = self.inner.put_if_absent(object_seq, content).await?;
+            if !self.lose_next.swap(false, Ordering::SeqCst) {
+                return Ok(result);
+            }
+            Err(
+                object_store::Error::new(object_store::ErrorKind::Unexpected, "lost response")
+                    .set_temporary(),
+            )
+            .context(WalObjectStoreSnafu {
+                operation: "write",
+                path: self.object_path(object_seq),
+            })
+        }
+
+        async fn get(&self, object_seq: u64) -> Result<Bytes> {
+            self.inner.get(object_seq).await
+        }
+
+        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            self.inner.get_range(object_seq, offset, len).await
+        }
+
+        async fn list(&self) -> Result<Vec<ListedObject>> {
+            self.inner.list().await
+        }
+
+        fn object_path(&self, object_seq: u64) -> String {
+            self.inner.object_path(object_seq)
+        }
+    }
+
+    /// Object access whose first create lets another object land at a given
+    /// sequence first, as a create issued before recovery would.
+    struct RacingIo {
+        inner: ObjectStoreIo,
+        late: Mutex<Option<(u64, Bytes)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl WalObjectIo for RacingIo {
+        async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+            let late = self.late.lock().unwrap().take();
+            if let Some((late_seq, late)) = late {
+                self.inner.put_if_absent(late_seq, late).await?;
+            }
+            self.inner.put_if_absent(object_seq, content).await
+        }
+
+        async fn get(&self, object_seq: u64) -> Result<Bytes> {
+            self.inner.get(object_seq).await
+        }
+
+        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            self.inner.get_range(object_seq, offset, len).await
+        }
+
+        async fn list(&self) -> Result<Vec<ListedObject>> {
+            self.inner.list().await
+        }
+
+        fn object_path(&self, object_seq: u64) -> String {
+            self.inner.object_path(object_seq)
+        }
     }
 
     struct ParkedIo {
