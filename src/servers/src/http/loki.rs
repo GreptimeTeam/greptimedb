@@ -573,6 +573,8 @@ impl LokiPbParser {
         bytes: Bytes,
         memory_limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
     ) -> Result<Self> {
+        // `decompressed` carries the memory permits for the decoded bytes and
+        // keeps them alive until the protobuf decoding below is finished.
         let decompressed = snappy_decompress_loki_request(&bytes, memory_limiter).await?;
         let req = loki_proto::logproto::PushRequest::decode(&decompressed[..])
             .context(DecodeLokiRequestSnafu)?;
@@ -586,7 +588,7 @@ impl LokiPbParser {
 async fn snappy_decompress_loki_request(
     buf: &[u8],
     limiter: &crate::request_memory_limiter::ServerMemoryLimiter,
-) -> Result<Vec<u8>> {
+) -> Result<crate::prom_store::ChargedBuffer> {
     // Loki's protobuf push body is Snappy-compressed independent of HTTP
     // content-encoding, so keep this decode step explicit.
     //
@@ -594,7 +596,9 @@ async fn snappy_decompress_loki_request(
     // the raw Snappy header carries the decoded length, and without this cap
     // a tiny body could declare multiple GiB of output. The declared size is
     // also charged to the aggregate request-memory limiter before the
-    // allocation, so concurrent Loki pushes cannot bypass the quota.
+    // allocation, so concurrent Loki pushes cannot bypass the quota. The
+    // returned buffer carries the permits, keeping the reservation alive
+    // until the caller is done with the decoded bytes.
     let decoded_len = snap::raw::decompress_len(buf).context(DecompressSnappyLokiRequestSnafu)?;
     ensure!(
         decoded_len <= crate::prom_store::MAX_DECOMPRESSED_REQUEST_SIZE,
@@ -603,12 +607,12 @@ async fn snappy_decompress_loki_request(
             limit: crate::prom_store::MAX_DECOMPRESSED_REQUEST_SIZE as u64,
         }
     );
-    // Hold the permit for the lifetime of the decompressed buffer below.
-    let _guard = limiter.acquire(decoded_len as u64).await?;
+    let guard = limiter.acquire(decoded_len as u64).await?;
     let mut decoder = Decoder::new();
-    decoder
+    let data = decoder
         .decompress_vec(buf)
-        .context(DecompressSnappyLokiRequestSnafu)
+        .context(DecompressSnappyLokiRequestSnafu)?;
+    Ok(crate::prom_store::ChargedBuffer::new(data, vec![guard]))
 }
 
 impl Iterator for LokiPbParser {

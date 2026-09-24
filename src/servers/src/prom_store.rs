@@ -595,6 +595,11 @@ impl std::fmt::Debug for ChargedBuffer {
 }
 
 impl ChargedBuffer {
+    /// Creates a buffer with the permits charged for it.
+    pub(crate) fn new(data: Vec<u8>, guards: Vec<MemoryGuard<RequestMemoryMetrics>>) -> Self {
+        Self { data, guards }
+    }
+
     /// Splits the buffer into the raw bytes and the memory permits charged for
     /// them. Hold the permits as long as the bytes are kept.
     pub(crate) fn into_parts(self) -> (Vec<u8>, Vec<MemoryGuard<RequestMemoryMetrics>>) {

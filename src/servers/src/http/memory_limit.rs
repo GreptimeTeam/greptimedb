@@ -31,6 +31,7 @@
 //! buffers that outlive the body stream itself).
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -86,6 +87,11 @@ pub async fn memory_limit_middleware(
     // Account whatever is actually streamed beyond the upfront reservation
     // (chunked transfer has none).
     let accounting = BodyMemoryAccounting::default();
+    // The middleware keeps its own handle so the acquired permits stay held
+    // for the whole request: the body wrapper and the extensions are dropped
+    // once the extractors finish collecting the body, before the handler is
+    // done with the decoded data.
+    let retained_accounting = accounting.clone();
     let (mut parts, body) = req.into_parts();
     // Expose the limiter to handlers that decompress request bodies on their
     // own (e.g. the Loki protobuf push) so they can charge the decoded size.
@@ -97,7 +103,28 @@ pub async fn memory_limit_middleware(
     let accounted = AccountedBody::new(body, limiter, content_length, accounting);
     let req = Request::from_parts(parts, Body::new(accounted));
 
-    next.run(req).await
+    let response = next.run(req).await;
+    // `retained_accounting` stays alive until this function returns, holding
+    // the permits across the handler's use of the collected body.
+    quota_exceeded_response(&retained_accounting, response)
+}
+
+/// Rewrites the response of a request whose body accounting hit the quota:
+/// the failure aborts the body mid-stream, so the extractors reject the
+/// request with a generic body error (mapped to 400). Quota exhaustion must
+/// surface as 429, matching the upfront admission path, so clients can tell
+/// backpressure apart from malformed input.
+fn quota_exceeded_response(accounting: &BodyMemoryAccounting, response: Response) -> Response {
+    // The flag can only be set when the body failed before the handler ran,
+    // so the response is the extractor rejection and can be replaced.
+    if accounting.take_quota_exceeded() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "Request body memory limit exceeded",
+        )
+            .into_response();
+    }
+    response
 }
 
 /// Route-local counterpart of [`memory_limit_middleware`] for routes that
@@ -126,26 +153,43 @@ pub(crate) async fn decoded_body_accounting_middleware(
         .unwrap_or(0);
 
     let accounting = BodyMemoryAccounting::default();
+    // Retain the permits for the whole request, like the global middleware.
+    let retained_accounting = accounting.clone();
     let (mut parts, body) = req.into_parts();
     parts.extensions.insert(accounting.clone());
     let accounted = AccountedBody::new(body, limiter, content_length, accounting);
     let req = Request::from_parts(parts, Body::new(accounted));
 
-    next.run(req).await
+    let response = next.run(req).await;
+    // `retained_accounting` stays alive until this function returns, holding
+    // the permits across the handler's use of the collected body.
+    quota_exceeded_response(&retained_accounting, response)
 }
 
 /// Holds the memory guards acquired while a request body is streamed. Shared
-/// between the [`AccountedBody`] wrapper and the request extensions so the
-/// permits are only released when the request (including any collected body
-/// buffers) is finished.
+/// between the [`AccountedBody`] wrapper, the request extensions and the
+/// middleware itself, so the permits are only released when the request
+/// (including any collected body buffers and the handler still using them)
+/// is finished.
 #[derive(Clone, Default)]
 struct BodyMemoryAccounting {
     guards: Arc<Mutex<Vec<MemoryGuard<RequestMemoryMetrics>>>>,
+    /// Set when an incremental charge hit the quota, so the rejection can be
+    /// rewritten into a 429 after the middleware regains control.
+    quota_exceeded: Arc<AtomicBool>,
 }
 
 impl BodyMemoryAccounting {
     fn hold(&self, guard: MemoryGuard<RequestMemoryMetrics>) {
         self.guards.lock().unwrap().push(guard);
+    }
+
+    fn mark_quota_exceeded(&self) {
+        self.quota_exceeded.store(true, Ordering::Release);
+    }
+
+    fn take_quota_exceeded(&self) -> bool {
+        self.quota_exceeded.swap(false, Ordering::AcqRel)
     }
 }
 
@@ -261,7 +305,10 @@ impl AccountedBody {
                 self.pending = Some((frame, bytes));
                 Poll::Pending
             }
-            ChargeOutcome::Failed => Poll::Ready(Some(Err(limit_exceeded_error()))),
+            ChargeOutcome::Failed => {
+                self.accounting.mark_quota_exceeded();
+                Poll::Ready(Some(Err(limit_exceeded_error())))
+            }
         }
     }
 }
@@ -364,8 +411,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             res.status(),
-            StatusCode::BAD_REQUEST,
-            "a chunked body larger than the quota must be rejected while streaming"
+            StatusCode::TOO_MANY_REQUESTS,
+            "a chunked body larger than the quota must be rejected with 429, not 400"
         );
         assert_eq!(0, limiter.used_bytes(), "guards must be released");
     }
@@ -419,7 +466,7 @@ mod tests {
             .body(Body::from_stream(stream))
             .unwrap();
         let res = app.oneshot(req).await.unwrap();
-        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(0, limiter.used_bytes());
     }
 
@@ -480,8 +527,8 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(
             res.status(),
-            StatusCode::BAD_REQUEST,
-            "decoded body larger than the quota must be rejected while streaming"
+            StatusCode::TOO_MANY_REQUESTS,
+            "decoded body larger than the quota must be rejected with 429"
         );
         assert_eq!(0, limiter.used_bytes(), "guards must be released");
     }

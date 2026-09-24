@@ -1762,8 +1762,8 @@ pub async fn test_influxdb_write_decoded_body_charged(store_type: StorageType) {
         .await;
     assert_eq!(
         res.status(),
-        StatusCode::BAD_REQUEST,
-        "decoded body larger than the aggregate quota must be rejected"
+        StatusCode::TOO_MANY_REQUESTS,
+        "decoded body larger than the aggregate quota must be rejected with 429"
     );
 
     // The server still serves a small compressed write within the quota.
