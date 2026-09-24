@@ -231,7 +231,7 @@ impl PrometheusJsonResponse {
     ) -> Self {
         // Hold the collector while a streaming result is consumed.
         let collector = query_id.and_then(get_promql_annotation_collector);
-        let response: Result<Self> = try {
+        let response: Result<Self> = async {
             let result = result?;
             let mut resp =
                 match result.data {
@@ -259,8 +259,9 @@ impl PrometheusJsonResponse {
                 resp.resp_metrics = re;
             }
 
-            resp
-        };
+            Ok(resp)
+        }
+        .await;
 
         let result_type_string = result_type.to_string();
 

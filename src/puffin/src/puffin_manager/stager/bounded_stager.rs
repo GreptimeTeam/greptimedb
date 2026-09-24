@@ -146,7 +146,7 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
         &self,
         handle: &Self::FileHandle,
         key: &str,
-        init_fn: Box<dyn InitBlobFn + Send + Sync + 'a>,
+        init_fn: Box<InitBlobFn<'a>>,
     ) -> Result<Self::Blob> {
         let handle_str = handle.to_string();
         let cache_key = Self::encode_cache_key(&handle_str, key);
@@ -202,7 +202,7 @@ impl<H: ToString + Clone + Send + Sync> Stager for BoundedStager<H> {
         &self,
         handle: &Self::FileHandle,
         key: &str,
-        init_fn: Box<dyn InitDirFn + Send + Sync + 'a>,
+        init_fn: Box<InitDirFn<'a>>,
     ) -> Result<(Self::Dir, DirMetrics)> {
         let handle_str = handle.to_string();
 
@@ -332,10 +332,7 @@ impl<H> BoundedStager<H> {
         BASE64_URL_SAFE.encode(hash)
     }
 
-    async fn write_blob(
-        target_path: &PathBuf,
-        init_fn: Box<dyn InitBlobFn + Send + Sync + '_>,
-    ) -> Result<u64> {
+    async fn write_blob(target_path: &PathBuf, init_fn: Box<InitBlobFn<'_>>) -> Result<u64> {
         // To guarantee the atomicity of writing the file, we need to write
         // the file to a temporary file first...
         let tmp_path = target_path.with_extension(TMP_EXTENSION);
@@ -354,10 +351,7 @@ impl<H> BoundedStager<H> {
         Ok(size)
     }
 
-    async fn write_dir(
-        target_path: &PathBuf,
-        init_fn: Box<dyn InitDirFn + Send + Sync + '_>,
-    ) -> Result<u64> {
+    async fn write_dir(target_path: &PathBuf, init_fn: Box<InitDirFn<'_>>) -> Result<u64> {
         // To guarantee the atomicity of writing the directory, we need to write
         // the directory to a temporary directory first...
         let tmp_base = target_path.with_extension(TMP_EXTENSION);

@@ -199,12 +199,12 @@ fn fetch_partition_range(input: Arc<dyn ExecutionPlan>) -> DataFusionResult<Opti
         Ok(Transformed::no(plan))
     })?;
 
-    let result = try {
-        ScannerInfo {
+    let result = (|| {
+        Some(ScannerInfo {
             partition_ranges: partition_ranges?,
             tag_columns: tag_columns?,
-        }
-    };
+        })
+    })();
 
     Ok(result)
 }

@@ -741,9 +741,9 @@ fn resolve_value(
                 &ConcreteDataType::string_datatype(),
                 schema_info,
             )?;
-            Some(ValueData::StringValue(String::from_utf8_lossy_owned(
-                v.to_vec(),
-            )))
+            Some(ValueData::StringValue(
+                String::from_utf8_lossy(&v).into_owned(),
+            ))
         }
 
         VrlValue::Regex(v) => {

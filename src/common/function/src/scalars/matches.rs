@@ -1119,11 +1119,12 @@ mod test {
         ];
 
         for (query, expected) in cases {
-            let result: Result<()> = try {
+            let result: Result<()> = (|| {
                 let parser = ParserContext { stack: vec![] };
                 let ast = parser.parse_pattern(query)?;
                 let _ast = ast.transform_ast()?;
-            };
+                Ok(())
+            })();
 
             assert!(result.is_err(), "{query}");
             let actual_error = result.unwrap_err().to_string();
