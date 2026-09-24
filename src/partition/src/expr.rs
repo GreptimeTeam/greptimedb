@@ -317,38 +317,38 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
-        let function_comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
-            (function @ Operand::Function { .. }, Operand::Value(value)) => {
-                Some((function, value, self.op.clone()))
+        let comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
+            (operand @ (Operand::Column(_) | Operand::Function { .. }), Operand::Value(value)) => {
+                Some((operand, value, self.op.clone()))
             }
-            (Operand::Value(value), function @ Operand::Function { .. }) => {
-                Some((function, value, self.op.invert_for_swap()))
+            (Operand::Value(value), operand @ (Operand::Column(_) | Operand::Function { .. })) => {
+                Some((operand, value, self.op.invert_for_swap()))
             }
             _ => None,
         };
-        if let Some((function, value, op)) = function_comparison {
-            let function = function.try_as_logical_expr()?;
+        if let Some((operand, value, op)) = comparison {
+            let operand = operand.try_as_logical_expr()?;
             // Partition routing uses a total, null-first ordering, so every
             // comparison must produce a non-null boolean in the batch path.
             if matches!(value, Value::Null) {
                 return match op {
-                    RestrictedOp::Eq | RestrictedOp::LtEq => Ok(function.is_null()),
-                    RestrictedOp::NotEq | RestrictedOp::Gt => Ok(function.is_not_null()),
-                    // Keep evaluating the function so invalid arguments fail in
+                    RestrictedOp::Eq | RestrictedOp::LtEq => Ok(operand.is_null()),
+                    RestrictedOp::NotEq | RestrictedOp::Gt => Ok(operand.is_not_null()),
+                    // Keep evaluating the operand so invalid function arguments fail in
                     // both row and batch routing, even for constant comparisons.
-                    RestrictedOp::Lt => Ok(function.clone().is_null().and(function.is_not_null())),
-                    RestrictedOp::GtEq => Ok(function.clone().is_null().or(function.is_not_null())),
+                    RestrictedOp::Lt => Ok(operand.clone().is_null().and(operand.is_not_null())),
+                    RestrictedOp::GtEq => Ok(operand.clone().is_null().or(operand.is_not_null())),
                     _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
                 };
             }
             let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
             return match op {
-                RestrictedOp::Eq => Ok(function.clone().eq(bound).and(function.is_not_null())),
-                RestrictedOp::NotEq => Ok(function.clone().not_eq(bound).or(function.is_null())),
-                RestrictedOp::Lt => Ok(function.clone().lt(bound).or(function.is_null())),
-                RestrictedOp::LtEq => Ok(function.clone().lt_eq(bound).or(function.is_null())),
-                RestrictedOp::Gt => Ok(function.clone().gt(bound).and(function.is_not_null())),
-                RestrictedOp::GtEq => Ok(function.clone().gt_eq(bound).and(function.is_not_null())),
+                RestrictedOp::Eq => Ok(operand.clone().eq(bound).and(operand.is_not_null())),
+                RestrictedOp::NotEq => Ok(operand.clone().not_eq(bound).or(operand.is_null())),
+                RestrictedOp::Lt => Ok(operand.clone().lt(bound).or(operand.is_null())),
+                RestrictedOp::LtEq => Ok(operand.clone().lt_eq(bound).or(operand.is_null())),
+                RestrictedOp::Gt => Ok(operand.clone().gt(bound).and(operand.is_not_null())),
+                RestrictedOp::GtEq => Ok(operand.clone().gt_eq(bound).and(operand.is_not_null())),
                 _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
             };
         }
@@ -370,78 +370,6 @@ impl PartitionExpr {
                 _ => unreachable!(),
             }
             .context(error::CreatePhysicalExprSnafu);
-        }
-
-        // Special handling for null equality.
-        // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
-        let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
-        let rhs_is_null = matches!(self.rhs.as_ref(), Operand::Value(Value::Null));
-
-        match (self.op.clone(), lhs_is_null, rhs_is_null) {
-            (RestrictedOp::Eq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_null());
-            }
-            (RestrictedOp::Eq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_null());
-            }
-            (RestrictedOp::NotEq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_not_null());
-            }
-            (RestrictedOp::NotEq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_not_null());
-            }
-            _ => {}
-        }
-
-        if matches!(
-            self.op,
-            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
-        ) {
-            // Keep filtering semantics aligned with direct PartitionExpr evaluation (null-first ordering).
-            // In DataFusion SQL semantics, range comparisons with NULL yield NULL, so we inject
-            // `OR col IS NULL` on the null-first side of the comparison.
-            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
-                let column_expr = self.lhs.try_as_logical_expr()?;
-                let other_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => {
-                        column_expr.clone().lt(other_expr).or(column_expr.is_null())
-                    }
-                    RestrictedOp::LtEq => column_expr
-                        .clone()
-                        .lt_eq(other_expr)
-                        .or(column_expr.is_null()),
-                    RestrictedOp::Gt => column_expr
-                        .clone()
-                        .gt(other_expr)
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::GtEq => column_expr
-                        .clone()
-                        .gt_eq(other_expr)
-                        .and(column_expr.is_not_null()),
-                    _ => unreachable!(),
-                };
-                return Ok(base);
-            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
-                let other_expr = self.lhs.try_as_logical_expr()?;
-                let column_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => other_expr
-                        .lt(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::LtEq => other_expr
-                        .lt_eq(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::Gt => {
-                        other_expr.gt(column_expr.clone()).or(column_expr.is_null())
-                    }
-                    RestrictedOp::GtEq => other_expr
-                        .gt_eq(column_expr.clone())
-                        .or(column_expr.is_null()),
-                    _ => unreachable!(),
-                };
-                return Ok(base);
-            }
         }
 
         // Normal cases handling, without NULL
@@ -878,7 +806,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) > a OR a IS NULL"
+            "a < Int64(10) OR a IS NULL"
         );
 
         let gteq_expr_rhs_column = PartitionExpr {
@@ -891,7 +819,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) >= a OR a IS NULL"
+            "a <= Int64(10) OR a IS NULL"
         );
     }
 

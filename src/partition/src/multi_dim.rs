@@ -438,7 +438,7 @@ mod tests {
     use crate::expr::col;
 
     #[test]
-    fn test_function_comparisons_match_row_evaluation() {
+    fn test_comparisons_match_row_evaluation() {
         use datatypes::arrow::array::{Array, StringArray};
         use datatypes::arrow::datatypes::{DataType, Field};
 
@@ -463,37 +463,40 @@ mod tests {
             ]))],
         )
         .unwrap();
-        for op in [
-            RestrictedOp::Eq,
-            RestrictedOp::NotEq,
-            RestrictedOp::Lt,
-            RestrictedOp::LtEq,
-            RestrictedOp::Gt,
-            RestrictedOp::GtEq,
-        ] {
-            for bound in [Value::Null, Value::from("m")] {
-                let expr = PartitionExpr::new(operand.clone(), op.clone(), bound.into());
-                let rule = MultiDimPartitionRule::try_new(
-                    vec!["host".into()],
-                    vec![1],
-                    vec![expr.clone()],
-                    false,
-                )
-                .unwrap();
-                let physical = expr
-                    .try_as_physical_expr(&batch.schema())
-                    .unwrap()
-                    .evaluate(&batch)
+        for operand in [col("host"), operand] {
+            for op in [
+                RestrictedOp::Eq,
+                RestrictedOp::NotEq,
+                RestrictedOp::Lt,
+                RestrictedOp::LtEq,
+                RestrictedOp::Gt,
+                RestrictedOp::GtEq,
+            ] {
+                for bound in [Value::Null, Value::from("m")] {
+                    let expr = PartitionExpr::new(operand.clone(), op.clone(), bound.into());
+                    let rule = MultiDimPartitionRule::try_new(
+                        vec!["host".into()],
+                        vec![1],
+                        vec![expr.clone()],
+                        false,
+                    )
                     .unwrap();
-                let physical = columnar_value_to_boolean_array(physical, batch.num_rows()).unwrap();
-                assert_eq!(physical.null_count(), 0);
-                for (row, value) in inputs.iter().enumerate() {
-                    assert_eq!(
-                        rule.evaluate_expr(&expr, std::slice::from_ref(value))
-                            .unwrap(),
-                        physical.value(row),
-                        "{expr}, input={value}"
-                    );
+                    let physical = expr
+                        .try_as_physical_expr(&batch.schema())
+                        .unwrap()
+                        .evaluate(&batch)
+                        .unwrap();
+                    let physical =
+                        columnar_value_to_boolean_array(physical, batch.num_rows()).unwrap();
+                    assert_eq!(physical.null_count(), 0);
+                    for (row, value) in inputs.iter().enumerate() {
+                        assert_eq!(
+                            rule.evaluate_expr(&expr, std::slice::from_ref(value))
+                                .unwrap(),
+                            physical.value(row),
+                            "{expr}, input={value}"
+                        );
+                    }
                 }
             }
         }
@@ -525,6 +528,15 @@ mod tests {
                     lower.clone().and(short.clone()),
                     lower.clone().and(long.clone()),
                     upper.clone(),
+                ],
+                1,
+                3,
+            ),
+            (
+                vec![
+                    col("host").not_eq(Value::from("z")).and(short.clone()),
+                    col("host").not_eq(Value::from("z")).and(long.clone()),
+                    col("host").eq(Value::from("z")),
                 ],
                 1,
                 3,
