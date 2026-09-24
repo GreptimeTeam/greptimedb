@@ -37,15 +37,15 @@ fn millis_since_epoch(time: SystemTime) -> Result<Timestamp> {
         Ok(duration) => (duration.as_millis(), false),
         Err(earlier) => (earlier.duration().as_millis(), true),
     };
-    let millis = i64::try_from(millis)
-        .ok()
-        .with_context(|| SystemTimeOutOfRangeSnafu { time })?;
+    let millis =
+        signed_millis(millis, before_epoch).with_context(|| SystemTimeOutOfRangeSnafu { time })?;
+    Ok(Timestamp::new_millisecond(millis))
+}
 
-    Ok(Timestamp::new_millisecond(if before_epoch {
-        -millis
-    } else {
-        millis
-    }))
+/// Converts a millisecond magnitude and epoch direction without platform time limits.
+fn signed_millis(millis: u128, before_epoch: bool) -> Option<i64> {
+    let millis = i64::try_from(millis).ok()?;
+    Some(if before_epoch { -millis } else { millis })
 }
 
 fn build_time_filter(time_index_expr: Expr, start: Timestamp, end: Timestamp) -> Expr {
@@ -139,7 +139,16 @@ mod tests {
 
     #[test]
     fn millis_beyond_i64_are_rejected() {
-        let time = UNIX_EPOCH + Duration::from_secs(1 << 60);
-        assert!(millis_since_epoch(time).is_err());
+        let limit = i64::MAX as u128;
+        assert_eq!(signed_millis(limit, false), Some(i64::MAX));
+        assert_eq!(signed_millis(limit, true), Some(-i64::MAX));
+        assert_eq!(signed_millis(limit + 1, false), None);
+        assert_eq!(signed_millis(limit + 1, true), None);
+
+        // Windows cannot represent this SystemTime. The conversion boundary is
+        // tested above on every platform; exercise the wrapper where possible.
+        if let Some(time) = UNIX_EPOCH.checked_add(Duration::from_millis(i64::MAX as u64 + 1)) {
+            assert!(millis_since_epoch(time).is_err());
+        }
     }
 }

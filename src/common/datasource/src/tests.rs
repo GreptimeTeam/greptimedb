@@ -18,34 +18,31 @@ use crate::test_util;
 
 #[tokio::test]
 async fn test_stream_to_json() {
-    let origin_path = &find_workspace_path("/src/common/datasource/tests/json/basic.json")
-        .display()
-        .to_string();
+    let root = find_workspace_path("/src/common/datasource/tests/json");
+    let store = test_util::test_store(root.to_str().unwrap());
+    let origin_path = "basic.json";
 
     // A small threshold
     // Triggers the flush each writes
-    test_util::setup_stream_to_json_test(origin_path, |size| size / 2).await;
+    test_util::setup_stream_to_json_test(&store, origin_path, |size| size / 2).await;
 
     // A large threshold
     // Only triggers the flush at last
-    test_util::setup_stream_to_json_test(origin_path, |size| size * 2).await;
+    test_util::setup_stream_to_json_test(&store, origin_path, |size| size * 2).await;
 }
 
 #[tokio::test]
 async fn test_stream_to_csv() {
-    let origin_path = &find_workspace_path("/src/common/datasource/tests/csv/basic.csv")
-        .display()
-        .to_string();
-
-    let format_path = &find_workspace_path("/src/common/datasource/tests/csv/basic_format.csv")
-        .display()
-        .to_string();
+    let root = find_workspace_path("/src/common/datasource/tests/csv");
+    let store = test_util::test_store(root.to_str().unwrap());
+    let origin_path = "basic.csv";
+    let format_path = "basic_format.csv";
 
     // A small threshold
     // Triggers the flush each writes
-    test_util::setup_stream_to_csv_test(origin_path, format_path, |size| size / 2).await;
+    test_util::setup_stream_to_csv_test(&store, origin_path, format_path, |size| size / 2).await;
 
     // A large threshold
     // Only triggers the flush at last
-    test_util::setup_stream_to_csv_test(origin_path, format_path, |size| size * 2).await;
+    test_util::setup_stream_to_csv_test(&store, origin_path, format_path, |size| size * 2).await;
 }

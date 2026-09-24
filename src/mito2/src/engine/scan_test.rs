@@ -1340,6 +1340,7 @@ async fn check_two_phase_series_scan(
         let store = region.series_index_store.clone().unwrap();
         let sequence = region.flushed_sequence();
         let entry = SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: Timestamp::new_millisecond(0),
             bucket_end: Timestamp::new_millisecond(2001),
@@ -1412,7 +1413,13 @@ async fn check_two_phase_series_scan(
             .unwrap();
             writer.write(0, &batch).await.unwrap();
             writer.finish().await.unwrap();
-            index_version.range_indexes.insert(file_id);
+            index_version.range_indexes.insert(
+                file_id,
+                crate::series_index::RangeIndexEntry {
+                    file_id,
+                    file_size: 0,
+                },
+            );
         }
         region
             .series_index_version_control
@@ -1607,7 +1614,7 @@ async fn check_two_phase_series_scan(
         // succeed even when that file is unavailable.
         let region = engine.find_region(region_id).unwrap();
         let version = region.series_index_version_control.current();
-        let file_id = *version.range_indexes.iter().next().unwrap();
+        let file_id = *version.range_indexes.keys().next().unwrap();
         region
             .series_index_store
             .as_ref()

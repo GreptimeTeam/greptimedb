@@ -206,6 +206,7 @@ mod tests {
     use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
+    use servers::batcher::BatchingProtocol;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
@@ -249,10 +250,7 @@ mod tests {
                         .logical_table
                         .unwrap()
                         .protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Prom,
-                        servers::http::BatchingProtocol::Otlp
-                    ]
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
                 );
             },
         );
@@ -270,10 +268,7 @@ mod tests {
                     FrontendOptions::load_layered_options(None, "FRONTEND_BATCHER_TEST").unwrap();
                 assert_eq!(
                     options.pending_rows_batcher.table.protocols,
-                    vec![
-                        servers::http::BatchingProtocol::Influxdb,
-                        servers::http::BatchingProtocol::HttpSql
-                    ]
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
                 );
             },
         );
@@ -319,7 +314,6 @@ max_batch_rows = 25
         let enabled: FrontendOptions = toml::from_str("experimental_metric_export = true").unwrap();
         assert!(enabled.experimental_metric_export);
         let toml_string = toml::to_string(&opts).unwrap();
-        assert!(toml_string.contains("experimental_enable_exponential_histogram = false"));
         let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
         assert_eq!(parsed.otlp, opts.otlp);
         assert_eq!(parsed.influxdb, opts.influxdb);

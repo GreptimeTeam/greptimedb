@@ -24,7 +24,7 @@ use common_base::Plugins;
 use common_config::Configurable;
 use common_telemetry::{info, warn};
 use meta_client::MetaClientOptions;
-use servers::batcher::pending_rows_batch_sync_enabled;
+use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
 use servers::error::Error as ServerError;
 use servers::grpc::builder::GrpcServerBuilder;
 use servers::grpc::flight::FlightCraftRef;
@@ -34,7 +34,7 @@ use servers::grpc::{GrpcOptions, GrpcServer};
 use servers::http::event::LogValidatorRef;
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::utils::router::RouterConfigurator;
-use servers::http::{BatchingProtocol, HttpOptions, HttpServer, HttpServerBuilder};
+use servers::http::{HttpOptions, HttpServer, HttpServerBuilder};
 use servers::interceptor::LogIngestInterceptorRef;
 use servers::metrics_handler::MetricsHandler;
 use servers::mysql::server::{MysqlServer, MysqlSpawnConfig, MysqlSpawnRef};
@@ -146,19 +146,14 @@ where
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.prom_store.prom_validation_mode,
-                    opts.prom_store
-                        .experimental_enable_prometheus_native_histogram,
                     pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(
-                self.instance.clone(),
-                opts.prom_store.with_metric_engine,
-                opts.otlp.experimental_enable_exponential_histogram,
-            );
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
@@ -369,6 +364,15 @@ where
             }
         }
 
+        let table_batcher = opts.table_batcher_options();
+        let batching_enabled = table_batcher.pending_rows_batching_enabled();
+        let mysql_batching =
+            batching_enabled && table_batcher.protocols.contains(&BatchingProtocol::Mysql);
+        let postgres_batching = batching_enabled
+            && table_batcher
+                .protocols
+                .contains(&BatchingProtocol::Postgres);
+
         if opts.mysql.enable {
             // Init MySQL server
             let opts = &opts.mysql;
@@ -384,13 +388,16 @@ where
             let mysql_server = MysqlServer::create_server(
                 common_runtime::global_runtime(),
                 Arc::new(MysqlSpawnRef::new(instance.clone(), user_provider.clone())),
-                Arc::new(MysqlSpawnConfig::new(
-                    opts.tls.should_force_tls(),
-                    tls_server_config,
-                    opts.keep_alive.as_secs(),
-                    opts.reject_no_database.unwrap_or(false),
-                    opts.prepared_stmt_cache_size,
-                )),
+                Arc::new(
+                    MysqlSpawnConfig::new(
+                        opts.tls.should_force_tls(),
+                        tls_server_config,
+                        opts.keep_alive.as_secs(),
+                        opts.reject_no_database.unwrap_or(false),
+                        opts.prepared_stmt_cache_size,
+                    )
+                    .with_batching_enabled(mysql_batching),
+                ),
                 Some(instance.process_manager().clone()),
             );
             handlers.insert((mysql_server, mysql_addr));
@@ -407,15 +414,18 @@ where
 
             maybe_watch_server_tls_config(tls_server_config.clone()).context(StartServerSnafu)?;
 
-            let pg_server = Box::new(PostgresServer::new(
-                instance.clone(),
-                opts.tls.should_force_tls(),
-                tls_server_config,
-                opts.keep_alive.as_secs(),
-                common_runtime::global_runtime(),
-                user_provider.clone(),
-                Some(self.instance.process_manager().clone()),
-            )) as Box<dyn Server>;
+            let pg_server = Box::new(
+                PostgresServer::new(
+                    instance.clone(),
+                    opts.tls.should_force_tls(),
+                    tls_server_config,
+                    opts.keep_alive.as_secs(),
+                    common_runtime::global_runtime(),
+                    user_provider.clone(),
+                    Some(self.instance.process_manager().clone()),
+                )
+                .with_batching_enabled(postgres_batching),
+            ) as Box<dyn Server>;
 
             handlers.insert((pg_server, pg_addr));
         }
@@ -452,8 +462,11 @@ fn effective_http_options_with_sync(opts: &FrontendOptions, batch_sync: bool) ->
     let common_enabled = batch_sync
         && shared.pending_rows_batching_enabled()
         && shared.protocols.iter().any(|protocol| {
-            *protocol != BatchingProtocol::Prom
-                || (prom_store.enable && !prom_store.with_metric_engine)
+            !matches!(
+                protocol,
+                BatchingProtocol::Mysql | BatchingProtocol::Postgres
+            ) && (*protocol != BatchingProtocol::Prom
+                || (prom_store.enable && !prom_store.with_metric_engine))
         });
     let common_interval = common_enabled.then_some(shared.pending_rows_flush_interval);
     let prom_interval = (prom_store.pending_rows_batching_enabled() && batch_sync)
@@ -605,8 +618,6 @@ mod tests {
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.enable = prom_enabled;
-            opts.prom_store
-                .experimental_enable_prometheus_native_histogram = true;
             let shared = &mut opts.pending_rows_batcher.table;
             shared.protocols = vec![if selected {
                 BatchingProtocol::Prom
@@ -655,6 +666,10 @@ mod tests {
             expected_secs,
         ) in [
             (vec![BatchingProtocol::Prom], false, false, 5, 2, 1, 1),
+            (vec![BatchingProtocol::Mysql], false, false, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Postgres], false, false, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Mysql], false, true, 5, 0, 1, 1),
+            (vec![BatchingProtocol::Postgres], false, true, 5, 0, 1, 1),
             (vec![BatchingProtocol::Prom], true, false, 5, 2, 1, 1),
             (vec![BatchingProtocol::Prom], true, true, 5, 2, 1, 6),
             (vec![BatchingProtocol::Influxdb], true, false, 5, 2, 1, 1),

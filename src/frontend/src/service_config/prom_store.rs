@@ -27,9 +27,6 @@ pub struct PromStoreOptions {
     /// Validation mode while decoding Prometheus remote write requests.
     #[serde(default)]
     pub prom_validation_mode: PromValidationMode,
-    /// Enables experimental Prometheus remote write v2 native histogram ingestion.
-    #[serde(default)]
-    pub experimental_enable_prometheus_native_histogram: bool,
     #[serde(default, with = "humantime_serde")]
     pub pending_rows_flush_interval: Duration,
     #[serde(default = "default_max_batch_rows")]
@@ -89,7 +86,6 @@ impl Default for PromStoreOptions {
             enable: true,
             with_metric_engine: true,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_flush_interval: Duration::ZERO,
             max_batch_rows: default_max_batch_rows(),
             max_concurrent_flushes: default_max_concurrent_flushes(),
@@ -108,7 +104,6 @@ mod tests {
     use crate::service_config::prom_store::{
         default_flow_notification_queue_capacity, default_max_batch_rows,
         default_max_concurrent_flushes, default_max_inflight_requests,
-        default_worker_channel_capacity,
     };
 
     #[test]
@@ -153,17 +148,13 @@ mod tests {
         assert!(default.enable);
         assert!(default.with_metric_engine);
         assert_eq!(default.prom_validation_mode, PromValidationMode::Strict);
-        assert!(!default.experimental_enable_prometheus_native_histogram);
         assert_eq!(default.pending_rows_flush_interval, Duration::ZERO);
         assert_eq!(default.max_batch_rows, default_max_batch_rows());
         assert_eq!(
             default.max_concurrent_flushes,
             default_max_concurrent_flushes()
         );
-        assert_eq!(
-            default.worker_channel_capacity,
-            default_worker_channel_capacity()
-        );
+        assert_eq!(default.worker_channel_capacity, 65_536);
         assert_eq!(
             default.max_inflight_requests,
             default_max_inflight_requests()

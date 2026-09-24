@@ -138,7 +138,7 @@ pub fn to_grpc_insert_requests(
             && !metric_ctx.is_legacy
             && let Some(r) = resource.resource.as_ref()
         {
-            resource_info.observe(&r.attributes, resource, metric_ctx);
+            resource_info.observe(&r.attributes, resource);
         }
 
         let resource_attrs = resource.resource.as_ref().map(|r| {
@@ -630,7 +630,7 @@ fn encode_exponential_histogram(
     metric_ctx: &OtlpMetricCtx,
     outcome: &mut MetricsIngestOutcome,
 ) -> Result<bool> {
-    if let Err(rejection) = exponential_histogram_gate(histogram, metric_ctx) {
+    if let Err(rejection) = exponential_histogram_gate(histogram) {
         reject_data_points(outcome, histogram.data_points.len(), || {
             rejection.message(name)
         })?;
@@ -684,7 +684,6 @@ fn encode_exponential_histogram(
 }
 
 pub(crate) enum ExponentialHistogramRejection {
-    Disabled,
     DeltaTemporality,
     UnspecifiedTemporality,
 }
@@ -692,9 +691,6 @@ pub(crate) enum ExponentialHistogramRejection {
 impl ExponentialHistogramRejection {
     fn message(&self, name: &str) -> String {
         match self {
-            Self::Disabled => format!(
-                "metric `{name}` uses OTLP exponential histograms; set otlp.experimental_enable_exponential_histogram = true to enable ingestion"
-            ),
             Self::DeltaTemporality => format!(
                 "metric `{name}` uses delta OTLP exponential histograms; only cumulative temporality is supported"
             ),
@@ -710,11 +706,7 @@ impl ExponentialHistogramRejection {
 /// Individual points can still fail [`exponential_histogram_value`].
 pub(crate) fn exponential_histogram_gate(
     histogram: &ExponentialHistogram,
-    metric_ctx: &OtlpMetricCtx,
 ) -> std::result::Result<(), ExponentialHistogramRejection> {
-    if !metric_ctx.experimental_enable_exponential_histogram {
-        return Err(ExponentialHistogramRejection::Disabled);
-    }
     match AggregationTemporality::try_from(histogram.aggregation_temporality) {
         Ok(AggregationTemporality::Cumulative) => Ok(()),
         Ok(AggregationTemporality::Delta) => Err(ExponentialHistogramRejection::DeltaTemporality),
@@ -2580,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_exponential_histogram_gate_and_partial_outcome() {
+    fn test_exponential_histogram_default_context_and_partial_outcome() {
         let request = metrics_request(vec![
             Metric {
                 name: "temperature".to_string(),
@@ -2594,6 +2586,11 @@ mod tests {
                 vec![exponential_point()],
                 AggregationTemporality::Cumulative,
             ),
+            exponential_metric(
+                "delta_latency",
+                vec![exponential_point()],
+                AggregationTemporality::Delta,
+            ),
         ]);
         let MetricsConversion {
             requests,
@@ -2602,20 +2599,20 @@ mod tests {
             ..
         } = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default()).unwrap();
 
-        assert_eq!(outcome.accepted_data_points, 1);
+        assert_eq!(outcome.accepted_data_points, 2);
         assert_eq!(outcome.rejected_data_points, 1);
         assert!(
             outcome
                 .error_message
                 .as_deref()
                 .unwrap()
-                .contains("otlp.experimental_enable_exponential_histogram")
+                .contains("only cumulative temporality is supported")
         );
-        assert_eq!(requests.inserts.len(), 1);
-        assert_eq!(requests.inserts[0].table_name, "temperature");
+        assert_eq!(requests.inserts.len(), 2);
         let semantics = decode(&semantic_index);
         assert!(semantics.contains_key("temperature"));
-        assert!(!semantics.contains_key("latency"));
+        assert!(semantics.contains_key("latency"));
+        assert!(!semantics.contains_key("delta_latency"));
 
         let empty = metrics_request(vec![exponential_metric(
             "empty",
@@ -2648,10 +2645,7 @@ mod tests {
                 AggregationTemporality::Cumulative,
             ),
         ]);
-        let mut ctx = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
-            ..Default::default()
-        };
+        let mut ctx = OtlpMetricCtx::default();
 
         let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
         assert!(
@@ -2671,10 +2665,7 @@ mod tests {
             ),
             histogram_metric("latency"),
         ]);
-        let mut ctx = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
-            ..Default::default()
-        };
+        let mut ctx = OtlpMetricCtx::default();
 
         let error = to_grpc_insert_requests(request, &mut ctx).unwrap_err();
         assert!(
@@ -2739,10 +2730,7 @@ mod tests {
                 vec![stale.clone()],
                 temporality,
             )]);
-            let mut ctx = OtlpMetricCtx {
-                experimental_enable_exponential_histogram: true,
-                ..Default::default()
-            };
+            let mut ctx = OtlpMetricCtx::default();
             let MetricsConversion {
                 requests,
                 rows,
@@ -2770,15 +2758,11 @@ mod tests {
             vec![point],
             AggregationTemporality::Cumulative,
         )]);
-        let mut new_ctx = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
-            ..Default::default()
-        };
+        let mut new_ctx = OtlpMetricCtx::default();
         let new_requests = to_grpc_insert_requests(request.clone(), &mut new_ctx)
             .unwrap()
             .requests;
         let mut legacy_ctx = OtlpMetricCtx {
-            experimental_enable_exponential_histogram: true,
             is_legacy: true,
             ..Default::default()
         };
@@ -2831,7 +2815,7 @@ mod tests {
         let request = metrics_request(vec![exponential_metric(
             "x".repeat(1_000),
             vec![ExponentialHistogramDataPoint::default()],
-            AggregationTemporality::Cumulative,
+            AggregationTemporality::Delta,
         )]);
         let outcome = to_grpc_insert_requests(request, &mut OtlpMetricCtx::default())
             .unwrap()

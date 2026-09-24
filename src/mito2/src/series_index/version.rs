@@ -14,7 +14,7 @@
 
 //! Immutable index snapshots and aggregate series-file handles.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Debug, Formatter};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -23,7 +23,7 @@ use common_time::Timestamp;
 use store_api::storage::{FileId, RegionId};
 
 use crate::series_index::bucket::IndexBucket;
-use crate::series_index::catalog::SeriesIndexEntry;
+use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
 use crate::series_index::purger::{IndexFilePurger, PurgeRequest};
 use crate::sst::file::RegionFileId;
 
@@ -94,7 +94,7 @@ impl Drop for SeriesIndexFileHandleInner {
 pub(crate) struct SeriesIndexVersion {
     /// Range indexes for visible SSTs; reconciliation removes IDs absent from its SST snapshot.
     /// Physical deletion is independently handled by the SST file purger.
-    pub(crate) range_indexes: HashSet<FileId>,
+    pub(crate) range_indexes: HashMap<FileId, RangeIndexEntry>,
     pub(crate) series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     pub(crate) index_buckets: BTreeMap<Timestamp, IndexBucket>,
 }
@@ -102,7 +102,7 @@ pub(crate) struct SeriesIndexVersion {
 impl SeriesIndexVersion {
     /// Restores bucket lookup from immutable index coverage stored in the catalog.
     pub(crate) fn new(
-        range_indexes: HashSet<FileId>,
+        range_indexes: HashMap<FileId, RangeIndexEntry>,
         series_indexes: HashMap<FileId, SeriesIndexFileHandle>,
     ) -> Self {
         let mut index_buckets = BTreeMap::new();
@@ -114,6 +114,19 @@ impl SeriesIndexVersion {
             series_indexes,
             index_buckets,
         }
+    }
+
+    /// Approximate installed usage; old snapshots and unpublished outputs are excluded.
+    pub(crate) fn disk_usage(&self) -> u64 {
+        self.range_indexes
+            .values()
+            .map(|entry| entry.file_size)
+            .sum::<u64>()
+            + self
+                .series_indexes
+                .values()
+                .map(|handle| handle.entry().file_size)
+                .sum::<u64>()
     }
 
     fn mark_all_deleted(&self) {

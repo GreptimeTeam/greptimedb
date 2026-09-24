@@ -16,9 +16,9 @@ use std::sync::{Arc, Weak};
 
 use api::v1::ColumnSchema;
 use async_trait::async_trait;
+use servers::batcher::BatchingProtocol;
 use servers::batcher::logical_table::{LogicalTablePendingRowsBatcher, PendingRowsSchemaAlterer};
 use servers::error::{BatcherChannelClosedSnafu, Result};
-use servers::http::BatchingProtocol;
 use session::context::QueryContextRef;
 use snafu::OptionExt;
 

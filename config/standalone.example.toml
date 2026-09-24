@@ -210,11 +210,13 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
-## Ordinary-table batching for opted-in HTTP ingestion protocols.
+## Ordinary-table batching for opted-in ingestion protocols.
 ## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
 ## queue admission without waiting for storage; later failures cannot be returned to the client.
 ## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
 ## OTLP logs, traces and ordinary metrics use this batcher.
+## MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.
+## Single-connection writes and INSERT SELECT may incur additional flush waits.
 [pending_rows_batcher]
 # protocols = [
 #     "influxdb",
@@ -225,6 +227,8 @@ default_merge_mode = "last_non_null"
 #     "splunk",
 #     "elasticsearch",
 #     "http_sql",
+#     "mysql",
+#     "postgres",
 #     "prom",
 # ]
 ## Flush interval measured from the first pending submission. Zero disables batching.
@@ -270,8 +274,6 @@ enable = true
 [otlp]
 ## Whether to enable OpenTelemetry protocol in HTTP API.
 enable = true
-## Experimental: enable cumulative OTLP exponential histogram ingestion.
-experimental_enable_exponential_histogram = false
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
 ## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
@@ -290,8 +292,6 @@ with_metric_engine = true
 ## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
 ## - unchecked: do not valid strings.
 prom_validation_mode = "strict"
-## Experimental: enable Prometheus remote write v2 native histogram ingestion.
-experimental_enable_prometheus_native_histogram = false
 
 
 ## The WAL options.
@@ -706,6 +706,13 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Approximate series and range index size limit in open regions, shared across workers.
+## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
+## retained by readers are not counted.
+## Minimum: 1KiB. Takes effect on restart.
+#+ experimental_series_index_max_size = "5GiB"
 
 ## Whether to build and query range indexes when series indexes are enabled.
 ## Obsolete range-index metadata and files are still cleaned up when disabled.

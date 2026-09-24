@@ -56,11 +56,7 @@ fn observe_ignores_rejected_classic_histogram_windows() {
         ..Default::default()
     };
     let mut data = ResourceInfoData::default();
-    data.observe(
-        &[kv("service.name", "api")],
-        &resource,
-        &OtlpMetricCtx::default(),
-    );
+    data.observe(&[kv("service.name", "api")], &resource);
 
     let windows = data.rows.values().next().unwrap();
     assert_eq!(

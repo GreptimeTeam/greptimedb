@@ -75,7 +75,7 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
-| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in HTTP ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher. |
+| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher.<br/>MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.<br/>Single-connection writes and INSERT SELECT may incur additional flush waits. |
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
@@ -93,14 +93,12 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `wal` | -- | -- | The WAL options. |
 | `wal.provider` | String | `raft_engine` | The provider of the WAL.<br/>- `raft_engine`: the wal is stored in the local file system by raft-engine.<br/>- `kafka`: it's remote wal that data is stored in Kafka.<br/>- `experimental_object_store`: the wal is stored as objects in an object store.<br/>**Notes: experimental and not supported yet.** |
 | `wal.dir` | String | Unset | The directory to store the WAL files.<br/>**It's only used when the provider is `raft_engine`**. |
@@ -179,6 +177,7 @@
 | `region_engine.mito.manifest_checkpoint_distance` | Integer | `10` | Number of meta action updated to trigger a new checkpoint for the manifest. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |
@@ -343,7 +342,7 @@
 | `influxdb` | -- | -- | InfluxDB protocol options. |
 | `influxdb.enable` | Bool | `true` | Whether to enable InfluxDB protocol in HTTP API. |
 | `influxdb.default_merge_mode` | String | `last_non_null` | Default merge mode for tables automatically created by InfluxDB protocol.<br/>Available values: "last_non_null", "last_row". |
-| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in HTTP ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher. |
+| `pending_rows_batcher` | -- | -- | Ordinary-table batching for opted-in ingestion protocols.<br/>PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge<br/>queue admission without waiting for storage; later failures cannot be returned to the client.<br/>Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.<br/>OTLP logs, traces and ordinary metrics use this batcher.<br/>MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.<br/>Single-connection writes and INSERT SELECT may incur additional flush waits. |
 | `pending_rows_batcher.pending_rows_flush_interval` | String | `0s` | Flush interval measured from the first pending submission. Zero disables batching. |
 | `pending_rows_batcher.max_batch_rows` | Integer | `100000` | Flush after a complete submission reaches this row threshold. |
 | `pending_rows_batcher.max_concurrent_flushes` | Integer | `256` | Maximum concurrent flushes shared by the frontend batcher. |
@@ -361,14 +360,12 @@
 | `jaeger.enable` | Bool | `true` | Whether to enable Jaeger protocol in HTTP API. |
 | `otlp` | -- | -- | OpenTelemetry protocol options. |
 | `otlp.enable` | Bool | `true` | Whether to enable OpenTelemetry protocol in HTTP API. |
-| `otlp.experimental_enable_exponential_histogram` | Bool | `false` | Experimental: enable cumulative OTLP exponential histogram ingestion. |
 | `otlp.trace_ingest_chunk_size` | Integer | `512` | Maximum spans per trace ingest chunk. Set to 0 to disable splitting. |
 | `otlp.experimental_enable_resource_info` | Bool | `false` | Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric<br/>resource attributes, so metrics-only services reach the semantic graph. |
 | `prom_store` | -- | -- | Prometheus remote storage options |
 | `prom_store.enable` | Bool | `true` | Whether to enable Prometheus remote write and read in HTTP API. |
 | `prom_store.with_metric_engine` | Bool | `true` | Whether to store the data from Prometheus remote write in metric engine. |
 | `prom_store.prom_validation_mode` | String | `strict` | Whether to enable validation for Prometheus remote write requests.<br/>Available options:<br/>- strict: deny invalid UTF-8 strings (default).<br/>- lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).<br/>- unchecked: do not valid strings. |
-| `prom_store.experimental_enable_prometheus_native_histogram` | Bool | `false` | Experimental: enable Prometheus remote write v2 native histogram ingestion. |
 | `meta_client` | -- | -- | The metasrv client options. |
 | `meta_client.metasrv_addrs` | Array | -- | The addresses of the metasrv. |
 | `meta_client.timeout` | String | `3s` | Operation timeout. |
@@ -643,6 +640,7 @@
 | `region_engine.mito.experimental_manifest_keep_removed_file_ttl` | String | `1h` | How long to keep removed files in the `removed_files` field of manifest<br/>after they are removed from manifest.<br/>files will only be removed from `removed_files` field<br/>if both `keep_removed_file_count` and `keep_removed_file_ttl` is reached. |
 | `region_engine.mito.compress_manifest` | Bool | `false` | Whether to compress manifest and checkpoint file by gzip (default false). |
 | `region_engine.mito.experimental_enable_series_index` | Bool | `false` | Under development; do not enable. Whether to enable series indexes.<br/>Indexes are stored on the local filesystem under `{data_home}/series_index`. |
+| `region_engine.mito.experimental_series_index_max_size` | String | `5GiB` | Approximate series and range index size limit in open regions, shared across workers.<br/>Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation<br/>can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots<br/>retained by readers are not counted.<br/>Minimum: 1KiB. Takes effect on restart. |
 | `region_engine.mito.experimental_enable_range_index` | Bool | `false` | Whether to build and query range indexes when series indexes are enabled.<br/>Obsolete range-index metadata and files are still cleaned up when disabled. |
 | `region_engine.mito.experimental_series_index_maintenance_interval` | String | `5m` | Interval between series-index maintenance runs. Zero uses the default of 5 min. |
 | `region_engine.mito.experimental_series_index_bucket_width` | String | `5days` | Requested minimum series-index bucket width (default: 5 days), rounded up to<br/>an exact multiple of each region's compaction time window. |

@@ -24,6 +24,7 @@ use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_serv
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::{
     BatchArrowRecords, BatchStatus, StatusCode as ArrowStatusCode,
 };
+use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
 use otel_arrow_rust::proto::opentelemetry::metrics::v1::metric;
 use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 use tonic::metadata::{Entry, MetadataValue};
@@ -50,23 +51,42 @@ impl<T> OtelArrowServiceHandler<T> {
     }
 }
 
+/// Removes unsupported Arrow histograms before ingestion, preserving other metrics.
+fn remove_exponential_histograms(request: &mut ExportMetricsServiceRequest) -> bool {
+    let mut has_data_points = false;
+    for scope in request
+        .resource_metrics
+        .iter_mut()
+        .flat_map(|resource| &mut resource.scope_metrics)
+    {
+        scope.metrics.retain(|item| {
+            if let Some(metric::Data::ExponentialHistogram(histogram)) = &item.data {
+                has_data_points |= !histogram.data_points.is_empty();
+                false
+            } else {
+                true
+            }
+        });
+    }
+    has_data_points
+}
+
 fn batch_status(
     batch_id: i64,
     outcome: MetricsIngestOutcome,
     has_exponential_histogram_data_points: bool,
 ) -> BatchStatus {
-    let status_code = if outcome.accepted_data_points == 0 && outcome.rejected_data_points > 0 {
+    let status_code = if outcome.accepted_data_points == 0
+        && (outcome.rejected_data_points > 0 || has_exponential_histogram_data_points)
+    {
         ArrowStatusCode::InvalidArgument
     } else {
         ArrowStatusCode::Ok
     };
-    let status_message = match outcome.error_message {
-        // Arrow keeps the feature gate off, so these fail before per-point validation.
-        Some(_) if has_exponential_histogram_data_points => {
-            EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
-        }
-        Some(message) => message,
-        None => String::new(),
+    let status_message = if has_exponential_histogram_data_points {
+        EXPONENTIAL_HISTOGRAM_UNSUPPORTED.to_string()
+    } else {
+        outcome.error_message.unwrap_or_default()
     };
     BatchStatus {
         batch_id,
@@ -117,7 +137,7 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                     }
                 };
                 let batch_id = batch.batch_id;
-                let request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
+                let mut request = match consumer.consume_metrics_batches(&mut batch).map_err(|e| {
                     error::HandleOtelArrowRequestSnafu {
                         err_msg: e.to_string(),
                     }
@@ -137,18 +157,8 @@ impl ArrowMetricsService for OtelArrowServiceHandler<OpenTelemetryProtocolHandle
                         return;
                     }
                 };
-                let has_exponential_histogram_data_points = request
-                    .resource_metrics
-                    .iter()
-                    .flat_map(|resource| &resource.scope_metrics)
-                    .flat_map(|scope| &scope.metrics)
-                    .any(|item| {
-                        matches!(
-                            item.data.as_ref(),
-                            Some(metric::Data::ExponentialHistogram(histogram))
-                                if !histogram.data_points.is_empty()
-                        )
-                    });
+                let has_exponential_histogram_data_points =
+                    remove_exponential_histograms(&mut request);
                 let outcome = match handler.metrics(request, query_ctx.clone()).await {
                     Ok(outcome) => outcome,
                     Err(error::Error::InvalidOtlpMetricInput { reason }) => {
@@ -202,19 +212,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn batch_status_explains_arrow_exponential_histogram_limit() {
-        let status = batch_status(
-            7,
-            MetricsIngestOutcome {
-                rejected_data_points: 1,
-                error_message: Some("internal OTLP rejection detail".to_string()),
-                ..Default::default()
-            },
-            true,
-        );
+    fn removes_arrow_exponential_histograms_and_preserves_other_metrics() {
+        use otel_arrow_rust::proto::opentelemetry::metrics::v1::{
+            ExponentialHistogram, ExponentialHistogramDataPoint, Gauge, Metric, ResourceMetrics,
+            ScopeMetrics,
+        };
 
-        assert_eq!(7, status.batch_id);
-        assert_eq!(ArrowStatusCode::InvalidArgument as i32, status.status_code);
-        assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
+        let mut request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![
+                        Metric {
+                            data: Some(metric::Data::ExponentialHistogram(ExponentialHistogram {
+                                data_points: vec![ExponentialHistogramDataPoint::default()],
+                                ..Default::default()
+                            })),
+                            ..Default::default()
+                        },
+                        Metric {
+                            data: Some(metric::Data::Gauge(Gauge::default())),
+                            ..Default::default()
+                        },
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        assert!(remove_exponential_histograms(&mut request));
+        let metrics = &request.resource_metrics[0].scope_metrics[0].metrics;
+        assert_eq!(metrics.len(), 1);
+        assert!(matches!(metrics[0].data, Some(metric::Data::Gauge(_))));
+        assert!(!remove_exponential_histograms(&mut request));
+    }
+
+    #[test]
+    fn batch_status_explains_arrow_exponential_histogram_limit() {
+        for accepted_data_points in [0, 1] {
+            let status = batch_status(
+                7,
+                MetricsIngestOutcome {
+                    accepted_data_points,
+                    ..Default::default()
+                },
+                true,
+            );
+            assert_eq!(7, status.batch_id);
+            assert_eq!(
+                if accepted_data_points == 0 {
+                    ArrowStatusCode::InvalidArgument
+                } else {
+                    ArrowStatusCode::Ok
+                } as i32,
+                status.status_code
+            );
+            assert_eq!(EXPONENTIAL_HISTOGRAM_UNSUPPORTED, status.status_message);
+        }
     }
 }
