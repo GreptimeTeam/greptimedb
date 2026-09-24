@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod at_modifier;
 mod matching_filters;
 
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -168,6 +169,12 @@ struct PromPlannerContext {
     end: Millisecond,
     interval: Millisecond,
     lookback_delta: Millisecond,
+    /// Evaluation range of the whole statement, which `@ start()` and `@ end()` refer to.
+    ///
+    /// Unlike [`Self::start`] and [`Self::end`], these are never rewritten while planning, so a
+    /// selector inside a subquery still resolves `@ start()` / `@ end()` against the statement.
+    stmt_start: Millisecond,
+    stmt_end: Millisecond,
 
     // planner states
     table_name: Option<String>,
@@ -196,6 +203,16 @@ struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+    /// The offset in milliseconds the window of the last planned range selector is folded with,
+    /// or `None` when no range selector has been planned since the last read.
+    ///
+    /// [`Self::start`] and the sample timestamps are compared on the shifted timeline: a range
+    /// payload carries `sample_timestamp + offset`, while the time index column of a folded row
+    /// stays the evaluation timestamp of its step. A function that reads it right after its input
+    /// plan is built, like `predict_linear`, consumes it instead of reading the state, so the
+    /// offset cannot leak from one input to another; see
+    /// [`PromPlanner::create_function_expr`].
+    range_fold_offset: Option<Millisecond>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -401,11 +418,15 @@ impl IslandCollectEnv {
 
 impl PromPlannerContext {
     fn from_eval_stmt(stmt: &EvalStmt) -> Self {
+        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
+        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
         Self {
-            start: stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
-            end: stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
+            start,
+            end,
             interval: stmt.interval.as_millis() as _,
             lookback_delta: stmt.lookback_delta.as_millis() as _,
+            stmt_start: start,
+            stmt_end: end,
             ..Default::default()
         }
     }
@@ -421,6 +442,7 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
+        self.range_fold_offset = None;
     }
 
     /// Reset table name and schema to empty
@@ -500,6 +522,16 @@ impl PromPlanner {
         timestamp_fn: bool,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
+        // An anchored range call is step-invariant: evaluate it once, at the start of the
+        // evaluation, and report its result at every step; see
+        // [`Self::promote_anchored_range_call`].
+        if let Some(plan) = self
+            .promote_anchored_range_call(prom_expr, timestamp_fn, query_engine_state)
+            .await?
+        {
+            return Ok(plan);
+        }
+
         let res = match prom_expr {
             PromExpr::Aggregate(expr) => {
                 self.prom_aggr_expr_to_plan(query_engine_state, expr)
@@ -633,6 +665,9 @@ impl PromPlanner {
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
+        // A subquery always folds with offset 0, so its payload timestamps are already on the
+        // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(0);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
@@ -2012,6 +2047,44 @@ impl PromPlanner {
         Ok(plan)
     }
 
+    /// The offset of a selector in milliseconds. A positive offset selects samples from an earlier
+    /// time and moves them forward into the evaluation timeline.
+    fn offset_millis(offset: &Option<Offset>) -> Millisecond {
+        match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        }
+    }
+
+    /// The columns that identify one series, which is the series key expected by the PromQL plan
+    /// nodes that hold exactly one series per input batch.
+    fn series_key_columns(&self) -> Vec<String> {
+        if self.ctx.use_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx.tag_columns.clone()
+        }
+    }
+
+    /// Keep replay and series division on the same effective keys when a call rewrites labels.
+    fn series_key_columns_for_schema(&self, schema: &DFSchemaRef) -> Vec<String> {
+        let has_tsid = schema.fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        });
+        if has_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx
+                .tag_columns
+                .iter()
+                .filter(|name| schema.has_column_with_unqualified_name(name))
+                .cloned()
+                .collect()
+        }
+    }
+
     async fn prom_vector_selector_to_plan(
         &mut self,
         vector_selector: &VectorSelector,
@@ -2021,20 +2094,37 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            at: _,
+            at,
         } = vector_selector;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
+        let offset_ms = Self::offset_millis(offset);
+        // `@` anchors the sample window at a fixed timestamp: the selector selects its samples
+        // around the anchor once, instead of following the outer evaluation grid. See
+        // [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
+        let normalize = match at_offset {
+            Some(at_offset) => {
+                // Select the anchored samples at the start of the evaluation, with the offset that
+                // re-anchors the selector.
+                // The planner is single-use (one `EvalStmt` produces one plan), so an error
+                // below aborts the whole planning and `ctx.end` needs no restore-on-error.
+                self.ctx.end = grid_start;
+                let plan = self
+                    .selector_to_series_normalize_plan(at_offset, matchers, false)
+                    .await?;
+                self.ctx.end = grid_end;
+                plan
+            }
+            None => {
+                self.selector_to_series_normalize_plan(offset_ms, matchers, false)
+                    .await?
+            }
         };
-        let normalize = self
-            .selector_to_series_normalize_plan(offset, matchers, false)
-            .await?;
         let time_index_column =
             self.ctx
                 .time_index_column
@@ -2116,24 +2206,46 @@ impl PromPlanner {
         };
 
         let field_column = self.ctx.field_columns.first().cloned();
-        let manipulate = InstantManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.lookback_delta,
-            self.ctx.interval,
-            offset_ms,
-            time_index_column,
-            if self.ctx.use_tsid {
-                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
-            } else {
-                self.ctx.tag_columns.clone()
-            },
-            field_column,
-            normalize,
-        );
-        let manipulate = LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        });
+        let series_key_columns = self.series_key_columns();
+        let manipulate = match at_offset {
+            Some(at_offset) => {
+                // Select the anchored sample once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let anchored = InstantManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    at_offset,
+                    time_index_column.clone(),
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                );
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )
+            }
+            None => LogicalPlan::Extension(Extension {
+                node: Arc::new(InstantManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    offset_ms,
+                    time_index_column,
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                )),
+            }),
+        };
         if let Some(timestamp_value_column) = timestamp_value_column {
             self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
         } else {
@@ -2191,46 +2303,108 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            ..
+            at,
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
+        let offset_ms = Self::offset_millis(offset);
+
+        // `@` anchors the range selector's window at a fixed timestamp, so the same window is fed
+        // to the enclosing function at every evaluation step. See [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
-        let normalize = match self.setup_context().await? {
-            Some(empty_plan) => empty_plan,
+        let (normalize, at_offset) = match self.setup_context().await? {
+            // An empty metric does not contain any sample, so anchoring cannot change the result.
+            // The manipulate below folds the empty input with `offset_ms`, and the recorded fold
+            // offset agrees with it instead of with the anchor the window cannot use.
+            Some(empty_plan) => {
+                self.ctx.range_fold_offset = Some(offset_ms);
+                (empty_plan, None)
+            }
             None => {
-                self.selector_to_series_normalize_plan(offset, matchers, true)
-                    .await?
+                let normalize = match at_offset {
+                    Some(at_offset) => {
+                        // Fold the anchored window once, at the start of the evaluation.
+                        // Single-use planner: an error below aborts planning, so `ctx.end`
+                        // needs no restore-on-error.
+                        self.ctx.end = grid_start;
+                        let plan = self
+                            .selector_to_series_normalize_plan(at_offset, matchers, true)
+                            .await?;
+                        self.ctx.end = grid_end;
+                        plan
+                    }
+                    None => {
+                        self.selector_to_series_normalize_plan(offset_ms, matchers, true)
+                            .await?
+                    }
+                };
+                // Samples are shifted onto the evaluation timeline with the very same offset while
+                // the window is folded. Record it so that the function above the selector can
+                // recover the evaluation instant of the folded window; see
+                // [`Self::create_range_eval_ts_expr`].
+                self.ctx.range_fold_offset = Some(at_offset.unwrap_or(offset_ms));
+                (normalize, at_offset)
             }
         };
-        let manipulate = RangeManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.interval,
-            offset_ms,
-            // TODO(ruihang): convert via Timestamp datatypes to support different time units
-            range_ms,
-            self.ctx
-                .time_index_column
-                .clone()
-                .expect("time index should be set in `setup_context`"),
-            self.ctx.field_columns.clone(),
-            normalize,
-        )
-        .context(DataFusionPlanningSnafu)?;
+        let time_index_column = self
+            .ctx
+            .time_index_column
+            .clone()
+            .expect("time index should be set in `setup_context`");
+        let manipulate = match at_offset {
+            Some(at_offset) => {
+                // Fold the anchored window once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let anchored = RangeManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.interval,
+                    at_offset,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column.clone(),
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )
+            }
+            None => {
+                let manipulate = RangeManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.interval,
+                    offset_ms,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column,
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
 
-        Ok(LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        }))
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
+            }
+        };
+
+        Ok(manipulate)
     }
 
     async fn prom_call_expr_to_plan(
@@ -2279,11 +2453,17 @@ impl PromPlanner {
                 ),
             })
         };
+        // The input plan records the fold offset of the range selector it is built from. Take it
+        // here, so that the offset of one input cannot leak into another call, and pass it to
+        // `create_function_expr`: the function that reads it (`predict_linear`) then depends on an
+        // argument instead of on planner state written by the selector below it.
+        let range_fold_offset = self.ctx.range_fold_offset.take();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
             input.schema(),
             query_engine_state,
+            range_fold_offset,
         )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -2467,7 +2647,7 @@ impl PromPlanner {
 
     async fn selector_to_series_normalize_plan(
         &mut self,
-        offset: &Option<Offset>,
+        offset_duration: Millisecond,
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
@@ -2477,11 +2657,6 @@ impl PromPlanner {
         let table_schema = table_scan.schema();
 
         // make filter exprs
-        let offset_duration = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
         if let Some(time_index_filter) =
             self.build_time_index_filter(offset_duration, table_schema)?
@@ -2580,11 +2755,7 @@ impl PromPlanner {
         }
 
         // make sort plan
-        let series_key_columns = if self.ctx.use_tsid {
-            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
-        } else {
-            self.ctx.tag_columns.clone()
-        };
+        let series_key_columns = self.series_key_columns();
 
         let sort_exprs = if self.ctx.use_tsid {
             vec![
@@ -3381,6 +3552,7 @@ impl PromPlanner {
         float_field: &str,
         histogram_field: &str,
         input_schema: &DFSchemaRef,
+        range_fold_offset: Option<Millisecond>,
     ) -> Result<Option<Vec<DfExpr>>> {
         let returns_histogram = matches!(
             func.name,
@@ -3420,6 +3592,14 @@ impl PromPlanner {
                 Box::new(other_input_exprs[0].clone()),
                 ArrowDataType::Int64,
             ));
+            // Same evaluation instant as in the non-mixed path; it follows the other inputs so the
+            // float UDF below is called as `predict_linear(ts_range, value_range, t, eval_ts)`.
+            // The regression is only defined for a folded window, so a missing fold offset is an
+            // error instead of a default.
+            other_input_exprs.push_back(self.create_range_eval_ts_expr(
+                range_fold_offset.context(ExpectRangeSelectorSnafu)?,
+                input_schema,
+            )?);
         }
 
         let timestamp_range = DfExpr::Column(Column::from_name(
@@ -3478,7 +3658,13 @@ impl PromPlanner {
                 .alias(histogram_field),
             ]
         } else {
-            let display_name = float_expr.schema_name().to_string();
+            let display_name = if func.name == "predict_linear" {
+                // The evaluation instant is the private last argument of the mixed float UDF
+                // call; keep it out of the output column name like on the non-mixed path.
+                Self::name_without_last_arg(&float_expr)
+            } else {
+                float_expr.schema_name().to_string()
+            };
             self.ctx.field_columns = vec![display_name.clone()];
             vec![float_expr.alias(display_name)]
         };
@@ -3496,6 +3682,7 @@ impl PromPlanner {
         other_input_exprs: Vec<DfExpr>,
         input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
+        range_fold_offset: Option<Millisecond>,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -3508,6 +3695,7 @@ impl PromPlanner {
                 &float_field,
                 &histogram_field,
                 input_schema,
+                range_fold_offset,
             )?
         {
             return Ok((exprs, vec![]));
@@ -3709,6 +3897,16 @@ impl PromPlanner {
                         Box::new(other_input_exprs[0].clone()),
                         ArrowDataType::Int64,
                     ));
+                    // The prediction starts at the evaluation instant of the step, which the
+                    // window's fold offset recovers from the row's time index; see
+                    // [`Self::create_range_eval_ts_expr`]. It is appended last, so the UDF is
+                    // called as `predict_linear(ts_range, value_range, t, eval_ts)`. The
+                    // regression is only defined for a folded window, so a missing fold offset
+                    // is an error instead of a default.
+                    other_input_exprs.push_back(self.create_range_eval_ts_expr(
+                        range_fold_offset.context(ExpectRangeSelectorSnafu)?,
+                        input_schema,
+                    )?);
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -4081,7 +4279,17 @@ impl PromPlanner {
             exprs = exprs
                 .into_iter()
                 .map(|expr| {
-                    let display_name = expr.schema_name().to_string();
+                    // `predict_linear` appends its private evaluation instant as the last argument
+                    // of the UDF call; the output column is named after the call without it, so
+                    // the injected expression stays out of the user-visible schema. The
+                    // native-histogram drop UDF takes no such argument.
+                    let display_name = if func.name == "predict_linear"
+                        && !all_field_columns_are_native_histogram_ranges
+                    {
+                        Self::name_without_last_arg(&expr)
+                    } else {
+                        expr.schema_name().to_string()
+                    };
                     new_field_columns.push(display_name.clone());
                     Ok(expr.alias(display_name))
                 })
@@ -4348,6 +4556,66 @@ impl PromPlanner {
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
+    }
+
+    /// Builds the evaluation instant the window of the last planned range selector is folded for,
+    /// as a `Timestamp(Millisecond)` expression.
+    ///
+    /// The timestamp payload of a folded window is shifted onto the evaluation timeline by the
+    /// offset the window is folded with (`fold_offset`), while the time index column of a folded
+    /// row keeps the evaluation timestamp of its step. Adding the offset back yields the
+    /// evaluation instant on the payload timeline, which is where the regression of
+    /// `predict_linear` is centered: neither a plain window (which may end before the step, and
+    /// is additionally shifted by `offset` on the payload timeline) nor an `@`-anchored one
+    /// (whose end is the anchor, while the payload is shifted by `at_offset`) ends at the step it
+    /// is evaluated at.
+    ///
+    /// The sum is computed on the millisecond representation and cast back, so that the result
+    /// keeps the `Timestamp(Millisecond)` type the range functions declare for it.
+    fn create_range_eval_ts_expr(
+        &self,
+        fold_offset: Millisecond,
+        input_schema: &DFSchemaRef,
+    ) -> Result<DfExpr> {
+        let eval_ts = self
+            .create_time_index_column_expr()?
+            .cast_to(
+                &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                input_schema,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Int64, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(eval_ts),
+            op: Operator::Plus,
+            right: Box::new(lit(fold_offset)),
+        })
+        .cast_to(
+            &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            input_schema,
+        )
+        .context(DataFusionPlanningSnafu)
+    }
+
+    /// The name of `expr` without its last argument.
+    ///
+    /// A `predict_linear` call appends the evaluation instant of its window as a private last
+    /// argument ([`Self::create_range_eval_ts_expr`]). Naming the output column after the call
+    /// the user wrote, without that argument, keeps the injected expression out of the
+    /// user-visible schema; the expression itself keeps every argument it needs.
+    fn name_without_last_arg(expr: &DfExpr) -> String {
+        if let DfExpr::ScalarFunction(ScalarFunction { func, args }) = expr
+            && let Some((_, visible_args)) = args.split_last()
+        {
+            let visible = ScalarFunction {
+                func: func.clone(),
+                args: visible_args.to_vec(),
+            };
+            return DfExpr::ScalarFunction(visible).schema_name().to_string();
+        }
+
+        expr.schema_name().to_string()
     }
 
     fn create_tag_column_exprs(&self) -> Result<Vec<DfExpr>> {
@@ -9545,6 +9813,604 @@ mod test {
         assert!(format!("{exec:?}").contains("reuse_tsid_column: true"));
     }
 
+    async fn build_at_modifier_plan(query: &str, start_secs: u64, end_secs: u64) -> LogicalPlan {
+        let eval_stmt = build_at_modifier_eval_stmt(query, start_secs, end_secs);
+        let table_provider = build_test_table_provider(
+            &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+            1,
+            1,
+        )
+        .await;
+        PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+            .await
+            .unwrap()
+    }
+
+    fn build_at_modifier_eval_stmt(query: &str, start_secs: u64, end_secs: u64) -> EvalStmt {
+        EvalStmt {
+            expr: parser::parse(query).unwrap(),
+            start: UNIX_EPOCH
+                .checked_add(Duration::from_secs(start_secs))
+                .unwrap(),
+            end: UNIX_EPOCH
+                .checked_add(Duration::from_secs(end_secs))
+                .unwrap(),
+            interval: Duration::from_secs(5),
+            lookback_delta: Duration::from_secs(1),
+        }
+    }
+
+    /// Every selector of an `@` anchored query must scan around the anchor only, instead of the
+    /// whole evaluation range.
+    #[tokio::test]
+    async fn at_modifier_anchors_selector_scan_window() {
+        // `@ 100` anchors at t=100s; the lookback delta is 1s, so the scan covers (99s, 100s].
+        let plan = build_at_modifier_plan("some_metric @ 100", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(99001, None) AND some_metric.timestamp <= TimestampMillisecond(100000, None)"
+            ),
+            "{plan_str}"
+        );
+        // The result is reported at the evaluation timestamps, not at the anchor.
+        assert!(plan_str.contains("range=[0..1000000]"), "{plan_str}");
+
+        // `@ start()` / `@ end()` resolve to the evaluation range of the statement.
+        let plan = build_at_modifier_plan("some_metric @ start()", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(-999, None) AND some_metric.timestamp <= TimestampMillisecond(0, None)"
+            ),
+            "{plan_str}"
+        );
+
+        let plan = build_at_modifier_plan("some_metric @ end()", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(999001, None) AND some_metric.timestamp <= TimestampMillisecond(1000000, None)"
+            ),
+            "{plan_str}"
+        );
+
+        // `offset` moves the anchor backwards and is not applied twice.
+        let plan = build_at_modifier_plan("some_metric @ 200 offset 50s", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(149001, None) AND some_metric.timestamp <= TimestampMillisecond(150000, None)"
+            ),
+            "{plan_str}"
+        );
+
+        // A timestamp before the Unix epoch is accepted, as in Prometheus.
+        let plan = build_at_modifier_plan("some_metric @ -1", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(-1999, None) AND some_metric.timestamp <= TimestampMillisecond(-1000, None)"
+            ),
+            "{plan_str}"
+        );
+    }
+
+    /// A call over one range selector anchored by `@` is evaluated once, at the start of the
+    /// evaluation, and its result is reported at every step: the window is folded around the anchor
+    /// instead of following the outer evaluation grid. This is the planner's counterpart of
+    /// Prometheus' `StepInvariantExpr` wrapper; see [`PromPlanner::promotes_anchored_range_call`].
+    #[tokio::test]
+    async fn at_modifier_promotes_anchored_range_call() {
+        let plan = build_at_modifier_plan("rate(some_metric[5m] @ 300)", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The scan is limited to the anchored window (offset by `eval_start - anchor`).
+        assert!(
+            plan_str.contains(
+                "some_metric.timestamp >= TimestampMillisecond(1, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+            ),
+            "{plan_str}"
+        );
+        // A single fold, at the anchor...
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        // ... never a fold per step of the outer grid.
+        assert!(
+            !plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+            "{plan_str}"
+        );
+        // A single replay of the function result over the whole grid...
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{plan_str}"
+        );
+        // ... so `rate` itself is evaluated below that replay node, on the single evaluation
+        // instant of the anchored subtree, instead of once per step.
+        let replay = plan_str
+            .find("PromInstantManipulate")
+            .expect("instant manipulate node");
+        let rate = plan_str.find("prom_rate(").expect("rate projection");
+        assert!(
+            replay < rate,
+            "`rate` must be evaluated below the replay node:\n{plan_str}"
+        );
+    }
+
+    /// Parentheses around the range argument are transparent: `rate((some_metric[5m] @ 300))` gets
+    /// the same fixed-window promotion as `rate(some_metric[5m] @ 300)`, with the anchored window
+    /// folded once and its result replayed at every step of the grid. Only that one argument is
+    /// looked through, so a parenthesis above the call promotes no operator of its own and a
+    /// parenthesized subtree is planned exactly like the bare one.
+    #[tokio::test]
+    async fn at_modifier_promotes_parenthesized_range_argument() {
+        // Each form is planned exactly like its unparenthesized counterpart: parentheses below the
+        // call are transparent, a parenthesis around the call adds nothing, and a parenthesis above
+        // it does not widen the promotion.
+        for (query, plain) in [
+            (
+                "rate((some_metric[5m] @ 300))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "rate(((some_metric[5m] @ 300)))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "(rate(some_metric[5m] @ 300))",
+                "rate(some_metric[5m] @ 300)",
+            ),
+            (
+                "abs((rate(some_metric[5m] @ 300)))",
+                "abs(rate(some_metric[5m] @ 300))",
+            ),
+        ] {
+            assert_eq!(
+                build_at_modifier_plan(query, 0, 1000)
+                    .await
+                    .display_indent_schema()
+                    .to_string(),
+                build_at_modifier_plan(plain, 0, 1000)
+                    .await
+                    .display_indent_schema()
+                    .to_string(),
+                "`{query}` must be planned like `{plain}`"
+            );
+        }
+
+        // The parentheses do not push the enclosing operator into the promotion either: `abs` stays
+        // above the replay of the promoted call, exactly as it does without them. The promotion
+        // itself (one anchored fold, one replay, `rate` below it) is asserted for the
+        // unparenthesized form by `at_modifier_promotes_anchored_range_call`, and the form above is
+        // planned identically to it.
+        let plan_str = build_at_modifier_plan("abs((rate(some_metric[5m] @ 300)))", 0, 1000)
+            .await
+            .display_indent_schema()
+            .to_string();
+        let replay = plan_str
+            .find("PromInstantManipulate")
+            .expect("instant manipulate node");
+        assert!(
+            plan_str.find("abs(").expect("`abs` projection") < replay,
+            "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+        );
+    }
+
+    /// `@ start()` and `@ end()` are fixed anchors for the whole statement, so a call using them is
+    /// promoted as well.
+    #[tokio::test]
+    async fn at_modifier_promotes_start_and_end_anchored_call() {
+        for query in [
+            "rate(some_metric[5m] @ start())",
+            "rate(some_metric[5m] @ end())",
+            "max_over_time(some_metric[5m] @ end())",
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            assert_eq!(
+                plan_str
+                    .matches("PromRangeManipulate: req range=[0..0]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            assert!(
+                plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+                "{query}:\n{plan_str}"
+            );
+        }
+
+        // Only the call itself is promoted: a call above it (`abs`) is planned as usual and
+        // evaluated at every step over the replayed result of the promoted call. The window is
+        // still folded once, around the anchor.
+        let plan =
+            build_at_modifier_plan("abs(max_over_time(some_metric[5m] @ end()))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        let abs = plan_str.find("abs(").expect("`abs` projection");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            abs < replay,
+            "`abs` must be evaluated above the replay of the promoted call:\n{plan_str}"
+        );
+        // The window is the only one folded once, and it sits below the replay: the promoted call
+        // feeds the grid from there.
+        let fold = plan_str.find("PromRangeManipulate").expect("range fold");
+        assert!(
+            replay < fold,
+            "the anchored window must be folded below the replay:\n{plan_str}"
+        );
+
+        // An aggregation above the promoted call stays above it as well: `sum` aggregates the
+        // replayed per-series rows at every step, instead of aggregating the single anchored
+        // instant and replaying the aggregation — which would also have to replay rows of several
+        // groups through the one-series-per-batch `InstantManipulate`.
+        let plan = build_at_modifier_plan("sum(rate(some_metric[5m] @ start()))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        // A single replay, and it sits below the aggregation node: `sum` aggregates the replayed
+        // per-series rows at every step.
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            1,
+            "{plan_str}"
+        );
+        let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            aggregate < replay,
+            "the aggregation must stay above the replay of the promoted call:\n{plan_str}"
+        );
+
+        // Without `@` nothing is promoted: the function keeps folding one window per step.
+        let plan = build_at_modifier_plan("rate(some_metric[5m])", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(
+            plan_str.contains("PromRangeManipulate: req range=[0..1000000]"),
+            "{plan_str}"
+        );
+        assert!(!plan_str.contains("lookback=[1000001]"), "{plan_str}");
+    }
+
+    /// A call or a unary operator above the anchored range call is planned as usual: the inner range
+    /// call is promoted on its own (it is the direct call over the anchored range selector), and the
+    /// operator above it is evaluated at every step over the replayed result.
+    #[tokio::test]
+    async fn at_modifier_promotes_inner_range_call_below_wrappers() {
+        for (query, wrapper) in [
+            ("abs(rate(some_metric[5m] @ 300))", "abs(prom_rate("),
+            ("-rate(some_metric[5m] @ 300)", "(- prom_rate("),
+            (
+                "abs(max_over_time(some_metric[5m] @ 300))",
+                "abs(prom_max_over_time(",
+            ),
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            // The anchored window is folded once, and the wrapper sits above its replay.
+            assert_eq!(
+                plan_str
+                    .matches("PromRangeManipulate: req range=[0..0]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str.matches("PromInstantManipulate").count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            let wrapper = plan_str
+                .find(wrapper)
+                .unwrap_or_else(|| panic!("no `{wrapper}` projection in:\n{plan_str}"));
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .expect("replay node");
+            assert!(
+                wrapper < replay,
+                "the wrapper must be evaluated above the replay of the range call:\n{plan_str}"
+            );
+        }
+    }
+
+    /// `anchored + plain`: only the binary operand that is a call over the anchored range selector
+    /// is promoted, and the plain side keeps following the evaluation step.
+    #[tokio::test]
+    async fn at_modifier_promotes_only_anchored_binary_operand() {
+        let plan =
+            build_at_modifier_plan("rate(some_metric[5m] @ 300) + some_metric", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // The anchored operand is folded once and its result replayed over the whole grid.
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000001]"),
+            "{plan_str}"
+        );
+        // The plain operand still selects one sample per step with the default lookback.
+        assert!(
+            plan_str.contains("PromInstantManipulate: range=[0..1000000], lookback=[1000]"),
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            2,
+            "{plan_str}"
+        );
+
+        // Both operands anchored: the binary expression is not promoted as a whole, because a join
+        // emits the rows of several series in shared batches and the replay needs one series per
+        // batch. Each operand anchors and replays on its own instead, and the join runs at every
+        // step over those per-series results.
+        let plan = build_at_modifier_plan("some_metric @ 300 + some_metric @ 0", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        // One anchoring node and one replay per operand...
+        assert_eq!(
+            plan_str.matches("PromInstantManipulate").count(),
+            4,
+            "{plan_str}"
+        );
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+        // ... and the two operands are anchored at different timestamps, so both select their own
+        // sample.
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+    }
+
+    /// Only a direct call over an anchored range selector is promoted. A value function or a unary
+    /// operator over an anchored *instant* selector needs no promotion: the selector anchors and
+    /// replays its sample per series on its own, and the operator above it is row-wise, so it can be
+    /// evaluated at every step over that replay.
+    #[tokio::test]
+    async fn at_modifier_does_not_promote_value_calls_over_anchored_selectors() {
+        for (query, value_expr) in [
+            ("abs(some_metric @ 300)", "abs(some_metric.field_0)"),
+            ("-some_metric @ 300", "(- some_metric.field_0)"),
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            // The scan is limited to the anchored sample (the lookback delta of this test is 1s).
+            assert!(
+                plan_str.contains(
+                    "some_metric.timestamp >= TimestampMillisecond(299001, None) AND some_metric.timestamp <= TimestampMillisecond(300000, None)"
+                ),
+                "{query}:\n{plan_str}"
+            );
+            // ... and the result is replayed at every step by the selector itself: the anchored
+            // selection, then the grid replay, with no promoted subtree on top of the operator.
+            assert!(
+                !plan_str.starts_with("PromInstantManipulate"),
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str
+                    .matches("PromInstantManipulate: range=[0..0], lookback=[1000]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .unwrap_or_else(|| panic!("replay node:\n{plan_str}"));
+            let value = plan_str
+                .find(value_expr)
+                .unwrap_or_else(|| panic!("no `{value_expr}` projection in:\n{plan_str}"));
+            assert!(
+                value < replay,
+                "`{value_expr}` must be evaluated above the per-series replay:\n{plan_str}"
+            );
+        }
+    }
+
+    /// A call whose argument merges series (an aggregation or a join) or whose own output reorders
+    /// the whole vector (`sort*`, the histogram folds) is never the promoted root either: it is
+    /// planned as usual over the leaf-level anchoring of its selectors, which replays every selector
+    /// per series and keeps the one-series-per-batch layout the replay needs.
+    #[tokio::test]
+    async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
+        // An aggregation below the call emits one row per group in shared batches, so the call is
+        // not promoted: the replay of the anchored selector stays below the aggregate.
+        let plan = build_at_modifier_plan("abs(sum(some_metric @ 300))", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        let aggregate = plan_str.find("Aggregate:").expect("aggregate node");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            aggregate < replay,
+            "the aggregation must stay above the replay:\n{plan_str}"
+        );
+
+        // A join of two anchored selectors below the call: neither the join nor the call is
+        // promoted, so each operand is replayed on its own.
+        let plan =
+            build_at_modifier_plan("abs(some_metric @ 300 + some_metric @ 0)", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            2,
+            "{plan_str}"
+        );
+
+        // A call that reorders the whole vector keeps its sort above the per-series replay.
+        let plan =
+            build_at_modifier_plan("sort_by_label(some_metric @ 300, \"tag_0\")", 0, 1000).await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert!(plan_str.starts_with("Sort:"), "{plan_str}");
+        assert_eq!(
+            plan_str
+                .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+    }
+
+    /// `label_join` rewrites the labels of its input series, so it is never the promoted root: the
+    /// anchored selector keeps replaying one series per batch, and the join runs at every step above
+    /// that replay (see [`Self::promotes_anchored_range_call`]). Promoting it would replay the
+    /// joined rows through the labels the join just rewrote, which merges the distinct input series
+    /// into one timeline.
+    #[tokio::test]
+    async fn at_modifier_does_not_promote_label_join() {
+        for query in [
+            // Directly above the anchored instant selector...
+            "label_join(some_metric @ 300, \"tag_0\", \"-\", \"\")",
+            // ... and below another call, which is planned as usual over the join.
+            "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"\"))",
+        ] {
+            let plan = build_at_modifier_plan(query, 0, 1000).await;
+            let plan_str = plan.display_indent_schema().to_string();
+            // The join is not wrapped in a replay of its own; the only replay over the grid is the
+            // one of the anchored selector...
+            assert!(
+                !plan_str.starts_with("PromInstantManipulate"),
+                "{query}:\n{plan_str}"
+            );
+            assert_eq!(
+                plan_str
+                    .matches("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                    .count(),
+                1,
+                "{query}:\n{plan_str}"
+            );
+            // ... and the projected join stays above it, evaluated at every step.
+            let join = plan_str
+                .find("concat_ws(")
+                .unwrap_or_else(|| panic!("no `label_join` projection in:\n{plan_str}"));
+            let replay = plan_str
+                .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+                .expect("replay node");
+            assert!(
+                join < replay,
+                "`label_join` must be evaluated above the per-series replay:\n{plan_str}"
+            );
+        }
+
+        // A range call below the join is still promoted on its own: the anchored window is folded
+        // once per series, and the join above it is evaluated at every step over that replay.
+        let plan = build_at_modifier_plan(
+            "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"\")",
+            0,
+            1000,
+        )
+        .await;
+        let plan_str = plan.display_indent_schema().to_string();
+        assert_eq!(
+            plan_str
+                .matches("PromRangeManipulate: req range=[0..0]")
+                .count(),
+            1,
+            "{plan_str}"
+        );
+        assert!(!plan_str.starts_with("PromInstantManipulate"), "{plan_str}");
+        let join = plan_str.find("concat_ws(").expect("join projection");
+        let replay = plan_str
+            .find("PromInstantManipulate: range=[0..1000000], lookback=[1000001]")
+            .expect("replay node");
+        assert!(
+            join < replay,
+            "the join must be evaluated above the replay of the range call:\n{plan_str}"
+        );
+    }
+
+    #[test]
+    fn at_modifier_rejects_subtraction_overflow() {
+        for (anchor, offset) in [(i64::MAX, -1), (i64::MIN, 1)] {
+            let err = PromPlanner::anchor_sub(anchor, offset).unwrap_err();
+            assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+            assert!(
+                err.to_string()
+                    .contains("Timestamp out of range for the `@` modifier"),
+                "{err}"
+            );
+        }
+        assert_eq!(PromPlanner::anchor_sub(-1, 1).unwrap(), -2);
+    }
+
+    /// `@` beyond the representable millisecond range is rejected instead of silently wrapping.
+    ///
+    /// `@ 1e16` is 10^19 milliseconds, beyond `i64::MAX`. A Unix `SystemTime` can hold it, so
+    /// the planner rejects the anchor it cannot represent. A Windows `SystemTime` tops out
+    /// below `i64::MAX` milliseconds, so the same literal is already rejected while parsing.
+    #[tokio::test]
+    async fn at_modifier_rejects_unrepresentable_timestamp() {
+        #[cfg(windows)]
+        {
+            let err = parser::parse("some_metric @ 1e16").unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("timestamp out of bounds for @ modifier"),
+                "{err}"
+            );
+        }
+
+        #[cfg(not(windows))]
+        {
+            let eval_stmt = build_eval_stmt("some_metric @ 1e16");
+            let table_provider = build_test_table_provider(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                1,
+                1,
+            )
+            .await;
+            let err =
+                PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
+                    .await
+                    .unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains("Timestamp out of range for the `@` modifier"),
+                "{err}"
+            );
+            assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+        }
+    }
+
     #[tokio::test]
     async fn default_binary_join_uses_tsid_when_available() {
         let eval_stmt = build_eval_stmt("some_metric / some_alt_metric");
@@ -11079,6 +11945,13 @@ mod test {
     }
 
     async fn indie_query_plan_compare<T: AsRef<str>>(query: &str, expected: T) {
+        let plan_str = indie_query_plan(query).await;
+
+        assert_eq!(plan_str, expected.as_ref());
+    }
+
+    /// Plans `query` over the shared test table provider and renders it.
+    async fn indie_query_plan(query: &str) -> String {
         let prom_expr = parser::parse(query).unwrap();
         let eval_stmt = EvalStmt {
             expr: prom_expr,
@@ -11107,7 +11980,7 @@ mod test {
                 .await
                 .unwrap();
 
-        assert_eq!(plan.display_indent_schema().to_string(), expected.as_ref());
+        plan.display_indent_schema().to_string()
     }
 
     #[tokio::test]
@@ -11193,6 +12066,51 @@ mod test {
         );
 
         indie_query_plan_compare(query, expected).await;
+    }
+
+    #[tokio::test]
+    async fn predict_linear_injects_the_eval_timestamp() {
+        // The fourth argument is the evaluation instant of each row, which the fold offset
+        // recovers from the row's time index (here: no `@` and no `offset`, so the step itself).
+        let query = "predict_linear(some_metric[5m], 60)";
+        let expected = String::from(
+            "Filter: prom_predict_linear(timestamp_range,field_0,Float64(60)) IS NOT NULL [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_predict_linear(timestamp_range, field_0, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms))) AS prom_predict_linear(timestamp_range,field_0,Float64(60)), some_metric.tag_0 [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            Filter: some_metric.timestamp >= TimestampMillisecond(-299999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        );
+
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    /// The evaluation instant follows the selector's fold offset, not the projection's: an
+    /// `@`-anchored selector is folded with `at_offset`, which is what the window's timestamps were
+    /// shifted by. The evaluation starts at 0s here, so `@ 100` anchors 100s in the future and
+    /// yields `at_offset` = -100000ms.
+    #[tokio::test]
+    async fn predict_linear_eval_ts_follows_the_fold_offset() {
+        for (query, expected_offset) in [
+            (
+                "predict_linear(some_metric[5m] @ 100, 60)",
+                "Int64(-100000)",
+            ),
+            (
+                "predict_linear(some_metric[5m] offset 2m, 60)",
+                "Int64(120000)",
+            ),
+        ] {
+            let plan = indie_query_plan(query).await;
+            assert!(
+                plan.contains(&format!(
+                    "some_metric.timestamp AS Int64) + {expected_offset}"
+                )),
+                "{query}\n{plan}"
+            );
+        }
     }
 
     async fn native_histogram_plan(query: &str) -> String {
@@ -11877,6 +12795,30 @@ mod test {
         assert_eq!(plan, expected);
     }
 
+    /// The mixed float/histogram path forwards the extra arguments of a range function after the
+    /// three shared range inputs (`args[4..]`), so `predict_linear` must append its evaluation
+    /// instant there, after `t`, exactly like the plain path above.
+    #[tokio::test]
+    async fn mixed_native_histogram_predict_linear_forwards_the_eval_timestamp() {
+        let query = "predict_linear(some_metric[5m], 60)";
+        let plan = PromPlanner::stmt_to_plan(
+            build_test_mixed_native_histogram_table_provider("some_metric").await,
+            &build_eval_stmt(query),
+            &build_query_engine_state(),
+        )
+        .await
+        .unwrap()
+        .display_indent_schema()
+        .to_string();
+
+        assert!(
+            plan.contains(
+                "prom_mixed_range_float(Utf8(\"predict_linear\"), timestamp_range, greptime_value, greptime_native_histogram, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms)))"
+            ),
+            "{query}\n{plan}"
+        );
+    }
+
     #[tokio::test]
     async fn mixed_native_histogram_rate_executes_real_ranges() {
         let schema = Arc::new(ArrowSchema::new(vec![
@@ -11951,7 +12893,7 @@ mod test {
         );
         let state = build_query_engine_state();
         let (mut exprs, _) = planner
-            .create_function_expr(&call.func, vec![], input.schema(), &state)
+            .create_function_expr(&call.func, vec![], input.schema(), &state, None)
             .unwrap();
         exprs.insert(0, planner.create_time_index_column_expr().unwrap());
         let plan = LogicalPlanBuilder::from(input)
@@ -14812,7 +15754,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
             };
             let state = build_query_engine_state();
             let (mut exprs, _) = planner
-                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .create_function_expr(&call.func, vec![], input.schema(), &state, None)
                 .unwrap();
             exprs.insert(0, planner.create_time_index_column_expr().unwrap());
             exprs.extend(planner.create_tag_column_exprs().unwrap());
@@ -14865,7 +15807,7 @@ Projection: count(prometheus_tsdb_head_series.greptime_value) AS my_series, prom
         let args = planner.create_function_args(&call.args.args).unwrap();
         let state = build_query_engine_state();
         let (mut exprs, _) = planner
-            .create_function_expr(&call.func, args.literals, input.schema(), &state)
+            .create_function_expr(&call.func, args.literals, input.schema(), &state, None)
             .unwrap();
         exprs.insert(0, planner.create_time_index_column_expr().unwrap());
         exprs.extend(planner.create_tag_column_exprs().unwrap());
