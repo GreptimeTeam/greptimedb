@@ -1951,10 +1951,10 @@ mod tests {
 
     async fn put_fixture(io: &ObjectStoreIo, object_seq: u64, records: &[Record]) {
         let header = fixture_header(io, object_seq).await;
-        put_header(io, header, records).await;
+        put_object_with_header(io, header, records).await;
     }
 
-    async fn put_header(io: &ObjectStoreIo, header: Header, records: &[Record]) {
+    async fn put_object_with_header(io: &ObjectStoreIo, header: Header, records: &[Record]) {
         let object_seq = header.object_seq;
         let encoded = encode_object(header, records).unwrap();
         io.put_if_absent(object_seq, encoded.bytes).await.unwrap();
@@ -1969,7 +1969,7 @@ mod tests {
             epoch,
             prev: None,
         };
-        put_header(&io, header, &[]).await;
+        put_object_with_header(&io, header, &[]).await;
     }
 
     fn object_path(object_store: &ObjectStore, object_seq: u64) -> String {
@@ -3992,12 +3992,12 @@ mod tests {
         let first = fixture_header(&io, 1).await;
         // Object 1 was reported as failed; object 2 reused its row sequences
         // and links past it.
-        put_header(&io, first.clone(), &[record(id(1, 1), "old")]).await;
+        put_object_with_header(&io, first.clone(), &[record(id(1, 1), "old")]).await;
         let second = Header {
             object_seq: 2,
-            ..first.clone()
+            ..first
         };
-        put_header(&io, second, &[record(id(2, 1), "new")]).await;
+        put_object_with_header(&io, second, &[record(id(2, 1), "new")]).await;
 
         for restart in 0..2 {
             let store = open(object_store.clone(), &eager()).await;
@@ -4029,7 +4029,7 @@ mod tests {
             }),
             ..fixture_header(&io, 2).await
         };
-        put_header(&io, orphan, &[]).await;
+        put_object_with_header(&io, orphan, &[]).await;
         let recovered = recover(&io).await.unwrap();
         assert_eq!(Some(0), recovered.tip.map(|tip| tip.object_seq));
         assert_eq!(3, recovered.next_object_seq);
@@ -4040,7 +4040,7 @@ mod tests {
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         // Object 1 extends object 0, which is gone.
-        put_header(&io, chain_header(1, 1, Some((0, 1))), &[]).await;
+        put_object_with_header(&io, chain_header(1, 1, Some((0, 1))), &[]).await;
         let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
             .await
             .unwrap_err();
@@ -4061,16 +4061,16 @@ mod tests {
             entry_id,
             payload: Bytes::from_static(data.as_bytes()),
         };
-        put_header(&io, chain_header(0, 1, None), &[record(1, "a")]).await;
+        put_object_with_header(&io, chain_header(0, 1, None), &[record(1, "a")]).await;
         // Instance B acknowledged object 1 before the create instance A issued
         // for object 2 landed.
-        put_header(
+        put_object_with_header(
             &io,
             chain_header(1, 2, Some((0, 1))),
             &[record(id(1, 1), "b")],
         )
         .await;
-        put_header(
+        put_object_with_header(
             &io,
             chain_header(2, 1, Some((0, 1))),
             &[record(id(2, 1), "late")],
@@ -4192,7 +4192,7 @@ mod tests {
         let recovered = recover(&io).await.unwrap();
         // A late object of epoch 1 lands at sequence 2, across the gap at
         // sequence 1, and open B, which lists it, completes.
-        put_header(&io, chain_header(2, 1, Some((0, 1))), &[]).await;
+        put_object_with_header(&io, chain_header(2, 1, Some((0, 1))), &[]).await;
         open(object_store, &eager()).await.stop().await.unwrap();
         let b = decode_header(&io.get(3).await.unwrap()).unwrap();
         assert_eq!(4, b.epoch);
@@ -4216,7 +4216,7 @@ mod tests {
         let object_store = memory_store();
         let io = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
         // No instance that starts at or below sequence 0 writes epoch 5.
-        put_header(&io, chain_header(0, 5, None), &[]).await;
+        put_object_with_header(&io, chain_header(0, 5, None), &[]).await;
         let error = ObjectStoreLogStore::try_new(object_store, &eager(), 1, 2)
             .await
             .unwrap_err();
@@ -4226,6 +4226,83 @@ mod tests {
             "unexpected error: {error:?}"
         );
         assert_eq!(vec![0], object_seqs(&io).await);
+    }
+
+    #[tokio::test]
+    async fn test_store_open_fails_when_its_start_object_lands_with_an_unknown_outcome() {
+        let object_store = memory_store();
+        let fixtures = ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap();
+        put_fixture(&fixtures, 0, &[]).await;
+        // The start object is stored, but its create reports an error.
+        let io = Arc::new(LostResponseIo {
+            inner: ObjectStoreIo::new(object_store.clone(), PREFIX).unwrap(),
+            lose_next: AtomicBool::new(true),
+        });
+        let error = ObjectStoreLogStore::open(io, &eager(), PREFIX.to_string())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::WalObjectStore { .. }),
+            "unexpected error: {error:?}"
+        );
+        // The open does not move to another sequence.
+        assert_eq!(vec![0, 1], object_seqs(&fixtures).await);
+        let stored = decode_header(&fixtures.get(1).await.unwrap()).unwrap();
+        assert_eq!(2, stored.epoch);
+
+        // The next open counts the stored start object and claims a later
+        // epoch.
+        open(object_store, &eager()).await.stop().await.unwrap();
+        let start = decode_header(&fixtures.get(2).await.unwrap()).unwrap();
+        assert_eq!(3, start.epoch);
+        assert_eq!(
+            Some(ChainLink {
+                object_seq: 1,
+                epoch: 2,
+            }),
+            start.prev
+        );
+    }
+
+    /// Object access whose next create stores the object but reports a
+    /// transient failure, as a create whose response is lost.
+    struct LostResponseIo {
+        inner: ObjectStoreIo,
+        lose_next: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl WalObjectIo for LostResponseIo {
+        async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+            let result = self.inner.put_if_absent(object_seq, content).await?;
+            if !self.lose_next.swap(false, Ordering::SeqCst) {
+                return Ok(result);
+            }
+            Err(
+                object_store::Error::new(object_store::ErrorKind::Unexpected, "lost response")
+                    .set_temporary(),
+            )
+            .context(WalObjectStoreSnafu {
+                operation: "write",
+                path: self.object_path(object_seq),
+            })
+        }
+
+        async fn get(&self, object_seq: u64) -> Result<Bytes> {
+            self.inner.get(object_seq).await
+        }
+
+        async fn get_range(&self, object_seq: u64, offset: u64, len: u64) -> Result<Bytes> {
+            self.inner.get_range(object_seq, offset, len).await
+        }
+
+        async fn list(&self) -> Result<Vec<ListedObject>> {
+            self.inner.list().await
+        }
+
+        fn object_path(&self, object_seq: u64) -> String {
+            self.inner.object_path(object_seq)
+        }
     }
 
     /// Object access whose first create lets another object land at a given
