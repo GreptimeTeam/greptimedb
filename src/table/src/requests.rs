@@ -300,8 +300,45 @@ impl TableOptions {
     }
 }
 
-impl fmt::Display for TableOptions {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+/// Table option keys whose values are credentials and must never be rendered
+/// verbatim in user-visible output.
+///
+/// These are the credential-carrying keys accepted by [`validate_table_option`]
+/// for the object stores an external table can point at: `access_key_id` (S3 and
+/// OSS), `secret_access_key` and `session_token` (S3), and `access_key_secret`
+/// (OSS).
+///
+/// Every path that renders table options for a user must mask these; see
+/// [`TableOptions::to_redacted_string`] and `OptionMap` in the `sql` crate,
+/// which share this list so the two cannot drift apart.
+pub const REDACTED_TABLE_OPTION_KEYS: [&str; 4] = [
+    "access_key_id",
+    "secret_access_key",
+    "session_token",
+    "access_key_secret",
+];
+
+/// The placeholder substituted for a redacted option value.
+pub const REDACTED_VALUE: &str = "******";
+
+/// Returns true if `key` names a table option whose value is a credential.
+pub fn is_redacted_table_option(key: &str) -> bool {
+    REDACTED_TABLE_OPTION_KEYS.contains(&key)
+}
+
+impl TableOptions {
+    /// Renders the options the way [`fmt::Display`] does, but with the values of
+    /// credential-carrying keys replaced by [`REDACTED_VALUE`].
+    ///
+    /// Use this for anything a user can read. [`fmt::Display`] is deliberately
+    /// left verbatim: this struct also derives [`fmt::Debug`], which prints
+    /// `extra_options` raw, so redacting only `Display` would promise a
+    /// protection that `{:?}` does not honour.
+    pub fn to_redacted_string(&self) -> String {
+        self.render(true)
+    }
+
+    fn render(&self, redact: bool) -> String {
         let mut key_vals = vec![];
         if let Some(size) = self.write_buffer_size {
             key_vals.push(format!("{}={}", WRITE_BUFFER_SIZE_KEY, size));
@@ -316,10 +353,20 @@ impl fmt::Display for TableOptions {
         }
 
         for (k, v) in &self.extra_options {
-            key_vals.push(format!("{}={}", k, v));
+            if redact && is_redacted_table_option(k) {
+                key_vals.push(format!("{}={}", k, REDACTED_VALUE));
+            } else {
+                key_vals.push(format!("{}={}", k, v));
+            }
         }
 
-        write!(f, "{}", key_vals.join(" "))
+        key_vals.join(" ")
+    }
+}
+
+impl fmt::Display for TableOptions {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.render(false))
     }
 }
 
@@ -1148,6 +1195,80 @@ mod tests {
             "Conflicting table options: compaction.twcs.trigger_file_num=4 and compaction.twcs.active_window.trigger_file_num=8",
             error.to_string()
         );
+    }
+
+    #[test]
+    fn test_redacted_table_option_keys() {
+        // Every credential-carrying option accepted by `validate_table_option`
+        // must be on the redaction list, otherwise it leaks through any path
+        // that renders table options.
+        for key in [
+            "access_key_id",
+            "secret_access_key",
+            "session_token",
+            "access_key_secret",
+        ] {
+            assert!(
+                validate_table_option(key),
+                "{key} should be an accepted table option"
+            );
+            assert!(is_redacted_table_option(key), "{key} should be redacted");
+        }
+
+        // Non-credential options are rendered as-is.
+        assert!(!is_redacted_table_option(FILE_TABLE_LOCATION_KEY));
+        assert!(!is_redacted_table_option(TTL_KEY));
+    }
+
+    #[test]
+    fn test_table_options_to_redacted_string() {
+        let options = TableOptions {
+            write_buffer_size: None,
+            ttl: None,
+            skip_wal: false,
+            extra_options: HashMap::from([
+                ("location".to_string(), "s3://bucket/path".to_string()),
+                ("access_key_id".to_string(), "AKIDEXAMPLE".to_string()),
+                ("secret_access_key".to_string(), "SECRETEXAMPLE".to_string()),
+                ("session_token".to_string(), "TOKENEXAMPLE".to_string()),
+                ("access_key_secret".to_string(), "OSSSECRET".to_string()),
+            ]),
+        };
+
+        let redacted = options.to_redacted_string();
+        for secret in ["AKIDEXAMPLE", "SECRETEXAMPLE", "TOKENEXAMPLE", "OSSSECRET"] {
+            assert!(
+                !redacted.contains(secret),
+                "credential {secret} leaked into: {redacted}"
+            );
+        }
+        // Non-credential options survive, and every credential key is masked.
+        assert!(redacted.contains("location=s3://bucket/path"));
+        assert_eq!(redacted.matches(REDACTED_VALUE).count(), 4);
+
+        // `Display` is unchanged.
+        assert!(options.to_string().contains("AKIDEXAMPLE"));
+    }
+
+    #[test]
+    fn test_redaction_does_not_disturb_other_options() {
+        // `information_schema.tables.create_options` is not only read by humans:
+        // `src/servers/src/prometheus.rs` regexp-matches it for the metric engine
+        // markers (`on_physical_table=` / `physical_metric_table=`) to decide which
+        // tables PromQL may see. Redacting must therefore be a no-op for every
+        // option that is not a credential, formatting and ordering included.
+        let options = TableOptions {
+            write_buffer_size: Some(ReadableSize::mb(128)),
+            ttl: Some(Duration::from_secs(1000).into()),
+            skip_wal: true,
+            extra_options: HashMap::from([
+                ("on_physical_table".to_string(), "phy".to_string()),
+                ("location".to_string(), "s3://bucket/path".to_string()),
+                ("append_mode".to_string(), "true".to_string()),
+            ]),
+        };
+
+        assert_eq!(options.to_redacted_string(), options.to_string());
     }
 
     #[test]
