@@ -15,8 +15,6 @@
 pub mod bloom_filter_index;
 pub mod inverted_index;
 pub mod result_cache;
-#[cfg(feature = "vector_index")]
-pub mod vector_index;
 
 use std::future::Future;
 use std::hash::Hash;
