@@ -105,6 +105,22 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
 
     /// Returns the latest entry id in the log store.
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
+
+    /// Waits until every entry of the provider's region with an id at or below
+    /// `entry_id` is durable, so that a caller can persist `entry_id` as a
+    /// replay watermark.
+    ///
+    /// Only a log store that acknowledges an append before its entries are
+    /// durable has anything to wait for; every other log store keeps this
+    /// default, which returns at once because an entry id a caller holds is
+    /// durable already.
+    async fn wait_durable(
+        &self,
+        _provider: &Provider,
+        _entry_id: EntryId,
+    ) -> Result<(), Self::Error> {
+        Ok(())
+    }
 }
 
 /// The response of an `append` operation.
