@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use bytes::Bytes;
+use common_error::ext::{ErrorExt, RetryHint};
 use common_telemetry::info;
 use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig};
 use futures::future::BoxFuture;
@@ -1071,6 +1072,7 @@ impl Actor {
             let object_seq = batch.object_seq;
             let bytes = batch.bytes.clone();
             let epoch = self.epoch;
+            let ack_mode = self.ack_mode;
             #[cfg(any(test, feature = "testing"))]
             let mut creates_held = self.creates_held.clone();
             #[cfg(any(test, feature = "testing"))]
@@ -1098,8 +1100,12 @@ impl Actor {
                     });
                     return (object_seq, result);
                 }
+                // Any conflict poisons an `enqueued` store, so only the
+                // `durable` mode reads the epoch of the existing object.
                 let result = match io.put_if_absent(object_seq, bytes).await {
-                    Err(error @ Error::WalObjectConflict { .. }) => {
+                    Err(error @ Error::WalObjectConflict { .. })
+                        if ack_mode == AckMode::Durable =>
+                    {
                         stale_conflict(io.as_ref(), object_seq, epoch, error).await
                     }
                     result => result,
@@ -1123,10 +1129,12 @@ impl Actor {
         match result {
             Ok(_) => self.sealed[index].state = CreateState::Created,
             // Nobody is left to retry in the `enqueued` mode, so the store
-            // repeats the create under the same sequence with the same bytes,
-            // which an identical retry accepts.
-            Err(Error::WalObjectStore { .. })
-                if self.ack_mode == AckMode::Enqueued && !self.is_stopped() =>
+            // repeats a create that failed transiently under the same sequence
+            // with the same bytes, which an identical retry accepts.
+            Err(error @ Error::WalObjectStore { .. })
+                if self.ack_mode == AckMode::Enqueued
+                    && !self.is_stopped()
+                    && error.retry_hint() == RetryHint::Retryable =>
             {
                 self.sealed[index].state = CreateState::Pending;
             }
@@ -1135,7 +1143,11 @@ impl Actor {
             // can never be on the chain. A caller of the `durable` mode
             // retries the append itself; after stop began the `enqueued`
             // backlog is dropped.
-            Err(error @ Error::WalObjectStore { .. }) => self.roll_back(Arc::new(error)),
+            Err(error @ Error::WalObjectStore { .. })
+                if self.ack_mode == AckMode::Durable || self.is_stopped() =>
+            {
+                self.roll_back(Arc::new(error))
+            }
             Err(error @ Error::StaleWalObject { .. }) if self.ack_mode == AckMode::Durable => {
                 self.roll_back(Arc::new(error))
             }
@@ -1306,11 +1318,13 @@ impl Actor {
             let _ = response.send(Err(shared(error)));
             return;
         }
-        // An id this store never handed out is not in its backlog, so there
-        // is nothing to wait for. An id of a batch that failed is answered
-        // once a later id of the region is durable.
+        // An id this store never handed out is not in its backlog, but the
+        // ids of the region it did hand out below it are waited for. An id of
+        // a batch that failed is answered once a later id of the region is
+        // durable.
         let issued = self.issued_entry_ids.get(&region_id).copied().unwrap_or(0);
-        if entry_id > issued {
+        let entry_id = entry_id.min(issued);
+        if entry_id <= durable {
             let _ = response.send(Ok(()));
             return;
         }
@@ -4636,27 +4650,27 @@ mod tests {
         let (object_seq, release) = next_create(&mut parked).await;
         assert_eq!(1, object_seq);
         assert_eq!(0, store.durable_entry_id(&provider(region_one)).unwrap());
-        let wait_one = {
+        let wait = |entry_id| {
             let store = store.clone();
-            tokio::spawn(async move { store.wait_durable(&provider(region_one), id(1, 1)).await })
+            tokio::spawn(async move { store.wait_durable(&provider(region_one), entry_id).await })
         };
-        // Neither the other region nor an id the store never handed out has
-        // anything to wait for.
+        // An id the store never handed out waits for the ids of the region
+        // that were handed out below it.
+        let waits = [wait(id(1, 1)), wait(id(1, 7))];
+        // The other region has nothing to wait for.
         timeout(WAIT, store.wait_durable(&provider(region_two), id(1, 1)))
-            .await
-            .unwrap()
-            .unwrap();
-        timeout(WAIT, store.wait_durable(&provider(region_one), id(1, 7)))
             .await
             .unwrap()
             .unwrap();
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
-        assert!(!wait_one.is_finished());
+        assert!(waits.iter().all(|wait| !wait.is_finished()));
 
         release.send(true).unwrap();
-        timeout(WAIT, wait_one).await.unwrap().unwrap().unwrap();
+        for wait in waits {
+            timeout(WAIT, wait).await.unwrap().unwrap().unwrap();
+        }
         assert_eq!(
             id(1, 1),
             store.durable_entry_id(&provider(region_one)).unwrap()
@@ -4856,41 +4870,39 @@ mod tests {
 
     #[tokio::test]
     async fn test_store_enqueued_permanent_failure_poisons() {
-        // A conflict of any epoch poisons the store, since the acknowledged
-        // entries cannot be moved to another sequence.
-        for (epoch, stale) in [(0, true), (2, false)] {
+        // A conflict of any epoch poisons the store without reading the
+        // existing object, since the acknowledged entries cannot move to
+        // another sequence. So does a storage error that is not temporary.
+        for foreign_epoch in [Some(0), Some(2), None] {
             let object_store = memory_store();
-            let store = open(object_store.clone(), &enqueued(eager())).await;
+            let (io, reads) = RecordingIo::over(object_store.clone());
+            let store = open_over(io.clone(), &enqueued(eager())).await;
             let region_id = region(1);
-            put_foreign(&object_store, 1, epoch).await;
-            let assert_conflict = |error: &Error| {
-                let source = unwrap_shared(error);
-                assert_eq!(
-                    stale,
-                    matches!(source, Error::StaleWalObject { .. }),
-                    "unexpected error: {error:?}"
-                );
-                assert!(
-                    matches!(
-                        source,
-                        Error::StaleWalObject { .. } | Error::WalObjectConflict { .. }
-                    ),
-                    "unexpected error: {error:?}"
-                );
+            match foreign_epoch {
+                Some(epoch) => put_foreign(&object_store, 1, epoch).await,
+                None => io.fail_next_put_permanently.store(true, Ordering::Relaxed),
+            }
+            let assert_poisoned = |error: Error| {
+                let poisoned = match foreign_epoch {
+                    Some(_) => matches!(unwrap_shared(&error), Error::WalObjectConflict { .. }),
+                    None => matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
+                };
+                assert!(poisoned, "unexpected error: {error:?}");
             };
 
-            // The append was acknowledged; the conflict surfaces afterwards.
+            // The append was acknowledged; the failure surfaces afterwards.
             let second = entry(&store, region_id, "a2");
             append(&store, region_id, "a1").await.unwrap();
             let error = timeout(WAIT, store.wait_durable(&provider(region_id), id(1, 1)))
                 .await
                 .unwrap()
                 .unwrap_err();
-            assert_conflict(&error);
-            assert_conflict(&store.append_batch(vec![second]).await.unwrap_err());
+            assert_poisoned(error);
+            assert_poisoned(store.append_batch(vec![second]).await.unwrap_err());
             assert!(store.latest_entry_id(&provider(region_id)).is_err());
             // The acknowledged entry was dropped, which stop reports.
-            assert_conflict(&store.stop().await.unwrap_err());
+            assert_poisoned(store.stop().await.unwrap_err());
+            assert!(reads.lock().unwrap().is_empty());
         }
     }
 
@@ -5247,11 +5259,13 @@ mod tests {
 
     /// Object access that records every range read as (sequence, offset,
     /// length) and, on request, reports the next conditional create as failed
-    /// after it wrote the object.
+    /// after it wrote the object, or fails it with an error that is not
+    /// temporary before it writes.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
         fail_after_next_put: AtomicBool,
+        fail_next_put_permanently: AtomicBool,
     }
 
     impl RecordingIo {
@@ -5261,6 +5275,7 @@ mod tests {
                 inner: ObjectStoreIo::new(object_store, PREFIX).unwrap(),
                 reads: reads.clone(),
                 fail_after_next_put: AtomicBool::new(false),
+                fail_next_put_permanently: AtomicBool::new(false),
             };
             (Arc::new(io), reads)
         }
@@ -5269,6 +5284,19 @@ mod tests {
     #[async_trait::async_trait]
     impl WalObjectIo for RecordingIo {
         async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
+            if self
+                .fail_next_put_permanently
+                .swap(false, Ordering::Relaxed)
+            {
+                let error = object_store::Error::new(
+                    object_store::ErrorKind::PermissionDenied,
+                    "injected failure",
+                );
+                return Err(error).context(WalObjectStoreSnafu {
+                    operation: "write",
+                    path: self.object_path(object_seq),
+                });
+            }
             let result = self.inner.put_if_absent(object_seq, content).await?;
             if self.fail_after_next_put.swap(false, Ordering::Relaxed) {
                 return injected_failure("write", self.object_path(object_seq));
