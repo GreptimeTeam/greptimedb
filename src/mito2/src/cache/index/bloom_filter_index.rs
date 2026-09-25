@@ -154,25 +154,16 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     ) -> Result<Vec<Bytes>> {
         let start = metrics.as_ref().map(|_| Instant::now());
 
-        let mut pages = Vec::with_capacity(ranges.len());
-        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
-        for range in ranges {
-            let inner = &self.inner;
-            let (page, cache_metrics) = self
-                .cache
-                .get_or_load(
-                    (self.file_id, self.index_version, self.column_id, self.tag),
-                    self.blob_size,
-                    range.start,
-                    (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges, None).await },
-                )
-                .await?;
-
-            total_cache_metrics.merge(&cache_metrics);
-            pages.push(Bytes::from(page));
-        }
-
+        let inner = &self.inner;
+        let (pages, total_cache_metrics) = self
+            .cache
+            .get_or_load_vec(
+                (self.file_id, self.index_version, self.column_id, self.tag),
+                self.blob_size,
+                ranges,
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
+            )
+            .await?;
         if let Some(m) = metrics {
             m.total_ranges += total_cache_metrics.num_pages;
             m.total_bytes += total_cache_metrics.page_bytes;
