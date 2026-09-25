@@ -16,6 +16,7 @@ use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
+use crate::inverted_index::format::FstValue;
 use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 
 /// `ParallelFstValuesMapper` enables parallel mapping of multiple FST value groups to their
@@ -38,44 +39,42 @@ impl<'a> ParallelFstValuesMapper<'a> {
         value_and_meta_vec: &[(Vec<u64>, &InvertedIndexMeta)],
         metrics: Option<&mut InvertedIndexReadMetrics>,
     ) -> Result<Vec<Bitmap>> {
-        let groups = value_and_meta_vec
-            .iter()
-            .map(|(values, _)| values.len())
-            .collect::<Vec<_>>();
-        let len = groups.iter().sum::<usize>();
-        let mut fetch_ranges = Vec::with_capacity(len);
+        let mut output = Vec::with_capacity(value_and_meta_vec.len());
+        let mut fetch_ranges = Vec::new();
+        // For each group, the number of bitmaps to fetch.
+        let mut fetch_counts = Vec::with_capacity(value_and_meta_vec.len());
 
         for (values, meta) in value_and_meta_vec {
+            let mut inline_bitmap = Bitmap::new_roaring();
+            let mut fetch_count = 0;
             for value in values {
-                // The higher 32 bits of each u64 value represent the
-                // bitmap offset and the lower 32 bits represent its size. This mapper uses these
-                // combined offset-size pairs to fetch and union multiple bitmaps into a single `BitVec`.
-                let [relative_offset, size] = bytemuck::cast::<u64, [u32; 2]>(*value);
-                let range = meta.base_offset + relative_offset as u64
-                    ..meta.base_offset + relative_offset as u64 + size as u64;
-                fetch_ranges.push((
-                    range,
-                    BitmapType::try_from(meta.bitmap_type).unwrap_or(BitmapType::BitVec),
-                ));
+                match FstValue::decode(*value) {
+                    FstValue::Inline(posting) => inline_bitmap.union(posting.to_bitmap()),
+                    FstValue::Bitmap { offset, size } => {
+                        let range = meta.base_offset + offset as u64
+                            ..meta.base_offset + offset as u64 + size as u64;
+                        fetch_ranges.push((
+                            range,
+                            BitmapType::try_from(meta.bitmap_type).unwrap_or(BitmapType::BitVec),
+                        ));
+                        fetch_count += 1;
+                    }
+                }
             }
+            output.push(inline_bitmap);
+            fetch_counts.push(fetch_count);
         }
 
         if fetch_ranges.is_empty() {
-            return Ok(vec![Bitmap::new_bitvec()]);
+            return Ok(output);
         }
 
         common_telemetry::debug!("fetch ranges: {:?}", fetch_ranges);
         let mut bitmaps = self.reader.bitmap_deque(&fetch_ranges, metrics).await?;
-        let mut output = Vec::with_capacity(groups.len());
-
-        for counter in groups {
-            let mut bitmap = Bitmap::new_roaring();
-            for _ in 0..counter {
-                let bm = bitmaps.pop_front().unwrap();
-                bitmap.union(bm);
+        for (bitmap, count) in output.iter_mut().zip(fetch_counts) {
+            for _ in 0..count {
+                bitmap.union(bitmaps.pop_front().unwrap());
             }
-
-            output.push(bitmap);
         }
 
         Ok(output)
