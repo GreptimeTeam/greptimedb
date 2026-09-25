@@ -239,6 +239,13 @@ fn invoke_substring(mut args: ScalarFunctionArgs) -> Result<ColumnarValue> {
             let array = if array.data_type() == &data_type {
                 array
             } else {
+                // Decode before narrowing: Arrow casts every dictionary value,
+                // including entries unused by the selected rows.
+                let array = if let DataType::Dictionary(_, value_type) = array.data_type() {
+                    cast_with_options(array.as_ref(), value_type, &options)?
+                } else {
+                    array
+                };
                 let array = if let Some(mask) = &null_mask {
                     nullif(array.as_ref(), mask)?
                 } else {
@@ -284,24 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_and_scalar_results() {
-        use datatypes::arrow::array::{ArrayRef, StringArray};
+    fn test_scalar_arguments_and_empty_batch() {
+        use datatypes::arrow::array::StringArray;
 
-        let values = Arc::new(StringArray::from(vec![Some("abc"), None, Some("中🙂")])) as ArrayRef;
-        let actual = invoke(
-            PartitionFunction::Substring,
-            vec![
-                ColumnarValue::Array(values),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(2))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
-            ],
-            3,
-        )
-        .unwrap();
-        assert_eq!(
-            actual.as_any().downcast_ref::<StringArray>().unwrap(),
-            &StringArray::from(vec![Some("b"), None, Some("🙂")])
-        );
         let actual = invoke(
             PartitionFunction::Hash,
             vec![
@@ -400,7 +392,6 @@ mod tests {
                 .unwrap();
             let row = PartitionFunction::Substring.evaluate(&values);
             assert_eq!(row.is_err(), should_error, "{args:?}");
-            // Vary which argument is an array to exercise scalar broadcasting.
             for array_index in 0..args.len() {
                 let batch_args = args
                     .iter()
@@ -439,6 +430,45 @@ mod tests {
             let actual = invoke(PartitionFunction::Substring, args, 3 - offset).unwrap();
             let expected = StringArray::from(vec![Some("中🙂"), None, Some("")]);
             assert_eq!(actual.as_ref(), &expected.slice(offset, 3 - offset));
+        }
+    }
+
+    #[test]
+    fn test_substring_dictionary_integer_bounds() {
+        use datatypes::arrow::array::{DictionaryArray, StringArray, UInt32Array, UInt64Array};
+        use datatypes::arrow::datatypes::UInt32Type;
+
+        let dictionary = DictionaryArray::<UInt32Type>::try_new(
+            UInt32Array::from(vec![0, 1]),
+            Arc::new(UInt64Array::from(vec![1, u64::MAX])),
+        )
+        .unwrap();
+        for argument_index in [1, 2] {
+            for (offset, host, expected) in [
+                (0, Some("abc"), Some("abc")),
+                (1, None, None),
+                (1, Some("abc"), None),
+            ] {
+                let mut args = vec![
+                    ColumnarValue::Scalar(ScalarValue::Utf8(host.map(str::to_owned))),
+                    ColumnarValue::Scalar(ScalarValue::Int64(Some(1))),
+                ];
+                if argument_index == 2 {
+                    args.push(ColumnarValue::Scalar(ScalarValue::Int64(Some(1))));
+                }
+                args[argument_index] = ColumnarValue::Array(Arc::new(dictionary.slice(offset, 1)));
+                let actual = invoke(PartitionFunction::Substring, args, 1);
+                if offset == 1 && host.is_some() {
+                    assert!(actual.is_err());
+                } else {
+                    let expected = if argument_index == 2 {
+                        expected.map(|_| "a")
+                    } else {
+                        expected
+                    };
+                    assert_eq!(actual.unwrap().as_ref(), &StringArray::from(vec![expected]));
+                }
+            }
         }
     }
 

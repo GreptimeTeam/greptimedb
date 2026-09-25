@@ -327,6 +327,7 @@ impl PartitionExpr {
             _ => None,
         };
         if let Some((operand, value, op)) = comparison {
+            let is_function = matches!(operand, Operand::Function { .. });
             let operand = operand.try_as_logical_expr()?;
             // Partition routing uses a total, null-first ordering, so every
             // comparison must produce a non-null boolean in the batch path.
@@ -342,15 +343,26 @@ impl PartitionExpr {
                 };
             }
             let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
-            return match op {
-                RestrictedOp::Eq => Ok(operand.clone().eq(bound).and(operand.is_not_null())),
-                RestrictedOp::NotEq => Ok(operand.clone().not_eq(bound).or(operand.is_null())),
-                RestrictedOp::Lt => Ok(operand.clone().lt(bound).or(operand.is_null())),
-                RestrictedOp::LtEq => Ok(operand.clone().lt_eq(bound).or(operand.is_null())),
-                RestrictedOp::Gt => Ok(operand.clone().gt(bound).and(operand.is_not_null())),
-                RestrictedOp::GtEq => Ok(operand.clone().gt_eq(bound).and(operand.is_not_null())),
-                _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
+            let comparison = match op {
+                RestrictedOp::Eq => operand.clone().eq(bound),
+                RestrictedOp::NotEq => operand.clone().not_eq(bound),
+                RestrictedOp::Lt => operand.clone().lt(bound),
+                RestrictedOp::LtEq => operand.clone().lt_eq(bound),
+                RestrictedOp::Gt => operand.clone().gt(bound),
+                RestrictedOp::GtEq => operand.clone().gt_eq(bound),
+                _ => return error::InvalidExprSnafu { expr: self.clone() }.fail(),
             };
+            let null_matches = matches!(
+                op,
+                RestrictedOp::NotEq | RestrictedOp::Lt | RestrictedOp::LtEq
+            );
+            // Evaluate functions once; columns keep the cheaper boolean kernels.
+            return Ok(match (is_function, null_matches) {
+                (true, true) => comparison.is_not_false(),
+                (true, false) => comparison.is_true(),
+                (false, true) => comparison.or(operand.is_null()),
+                (false, false) => comparison.and(operand.is_not_null()),
+            });
         }
 
         if matches!(self.op, RestrictedOp::And | RestrictedOp::Or)

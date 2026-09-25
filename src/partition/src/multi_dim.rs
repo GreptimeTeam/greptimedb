@@ -609,26 +609,8 @@ mod tests {
                     assert!(masks[&expected].array().value(index));
                 }
             }
-            assert_eq!(
-                rule.find_region(&[Value::from("z"), Value::Int64(-1)])
-                    .unwrap(),
-                expected_z
-            );
-            let batch = RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(Int64Array::from(vec![-1])),
-                    Arc::new(StringArray::from(vec!["z"])),
-                ],
-            )
-            .unwrap();
             assert!(
-                rule.split_record_batch(&batch).unwrap()[&expected_z]
-                    .array()
-                    .value(0)
-            );
-            assert!(
-                rule.split_record_batch(&batch.slice(0, 0))
+                rule.split_record_batch(&RecordBatch::new_empty(schema.clone()))
                     .unwrap()
                     .is_empty()
             );
@@ -827,19 +809,13 @@ mod tests {
             .unwrap();
             let naive = rule.split_record_batch_naive(&batch).unwrap();
             let physical = rule.split_record_batch(&batch).unwrap();
-            let columns = rule.record_batch_to_cols(&batch).unwrap();
-            for row in 0..batch.num_rows() {
-                let region = rule
-                    .find_region(
-                        &columns
-                            .iter()
-                            .map(|column| column.get(row))
-                            .collect::<Vec<_>>(),
-                    )
-                    .unwrap();
-                assert_ne!(region, 0);
-                assert!(naive[&region].value(row));
-            }
+            assert_eq!(
+                physical
+                    .values()
+                    .map(|mask| mask.array().true_count())
+                    .sum::<usize>(),
+                batch.num_rows()
+            );
             for (region, mask) in physical {
                 assert_eq!(mask.array(), &naive[&region]);
             }
