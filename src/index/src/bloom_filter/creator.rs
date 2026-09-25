@@ -55,8 +55,8 @@ pub struct BloomFilterCreator {
 
     /// Distinct element hashes (see [`element_hash`]) in the current segment.
     ///
-    /// Two elements with the same hash set the same bits, so deduplicating by hash
-    /// produces the same filter as deduplicating by value.
+    /// Elements with equal hashes set the same bits, so deduplicating by hash loses
+    /// nothing and avoids copying the values.
     cur_seg_distinct_elems: HashSet<u64, BuildHasherDefault<PrehashedHasher>>,
 
     /// The memory usage of the current segment's distinct elements.
