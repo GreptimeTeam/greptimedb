@@ -53,7 +53,22 @@
 pub mod reader;
 pub mod writer;
 
-use crate::bitmap::Bitmap;
+use greptime_proto::v1::index::InvertedIndexMeta;
+
+use crate::bitmap::{Bitmap, BitmapType};
+
+/// Set in [`InvertedIndexMeta::bitmap_type`] when the FST region holds a top-level FST
+/// (last key of each block -> block location) instead of the whole FST.
+// TODO: a dedicated proto field instead of borrowing bits of `bitmap_type`.
+pub const CHUNKED_FST_FLAG: i32 = 1 << 8;
+
+pub fn is_chunked_fst(meta: &InvertedIndexMeta) -> bool {
+    meta.bitmap_type & CHUNKED_FST_FLAG != 0
+}
+
+pub fn bitmap_type(meta: &InvertedIndexMeta) -> BitmapType {
+    BitmapType::try_from(meta.bitmap_type & !CHUNKED_FST_FLAG).unwrap_or(BitmapType::BitVec)
+}
 
 const FOOTER_PAYLOAD_SIZE_SIZE: u64 = 4;
 const MIN_BLOB_SIZE: u64 = FOOTER_PAYLOAD_SIZE_SIZE;

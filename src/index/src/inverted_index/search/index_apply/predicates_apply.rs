@@ -20,6 +20,7 @@ use greptime_proto::v1::index::InvertedIndexMetas;
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::{IndexNotFoundSnafu, Result};
 use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
+use crate::inverted_index::format::{FstValue, is_chunked_fst};
 use crate::inverted_index::search::fst_apply::{
     FstApplier, IntersectionFstApplier, KeysFstApplier,
 };
@@ -87,10 +88,50 @@ impl IndexApplier for PredicatesIndexApplier {
         }
 
         let fsts = reader.fst_vec(&fst_ranges, metrics.as_deref_mut()).await?;
+
+        // Chunked columns: `fsts` holds their top-level FST; fetch the selected blocks of all
+        // such columns in one read.
+        let mut block_ranges = Vec::new();
+        let mut blocks_per_column = Vec::with_capacity(fsts.len());
+        for (fst, (fst_applier, meta)) in fsts.iter().zip(&appliers) {
+            if !is_chunked_fst(meta) {
+                blocks_per_column.push(0);
+                continue;
+            }
+            let selected = fst_applier.select_blocks(fst);
+            blocks_per_column.push(selected.len());
+            for location in selected {
+                let FstValue::Bitmap { offset, size } = FstValue::decode(location) else {
+                    unreachable!("block locations are never inline")
+                };
+                let start = meta.base_offset + offset as u64;
+                block_ranges.push(start..start + size as u64);
+            }
+        }
+        let mut blocks = if block_ranges.is_empty() {
+            Vec::new()
+        } else {
+            reader
+                .fst_vec(&block_ranges, metrics.as_deref_mut())
+                .await?
+        }
+        .into_iter();
+
         let value_and_meta_vec = fsts
             .into_iter()
             .zip(appliers)
-            .map(|(fst, (fst_applier, meta))| (fst_applier.apply(&fst), meta))
+            .zip(blocks_per_column)
+            .map(|((fst, (fst_applier, meta)), num_blocks)| {
+                if !is_chunked_fst(meta) {
+                    return (fst_applier.apply(&fst), meta);
+                }
+                let values = blocks
+                    .by_ref()
+                    .take(num_blocks)
+                    .flat_map(|block| fst_applier.apply(&block))
+                    .collect();
+                (values, meta)
+            })
             .collect::<Vec<_>>();
 
         let mut mapper = ParallelFstValuesMapper::new(reader);
