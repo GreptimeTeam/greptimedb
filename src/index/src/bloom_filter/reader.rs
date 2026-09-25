@@ -24,10 +24,10 @@ use greptime_proto::v1::index::{BloomFilterLoc, BloomFilterMeta};
 use prost::Message;
 use snafu::{ResultExt, ensure};
 
-use crate::bloom_filter::SEED;
 use crate::bloom_filter::error::{
     DecodeProtoSnafu, FileSizeTooSmallSnafu, IoSnafu, Result, UnexpectedMetaSizeSnafu,
 };
+use crate::bloom_filter::{PrehashedBloomFilter, PrehashedBuildHasher, SEED};
 
 /// Minimum size of the bloom filter, which is the size of the length of the bloom filter.
 const BLOOM_META_LEN_SIZE: u64 = 4;
@@ -180,11 +180,12 @@ pub trait BloomFilterReader: Sync {
         Ok(bm)
     }
 
+    /// Reads multiple bloom filters; probe them with [`crate::bloom_filter::element_hash`].
     async fn bloom_filter_vec(
         &self,
         locs: &[BloomFilterLoc],
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<Vec<BloomFilter>> {
+    ) -> Result<Vec<PrehashedBloomFilter>> {
         let ranges = locs
             .iter()
             .map(|l| l.offset..l.offset + l.size)
@@ -195,7 +196,7 @@ pub trait BloomFilterReader: Sync {
         for (bs, loc) in bss.into_iter().zip(locs.iter()) {
             let vec = bytes_to_u64_vec(&bs);
             let bm = BloomFilter::from_vec(vec)
-                .seed(&SEED)
+                .hasher(PrehashedBuildHasher::default())
                 .expected_items(loc.element_count as _);
             result.push(bm);
         }
