@@ -32,24 +32,29 @@ use sql::statements::value_to_sql_value;
 use sqlparser::ast::{BinaryOperator as ParserBinaryOperator, Expr as ParserExpr, Ident};
 
 use crate::error;
+use crate::function::PartitionFunction;
 use crate::partition::PartitionBound;
 
 /// Struct for partition expression. This can be converted back to sqlparser's [Expr].
 /// by [`Self::to_parser_expr`].
 ///
 /// [Expr]: sqlparser::ast::Expr
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PartitionExpr {
     pub lhs: Box<Operand>,
     pub op: RestrictedOp,
     pub rhs: Box<Operand>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum Operand {
     Column(String),
     Value(Value),
     Expr(PartitionExpr),
+    Function {
+        function: PartitionFunction,
+        args: Vec<Operand>,
+    },
 }
 
 pub fn col(column_name: impl Into<String>) -> Operand {
@@ -65,7 +70,7 @@ impl From<Value> for Operand {
 impl Operand {
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
         match self {
-            Self::Column(c) => Ok(datafusion_expr::col(format!(r#""{}""#, c))),
+            Self::Column(c) => Ok(Expr::Column(datafusion_common::Column::from_name(c))),
             Self::Value(v) => {
                 let scalar_value = match v {
                     Value::Boolean(v) => ScalarValue::Boolean(Some(*v)),
@@ -106,6 +111,48 @@ impl Operand {
                 Ok(datafusion_expr::lit(scalar_value))
             }
             Self::Expr(e) => e.try_as_logical_expr(),
+            Self::Function { function, args } => Ok(datafusion_expr::ScalarUDF::from(*function)
+                .call(
+                    args.iter()
+                        .map(Self::try_as_logical_expr)
+                        .collect::<error::Result<Vec<_>>>()?,
+                )),
+        }
+    }
+
+    fn to_parser_expr(&self) -> ParserExpr {
+        use sqlparser::ast::{
+            Function, FunctionArg, FunctionArgExpr, FunctionArgumentList, FunctionArguments,
+            ObjectName,
+        };
+        match self {
+            Self::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
+            Self::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
+            Self::Expr(e) => e.to_parser_expr(),
+            Self::Function { function, args } => ParserExpr::Function(Function {
+                name: ObjectName::from(vec![Ident::new(function.name())]),
+                uses_odbc_syntax: false,
+                parameters: FunctionArguments::None,
+                args: FunctionArguments::List(FunctionArgumentList {
+                    duplicate_treatment: None,
+                    args: args
+                        .iter()
+                        .map(|arg| {
+                            FunctionArg::Unnamed(FunctionArgExpr::Expr(match arg {
+                                Self::Column(name) => {
+                                    ParserExpr::Identifier(Ident::with_quote('"', name))
+                                }
+                                _ => arg.to_parser_expr(),
+                            }))
+                        })
+                        .collect(),
+                    clauses: vec![],
+                }),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: vec![],
+            }),
         }
     }
 
@@ -140,13 +187,14 @@ impl Display for Operand {
             Self::Column(v) => write!(f, "{v}"),
             Self::Value(v) => write!(f, "{v}"),
             Self::Expr(v) => write!(f, "{v}"),
+            Self::Function { .. } => write!(f, "{}", self.to_parser_expr()),
         }
     }
 }
 
 /// A restricted set of [Operator](datafusion_expr::Operator) that can be used in
 /// partition expressions.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RestrictedOp {
     // Evaluate to binary
     Eq,
@@ -237,7 +285,9 @@ impl PartitionExpr {
             rhs: Box::new(rhs),
         };
 
-        if matches!(&*expr.lhs, Operand::Value(_)) && matches!(&*expr.rhs, Operand::Column(_)) {
+        if matches!(&*expr.lhs, Operand::Value(_))
+            && matches!(&*expr.rhs, Operand::Column(_) | Operand::Function { .. })
+        {
             std::mem::swap(&mut expr.lhs, &mut expr.rhs);
             expr.op = expr.op.invert_for_swap();
         }
@@ -256,19 +306,8 @@ impl PartitionExpr {
     ///
     /// [Expr]: ParserExpr
     pub fn to_parser_expr(&self) -> ParserExpr {
-        // Safety: Partition rule won't contains unsupported value type.
-        // Otherwise it will be rejected by the parser.
-        let lhs = match &*self.lhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
-
-        let rhs = match &*self.rhs {
-            Operand::Column(c) => ParserExpr::Identifier(Ident::new(c.clone())),
-            Operand::Value(v) => ParserExpr::Value(value_to_sql_value(v).unwrap().into()),
-            Operand::Expr(e) => e.to_parser_expr(),
-        };
+        let lhs = self.lhs.to_parser_expr();
+        let rhs = self.rhs.to_parser_expr();
 
         ParserExpr::BinaryOp {
             left: Box::new(lhs),
@@ -278,76 +317,71 @@ impl PartitionExpr {
     }
 
     pub fn try_as_logical_expr(&self) -> error::Result<Expr> {
-        // Special handling for null equality.
-        // `col = NULL` -> `col IS NULL` to match SQL (DataFusion) semantics.
-        let lhs_is_null = matches!(self.lhs.as_ref(), Operand::Value(Value::Null));
-        let rhs_is_null = matches!(self.rhs.as_ref(), Operand::Value(Value::Null));
-
-        match (self.op.clone(), lhs_is_null, rhs_is_null) {
-            (RestrictedOp::Eq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_null());
+        let comparison = match (self.lhs.as_ref(), self.rhs.as_ref()) {
+            (operand @ (Operand::Column(_) | Operand::Function { .. }), Operand::Value(value)) => {
+                Some((operand, value, self.op.clone()))
             }
-            (RestrictedOp::Eq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_null());
+            (Operand::Value(value), operand @ (Operand::Column(_) | Operand::Function { .. })) => {
+                Some((operand, value, self.op.invert_for_swap()))
             }
-            (RestrictedOp::NotEq, _, true) => {
-                return Ok(self.lhs.try_as_logical_expr()?.is_not_null());
+            _ => None,
+        };
+        if let Some((operand, value, op)) = comparison {
+            let is_function = matches!(operand, Operand::Function { .. });
+            let operand = operand.try_as_logical_expr()?;
+            // Partition routing uses a total, null-first ordering, so every
+            // comparison must produce a non-null boolean in the batch path.
+            if matches!(value, Value::Null) {
+                return match op {
+                    RestrictedOp::Eq | RestrictedOp::LtEq => Ok(operand.is_null()),
+                    RestrictedOp::NotEq | RestrictedOp::Gt => Ok(operand.is_not_null()),
+                    // Keep evaluating the operand so invalid function arguments fail in
+                    // both row and batch routing, even for constant comparisons.
+                    RestrictedOp::Lt => Ok(operand.clone().is_null().and(operand.is_not_null())),
+                    RestrictedOp::GtEq => Ok(operand.clone().is_null().or(operand.is_not_null())),
+                    _ => error::InvalidExprSnafu { expr: self.clone() }.fail(),
+                };
             }
-            (RestrictedOp::NotEq, true, _) => {
-                return Ok(self.rhs.try_as_logical_expr()?.is_not_null());
-            }
-            _ => {}
+            let bound = Operand::Value(value.clone()).try_as_logical_expr()?;
+            let comparison = match op {
+                RestrictedOp::Eq => operand.clone().eq(bound),
+                RestrictedOp::NotEq => operand.clone().not_eq(bound),
+                RestrictedOp::Lt => operand.clone().lt(bound),
+                RestrictedOp::LtEq => operand.clone().lt_eq(bound),
+                RestrictedOp::Gt => operand.clone().gt(bound),
+                RestrictedOp::GtEq => operand.clone().gt_eq(bound),
+                _ => return error::InvalidExprSnafu { expr: self.clone() }.fail(),
+            };
+            let null_matches = matches!(
+                op,
+                RestrictedOp::NotEq | RestrictedOp::Lt | RestrictedOp::LtEq
+            );
+            // Evaluate functions once; columns keep the cheaper boolean kernels.
+            return Ok(match (is_function, null_matches) {
+                (true, true) => comparison.is_not_false(),
+                (true, false) => comparison.is_true(),
+                (false, true) => comparison.or(operand.is_null()),
+                (false, false) => comparison.and(operand.is_not_null()),
+            });
         }
 
-        if matches!(
-            self.op,
-            RestrictedOp::Lt | RestrictedOp::LtEq | RestrictedOp::Gt | RestrictedOp::GtEq
-        ) {
-            // Keep filtering semantics aligned with direct PartitionExpr evaluation (null-first ordering).
-            // In DataFusion SQL semantics, range comparisons with NULL yield NULL, so we inject
-            // `OR col IS NULL` on the null-first side of the comparison.
-            if matches!(self.lhs.as_ref(), Operand::Column(_)) {
-                let column_expr = self.lhs.try_as_logical_expr()?;
-                let other_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => {
-                        column_expr.clone().lt(other_expr).or(column_expr.is_null())
-                    }
-                    RestrictedOp::LtEq => column_expr
-                        .clone()
-                        .lt_eq(other_expr)
-                        .or(column_expr.is_null()),
-                    RestrictedOp::Gt => column_expr
-                        .clone()
-                        .gt(other_expr)
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::GtEq => column_expr
-                        .clone()
-                        .gt_eq(other_expr)
-                        .and(column_expr.is_not_null()),
-                    _ => unreachable!(),
-                };
-                return Ok(base);
-            } else if matches!(self.rhs.as_ref(), Operand::Column(_)) {
-                let other_expr = self.lhs.try_as_logical_expr()?;
-                let column_expr = self.rhs.try_as_logical_expr()?;
-                let base = match self.op {
-                    RestrictedOp::Lt => other_expr
-                        .lt(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::LtEq => other_expr
-                        .lt_eq(column_expr.clone())
-                        .and(column_expr.is_not_null()),
-                    RestrictedOp::Gt => {
-                        other_expr.gt(column_expr.clone()).or(column_expr.is_null())
-                    }
-                    RestrictedOp::GtEq => other_expr
-                        .gt_eq(column_expr.clone())
-                        .or(column_expr.is_null()),
-                    _ => unreachable!(),
-                };
-                return Ok(base);
+        if matches!(self.op, RestrictedOp::And | RestrictedOp::Or)
+            && matches!(&*self.rhs, Operand::Expr(rhs) if rhs.contains_function())
+        {
+            let lhs = self.lhs.try_as_logical_expr()?;
+            let rhs = self.rhs.try_as_logical_expr()?;
+            // AND/OR may evaluate both sides depending on batch selectivity.
+            // CASE guarantees that fallible functions only see rows requiring RHS.
+            return match self.op {
+                RestrictedOp::And => {
+                    datafusion_expr::when(lhs, rhs).otherwise(datafusion_expr::lit(false))
+                }
+                RestrictedOp::Or => {
+                    datafusion_expr::when(lhs, datafusion_expr::lit(true)).otherwise(rhs)
+                }
+                _ => unreachable!(),
             }
+            .context(error::CreatePhysicalExprSnafu);
         }
 
         // Normal cases handling, without NULL
@@ -436,6 +470,16 @@ impl PartitionExpr {
         })
     }
 
+    pub(crate) fn contains_function(&self) -> bool {
+        [&*self.lhs, &*self.rhs]
+            .into_iter()
+            .any(|operand| match operand {
+                Operand::Function { .. } => true,
+                Operand::Expr(expr) => expr.contains_function(),
+                _ => false,
+            })
+    }
+
     /// Collects all column names referenced by this expression.
     pub fn collect_column_names(&self, columns: &mut HashSet<String>) {
         Self::collect_operand_columns(&self.lhs, columns);
@@ -449,6 +493,11 @@ impl PartitionExpr {
             }
             Operand::Expr(e) => {
                 e.collect_column_names(columns);
+            }
+            Operand::Function { args, .. } => {
+                for arg in args {
+                    Self::collect_operand_columns(arg, columns);
+                }
             }
             Operand::Value(_) => {}
         }
@@ -769,7 +818,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) > a OR a IS NULL"
+            "a < Int64(10) OR a IS NULL"
         );
 
         let gteq_expr_rhs_column = PartitionExpr {
@@ -782,7 +831,7 @@ mod tests {
                 .try_as_logical_expr()
                 .unwrap()
                 .to_string(),
-            "Int64(10) >= a OR a IS NULL"
+            "a <= Int64(10) OR a IS NULL"
         );
     }
 

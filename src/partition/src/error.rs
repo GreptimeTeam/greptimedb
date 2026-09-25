@@ -167,6 +167,14 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Failed to evaluate partition function"))]
+    EvaluatePartitionFunction {
+        #[snafu(source)]
+        error: datafusion_common::error::DataFusionError,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to evaluate record batch"))]
     EvaluateRecordBatch {
         #[snafu(source)]
@@ -252,6 +260,7 @@ impl ErrorExt for Error {
             Error::InvalidExpr { .. }
             | Error::NoExprOperand { .. }
             | Error::UndefinedColumn { .. }
+            | Error::EvaluatePartitionFunction { .. }
             | Error::DuplicateExpr { .. }
             | Error::CheckpointNotCovered { .. }
             | Error::CheckpointOverlapped { .. } => StatusCode::InvalidArguments,

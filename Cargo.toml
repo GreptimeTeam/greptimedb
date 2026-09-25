@@ -177,6 +177,7 @@ jsonb = { git = "https://github.com/GreptimeTeam/jsonb", rev = "dd1e2341e3df35e9
 lazy_static = "1.4"
 local-ip-address = "0.6"
 loki-proto = { git = "https://github.com/GreptimeTeam/loki-proto.git", rev = "f69c8924c4babe516373e26a4118be82d976629c" }
+md5 = "0.8"
 meter-core = { git = "https://github.com/GreptimeTeam/greptime-meter.git", rev = "f743c3a5fe8c1f57363eac5866c356b7d91f9b39" }
 mockall = "0.13"
 moka = "0.12"
