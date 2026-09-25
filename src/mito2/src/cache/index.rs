@@ -45,16 +45,6 @@ pub struct IndexCacheMetrics {
     pub page_bytes: u64,
 }
 
-impl IndexCacheMetrics {
-    /// Merges another set of metrics into this one.
-    pub fn merge(&mut self, other: &Self) {
-        self.cache_hit += other.cache_hit;
-        self.cache_miss += other.cache_miss;
-        self.num_pages += other.num_pages;
-        self.page_bytes += other.page_bytes;
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PageKey {
     page_id: u64,
