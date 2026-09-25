@@ -573,12 +573,18 @@ impl PromPlanner {
         // (`subqueryTimes` documents this as "the sum of offsets ... of all subqueries in the
         // path").
         //
-        // Divergence worth knowing: Prometheus anchors subquery step points on absolute epoch
-        // multiples of the step, so an offset that is not a multiple of the step does not
-        // rotate the grid. GreptimeDB anchors the grid on the evaluation start instead (see
-        // the `ctx.start` arithmetic below, which predates this offset handling), so a
-        // sub-step offset does rotate it. The two agree whenever the offset is a multiple of
-        // the subquery step.
+        // Pre-existing divergence, neither introduced nor widened by this offset handling:
+        // GreptimeDB anchors subquery step points on the evaluation start (see the `ctx.start`
+        // arithmetic below), while Prometheus anchors them on absolute epoch multiples of the
+        // step. Results differ whenever `(start - offset)` is not a multiple of the subquery
+        // step. An offset is *not* required for this -- an unaligned evaluation timestamp
+        // alone is enough: `sum_over_time(fine[20s:10s])` evaluated at t=57 samples 47s and
+        // 57s here but 40s and 50s in Prometheus. `subquery.sql` already pins an instance that
+        // predates this commit (`tql eval (359, 359, '1s')
+        // sum_over_time(metric_total[60s:10s])`, where `359 - 60 + 10 = 309` is not a multiple
+        // of the 10s step). An offset merely adds another way to land off the grid, and a
+        // sub-step offset is not rejected here: `foo[20s:10s] offset 5s` is a valid Prometheus
+        // query, erroring on it would be a regression, and it would not close the gap anyway.
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
@@ -651,33 +657,60 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
+        // Only the `offset_ms != 0` branch below needs a second copy of the series keys.
+        let normalize_key_columns = (offset_ms != 0).then(|| series_key_columns.clone());
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
-                series_key_columns.clone(),
+                series_key_columns,
                 time_index_column.clone(),
                 sort_plan,
             )),
         });
 
         // `RangeManipulate`'s protobuf message has no offset field: on the decode path it
-        // recovers the offset from an immediately underlying `SeriesNormalize` (`local_offset`).
-        // `RangeManipulate` is `Commutative` in `dist_plan`, so a subquery's node can be pushed
-        // below a `MergeScan` and round-tripped through that encoding; without the carrier its
-        // offset would silently decode as zero and reintroduce this bug in distributed mode.
+        // recovers the offset from an immediately underlying `SeriesNormalize`
+        // (`local_offset`, see `range_manipulate.rs` and `instant_manipulate.rs`), and
+        // `RangeManipulate` is `Commutative` in `dist_plan`, so the node can be pushed below a
+        // `MergeScan` and round-tripped through that encoding.
+        //
+        // This carrier is load-bearing in BOTH standalone and distributed mode. Standalone is
+        // *not* exempt: GreptimeDB routes PromQL plans through `MergeScan`/substrait there too
+        // -- see the `MergeScan [is_placeholder=false, remote_input=[...]]` lines in the
+        // standalone results `tests/cases/standalone/common/promql/encode_substrait.result`
+        // and `precisions.result`. Remove this node and the offset decodes as zero, emptying
+        // subquery-with-offset results in standalone as well, while the logical-plan unit test
+        // for this path (`count_over_time_subquery_with_offset`, below) keeps passing because
+        // it asserts the plan *before* serialization. Anything touching this node must be
+        // checked against `tests/cases/standalone/common/promql/subquery.sql`, which exercises
+        // the encode/decode round trip for real.
+        //
+        // The node is also not semantically inert. `SeriesNormalizeStream::normalize` shifts
+        // native histogram `start_timestamp` payloads by `offset` whenever `offset != 0`
+        // (`normalize.rs`); the millisecond time index is deliberately left raw there and is
+        // shifted by `RangeManipulate` instead. That is intended here: both shifts move
+        // forward by the same `offset_ms`, so a histogram's reset/rate metadata stays aligned
+        // with the sample timestamp it describes, exactly as on the plain selector path -- and
+        // it composes with an offset the inner selector already applied, since that one
+        // shifted the time index and the start timestamp together. Pinned by
+        // `promql::extension_plan::normalize::test::
+        // subquery_offset_shifts_histogram_start_and_time_index_together`; it cannot be a
+        // sqlness case, because native histograms are a struct column with no SQL type or
+        // literal and can only be ingested over gRPC/remote-write v2.
+        //
         // Stale-marker filtering stays off: the input here is a computed inner result, not raw
         // storage samples.
-        let divide_plan = if offset_ms == 0 {
-            divide_plan
-        } else {
+        let divide_plan = if let Some(normalize_key_columns) = normalize_key_columns {
             LogicalPlan::Extension(Extension {
                 node: Arc::new(SeriesNormalize::new(
                     offset_ms,
                     time_index_column.clone(),
                     false,
-                    series_key_columns,
+                    normalize_key_columns,
                     divide_plan,
                 )),
             })
+        } else {
+            divide_plan
         };
 
         let manipulate = RangeManipulate::new(
