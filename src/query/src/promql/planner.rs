@@ -548,18 +548,55 @@ impl PromPlanner {
         subquery_expr: &SubqueryExpr,
     ) -> Result<LogicalPlan> {
         let SubqueryExpr {
-            expr, range, step, ..
+            expr,
+            range,
+            step,
+            offset,
+            ..
         } = subquery_expr;
+
+        // Prometheus shifts a subquery's own evaluation window back by its offset: the inner
+        // expression is evaluated over `(start - offset - range, end - offset]`
+        // (`evaluator.subqueryTimeRange` in `promql/engine.go`), producing samples that keep
+        // their real, un-shifted timestamps. `evalSubquery` then hands those samples to the
+        // outer range-vector function as a `MatrixSelector` whose `VectorSelector` still
+        // carries `subq.Offset`, so the function slices `(ts - offset - range, ts - offset]`.
+        // The offset is therefore applied once semantically, never twice.
+        //
+        // Here the same shift is expressed as: evaluate the inner plan over the shifted
+        // window, then let `RangeManipulate` map the resulting samples forward by `offset_ms`
+        // onto the evaluation timeline before bucketing them into ranges -- exactly what the
+        // plain matrix-selector path above does.
+        //
+        // An offset on the inner selector composes additively with this one, because the inner
+        // selector subtracts its own offset from the already shifted step timestamps
+        // (`subqueryTimes` documents this as "the sum of offsets ... of all subqueries in the
+        // path").
+        //
+        // Divergence worth knowing: Prometheus anchors subquery step points on absolute epoch
+        // multiples of the step, so an offset that is not a multiple of the step does not
+        // rotate the grid. GreptimeDB anchors the grid on the evaluation start instead (see
+        // the `ctx.start` arithmetic below, which predates this offset handling), so a
+        // sub-step offset does rotate it. The two agree whenever the offset is a multiple of
+        // the subquery step.
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
 
         let current_interval = self.ctx.interval;
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
         let current_start = self.ctx.start;
-        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
+        let current_end = self.ctx.end;
+        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
+        self.ctx.end -= offset_ms;
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
+        self.ctx.end = current_end;
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -616,17 +653,38 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?;
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
-                series_key_columns,
+                series_key_columns.clone(),
                 time_index_column.clone(),
                 sort_plan,
             )),
         });
 
+        // `RangeManipulate`'s protobuf message has no offset field: on the decode path it
+        // recovers the offset from an immediately underlying `SeriesNormalize` (`local_offset`).
+        // `RangeManipulate` is `Commutative` in `dist_plan`, so a subquery's node can be pushed
+        // below a `MergeScan` and round-tripped through that encoding; without the carrier its
+        // offset would silently decode as zero and reintroduce this bug in distributed mode.
+        // Stale-marker filtering stays off: the input here is a computed inner result, not raw
+        // storage samples.
+        let divide_plan = if offset_ms == 0 {
+            divide_plan
+        } else {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(SeriesNormalize::new(
+                    offset_ms,
+                    time_index_column.clone(),
+                    false,
+                    series_key_columns,
+                    divide_plan,
+                )),
+            })
+        };
+
         let manipulate = RangeManipulate::new(
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
-            0,
+            offset_ms,
             range_ms,
             time_index_column,
             self.ctx.field_columns.clone(),
@@ -12190,6 +12248,28 @@ mod test {
             \n              Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n                Filter: some_metric.timestamp >= TimestampMillisecond(-540999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        );
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    /// `offset` on a subquery must shift the inner evaluation window back and be
+    /// carried into the outer range manipulation. See
+    /// <https://github.com/GreptimeTeam/greptimedb/issues/9330>.
+    #[tokio::test]
+    async fn count_over_time_subquery_with_offset() {
+        let query = "count_over_time(some_metric[10m:1m] offset 5m)";
+        let expected = String::from(
+            "Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n      PromSeriesNormalize: offset=[300000], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            PromInstantManipulate: range=[-840000..99700000], lookback=[1000], interval=[60000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  Filter: some_metric.timestamp >= TimestampMillisecond(-840999, None) AND some_metric.timestamp <= TimestampMillisecond(99700000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                    TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
         );
         indie_query_plan_compare(query, expected).await;
     }
