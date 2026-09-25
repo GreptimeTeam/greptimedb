@@ -20,12 +20,16 @@ mod regex_match;
 
 use std::collections::{BTreeMap, HashSet};
 
+use arrow_schema::extension::ExtensionType;
+use common_function::scalars::json::json_get::{JsonGetWithType, json_object_path};
 use common_telemetry::warn;
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator};
-use datatypes::data_type::ConcreteDataType;
+use datatypes::data_type::{ConcreteDataType, DataType};
+use datatypes::extension::json::Json2ExtensionType;
 use datatypes::value::Value;
 use index::inverted_index::search::predicate::Predicate;
+use index::target::IndexTarget;
 use mito_codec::index::IndexValueCodec;
 use mito_codec::row_converter::SortField;
 use object_store::ObjectStore;
@@ -61,8 +65,11 @@ pub(crate) struct InvertedIndexApplierBuilder<'a> {
     /// Column ids of the columns that are indexed.
     indexed_column_ids: HashSet<ColumnId>,
 
+    /// Root columns explicitly excluded by the table index options.
+    ignored_column_ids: HashSet<ColumnId>,
+
     /// Stores predicates during traversal on the Expr tree.
-    output: BTreeMap<ColumnId, Vec<Predicate>>,
+    output: BTreeMap<IndexTarget, Vec<Predicate>>,
 
     /// The puffin manager factory.
     puffin_manager_factory: PuffinManagerFactory,
@@ -90,12 +97,19 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             object_store,
             metadata,
             indexed_column_ids,
+            ignored_column_ids: HashSet::new(),
             output: BTreeMap::default(),
             puffin_manager_factory,
             file_cache: None,
             inverted_index_cache: None,
             puffin_metadata_cache: None,
         }
+    }
+
+    /// Excludes JSON hint targets whose root column is ignored.
+    pub fn with_ignored_column_ids(mut self, ids: HashSet<ColumnId>) -> Self {
+        self.ignored_column_ids = ids;
+        self
     }
 
     /// Sets the file cache.
@@ -158,7 +172,10 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     fn expected_predicate_column_types(&self) -> BTreeMap<ColumnId, ConcreteDataType> {
         self.output
             .keys()
-            .filter_map(|col_id| {
+            .filter_map(|target| {
+                let IndexTarget::ColumnId(col_id) = target else {
+                    return None;
+                };
                 let col = self.metadata.column_by_id(*col_id)?;
                 Some((*col_id, col.column_schema.data_type.clone()))
             })
@@ -197,8 +214,8 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
     }
 
     /// Helper function to add a predicate to the output.
-    fn add_predicate(&mut self, column_id: ColumnId, predicate: Predicate) {
-        self.output.entry(column_id).or_default().push(predicate);
+    fn add_predicate(&mut self, target: IndexTarget, predicate: Predicate) {
+        self.output.entry(target).or_default().push(predicate);
     }
 
     /// Helper function to get the column id and the column type of a column.
@@ -222,6 +239,77 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
             column.column_id,
             column.column_schema.data_type.clone(),
         )))
+    }
+
+    /// Resolves only identity accesses: conversions to a different hint type are not indexed.
+    fn expr_to_index_target(&self, expr: &Expr) -> Result<Option<(IndexTarget, ConcreteDataType)>> {
+        if let Some(name) = Self::column_name(expr) {
+            return Ok(self
+                .column_id_and_type(name)?
+                .map(|(id, ty)| (IndexTarget::ColumnId(id), ty)));
+        }
+        let Expr::ScalarFunction(function) = expr else {
+            return Ok(None);
+        };
+        if function.func.name() != JsonGetWithType::NAME || !(2..=3).contains(&function.args.len())
+        {
+            return Ok(None);
+        }
+        let Some(name) = Self::column_name(&function.args[0]) else {
+            return Ok(None);
+        };
+        let Some(column) = self.metadata.column_by_name(name) else {
+            return Ok(None);
+        };
+        if !column.column_schema.data_type.is_json2()
+            || self.ignored_column_ids.contains(&column.column_id)
+        {
+            return Ok(None);
+        }
+        let Some(path_literal) = function.args[1]
+            .as_literal()
+            .and_then(|v| v.try_as_str())
+            .flatten()
+        else {
+            return Ok(None);
+        };
+        let Some(path) = json_object_path(path_literal).ok().flatten() else {
+            return Ok(None);
+        };
+        let Ok(Some(extension)) = column.column_schema.extension_type::<Json2ExtensionType>()
+        else {
+            return Ok(None);
+        };
+        let Some(hint) = extension
+            .metadata()
+            .json_settings()
+            .type_hints()
+            .iter()
+            .find(|hint| hint.path == path && hint.inverted_index)
+        else {
+            return Ok(None);
+        };
+        let result_type = match function.args.get(2) {
+            None => arrow_schema::DataType::Utf8View,
+            Some(Expr::Literal(value, _)) if value.is_null() => value.data_type(),
+            _ => return Ok(None),
+        };
+        if result_type != hint.data_type.as_arrow_type()
+            && !(result_type.is_string() && hint.data_type.is_string())
+        {
+            return Ok(None);
+        }
+        if !(hint.data_type.is_numeric()
+            || hint.data_type.is_boolean()
+            || hint.data_type.is_string())
+        {
+            return Ok(None);
+        }
+        Ok(
+            IndexTarget::json_path(column.column_id, path, hint.data_type.clone())
+                .ok()
+                .map(|target| (target, hint.data_type.clone())),
+        )
     }
 
     /// Helper function to get a non-null literal.
@@ -253,6 +341,8 @@ impl<'a> InvertedIndexApplierBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use api::v1::SemanticType;
     use datafusion_common::Column;
     use datafusion_expr::{Between, Literal};
@@ -267,6 +357,174 @@ mod tests {
     use store_api::storage::RegionId;
 
     use super::*;
+
+    fn json_expr(path: &str, ty: Option<ScalarValue>) -> Expr {
+        use common_function::scalars::udf::create_udf;
+        use datafusion_expr::expr::ScalarFunction;
+        let mut args = vec![datafusion_expr::col("attrs"), string_lit(path)];
+        if let Some(ty) = ty {
+            args.push(Expr::Literal(ty, None));
+        }
+        Expr::ScalarFunction(ScalarFunction::new_udf(
+            Arc::new(create_udf(Arc::new(JsonGetWithType::default()))),
+            args,
+        ))
+    }
+
+    fn json_metadata() -> RegionMetadata {
+        use datatypes::extension::json::JsonMetadata;
+        use datatypes::json::{JsonSettings, JsonTypeHint};
+        use datatypes::types::json_type::{JsonNativeType, JsonObjectType};
+        let mut column = ColumnSchema::new(
+            "attrs",
+            ConcreteDataType::json2(JsonNativeType::Object(JsonObjectType::new())),
+            true,
+        );
+        let hints = [
+            (vec!["a"], true),
+            (vec!["b"], true),
+            (vec!["a.b"], true),
+            (vec!["nested", "value"], true),
+            (vec!["unindexed"], false),
+        ]
+        .into_iter()
+        .map(|(path, inverted_index)| JsonTypeHint {
+            path: path.into_iter().map(String::from).collect(),
+            data_type: ConcreteDataType::string_datatype(),
+            inverted_index,
+        })
+        .chain(std::iter::once(JsonTypeHint {
+            path: vec!["n".into()],
+            data_type: ConcreteDataType::int64_datatype(),
+            inverted_index: true,
+        }))
+        .collect();
+        column.with_extension_type(&Json2ExtensionType::new(Arc::new(JsonMetadata::new(
+            JsonSettings::try_new(hints, Some(0)).unwrap(),
+        ))));
+        let mut builder = RegionMetadataBuilder::new(RegionId::new(1, 1));
+        builder
+            .push_column_metadata(ColumnMetadata {
+                column_schema: column,
+                column_id: 1,
+                semantic_type: SemanticType::Field,
+            })
+            .push_column_metadata(ColumnMetadata {
+                column_schema: ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                ),
+                column_id: 2,
+                semantic_type: SemanticType::Timestamp,
+            });
+        builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_json_target_resolution_and_predicates() {
+        use datafusion_expr::{col, lit};
+        let (_dir, factory) = PuffinManagerFactory::new_for_test_block("json_target_resolution");
+        let metadata = json_metadata();
+        let mut builder = InvertedIndexApplierBuilder::new(
+            "test".into(),
+            PathType::Bare,
+            test_object_store(),
+            &metadata,
+            HashSet::new(),
+            factory,
+        );
+        for (path, expected) in [
+            ("$.a", vec!["a"]),
+            ("$.\"a.b\"", vec!["a.b"]),
+            ("$.nested.value", vec!["nested", "value"]),
+        ] {
+            let (target, _) = builder
+                .expr_to_index_target(&json_expr(path, None))
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                target,
+                IndexTarget::json_path(
+                    1,
+                    expected.into_iter().map(String::from).collect(),
+                    ConcreteDataType::string_datatype()
+                )
+                .unwrap()
+            );
+        }
+        for path in [
+            "$.missing",
+            "$.unindexed",
+            "$.a[0]",
+            "$.*",
+            "$",
+            "$.!__remainder__!",
+            "$.n",
+        ] {
+            assert!(
+                builder
+                    .expr_to_index_target(&json_expr(path, None))
+                    .unwrap()
+                    .is_none(),
+                "{path}"
+            );
+        }
+        assert!(
+            builder
+                .expr_to_index_target(&json_expr("$.n", Some(ScalarValue::Int64(None))))
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            builder
+                .expr_to_index_target(&json_expr("$.n", Some(ScalarValue::Float64(None))))
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            builder
+                .expr_to_index_target(&col("attrs"))
+                .unwrap()
+                .is_none()
+        );
+        let n = json_expr("$.n", Some(ScalarValue::Int64(None)));
+        for expr in [
+            n.clone().eq(lit(42_i64)),
+            lit(40_i64).lt(n.clone()),
+            n.clone().between(lit(1_i64), lit(99_i64)),
+            n.clone().in_list(vec![lit(1_i64), lit(2_i64)], false),
+            n.clone().eq(lit(1_i64)).or(n.eq(lit(2_i64))),
+        ] {
+            builder.output.clear();
+            builder.traverse_and_collect(&expr);
+            assert_eq!(builder.output.len(), 1, "{expr}");
+        }
+        builder.output.clear();
+        let expr = json_expr("$.a", None)
+            .eq(lit("x"))
+            .or(json_expr("$.b", None).eq(lit("y")));
+        builder.traverse_and_collect(&expr);
+        assert!(builder.output.is_empty());
+        for pattern in [
+            ScalarValue::Utf8(Some("a.*[ip]".into())),
+            ScalarValue::Utf8View(Some("a.*[ip]".into())),
+            ScalarValue::LargeUtf8(Some("a.*[ip]".into())),
+        ] {
+            builder.output.clear();
+            builder
+                .collect_regex_match(&json_expr("$.a", None), &Expr::Literal(pattern, None))
+                .unwrap();
+            assert_eq!(builder.output.len(), 1);
+        }
+        builder.ignored_column_ids.insert(1);
+        assert!(
+            builder
+                .expr_to_index_target(&json_expr("$.a", None))
+                .unwrap()
+                .is_none()
+        );
+    }
 
     pub(crate) fn test_region_metadata() -> RegionMetadata {
         let mut builder = RegionMetadataBuilder::new(RegionId::new(1234, 5678));
@@ -379,7 +637,10 @@ mod tests {
         });
 
         builder.traverse_and_collect(&expr);
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -387,7 +648,10 @@ mod tests {
                 pattern: "bar".to_string()
             })
         );
-        let predicates = builder.output.get(&2).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(2))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

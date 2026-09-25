@@ -6815,6 +6815,7 @@ version = "1.3.0-alpha.1"
 dependencies = [
  "async-trait",
  "asynchronous-codec",
+ "base64 0.22.1",
  "bytemuck",
  "bytes",
  "common-base",

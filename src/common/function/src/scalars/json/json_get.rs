@@ -42,7 +42,8 @@ pub fn parse_json_get_path(path: &str) -> std::result::Result<JsonPath<'_>, json
     parse_json_path(path.as_bytes())
 }
 
-fn json_object_path(path: &str) -> Result<Option<Vec<String>>> {
+/// Returns object keys for an exact JSON path, or `None` for arrays and other selectors.
+pub fn json_object_path(path: &str) -> Result<Option<Vec<String>>> {
     Ok(parse_json_get_path(path)
         .map_err(|e| exec_datafusion_err!("Invalid JSONPath {path:?}: {e}"))?
         .paths

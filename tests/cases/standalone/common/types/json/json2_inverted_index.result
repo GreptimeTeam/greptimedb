@@ -1,0 +1,151 @@
+-- Index declarations round-trip through table metadata and SHOW CREATE TABLE.
+CREATE TABLE json2_inverted_index (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (
+        max_auto_expanded_paths = 0,
+        "service.name" STRING INVERTED INDEX,
+        service.name STRING INVERTED INDEX,
+        http.status_code INT INVERTED INDEX,
+        request.bytes BIGINT UNSIGNED INVERTED INDEX,
+        duration DOUBLE INVERTED INDEX,
+        success BOOLEAN INVERTED INDEX,
+        message STRING
+    )
+) WITH ('append_mode' = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE json2_inverted_index;
+
++----------------------+-------------------------------------------------------+
+| Table                | Create Table                                          |
++----------------------+-------------------------------------------------------+
+| json2_inverted_index | CREATE TABLE IF NOT EXISTS "json2_inverted_index" (   |
+|                      |   "ts" TIMESTAMP(3) NOT NULL,                         |
+|                      |   "attrs" JSON2(                                      |
+|                      |     max_auto_expanded_paths = 0,                      |
+|                      |     "service.name" STRING INVERTED INDEX,             |
+|                      |     "service"."name" STRING INVERTED INDEX,           |
+|                      |     "http"."status_code" BIGINT INVERTED INDEX,       |
+|                      |     "request"."bytes" BIGINT UNSIGNED INVERTED INDEX, |
+|                      |     "duration" DOUBLE INVERTED INDEX,                 |
+|                      |     "success" BOOLEAN INVERTED INDEX,                 |
+|                      |     "message" STRING                                  |
+|                      |   ) NULL,                                             |
+|                      |   TIME INDEX ("ts")                                   |
+|                      | )                                                     |
+|                      |                                                       |
+|                      | ENGINE=mito                                           |
+|                      | WITH(                                                 |
+|                      |   append_mode = 'true'                                |
+|                      | )                                                     |
++----------------------+-------------------------------------------------------+
+
+-- A rejected ALTER must preserve the existing declarations.
+ALTER TABLE json2_inverted_index MODIFY COLUMN attrs JSON2 (
+    message STRING INVERTED INDEX INVERTED INDEX
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: duplicated INVERTED INDEX option for JSON2 type hint 'message'
+
+ALTER TABLE json2_inverted_index MODIFY COLUMN attrs JSON2 (
+    nested."!__remainder__!" STRING INVERTED INDEX
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 indexed type hint path cannot contain reserved field '!__remainder__!'
+
+SHOW CREATE TABLE json2_inverted_index;
+
++----------------------+-------------------------------------------------------+
+| Table                | Create Table                                          |
++----------------------+-------------------------------------------------------+
+| json2_inverted_index | CREATE TABLE IF NOT EXISTS "json2_inverted_index" (   |
+|                      |   "ts" TIMESTAMP(3) NOT NULL,                         |
+|                      |   "attrs" JSON2(                                      |
+|                      |     max_auto_expanded_paths = 0,                      |
+|                      |     "service.name" STRING INVERTED INDEX,             |
+|                      |     "service"."name" STRING INVERTED INDEX,           |
+|                      |     "http"."status_code" BIGINT INVERTED INDEX,       |
+|                      |     "request"."bytes" BIGINT UNSIGNED INVERTED INDEX, |
+|                      |     "duration" DOUBLE INVERTED INDEX,                 |
+|                      |     "success" BOOLEAN INVERTED INDEX,                 |
+|                      |     "message" STRING                                  |
+|                      |   ) NULL,                                             |
+|                      |   TIME INDEX ("ts")                                   |
+|                      | )                                                     |
+|                      |                                                       |
+|                      | ENGINE=mito                                           |
+|                      | WITH(                                                 |
+|                      |   append_mode = 'true'                                |
+|                      | )                                                     |
++----------------------+-------------------------------------------------------+
+
+DROP TABLE json2_inverted_index;
+
+Affected Rows: 0
+
+-- Reserved field names cannot occur anywhere in an indexed hint path.
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 ("!__remainder__!" STRING INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 type hint path cannot be rooted at reserved field '!__remainder__!'
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (nested."!__remainder__!" STRING INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 indexed type hint path cannot contain reserved field '!__remainder__!'
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (nested."!__remainder__!".value STRING INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 indexed type hint path cannot contain reserved field '!__remainder__!'
+
+-- Invalid index declarations and unsupported paths/types are rejected.
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (message STRING INVERTED INDEX INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: duplicated INVERTED INDEX option for JSON2 type hint 'message'
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (message STRING INVERTED)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: expect INDEX after INVERTED keyword for JSON2 type hint 'message'
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (items[0].name STRING INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: a data type name, found: [ at Line: 3, Column: 23
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (event_time TIMESTAMP INVERTED INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: unsupported JSON2 type hint data type: TIMESTAMP
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (message STRING SKIPPING INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: JSON2 type hint SKIPPING INDEX is not supported yet
+
+CREATE TABLE json2_inverted_invalid (
+    ts TIMESTAMP TIME INDEX,
+    attrs JSON2 (message STRING FULLTEXT INDEX)
+);
+
+Error: 2000(InvalidSyntax), Invalid SQL syntax: sql parser error: Expected: JSON2 type hint option, found: FULLTEXT at Line: 3, Column: 33
+

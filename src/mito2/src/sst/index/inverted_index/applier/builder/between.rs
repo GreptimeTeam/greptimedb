@@ -25,10 +25,7 @@ impl InvertedIndexApplierBuilder<'_> {
             return Ok(());
         }
 
-        let Some(column_name) = Self::column_name(&between.expr) else {
-            return Ok(());
-        };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(&between.expr)? else {
             return Ok(());
         };
         let Some(low) = Self::nonnull_lit(&between.low) else {
@@ -51,7 +48,7 @@ impl InvertedIndexApplierBuilder<'_> {
             },
         });
 
-        self.add_predicate(column_id, predicate);
+        self.add_predicate(target, predicate);
         Ok(())
     }
 }
@@ -92,7 +89,10 @@ mod tests {
 
         builder.collect_between(&between).unwrap();
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
@@ -159,7 +159,10 @@ mod tests {
 
         builder.collect_between(&between).unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(3))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],

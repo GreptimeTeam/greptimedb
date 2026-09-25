@@ -31,28 +31,28 @@ impl InvertedIndexApplierBuilder<'_> {
     ) -> Result<()> {
         match op {
             Operator::Lt => {
-                if matches!(right, DfExpr::Column(_)) {
+                if Self::nonnull_lit(left).is_some() {
                     self.collect_column_gt_lit(right, left)
                 } else {
                     self.collect_column_lt_lit(left, right)
                 }
             }
             Operator::LtEq => {
-                if matches!(right, DfExpr::Column(_)) {
+                if Self::nonnull_lit(left).is_some() {
                     self.collect_column_ge_lit(right, left)
                 } else {
                     self.collect_column_le_lit(left, right)
                 }
             }
             Operator::Gt => {
-                if matches!(right, DfExpr::Column(_)) {
+                if Self::nonnull_lit(left).is_some() {
                     self.collect_column_lt_lit(right, left)
                 } else {
                     self.collect_column_gt_lit(left, right)
                 }
             }
             Operator::GtEq => {
-                if matches!(right, DfExpr::Column(_)) {
+                if Self::nonnull_lit(left).is_some() {
                     self.collect_column_le_lit(right, left)
                 } else {
                     self.collect_column_ge_lit(left, right)
@@ -108,13 +108,10 @@ impl InvertedIndexApplierBuilder<'_> {
         literal: &DfExpr,
         range_builder: impl FnOnce(Bytes) -> Range,
     ) -> Result<()> {
-        let Some(column_name) = Self::column_name(column) else {
-            return Ok(());
-        };
         let Some(lit) = Self::nonnull_lit(literal) else {
             return Ok(());
         };
-        let Some((column_id, data_type)) = self.column_id_and_type(column_name)? else {
+        let Some((target, data_type)) = self.expr_to_index_target(column)? else {
             return Ok(());
         };
 
@@ -122,7 +119,7 @@ impl InvertedIndexApplierBuilder<'_> {
             range: range_builder(Self::encode_lit(lit, data_type)?),
         });
 
-        self.add_predicate(column_id, predicate);
+        self.add_predicate(target, predicate);
         Ok(())
     }
 }
@@ -243,7 +240,10 @@ mod tests {
             builder.collect_comparison_expr(left, op, right).unwrap();
         }
 
-        let predicates = builder.output.get(&1).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(1))
+            .unwrap();
         assert_eq!(predicates.len(), cases.len());
         for ((_, expected), actual) in cases.into_iter().zip(predicates) {
             assert_eq!(
@@ -290,7 +290,10 @@ mod tests {
             .collect_comparison_expr(&field_column(), &Operator::Lt, &string_lit("abc"))
             .unwrap();
 
-        let predicates = builder.output.get(&3).unwrap();
+        let predicates = builder
+            .output
+            .get(&index::target::IndexTarget::ColumnId(3))
+            .unwrap();
         assert_eq!(predicates.len(), 1);
         assert_eq!(
             predicates[0],
