@@ -912,4 +912,146 @@ mod test {
             TimestampMillisecondArray::from(vec![2_000; 3]).to_data()
         );
     }
+
+    /// A subquery with an offset stacks `SeriesNormalize` + `RangeManipulate` on top of a
+    /// *computed inner result* (see `PromPlanner::prom_subquery_expr_to_plan`), so the native
+    /// histogram shift in [`SeriesNormalizeStream::normalize`] runs on samples the inner
+    /// selector may have already shifted. Pin that the two shifts stay consistent: the
+    /// millisecond time index is moved forward by `RangeManipulate` and the histogram
+    /// `start_timestamp` by `SeriesNormalize`, both by the same `offset`, so the distance
+    /// between a histogram's start timestamp and the sample carrying it -- the quantity
+    /// reset/rate detection reads -- is invariant under any number of stacked offsets.
+    ///
+    /// This cannot be covered by a sqlness case: native histograms are a struct column with
+    /// no SQL type or literal (`sql_data_type_to_concrete_data_type` rejects structs) and the
+    /// sqlness runner speaks only MySQL/Postgres, so such rows can only be ingested over
+    /// gRPC/remote-write v2.
+    #[tokio::test]
+    async fn subquery_offset_shifts_histogram_start_and_time_index_together() {
+        // The offset the subquery itself carries, applied by the nodes under test.
+        const SUBQUERY_OFFSET: Millisecond = 5_000;
+        // Distance from each sample to its histogram's start timestamp, before and after.
+        const START_TIMESTAMP_LAG: i64 = 1_000;
+
+        // `inner_offset` stands in for an offset the inner selector already applied: its own
+        // `SeriesNormalize`/`InstantManipulate` pair moves the sample timestamp and the
+        // histogram start timestamp forward together, so the inner result reaching the
+        // subquery's nodes is simply shifted by that amount.
+        for inner_offset in [0_i64, 10_000] {
+            let sample_timestamps = [10_000 + inner_offset, 20_000 + inner_offset];
+            let histograms = build_histogram_array(
+                &sample_timestamps
+                    .iter()
+                    .map(|timestamp| {
+                        let mut histogram = native_histogram(1.0);
+                        histogram.start_timestamp = Some(timestamp - START_TIMESTAMP_LAG);
+                        Some(histogram)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let schema = Arc::new(Schema::new(vec![
+                Field::new(
+                    TIME_INDEX_COLUMN,
+                    TimestampMillisecondType::DATA_TYPE,
+                    false,
+                ),
+                Field::new("value", histograms.data_type().clone(), true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(sample_timestamps.to_vec())),
+                    histograms,
+                ],
+            )
+            .unwrap();
+
+            // Same node stack the subquery planner builds for a non-zero offset, minus the
+            // `SeriesDivide` that only splits batches per series.
+            let logical_input = LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.clone().to_dfschema_ref().unwrap(),
+            });
+            let normalized = SeriesNormalize::new(
+                SUBQUERY_OFFSET,
+                TIME_INDEX_COLUMN,
+                false,
+                Vec::new(),
+                logical_input,
+            );
+            let evaluation_timestamp = 30_000 + inner_offset;
+            let range = RangeManipulate::new(
+                evaluation_timestamp,
+                evaluation_timestamp,
+                1,
+                SUBQUERY_OFFSET,
+                20_000,
+                TIME_INDEX_COLUMN.to_string(),
+                vec!["value".to_string()],
+                LogicalPlan::Extension(datafusion::logical_expr::Extension {
+                    node: Arc::new(normalized),
+                }),
+            )
+            .unwrap();
+            let input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![batch]], schema, None).unwrap(),
+            )));
+            let normalized_input = Arc::new(SeriesNormalizeExec {
+                offset: SUBQUERY_OFFSET,
+                time_index_column_name: TIME_INDEX_COLUMN.to_string(),
+                filter_stale_markers: false,
+                tag_columns: Vec::new(),
+                input,
+                metric: ExecutionPlanMetricsSet::new(),
+            });
+            let output = datafusion::physical_plan::collect(
+                range.to_execution_plan(normalized_input),
+                SessionContext::default().task_ctx(),
+            )
+            .await
+            .unwrap();
+
+            let range_column = |index: usize| {
+                RangeArray::try_new(
+                    output[0]
+                        .column(index)
+                        .as_any()
+                        .downcast_ref::<DictionaryArray<Int64Type>>()
+                        .unwrap()
+                        .clone(),
+                )
+                .unwrap()
+                .get(0)
+                .unwrap()
+            };
+
+            // The whole (shifted) input falls inside the evaluated range, so nothing is
+            // dropped and every sample can be compared against its histogram.
+            let expected_timestamps = sample_timestamps
+                .iter()
+                .map(|timestamp| timestamp + SUBQUERY_OFFSET)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                range_column(2).to_data(),
+                TimestampMillisecondArray::from(expected_timestamps.clone()).to_data(),
+                "inner_offset={inner_offset}"
+            );
+
+            let values = range_column(1);
+            let values = values
+                .as_any()
+                .downcast_ref::<datafusion::arrow::array::StructArray>()
+                .unwrap();
+            for (row, timestamp) in expected_timestamps.iter().enumerate() {
+                assert_eq!(
+                    read_histogram(values, row)
+                        .unwrap()
+                        .unwrap()
+                        .start_timestamp,
+                    Some(timestamp - START_TIMESTAMP_LAG),
+                    "inner_offset={inner_offset}, row={row}"
+                );
+            }
+        }
+    }
 }
