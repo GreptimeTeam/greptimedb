@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::mem;
 use std::num::NonZeroUsize;
 use std::ops::RangeInclusive;
@@ -24,6 +24,8 @@ use common_telemetry::{debug, error};
 use futures::stream;
 use snafu::ResultExt;
 
+use roaring::RoaringBitmap;
+
 use crate::bitmap::Bitmap;
 use crate::external_provider::ExternalTempFileProvider;
 use crate::inverted_index::create::sort::intermediate_rw::{
@@ -34,6 +36,30 @@ use crate::inverted_index::create::sort::{SortOutput, SortedStream, Sorter};
 use crate::inverted_index::create::sort_create::SorterFactory;
 use crate::inverted_index::error::{IntermediateSnafu, Result};
 use crate::{Bytes, BytesRef};
+
+/// Segments of one value. Rows arrive in order, so segment ids only grow.
+struct Posting {
+    segments: RoaringBitmap,
+    last_segment: u32,
+}
+
+/// Estimated fixed heap cost of a buffered value besides its bytes and segment ids.
+const POSTING_OVERHEAD: usize = 64;
+/// Estimated cost of one segment id in a roaring array container.
+const SEGMENT_SIZE: usize = size_of::<u16>();
+
+impl Posting {
+    /// Adds `start..=end` and returns the estimated memory growth.
+    fn push(&mut self, start: u32, end: u32) -> usize {
+        if end <= self.last_segment {
+            return 0;
+        }
+        let start = start.max(self.last_segment + 1);
+        self.segments.insert_range(start..=end);
+        self.last_segment = end;
+        (end - start + 1) as usize * SEGMENT_SIZE
+    }
+}
 
 /// `ExternalSorter` manages the sorting of data using both in-memory structures and external files.
 /// It dumps data to external files when the in-memory buffer crosses a certain memory threshold.
@@ -48,7 +74,7 @@ pub struct ExternalSorter {
     segment_null_bitmap: Bitmap,
 
     /// In-memory buffer to hold values and their corresponding bitmaps until memory threshold is exceeded
-    values_buffer: BTreeMap<Bytes, (Bitmap, usize)>,
+    values_buffer: HashMap<Bytes, Posting, ahash::RandomState>,
 
     /// Count of all rows ingested so far
     total_row_count: usize,
@@ -78,11 +104,11 @@ pub struct ExternalSorter {
 
 #[async_trait]
 impl Sorter for ExternalSorter {
-    /// Pushes n identical values into the sorter, adding them to the in-memory buffer and dumping
-    /// the buffer to an external file if necessary
-    async fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> Result<()> {
+    /// Pushes n identical values into the in-memory buffer; returns whether it should be
+    /// spilled.
+    fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> bool {
         if n == 0 {
-            return Ok(());
+            return false;
         }
 
         let segment_index_range = self.segment_index_range(n);
@@ -90,11 +116,15 @@ impl Sorter for ExternalSorter {
 
         if let Some(value) = value {
             let memory_diff = self.push_not_null(value, segment_index_range);
-            self.may_dump_buffer(memory_diff).await
+            self.account_memory(memory_diff)
         } else {
             self.segment_null_bitmap.insert_range(segment_index_range);
-            Ok(())
+            false
         }
+    }
+
+    async fn spill(&mut self) -> Result<()> {
+        self.dump_buffer().await
     }
 
     /// Finalizes the sorting operation, merging data from both in-memory buffer and external files
@@ -110,9 +140,7 @@ impl Sorter for ExternalSorter {
 
         let mut tree_nodes: VecDeque<SortedStream> = VecDeque::with_capacity(readers.len() + 1);
         tree_nodes.push_back(Box::new(stream::iter(
-            mem::take(&mut self.values_buffer)
-                .into_iter()
-                .map(|(value, (bitmap, _))| Ok((value, bitmap))),
+            Self::sorted(mem::take(&mut self.values_buffer)).map(Ok),
         )));
         for (_, reader) in readers {
             tree_nodes.push_back(IntermediateReader::new(reader).into_stream().await?);
@@ -149,7 +177,7 @@ impl ExternalSorter {
             temp_file_provider,
 
             segment_null_bitmap: Bitmap::new_bitvec(), // bitvec is more efficient for many null values
-            values_buffer: BTreeMap::new(),
+            values_buffer: HashMap::default(),
 
             total_row_count: 0,
             segment_row_count,
@@ -188,51 +216,60 @@ impl ExternalSorter {
         value: BytesRef<'_>,
         segment_index_range: RangeInclusive<usize>,
     ) -> usize {
+        let (start, end) = (
+            *segment_index_range.start() as u32,
+            *segment_index_range.end() as u32,
+        );
         match self.values_buffer.get_mut(value) {
-            Some((bitmap, mem_usage)) => {
-                bitmap.insert_range(segment_index_range);
-                let new_usage = bitmap.memory_usage() + value.len();
-                let diff = new_usage - *mem_usage;
-                *mem_usage = new_usage;
-
-                diff
-            }
+            Some(posting) => posting.push(start, end),
             None => {
-                let mut bitmap = Bitmap::new_roaring();
-                bitmap.insert_range(segment_index_range);
-
-                let mem_usage = bitmap.memory_usage() + value.len();
-                self.values_buffer
-                    .insert(value.to_vec(), (bitmap, mem_usage));
-
-                mem_usage
+                let mut posting = Posting {
+                    segments: RoaringBitmap::new(),
+                    last_segment: 0,
+                };
+                posting.segments.insert_range(start..=end);
+                posting.last_segment = end;
+                self.values_buffer.insert(value.to_vec(), posting);
+                value.len() + POSTING_OVERHEAD + (end - start + 1) as usize * SEGMENT_SIZE
             }
         }
     }
 
-    /// Checks if the in-memory buffer exceeds the threshold and offloads it to external storage if necessary
-    async fn may_dump_buffer(&mut self, memory_diff: usize) -> Result<()> {
+    /// Drains `values` sorted by value.
+    fn sorted(
+        values: HashMap<Bytes, Posting, ahash::RandomState>,
+    ) -> impl Iterator<Item = (Bytes, Bitmap)> {
+        let mut values = values.into_iter().collect::<Vec<_>>();
+        values.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        values
+            .into_iter()
+            .map(|(value, posting)| (value, Bitmap::Roaring(posting.segments)))
+    }
+
+    /// Records `memory_diff` and returns whether the buffer exceeds the thresholds and
+    /// should be offloaded to external storage.
+    fn account_memory(&mut self, memory_diff: usize) -> bool {
         self.current_memory_usage += memory_diff;
         let memory_usage = self.current_memory_usage;
         self.global_memory_usage
             .fetch_add(memory_diff, Ordering::Relaxed);
 
-        if self.global_memory_usage_sort_limit.is_none() {
-            return Ok(());
+        let Some(limit) = self.global_memory_usage_sort_limit else {
+            return false;
+        };
+        if self.global_memory_usage.load(Ordering::Relaxed) < limit {
+            return false;
         }
-
-        if self.global_memory_usage.load(Ordering::Relaxed)
-            < self.global_memory_usage_sort_limit.unwrap()
-        {
-            return Ok(());
-        }
-
         if let Some(current_threshold) = self.current_memory_usage_threshold
             && memory_usage < current_threshold
         {
-            return Ok(());
+            return false;
         }
+        true
+    }
 
+    async fn dump_buffer(&mut self) -> Result<()> {
+        let memory_usage = self.current_memory_usage;
         let file_id = &format!("{:012}", self.total_row_count);
         let index_name = &self.index_name;
         let writer = self
@@ -247,7 +284,7 @@ impl ExternalSorter {
         self.current_memory_usage = 0;
 
         let entries = values.len();
-        IntermediateWriter::new(writer).write_all(values.into_iter().map(|(k, (b, _))| (k, b))).await.inspect(|_|
+        IntermediateWriter::new(writer).write_all(Self::sorted(values)).await.inspect(|_|
             debug!("Dumped {entries} entries ({memory_usage} bytes) to intermediate file {file_id} for index {index_name}")
         ).inspect_err(|e|
             error!(e; "Failed to dump {entries} entries to intermediate file {file_id} for index {index_name}")
@@ -279,6 +316,8 @@ mod tests {
     use rand::Rng;
     use tokio::io::duplex;
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
+
+    use std::collections::BTreeMap;
 
     use super::*;
     use crate::external_provider::MockExternalTempFileProvider;
@@ -329,7 +368,9 @@ mod tests {
                 dictionary_values_and_sorted_result(row_count, segment_row_count);
 
             for (value, n) in dic_values {
-                sorter.push_n(value.as_deref(), n).await.unwrap();
+                if sorter.push_n(value.as_deref(), n) {
+                    sorter.spill().await.unwrap();
+                }
             }
 
             sorted_result
@@ -338,7 +379,9 @@ mod tests {
                 shuffle_values_and_sorted_result(row_count, segment_row_count);
 
             for value in mock_values {
-                sorter.push(value.as_deref()).await.unwrap();
+                if sorter.push_n(value.as_deref(), 1) {
+                    sorter.spill().await.unwrap();
+                }
             }
 
             sorted_result
