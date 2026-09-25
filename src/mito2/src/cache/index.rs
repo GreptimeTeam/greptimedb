@@ -16,6 +16,7 @@ pub mod bloom_filter_index;
 pub mod inverted_index;
 pub mod result_cache;
 
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::hash::Hash;
 use std::ops::Range;
@@ -241,6 +242,84 @@ where
                 .to_vec(),
             metrics,
         ))
+    }
+
+    /// Like [`IndexCache::get_or_load`] for several ranges, but loads the missing pages of
+    /// all ranges with a single `load` call so a cold read costs one round trip instead of
+    /// one per range.
+    async fn get_or_load_vec<F, Fut, E>(
+        &self,
+        key: K,
+        file_size: u64,
+        ranges: &[Range<u64>],
+        load: F,
+    ) -> Result<(Vec<Bytes>, IndexCacheMetrics), E>
+    where
+        F: FnOnce(Vec<Range<u64>>) -> Fut,
+        Fut: Future<Output = Result<Vec<Bytes>, E>>,
+        E: std::error::Error,
+    {
+        let mut metrics = IndexCacheMetrics::default();
+        let mut pages: HashMap<u64, Bytes> = HashMap::new();
+        let mut missing: Vec<u64> = Vec::new();
+        let mut seen = HashSet::new();
+        for range in ranges {
+            let size = (range.end - range.start) as u32;
+            for page_key in PageKey::generate_page_keys(range.start, size, self.page_size) {
+                if !seen.insert(page_key.page_id) {
+                    continue;
+                }
+                metrics.num_pages += 1;
+                match self.get_page(key, page_key) {
+                    Some(page) => {
+                        CACHE_HIT.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
+                        metrics.cache_hit += 1;
+                        metrics.page_bytes += page.len() as u64;
+                        pages.insert(page_key.page_id, page);
+                    }
+                    None => {
+                        CACHE_MISS.with_label_values(&[INDEX_CONTENT_TYPE]).inc();
+                        metrics.cache_miss += 1;
+                        missing.push(page_key.page_id);
+                    }
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            missing.sort_unstable();
+            let load_ranges = missing
+                .iter()
+                .map(|page_id| {
+                    let start = page_id * self.page_size;
+                    start..(start + self.page_size).min(file_size)
+                })
+                .collect();
+            let loaded = load(load_ranges).await?;
+            for (page_id, page) in missing.into_iter().zip(loaded) {
+                metrics.page_bytes += page.len() as u64;
+                self.put_page(key, PageKey { page_id }, page.clone());
+                pages.insert(page_id, page);
+            }
+        }
+
+        let result = ranges
+            .iter()
+            .map(|range| {
+                let size = (range.end - range.start) as u32;
+                if size == 0 {
+                    return Bytes::new();
+                }
+                let buffer = Buffer::from_iter(
+                    PageKey::generate_page_keys(range.start, size, self.page_size)
+                        .map(|p| pages[&p.page_id].clone()),
+                );
+                buffer
+                    .slice(PageKey::calculate_range(range.start, size, self.page_size))
+                    .to_bytes()
+            })
+            .collect();
+        Ok((result, metrics))
     }
 
     fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
