@@ -22,7 +22,7 @@ use futures::FutureExt;
 use snafu::ResultExt;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::compaction::compactor::{CompactionRegion, Compactor, DefaultCompactor, MergeOutput};
+use crate::compaction::compactor::{CompactionContext, DefaultCompactor, MergeOutput};
 use crate::compaction::memory_manager::CompactionMemoryManager;
 use crate::compaction::picker::CompactionTask;
 use crate::compaction::unit::CompactionUnit;
@@ -46,7 +46,7 @@ pub const MAX_PARALLEL_COMPACTION: usize = 1;
 pub(crate) struct CompactionTaskImpl {
     pub(crate) state: CancellableTaskState,
     pub(crate) execution: CompactionExecution,
-    pub(crate) compaction_region: CompactionRegion,
+    pub(crate) compaction_context: CompactionContext,
     pub(crate) request_sender: mpsc::Sender<WorkerRequestWithTime>,
     pub(crate) listener: WorkerListener,
     pub(crate) unit: CompactionUnit,
@@ -61,11 +61,11 @@ pub(crate) struct CompactionTaskImpl {
 impl Debug for CompactionTaskImpl {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TwcsCompactionTask")
-            .field("region_id", &self.compaction_region.region_id)
+            .field("region_id", &self.compaction_context.region_id)
             .field("unit", &self.unit)
             .field(
                 "append_mode",
-                &self.compaction_region.region_options.append_mode,
+                &self.compaction_context.region_options.append_mode,
             )
             .finish()
     }
@@ -74,7 +74,7 @@ impl Debug for CompactionTaskImpl {
 impl CompactionTaskImpl {
     /// Acquires the unit's memory budget and merges on the compaction runtime.
     async fn merge(&self) -> Result<MergeOutput> {
-        let region_id = self.compaction_region.region_id;
+        let region_id = self.compaction_context.region_id;
         self.listener
             .on_compaction_unit_merge_begin(region_id, self.execution.plan_id())
             .await;
@@ -104,11 +104,11 @@ impl CompactionTaskImpl {
             self.state.cancel_handle(),
             self.uncommitted.clone(),
         );
-        let region = self.compaction_region.clone();
+        let context = self.compaction_context.clone();
         let unit = self.unit.clone();
         let output =
             common_runtime::spawn_compact(
-                async move { compactor.merge_unit(&region, &unit).await },
+                async move { compactor.merge_unit(&context, &unit).await },
             )
             .await
             .context(error::JoinSnafu)??;
@@ -124,24 +124,18 @@ impl CompactionTaskImpl {
             return CompactionCancelledSnafu.fail();
         }
         // Report this unit's SSTs before its manifest update; sibling units may progress independently.
-        self.compaction_region.invoke_sst_hook(&output).await;
+        self.compaction_context.invoke_sst_hook(&output).await;
         self.listener
-            .on_compaction_commit_begin(self.compaction_region.region_id)
+            .on_compaction_commit_begin(self.compaction_context.region_id)
             .await;
         let _timer = COMPACTION_STAGE_ELAPSED
             .with_label_values(&["write_manifest"])
             .start_timer();
-        let compactor = DefaultCompactor::with_cancel_handle(
-            self.state.cancel_handle(),
-            self.uncommitted.clone(),
-        );
-        let (edit, _manifest_version) = compactor
-            .update_manifest(&self.compaction_region, output)
-            .await?;
+        let (edit, _manifest_version) = self.compaction_context.update_manifest(output).await?;
         self.uncommitted.disarm_cleanup();
         self.listener
             .on_compaction_unit_committed(
-                self.compaction_region.region_id,
+                self.compaction_context.region_id,
                 self.execution.plan_id(),
             )
             .await;
@@ -150,7 +144,7 @@ impl CompactionTaskImpl {
 
     /// Converts a caught panic into the unit's terminal error.
     fn panic_to_error(&self, payload: &(dyn std::any::Any + Send + 'static)) -> error::Error {
-        let region_id = self.compaction_region.region_id;
+        let region_id = self.compaction_context.region_id;
         let plan_id = self.execution.plan_id();
         error::UnexpectedSnafu {
             reason: format!(
@@ -173,7 +167,7 @@ impl CompactionTaskImpl {
             if !matches!(err, error::Error::CompactionCancelled { .. }) {
                 COMPACTION_FAILURE_COUNT.inc();
                 error!(err; "Compaction unit failed, region: {}, plan_id: {}",
-                    self.compaction_region.region_id, self.execution.plan_id());
+                    self.compaction_context.region_id, self.execution.plan_id());
             }
             if self.state.commit_started() && err.may_have_persisted_manifest_update() {
                 self.uncommitted.disarm_cleanup();
@@ -189,7 +183,7 @@ impl CompactionTaskImpl {
             applied,
         };
         if let Err(err) = self.notify_result(notify).await {
-            error!(err; "Failed to notify compaction unit completion, region: {}", self.compaction_region.region_id);
+            error!(err; "Failed to notify compaction unit completion, region: {}", self.compaction_context.region_id);
             return;
         }
         // This keeps the execution slot and inputs alive through worker apply.
@@ -202,7 +196,7 @@ impl CompactionTaskImpl {
     async fn notify_result(&self, notify: CompactionUnitNotification) -> Result<()> {
         self.request_sender
             .send(WorkerRequestWithTime::new(WorkerRequest::Background {
-                region_id: self.compaction_region.region_id,
+                region_id: self.compaction_context.region_id,
                 notify: BackgroundNotify::CompactionUnit(notify),
             }))
             .await
@@ -251,7 +245,7 @@ mod tests {
         let mut task = CompactionTaskImpl {
             state: CancellableTaskState::new(),
             execution: CompactionExecution::for_test(7),
-            compaction_region: region.clone(),
+            compaction_context: CompactionContext::from(&region),
             request_sender,
             listener: WorkerListener::new(Some(Arc::new(PanicOnUnitMergeBegin))),
             unit: CompactionUnit {

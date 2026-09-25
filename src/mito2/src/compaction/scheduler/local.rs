@@ -18,7 +18,7 @@ use std::sync::Arc;
 use common_meta::key::SchemaMetadataManagerRef;
 use store_api::storage::RegionId;
 
-use crate::compaction::compactor::CompactionRegion;
+use crate::compaction::compactor::{CompactionContext, CompactionRegion};
 use crate::compaction::picker::CompactionTask;
 use crate::compaction::scheduler::state::{CompactingFiles, CompactionExecution, CompactionPhase};
 use crate::compaction::scheduler::{CompactionScheduler, CompactionTransition};
@@ -126,6 +126,9 @@ impl CompactionScheduler {
             error: None,
             made_progress: false,
         };
+        let context = CompactionContext::from(&region);
+        // Planning is complete; unit tasks must not pin the other units' inputs.
+        drop(region);
         for unit in units {
             let files = reserved.for_inputs(&unit.inputs);
             let id = Self::next_plan_id(&mut self.next_plan_id);
@@ -142,7 +145,7 @@ impl CompactionScheduler {
             local.pending.push_back(CompactionTaskImpl {
                 state,
                 execution,
-                compaction_region: region.clone(),
+                compaction_context: context.clone(),
                 request_sender: self.request_sender.clone(),
                 listener: self.listener.clone(),
                 estimated_memory_bytes: unit.estimated_memory_bytes(),
@@ -150,9 +153,9 @@ impl CompactionScheduler {
                 memory_manager: self.memory_manager.clone(),
                 memory_policy: self.memory_policy,
                 uncommitted: UncommittedSsts::new(
-                    region.region_id,
-                    region.access_layer.clone(),
-                    Some(region.cache_manager.clone()),
+                    context.region_id,
+                    context.access_layer.clone(),
+                    Some(context.cache_manager.clone()),
                 ),
             });
         }

@@ -87,6 +87,8 @@ Tests live next to the code as `*_test.rs` (e.g. `src/mito2/src/engine/flush_tes
 - Loaded regions have resident compaction state, including `Idle` and handed-off
   DDLs. Publish create/open/catchup results through the worker's `register_region`;
   only close/drop unregisters them. See `compaction/scheduler/state.rs`.
+- Local compaction units use the snapshot-free `CompactionContext`. Retaining a
+  full `CompactionRegion` in a unit pins other units' inputs and delays SST purge.
 
 ## Maintenance contract
 

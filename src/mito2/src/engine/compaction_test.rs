@@ -1021,6 +1021,169 @@ async fn test_compaction_unit_applied_sibling_survives_failure_and_reopen(
     );
 }
 
+/// Holds one unit before merge and observes its sibling's task exit.
+struct UnitReleaseListener {
+    merge: Arc<UnitVisibilityGate>,
+    released: Notify,
+}
+
+#[async_trait]
+impl EventListener for UnitReleaseListener {
+    async fn on_compaction_unit_merge_begin(&self, _region_id: RegionId, plan_id: u64) {
+        self.merge.block_first(plan_id).await;
+    }
+
+    async fn on_compaction_result_notified(&self, _region_id: RegionId) {
+        self.released.notify_one();
+    }
+}
+
+/// Regression for #9067: a slow sibling must not pin a completed unit's old SSTs.
+#[tokio::test]
+async fn test_compaction_unit_releases_inputs_before_sibling_finishes() {
+    let gate = Arc::new(UnitVisibilityGate {
+        first: std::sync::atomic::AtomicU64::new(u64::MAX),
+        at_commit: false,
+        entered: Notify::new(),
+        resume: Semaphore::new(0),
+        applied: Notify::new(),
+        cancel_requested: Notify::new(),
+    });
+    let guard = UnitVisibilityGuard(gate.clone());
+    let listener = Arc::new(UnitReleaseListener {
+        merge: gate.clone(),
+        released: Notify::new(),
+    });
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine_with(
+            MitoConfig {
+                max_background_compactions: 2,
+                // A queued barrier can drain every preceding purge job.
+                max_background_purges: 1,
+                // TestEnv constructs its purge scheduler with flush concurrency.
+                max_background_flushes: 1,
+                min_compaction_interval: Duration::from_secs(3600),
+                gc: crate::gc::GcConfig {
+                    enable: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(49, 1);
+    let create = CreateRequestBuilder::new().build();
+    let table_dir = create.table_dir.clone();
+    let path_type = create.path_type;
+    let columns = crate::test_util::rows_schema(&create);
+    engine
+        .handle_request(region_id, RegionRequest::Create(create))
+        .await
+        .unwrap();
+    put_and_flush(&engine, region_id, &columns, 0..2).await;
+    put_and_flush(&engine, region_id, &columns, 120..122).await;
+
+    // Keep only IDs and paths, never a scanner, Version, or input FileHandle.
+    let original: HashSet<_> = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .file_ids()
+        .into_iter()
+        .collect();
+    assert_eq!(2, original.len());
+    let paths: HashMap<_, _> = original
+        .iter()
+        .map(|id| {
+            (
+                *id,
+                crate::sst::location::sst_file_path(&table_dir, *id, path_type),
+            )
+        })
+        .collect();
+    let store = env.get_object_store().unwrap();
+    for path in paths.values() {
+        assert!(store.exists(path).await.unwrap());
+    }
+
+    let compact_engine = engine.clone();
+    let compact = tokio::spawn(async move {
+        compact_engine
+            .handle_request(
+                region_id,
+                RegionRequest::Compact(RegionCompactRequest {
+                    options: api::v1::region::compact_request::Options::StrictWindow(
+                        api::v1::region::StrictWindow { window_seconds: 60 },
+                    ),
+                    parallelism: Some(2),
+                    ..Default::default()
+                }),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(10), gate.entered.notified())
+        .await
+        .expect("unit B did not reach the merge gate");
+    tokio::time::timeout(Duration::from_secs(10), listener.released.notified())
+        .await
+        .expect("unit A did not exit after worker apply");
+    assert!(!compact.is_finished());
+    let current: HashSet<_> = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap()
+        .file_ids()
+        .into_iter()
+        .collect();
+    assert_eq!(2, current.len());
+    assert_eq!(1, original.intersection(&current).count());
+    assert_eq!(1, original.difference(&current).count());
+    let completed_input = *original.difference(&current).next().unwrap();
+    let blocked_input = *original.intersection(&current).next().unwrap();
+
+    let drain_purges = || async {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        engine
+            .purge_scheduler()
+            .schedule(Box::pin(async move {
+                let _ = sender.send(());
+            }))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), receiver)
+            .await
+            .expect("purge queue did not drain")
+            .unwrap();
+    };
+    drain_purges().await;
+    let retained_before_sibling_exit = store.exists(&paths[&completed_input]).await.unwrap();
+    assert!(store.exists(&paths[&blocked_input]).await.unwrap());
+
+    // Finish B before asserting the regression, also checking that purging works at all.
+    drop(guard);
+    tokio::time::timeout(Duration::from_secs(10), compact)
+        .await
+        .expect("compaction did not finish after releasing B")
+        .unwrap()
+        .unwrap();
+    drain_purges().await;
+    for path in paths.values() {
+        assert!(
+            !store.exists(path).await.unwrap(),
+            "input not purged: {path}"
+        );
+    }
+    engine.stop().await.unwrap();
+    assert!(
+        !retained_before_sibling_exit,
+        "unit A exited and the purge queue drained, but its old input {} remained until unit B exited",
+        paths[&completed_input],
+    );
+}
+
 impl UnitVisibilityGate {
     /// Blocks only the first arriving unit, leaving its siblings free to progress.
     async fn block_first(&self, id: u64) {
