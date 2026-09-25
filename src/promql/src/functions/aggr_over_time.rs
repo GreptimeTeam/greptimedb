@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 use std::sync::Arc;
 
 use common_macro::range_fn;
@@ -99,37 +100,46 @@ fn evaluate_presence(
         .as_any()
         .downcast_ref::<Float64Array>()
         .unwrap();
-    let evaluator: fn(&Float64Array, usize, usize) -> Option<f64> = if values.null_count() == 0 {
-        match operation {
-            PresenceEvaluator::Count => |_, _, length| (length != 0).then_some(length as f64),
-            PresenceEvaluator::Last => {
-                |values, offset, length| (length != 0).then(|| values.value(offset + length - 1))
-            }
-            PresenceEvaluator::Absent => |_, _, length| (length == 0).then_some(1.0),
-            PresenceEvaluator::Present => |_, _, length| (length != 0).then_some(1.0),
-        }
+    // Windows overlap heavily, so locate every sample once and let each window binary-search
+    // its own slice of the index instead of rescanning the slots it shares with its neighbours.
+    let has_nulls = values.null_count() != 0;
+    let valid_positions: Vec<usize> = if has_nulls && matches!(operation, PresenceEvaluator::Count)
+    {
+        (0..values.len())
+            .filter(|&index| values.is_valid(index))
+            .collect()
     } else {
+        Vec::new()
+    };
+    let evaluator: fn(&Float64Array, &[usize], usize, usize) -> Option<f64> = if has_nulls {
         match operation {
-            PresenceEvaluator::Count => |values, offset, length| {
-                let count = (offset..offset + length)
-                    .filter(|&index| values.is_valid(index))
-                    .count();
+            PresenceEvaluator::Count => |_, samples, offset, length| {
+                let count = valid_slot_bounds(samples, offset, offset + length).len();
                 (count != 0).then_some(count as f64)
             },
-            PresenceEvaluator::Last => |values, offset, length| {
+            PresenceEvaluator::Last => |values, _, offset, length| {
                 (offset..offset + length)
                     .rev()
                     .find(|&index| values.is_valid(index))
                     .map(|index| values.value(index))
             },
-            PresenceEvaluator::Absent => |values, offset, length| {
+            PresenceEvaluator::Absent => |values, _, offset, length| {
                 (!(offset..offset + length).any(|index| values.is_valid(index))).then_some(1.0)
             },
-            PresenceEvaluator::Present => |values, offset, length| {
+            PresenceEvaluator::Present => |values, _, offset, length| {
                 (offset..offset + length)
                     .any(|index| values.is_valid(index))
                     .then_some(1.0)
             },
+        }
+    } else {
+        match operation {
+            PresenceEvaluator::Count => |_, _, _, length| (length != 0).then_some(length as f64),
+            PresenceEvaluator::Last => {
+                |values, _, offset, length| (length != 0).then(|| values.value(offset + length - 1))
+            }
+            PresenceEvaluator::Absent => |_, _, _, length| (length == 0).then_some(1.0),
+            PresenceEvaluator::Present => |_, _, _, length| (length != 0).then_some(1.0),
         }
     };
 
@@ -142,12 +152,26 @@ fn evaluate_presence(
                 "RangeArray's element {index} have different lengths in PromQL function {name}: array1={timestamp_length}, array2={value_length}"
             )));
         }
-        result.push(evaluator(values, value_offset, value_length));
+        result.push(evaluator(
+            values,
+            &valid_positions,
+            value_offset,
+            value_length,
+        ));
     }
 
     Ok(ColumnarValue::Array(Arc::new(Float64Array::from_iter(
         result,
     ))))
+}
+
+/// The slice of `valid_positions` holding the samples inside `[offset, end)`: the positions are
+/// ascending, so it is the half-open range between the first one at or past `offset` and the
+/// first one at or past `end`. Empty when the window holds no sample.
+fn valid_slot_bounds(valid_positions: &[usize], offset: usize, end: usize) -> Range<usize> {
+    let lo = valid_positions.partition_point(|&index| index < offset);
+    let hi = valid_positions.partition_point(|&index| index < end);
+    lo..hi
 }
 
 /// The average value of all points in the specified interval.
@@ -1286,6 +1310,212 @@ mod test {
                     assert_eq!(output.value(index).to_bits(), expected.to_bits());
                 }
             }
+        }
+    }
+
+    /// Payload kept under the null slots of the layouts below, so an evaluator that read the
+    /// padding instead of the samples would report a different value for `last_over_time`.
+    const NULL_PAYLOAD: f64 = -1234.5;
+
+    /// The backing layouts the presence matrix covers: no nulls, a single null, a fixed spread
+    /// of scattered nulls, a run of missing samples, and valid slots holding the special values
+    /// that must not be mistaken for missing samples.
+    fn presence_layouts(len: usize) -> Vec<(&'static str, Vec<Option<f64>>)> {
+        let base = |index: usize| Some((index % 7) as f64 + 1.0);
+
+        let no_nulls = (0..len).map(base).collect::<Vec<_>>();
+
+        let mut one_null = no_nulls.clone();
+        one_null[5] = None;
+
+        let mut scattered = no_nulls.clone();
+        // Pairs, gaps, and both ends of the backing array.
+        for index in [0usize, 3, 8, 9, 13, len - 1] {
+            scattered[index] = None;
+        }
+
+        let mut missing_run = no_nulls.clone();
+        missing_run[11..=15].fill(None);
+
+        let mut special = no_nulls.clone();
+        special[0] = Some(f64::NAN);
+        special[2] = Some(f64::from_bits(0x7ff0_0000_0000_0002)); // stale marker
+        special[5] = Some(-0.0);
+        special[7] = Some(f64::INFINITY);
+        special[11] = Some(f64::NEG_INFINITY);
+        special[13] = None;
+        special[23] = None;
+
+        vec![
+            ("no nulls", no_nulls),
+            ("one null", one_null),
+            ("scattered nulls", scattered),
+            ("missing run", missing_run),
+            ("special payloads", special),
+        ]
+    }
+
+    /// The window shapes the presence matrix covers, as `(offset, length)` pairs over a 24-slot
+    /// backing array.
+    fn presence_window_shapes() -> Vec<(&'static str, Vec<(u32, u32)>)> {
+        vec![
+            ("overlapping", (0..=12).map(|i| (i, 12)).collect()),
+            ("small", (0..21).map(|i| (i, 3)).collect()),
+            ("disjoint", (0..6).map(|i| (i * 4, 4)).collect()),
+            ("empty", vec![(0, 0), (12, 0), (23, 0)]),
+            // Boundaries on both sides of a null run, and windows sitting inside one.
+            (
+                "null run edges",
+                vec![(0, 1), (1, 1), (23, 1), (10, 5), (12, 4), (15, 2)],
+            ),
+        ]
+    }
+
+    /// Builds a backing array that keeps `NULL_PAYLOAD` under every null slot.
+    fn nullable_backing_values(values: &[Option<f64>]) -> Float64Array {
+        Float64Array::new(
+            values
+                .iter()
+                .map(|value| value.unwrap_or(NULL_PAYLOAD))
+                .collect::<Vec<_>>()
+                .into(),
+            Some(NullBuffer::from_iter(values.iter().map(Option::is_some))),
+        )
+    }
+
+    /// Runs one presence range UDF over a backing array and a set of windows.
+    fn run_presence_udf(
+        udf: ScalarUDF,
+        values: &Float64Array,
+        ranges: &[(u32, u32)],
+    ) -> Vec<Option<f64>> {
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter_values(
+            (0..values.len() as i64).map(|index| index * 1_000),
+        ));
+        let output = invoke_range_udf(
+            udf,
+            RangeArray::from_ranges(timestamps, ranges.iter().copied()).unwrap(),
+            RangeArray::from_ranges(Arc::new(values.clone()), ranges.iter().copied()).unwrap(),
+        )
+        .unwrap();
+        extract_array(&output)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn presence_range_udfs_match_per_window_oracle_on_nullable_layouts() {
+        // The scalar kernels independently validate the specialized UDFs.
+        let len = 24;
+        type PresenceCase = (
+            fn() -> ScalarUDF,
+            fn(&TimestampMillisecondArray, &Float64Array) -> Option<f64>,
+        );
+        let cases: [PresenceCase; 4] = [
+            (CountOverTime::scalar_udf, count_over_time),
+            (LastOverTime::scalar_udf, last_over_time),
+            (AbsentOverTime::scalar_udf, absent_over_time),
+            (PresentOverTime::scalar_udf, present_over_time),
+        ];
+
+        for (_, nulls) in presence_layouts(len) {
+            for (_, ranges) in presence_window_shapes() {
+                let values = nullable_backing_values(&nulls);
+                for (build_udf, kernel) in cases {
+                    let expected = ranges
+                        .iter()
+                        .map(|&(offset, length)| {
+                            let values = values.slice(offset as usize, length as usize);
+                            let values = values.as_any().downcast_ref::<Float64Array>().unwrap();
+                            let timestamps = TimestampMillisecondArray::new_null(values.len());
+                            kernel(&timestamps, values)
+                        })
+                        .collect::<Vec<_>>();
+                    let actual = run_presence_udf(build_udf(), &values, &ranges);
+                    assert_option_bits(&actual, &expected);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn presence_range_udfs_measure_samples_across_null_runs() {
+        // Slots 2..=5 are missing, slots 0, 1 and 6 are single samples, and one window is made
+        // only of nulls.
+        let nulls = [Some(1.0), Some(3.0), None, None, None, None, Some(9.0)];
+        let ranges = vec![
+            (0, 7),
+            (0, 2),
+            (2, 4),
+            (3, 4),
+            (1, 1),
+            (2, 1),
+            (6, 1),
+            (0, 0),
+        ];
+        let values = nullable_backing_values(&nulls);
+        let cases = [
+            (
+                CountOverTime::scalar_udf(),
+                vec![
+                    Some(3.0),
+                    Some(2.0),
+                    None,
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                    None,
+                ],
+            ),
+            (
+                LastOverTime::scalar_udf(),
+                vec![
+                    Some(9.0),
+                    Some(3.0),
+                    None,
+                    Some(9.0),
+                    Some(3.0),
+                    None,
+                    Some(9.0),
+                    None,
+                ],
+            ),
+            (
+                AbsentOverTime::scalar_udf(),
+                vec![
+                    None,
+                    None,
+                    Some(1.0),
+                    None,
+                    None,
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                ],
+            ),
+            (
+                PresentOverTime::scalar_udf(),
+                vec![
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                    Some(1.0),
+                    None,
+                    Some(1.0),
+                    None,
+                ],
+            ),
+        ];
+
+        for (udf, expected) in cases {
+            let actual = run_presence_udf(udf, &values, &ranges);
+            assert_option_bits(&actual, &expected);
         }
     }
 

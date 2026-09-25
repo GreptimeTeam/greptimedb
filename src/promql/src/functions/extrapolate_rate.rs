@@ -190,6 +190,15 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
         // under a null slot must not be read. Skip the per-window null scan when the whole
         // backing array is null-free, which is the common case.
         let has_nulls = value_array.null_count() > 0;
+        // Windows overlap heavily, so locate every sample once and let each window find its own
+        // slice of the index, instead of rescanning the slots it shares with its neighbours.
+        let valid_positions: Vec<usize> = if has_nulls {
+            (0..value_array.len())
+                .filter(|&index| value_array.is_valid(index))
+                .collect()
+        } else {
+            Vec::new()
+        };
         let all_values = value_array.values();
         let eval_ts = eval_ts_array.values();
 
@@ -222,16 +231,21 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
             let length = raw_length as usize;
 
             let end = offset + length;
-            let (first_index, last_index, sample_count) = if has_nulls {
-                match valid_window_bounds(value_array, offset, length) {
-                    Some(bounds) => bounds,
-                    None => {
-                        result_builder.append_null();
-                        continue;
-                    }
+            let (first_index, last_index, sample_count, window_samples) = if has_nulls {
+                let bounds = valid_slot_bounds(&valid_positions, offset, end);
+                if bounds.is_empty() {
+                    result_builder.append_null();
+                    continue;
                 }
+                let samples = &valid_positions[bounds];
+                (
+                    samples[0],
+                    samples[samples.len() - 1],
+                    samples.len(),
+                    Some(samples),
+                )
             } else {
-                (offset, end.saturating_sub(1), length)
+                (offset, end.saturating_sub(1), length, None)
             };
 
             if sample_count < 2 {
@@ -244,18 +258,14 @@ impl<const IS_COUNTER: bool, const IS_RATE: bool> ExtrapolatedRate<IS_COUNTER, I
 
             let mut result_value = last_value - first_value;
             if IS_COUNTER {
-                result_value = if has_nulls {
-                    add_counter_resets_between_samples(
-                        result_value,
-                        value_array,
-                        first_index,
-                        last_index,
-                    )
-                } else {
-                    match &mut reset_index {
+                result_value = match window_samples {
+                    Some(samples) => {
+                        add_counter_resets_between_samples(result_value, all_values, samples)
+                    }
+                    None => match &mut reset_index {
                         Some(reset_index) => reset_index.add_resets(result_value, offset, end),
                         None => add_counter_resets(result_value, &all_values[offset..end]),
-                    }
+                    },
                 };
             }
 
@@ -407,50 +417,28 @@ impl<'a> CounterResetIndex<'a> {
     }
 }
 
-/// Same additions [`add_counter_resets`] performs, over the samples in `[first, last]` instead
-/// of over every slot.
-fn add_counter_resets_between_samples(
-    result: f64,
-    values: &Float64Array,
-    first: usize,
-    last: usize,
-) -> f64 {
-    let raw_values = values.values();
+/// Same additions [`add_counter_resets`] performs, over the samples in `samples` instead of over
+/// every slot. `samples` holds the ascending slot positions of a window's samples, so the pairs
+/// are visited in sample order, exactly as a per-slot scan of the window would visit them, and
+/// the additions land on `result` in the same sequence.
+fn add_counter_resets_between_samples(result: f64, values: &[f64], samples: &[usize]) -> f64 {
     let mut result = result;
-    let mut previous = raw_values[first];
-    for index in first + 1..=last {
-        if values.is_null(index) {
-            continue;
-        }
-        let current = raw_values[index];
-        if current < previous {
+    for pair in samples.windows(2) {
+        let previous = values[pair[0]];
+        if values[pair[1]] < previous {
             result += previous;
         }
-        previous = current;
     }
     result
 }
 
-/// Locates the samples inside `[offset, offset + length)`, returning the first and last
-/// non-null index together with the number of non-null slots. Returns `None` when the
-/// window holds no sample.
-fn valid_window_bounds(
-    values: &Float64Array,
-    offset: usize,
-    length: usize,
-) -> Option<(usize, usize, usize)> {
-    let mut first = None;
-    let mut last = 0;
-    let mut count = 0;
-    for index in offset..offset + length {
-        if values.is_null(index) {
-            continue;
-        }
-        first.get_or_insert(index);
-        last = index;
-        count += 1;
-    }
-    first.map(|first| (first, last, count))
+/// The slice of `valid_positions` holding the samples inside `[offset, end)`: the positions are
+/// ascending, so it is the half-open range between the first one at or past `offset` and the
+/// first one at or past `end`. Empty when the window holds no sample.
+fn valid_slot_bounds(valid_positions: &[usize], offset: usize, end: usize) -> Range<usize> {
+    let lo = valid_positions.partition_point(|&index| index < offset);
+    let hi = valid_positions.partition_point(|&index| index < end);
+    lo..hi
 }
 
 fn extract_eval_timestamps(
@@ -779,6 +767,406 @@ mod test {
         );
 
         assert_eq!(output, vec![Some(7.5)]);
+    }
+
+    /// This independent scan implementation validates the indexed nullable path.
+    fn oracle_rate_output<const IS_COUNTER: bool, const IS_RATE: bool>(
+        timestamps: &[i64],
+        values: &Float64Array,
+        ranges: &[(u32, u32)],
+        eval_timestamps: &[i64],
+        range_length: i64,
+    ) -> Vec<Option<f64>> {
+        let raw_values = values.values();
+        let range_length_secs = range_length as f64 / 1000.0;
+        let mut output = Vec::with_capacity(ranges.len());
+        for (window, &(offset, length)) in ranges.iter().enumerate() {
+            let offset = offset as usize;
+            let end = offset + length as usize;
+
+            // oracle: the per-window scan for the first and last sample and the sample count.
+            let mut first = None;
+            let mut last = 0;
+            let mut sample_count = 0;
+            for slot in offset..end {
+                if values.is_null(slot) {
+                    continue;
+                }
+                first.get_or_insert(slot);
+                last = slot;
+                sample_count += 1;
+            }
+            let first_index = match first {
+                Some(first) => first,
+                None => {
+                    output.push(None);
+                    continue;
+                }
+            };
+            if sample_count < 2 {
+                output.push(None);
+                continue;
+            }
+            let last_index = last;
+
+            let first_value = raw_values[first_index];
+            let last_value = raw_values[last_index];
+
+            let mut result_value = last_value - first_value;
+            if IS_COUNTER {
+                // oracle: the per-slot walk between the two samples for the resets.
+                let mut previous = raw_values[first_index];
+                for slot in first_index + 1..=last_index {
+                    if values.is_null(slot) {
+                        continue;
+                    }
+                    let current = raw_values[slot];
+                    if current < previous {
+                        result_value += previous;
+                    }
+                    previous = current;
+                }
+            }
+
+            let first_ts = timestamps[first_index];
+            let last_ts = timestamps[last_index];
+            let range_end = eval_timestamps[window];
+            let range_start = range_end - range_length;
+            let sampled_interval_ms = (last_ts - first_ts) as f64;
+            let average_interval_ms = sampled_interval_ms / (sample_count - 1) as f64;
+            let mut duration_to_start_ms = (first_ts - range_start) as f64;
+            let mut duration_to_end_ms = (range_end - last_ts) as f64;
+            let extrapolation_threshold = average_interval_ms * 1.1;
+            if duration_to_start_ms >= extrapolation_threshold {
+                duration_to_start_ms = average_interval_ms / 2.0;
+            }
+            if IS_COUNTER && result_value > 0.0 && first_value >= 0.0 {
+                let duration_to_zero = sampled_interval_ms * (first_value / result_value);
+                if duration_to_zero < duration_to_start_ms {
+                    duration_to_start_ms = duration_to_zero;
+                }
+            }
+            if duration_to_end_ms >= extrapolation_threshold {
+                duration_to_end_ms = average_interval_ms / 2.0;
+            }
+            let mut factor = if sampled_interval_ms == 0.0 {
+                1.0
+            } else {
+                (sampled_interval_ms + duration_to_start_ms + duration_to_end_ms)
+                    / sampled_interval_ms
+            };
+            if IS_RATE {
+                factor /= range_length_secs;
+            }
+
+            output.push(Some(result_value * factor));
+        }
+        output
+    }
+
+    /// Runs the UDF and the per-window oracle over one layout and asserts they agree window by
+    /// window. `label` names the layout in failure messages.
+    fn assert_rate_matches_oracle<const IS_COUNTER: bool, const IS_RATE: bool>(
+        label: &str,
+        timestamps: Vec<i64>,
+        values: Arc<Float64Array>,
+        ranges: Vec<(u32, u32)>,
+        eval_timestamps: Vec<i64>,
+        range_length: i64,
+    ) {
+        let expected = oracle_rate_output::<IS_COUNTER, IS_RATE>(
+            &timestamps,
+            &values,
+            &ranges,
+            &eval_timestamps,
+            range_length,
+        );
+        let actual = nullable_rate_runner::<IS_COUNTER, IS_RATE>(
+            timestamps,
+            values,
+            ranges,
+            eval_timestamps,
+            range_length,
+        );
+
+        assert_eq!(actual.len(), expected.len(), "{label}");
+        for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
+            let equal = match (actual, expected) {
+                (None, None) => true,
+                (Some(actual), Some(expected)) => {
+                    actual.to_bits() == expected.to_bits() || (actual.is_nan() && expected.is_nan())
+                }
+                _ => false,
+            };
+            assert!(
+                equal,
+                "{label}: window {index}: indexed {actual:?} != oracle {expected:?}"
+            );
+        }
+    }
+
+    /// Payload kept under the null slots of the layouts below, so a window that read the
+    /// padding instead of the samples would report a different value.
+    const NULL_PAYLOAD: f64 = -1234.5;
+
+    /// The four layouts the index/oracle matrix covers: no nulls, a single interior null,
+    /// a fixed spread of scattered nulls and a run of missing samples. All of them are the
+    /// same resetting counter, so only the null layout differs.
+    fn matrix_inputs(len: usize) -> Vec<(&'static str, Vec<Option<f64>>)> {
+        let no_nulls = (0..len)
+            .map(|index| Some((index % 7) as f64 + 1.0))
+            .collect::<Vec<_>>();
+
+        let mut one_null = no_nulls.clone();
+        one_null[5] = None;
+
+        let mut scattered = no_nulls.clone();
+        // Pairs, gaps, and both ends of the backing array.
+        for index in [0usize, 3, 8, 9, 13, len - 1] {
+            scattered[index] = None;
+        }
+
+        let mut missing_run = no_nulls.clone();
+        missing_run[11..=15].fill(None);
+
+        vec![
+            ("no nulls", no_nulls),
+            ("one null", one_null),
+            ("scattered nulls", scattered),
+            ("missing run", missing_run),
+        ]
+    }
+
+    /// The three window shapes the matrix covers, as `(offset, length)` pairs over the same
+    /// backing array.
+    fn matrix_window_shapes(len: usize) -> Vec<(&'static str, Vec<(u32, u32)>)> {
+        vec![
+            // Heavily overlapping: neighbours share eleven of their twelve slots.
+            (
+                "overlapping",
+                (0..=(len as u32 - 12)).map(|i| (i, 12)).collect(),
+            ),
+            // Small windows, each overlapping its neighbour by two slots.
+            ("small", (0..(len as u32 - 3)).map(|i| (i, 3)).collect()),
+            // Disjoint: no slot is shared with another window.
+            (
+                "disjoint",
+                (0..(len as u32 / 4)).map(|i| (i * 4, 4)).collect(),
+            ),
+        ]
+    }
+
+    /// Evaluation timestamps just past the last slot of every window, which is where a range
+    /// vector ends in practice.
+    fn eval_timestamps_after(timestamps: &[i64], ranges: &[(u32, u32)], after_ms: i64) -> Vec<i64> {
+        ranges
+            .iter()
+            .map(|&(offset, length)| {
+                // An empty window has no last slot, so anchor it on its offset and stay inside
+                // the timestamp vector.
+                let last =
+                    (offset as usize + length.saturating_sub(1) as usize).min(timestamps.len() - 1);
+                timestamps[last] + after_ms
+            })
+            .collect()
+    }
+
+    #[test]
+    fn nullable_rate_windows_match_per_window_oracle() {
+        // Four layouts times three window shapes times the three functions, every window
+        // checked against the independent scan implementation.
+        let len = 24;
+        let timestamps: Vec<i64> = (0..len)
+            .map(|index| index as i64 * 30_000 + (index % 5) as i64 * 1_000)
+            .collect();
+        let range_length = 60_000;
+
+        for (input, nulls) in matrix_inputs(len) {
+            for (shape, ranges) in matrix_window_shapes(len) {
+                let eval_timestamps = eval_timestamps_after(&timestamps, &ranges, 5_000);
+                type CheckFn =
+                    fn(&str, Vec<i64>, Arc<Float64Array>, Vec<(u32, u32)>, Vec<i64>, i64);
+                for (name, check) in [
+                    ("rate", assert_rate_matches_oracle::<true, true> as CheckFn),
+                    (
+                        "increase",
+                        assert_rate_matches_oracle::<true, false> as CheckFn,
+                    ),
+                    (
+                        "delta",
+                        assert_rate_matches_oracle::<false, false> as CheckFn,
+                    ),
+                ] {
+                    check(
+                        &format!("{name}, {input}, {shape}"),
+                        timestamps.clone(),
+                        values_with_nulls(nulls.clone(), NULL_PAYLOAD),
+                        ranges.clone(),
+                        eval_timestamps.clone(),
+                        range_length,
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_rate_windows_match_per_window_oracle_on_seeded_layouts() {
+        // Fixed seeds over random nulls, resets, special values and window layouts, disjoint and
+        // overlapping, including windows that start, end or sit entirely inside a null run.
+        for seed in [
+            0x1f2e_3d4c_5b6a_7988,
+            0x0bad_c0de_dead_beef,
+            0x5eed_cafe_f00d_baad,
+        ] {
+            let mut prng = TinyPrng(seed);
+            let len = 48usize;
+            let timestamps: Vec<i64> = (0..len)
+                .map(|index| index as i64 * 30_000 + (index % 7) as i64 * 1_000)
+                .collect();
+
+            let mut raw = Vec::with_capacity(len);
+            let mut present = Vec::with_capacity(len);
+            for index in 0..len {
+                let value = match prng.next_index(10) {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    3 => 0.0,
+                    4 => -0.0,
+                    5 => f64::from_bits(0x7ff0_0000_0000_0002), // stale marker
+                    _ => {
+                        (prng.next_index(9) as f64 + 1.0) * if index % 3 == 0 { -1.0 } else { 1.0 }
+                    }
+                };
+                let is_present = prng.next_index(4) != 0;
+                // Null slots keep a payload that would change the result if it were read.
+                raw.push(if is_present {
+                    value
+                } else {
+                    -1.0e6 - index as f64
+                });
+                present.push(is_present);
+            }
+            let values = Arc::new(Float64Array::new(
+                raw.into(),
+                Some(NullBuffer::from_iter(present)),
+            ));
+
+            let ranges: Vec<(u32, u32)> = (0..32)
+                .map(|_| {
+                    let length = prng.next_index(12) as u32;
+                    let offset = prng.next_index(len - length as usize + 1) as u32;
+                    (offset, length)
+                })
+                .collect();
+            let eval_timestamps: Vec<i64> = ranges
+                .iter()
+                .map(|&(offset, length)| {
+                    // An empty window has no last slot, so anchor it on its offset.
+                    let last = (offset as usize + length.saturating_sub(1) as usize)
+                        .min(timestamps.len() - 1);
+                    timestamps[last] + prng.next_index(3) as i64 * 30_000
+                })
+                .collect();
+
+            let label = format!("seed {seed:#x}");
+            type CheckFn = fn(&str, Vec<i64>, Arc<Float64Array>, Vec<(u32, u32)>, Vec<i64>, i64);
+            for check in [
+                assert_rate_matches_oracle::<true, true> as CheckFn,
+                assert_rate_matches_oracle::<true, false> as CheckFn,
+                assert_rate_matches_oracle::<false, false> as CheckFn,
+            ] {
+                check(
+                    &label,
+                    timestamps.clone(),
+                    values.clone(),
+                    ranges.clone(),
+                    eval_timestamps.clone(),
+                    120_000,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nullable_rate_handles_windows_that_cut_through_nulls() {
+        // Slots 1..=3 and 6 are missing. The windows cover a single sample, a window made only
+        // of nulls, a window whose first and last slots are null, and one whose samples are
+        // entirely inside it.
+        let timestamps = vec![0, 1000, 2000, 3000, 4000, 5000, 6000, 7000];
+        let values = || {
+            values_with_nulls(
+                vec![
+                    Some(1.0),
+                    None,
+                    None,
+                    None,
+                    Some(4.0),
+                    Some(5.0),
+                    None,
+                    Some(8.0),
+                ],
+                NULL_PAYLOAD,
+            )
+        };
+        let ranges = vec![(0, 1), (1, 3), (3, 3), (3, 5), (2, 6), (6, 1), (7, 1)];
+        let eval_timestamps = eval_timestamps_after(&timestamps, &ranges, 0);
+
+        // increase: a single sample is not enough for a delta, so (0, 1), (6, 1) and (7, 1) are
+        // null, and so is the all-null window (1, 3). (3, 3) holds 4.0@4000 and 5.0@5000, whose
+        // increase of 1.0 over a 1000ms interval is extrapolated by half an interval to 1.5.
+        // (3, 5) and (2, 6) hold the same three samples, 4.0@4000, 5.0@5000 and 8.0@7000, whose
+        // increase of 4.0 over two intervals is extrapolated by half an interval to 5.0. Reading
+        // the null padding as a sample would charge a reset against it and change both values.
+        let output = nullable_rate_runner::<true, false>(
+            timestamps,
+            values(),
+            ranges,
+            eval_timestamps,
+            60_000,
+        );
+        assert_eq!(
+            output,
+            vec![None, None, Some(1.5), Some(5.0), Some(5.0), None, None]
+        );
+    }
+
+    #[test]
+    fn nullable_rate_keeps_special_values_out_of_the_null_branch() {
+        // NaN, infinities and stale markers are valid samples, not missing ones: the windows
+        // keep counting them, and only the null slots stay out of the sample set.
+        let timestamps: Vec<i64> = (0..6).map(|index| index as i64 * 1000).collect();
+        let values = || {
+            values_with_nulls(
+                vec![
+                    None,
+                    Some(f64::from_bits(0x7ff0_0000_0000_0002)),
+                    Some(f64::NAN),
+                    None,
+                    Some(f64::INFINITY),
+                    None,
+                ],
+                NULL_PAYLOAD,
+            )
+        };
+        let ranges = vec![(0, 6), (1, 3), (3, 3), (2, 1)];
+        let eval_timestamps = eval_timestamps_after(&timestamps, &ranges, 0);
+
+        let output = nullable_rate_runner::<false, false>(
+            timestamps,
+            values(),
+            ranges,
+            eval_timestamps,
+            60_000,
+        );
+        // The first two windows hold at least two valid samples, so they report a value, NaN
+        // because their samples are; the other two hold a single sample and stay null.
+        // Counting a NaN or a stale marker as missing would flip the first two to null.
+        assert!(output[0].is_some_and(|value| value.is_nan()));
+        assert!(output[1].is_some_and(|value| value.is_nan()));
+        assert_eq!(output[2], None);
+        assert_eq!(output[3], None);
     }
 
     /// Line-by-line port of Prometheus `extrapolatedRate` (promql/functions.go), float path
