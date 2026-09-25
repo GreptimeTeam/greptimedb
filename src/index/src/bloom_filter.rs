@@ -17,7 +17,7 @@ pub mod creator;
 pub mod error;
 pub mod reader;
 
-use std::hash::{BuildHasher, BuildHasherDefault, Hash, Hasher};
+use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
 use std::sync::LazyLock;
 
 /// The seed used for the Bloom filter.
@@ -32,9 +32,7 @@ static ELEMENT_HASHER: LazyLock<fastbloom::DefaultHasher> =
 /// bits as one built by inserting the elements themselves, so files stay readable by
 /// both paths.
 pub fn element_hash(elem: &[u8]) -> u64 {
-    let mut state = ELEMENT_HASHER.build_hasher();
-    elem.hash(&mut state);
-    state.finish()
+    ELEMENT_HASHER.hash_one(elem)
 }
 
 /// Hasher that returns an already computed [`element_hash`] unchanged.
