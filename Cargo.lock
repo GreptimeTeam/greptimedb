@@ -6839,6 +6839,7 @@ dependencies = [
  "rand_chacha 0.9.0",
  "regex",
  "regex-automata",
+ "regex-syntax",
  "roaring",
  "serde",
  "serde_json",
