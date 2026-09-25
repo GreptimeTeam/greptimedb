@@ -46,6 +46,7 @@ pub trait Sorter: Send {
     ///
     /// Returns true when the buffer should be spilled with [`Sorter::spill`] before more
     /// values are pushed. Kept synchronous so the per-row path does not allocate a future.
+    #[must_use = "a true result requires calling `spill` before pushing more"]
     fn push_n(&mut self, value: Option<BytesRef<'_>>, n: usize) -> bool;
 
     /// Moves the in-memory buffer to external storage.

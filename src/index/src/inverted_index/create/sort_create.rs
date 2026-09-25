@@ -155,7 +155,7 @@ mod tests {
 
         for (index_name, values) in index_values {
             for value in values {
-                creator.push_with_name(index_name, Some(value));
+                assert!(!creator.push_with_name(index_name, Some(value)));
             }
         }
 
@@ -201,7 +201,7 @@ mod tests {
 
         for (index_name, values) in index_values {
             for value in values {
-                creator.push_with_name(index_name, Some(value));
+                assert!(!creator.push_with_name(index_name, Some(value)));
             }
         }
 
@@ -230,9 +230,9 @@ mod tests {
         let mut creator =
             SortIndexCreator::new(NaiveSorter::factory(), NonZeroUsize::new(1).unwrap());
 
-        creator.push_with_name_n("a", None, 0);
-        creator.push_with_name_n("b", None, 0);
-        creator.push_with_name_n("c", None, 0);
+        assert!(!creator.push_with_name_n("a", None, 0));
+        assert!(!creator.push_with_name_n("b", None, 0));
+        assert!(!creator.push_with_name_n("c", None, 0));
 
         let mut mock_writer = MockInvertedIndexWriter::new();
         mock_writer

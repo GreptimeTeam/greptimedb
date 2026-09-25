@@ -28,6 +28,7 @@ pub trait InvertedIndexCreator: Send {
     /// Adds a value to the named index. A `None` value represents an absence of data (null)
     ///
     /// It should be equivalent to calling `push_with_name_n` with `n = 1`
+    #[must_use = "a true result requires calling `spill` before pushing more"]
     fn push_with_name(&mut self, index_name: &str, value: Option<BytesRef<'_>>) -> bool {
         self.push_with_name_n(index_name, value, 1)
     }
@@ -38,6 +39,7 @@ pub trait InvertedIndexCreator: Send {
     /// Returns true when buffered data exceeds the memory limit; the caller must then call
     /// [`InvertedIndexCreator::spill`] before pushing more. Pushing is synchronous so the
     /// per-row path does not allocate a future.
+    #[must_use = "a true result requires calling `spill` before pushing more"]
     fn push_with_name_n(&mut self, index_name: &str, value: Option<BytesRef<'_>>, n: usize)
     -> bool;
 
