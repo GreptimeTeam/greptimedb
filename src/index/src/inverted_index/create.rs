@@ -27,30 +27,22 @@ use crate::inverted_index::format::writer::InvertedIndexWriter;
 pub trait InvertedIndexCreator: Send {
     /// Adds a value to the named index. A `None` value represents an absence of data (null)
     ///
-    /// - `index_name`: Identifier for the index being built
-    /// - `value`: The data to be indexed, or `None` for a null entry
-    ///
     /// It should be equivalent to calling `push_with_name_n` with `n = 1`
-    async fn push_with_name(
-        &mut self,
-        index_name: &str,
-        value: Option<BytesRef<'_>>,
-    ) -> Result<()> {
-        self.push_with_name_n(index_name, value, 1).await
+    fn push_with_name(&mut self, index_name: &str, value: Option<BytesRef<'_>>) -> bool {
+        self.push_with_name_n(index_name, value, 1)
     }
 
-    /// Adds `n` identical values to the named index. `None` values represent absence of data (null)
+    /// Buffers `n` identical values for the named index. `None` values represent absence of
+    /// data (null).
     ///
-    /// - `index_name`: Identifier for the index being built
-    /// - `value`: The data to be indexed, or `None` for a null entry
-    ///
-    /// It should be equivalent to calling `push_with_name` `n` times
-    async fn push_with_name_n(
-        &mut self,
-        index_name: &str,
-        value: Option<BytesRef<'_>>,
-        n: usize,
-    ) -> Result<()>;
+    /// Returns true when buffered data exceeds the memory limit; the caller must then call
+    /// [`InvertedIndexCreator::spill`] before pushing more. Pushing is synchronous so the
+    /// per-row path does not allocate a future.
+    fn push_with_name_n(&mut self, index_name: &str, value: Option<BytesRef<'_>>, n: usize)
+    -> bool;
+
+    /// Moves the buffers that asked for it to external storage.
+    async fn spill(&mut self) -> Result<()>;
 
     /// Finalizes the index creation process, ensuring all data is properly indexed and stored
     /// in the provided writer
