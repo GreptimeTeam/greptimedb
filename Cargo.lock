@@ -14910,6 +14910,7 @@ dependencies = [
  "auth",
  "axum 0.8.4",
  "base64 0.22.1",
+ "bytes",
  "cache",
  "catalog",
  "chrono",

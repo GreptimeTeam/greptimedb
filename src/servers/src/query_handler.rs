@@ -43,6 +43,7 @@ use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetrics
 use pipeline::{GreptimePipelineParams, Pipeline, PipelineInfo, PipelineVersion, PipelineWay};
 use serde_json::Value;
 use session::context::{QueryContext, QueryContextRef};
+use table::metadata::TableInfoRef;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DashboardDefinition {
@@ -294,3 +295,33 @@ pub trait JaegerQueryHandler {
         query_params: QueryTraceParams,
     ) -> Result<Output>;
 }
+
+/// Handler for the PostgreSQL `COPY ... FROM STDIN` (copy-in) sub-protocol.
+///
+/// The servers layer owns the wire protocol and data parsing; this trait is
+/// the boundary to catalog lookup and ingestion, implemented by the
+/// frontend instance.
+#[async_trait]
+pub trait CopyInHandler: Send + Sync {
+    /// Resolves the target table of a COPY and returns its metadata, or
+    /// `None` when the table does not exist. Implementations should also
+    /// enforce the write permission for the table here so unauthorized
+    /// copies fail before any data is transferred.
+    async fn copy_in_table(
+        &self,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Option<TableInfoRef>>;
+
+    /// Inserts a parsed batch produced by a COPY stream. Returns the
+    /// number of affected rows.
+    async fn copy_in_insert(
+        &self,
+        requests: RowInsertRequests,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output>;
+}
+
+pub type CopyInHandlerRef = Arc<dyn CopyInHandler + Send + Sync>;

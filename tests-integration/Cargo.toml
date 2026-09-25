@@ -76,6 +76,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+bytes.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 chrono.workspace = true
 clap.workspace = true

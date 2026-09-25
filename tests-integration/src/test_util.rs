@@ -1173,7 +1173,8 @@ pub async fn setup_pg_server_with_slow_query_threshold(
     );
 
     let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
+        fe_instance_ref.clone(),
+        fe_instance_ref.clone(),
         opts.tls.should_force_tls(),
         tls_server_config,
         0,
@@ -1216,7 +1217,8 @@ pub async fn setup_pg_server_with_user_provider(
     );
 
     let mut pg_server = Box::new(PostgresServer::new(
-        fe_instance_ref,
+        fe_instance_ref.clone(),
+        fe_instance_ref.clone(),
         opts.tls.should_force_tls(),
         tls_server_config,
         0,
@@ -1271,6 +1273,7 @@ pub async fn setup_pg_server_with_prom_native_histogram(
     );
 
     let mut pg_server = Box::new(PostgresServer::new(
+        instance.fe_instance().clone(),
         instance.fe_instance().clone(),
         opts.tls.should_force_tls(),
         tls_server_config,

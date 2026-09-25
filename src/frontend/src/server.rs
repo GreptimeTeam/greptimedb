@@ -417,6 +417,7 @@ where
             let pg_server = Box::new(
                 PostgresServer::new(
                     instance.clone(),
+                    instance.clone(),
                     opts.tls.should_force_tls(),
                     tls_server_config,
                     opts.keep_alive.as_secs(),

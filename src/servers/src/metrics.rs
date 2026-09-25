@@ -320,6 +320,11 @@ lazy_static! {
         "servers postgres prepared count"
     )
     .unwrap();
+    pub static ref METRIC_POSTGRES_COPY_IN_ROWS: IntCounter = register_int_counter!(
+        "greptime_servers_postgres_copy_in_rows",
+        "servers postgres COPY FROM STDIN rows written"
+    )
+    .unwrap();
     pub static ref METRIC_SERVER_GRPC_DB_REQUEST_TIMER: HistogramVec = register_histogram_vec!(
         "greptime_servers_grpc_db_request_elapsed",
         "servers grpc db request elapsed",

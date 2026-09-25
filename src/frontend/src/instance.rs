@@ -13,6 +13,7 @@
 // limitations under the License.
 
 pub mod builder;
+mod copy_in;
 mod dashboard;
 mod entity_graph;
 mod export_database;
