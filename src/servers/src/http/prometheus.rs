@@ -450,12 +450,18 @@ pub async fn instant_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        let prom_queries = expand_metric_name_queries(&prom_query, metric_names);
+        // Keep the matched names around to describe rejected queries; see
+        // `ensure_single_metric_name_matched`.
+        let prom_queries = expand_metric_name_queries(&prom_query, metric_names.clone());
         try_call_return_response!(
             handler
                 .check_query_permission_parsed(&prom_queries, &query_ctx)
                 .await
         );
+        try_call_return_response!(ensure_single_metric_name_matched(
+            promql_expr,
+            &metric_names
+        ));
 
         if prom_queries.is_empty() {
             let result_type = promql_expr.value_type();
@@ -466,6 +472,11 @@ pub async fn instant_query(
             }));
         }
 
+        // Safety: `ensure_single_metric_name_matched` rejected every matcher that
+        // resolved to more than one metric without partitioning the expression by
+        // `__name__`, and the empty case returned above, so the responses of the
+        // one-query-per-metric expansion share no metric name and can be
+        // concatenated.
         let responses = join_all(prom_queries.into_iter().map(|prom_query| {
             let query_ctx = query_ctx.clone();
             let handler = handler.clone();
@@ -581,12 +592,18 @@ pub async fn range_query(
 
         debug!("Find metric names: {:?}", metric_names);
 
-        let prom_queries = expand_metric_name_queries(&prom_query, metric_names);
+        // Keep the matched names around to describe rejected queries; see
+        // `ensure_single_metric_name_matched`.
+        let prom_queries = expand_metric_name_queries(&prom_query, metric_names.clone());
         try_call_return_response!(
             handler
                 .check_query_permission_parsed(&prom_queries, &query_ctx)
                 .await
         );
+        try_call_return_response!(ensure_single_metric_name_matched(
+            promql_expr,
+            &metric_names
+        ));
 
         if prom_queries.is_empty() {
             return PrometheusJsonResponse::success(PrometheusResponse::PromData(PromData {
@@ -595,6 +612,11 @@ pub async fn range_query(
             }));
         }
 
+        // Safety: `ensure_single_metric_name_matched` rejected every matcher that
+        // resolved to more than one metric without partitioning the expression by
+        // `__name__`, and the empty case returned above, so the responses of the
+        // one-query-per-metric expansion share no metric name and can be
+        // concatenated.
         let responses = join_all(prom_queries.into_iter().map(|prom_query| {
             let query_ctx = query_ctx.clone();
             let handler = handler.clone();
@@ -603,7 +625,6 @@ pub async fn range_query(
         }))
         .await;
 
-        // Safety: at least one responses, checked above
         responses
             .into_iter()
             .reduce(|mut acc, resp| {
@@ -1509,6 +1530,112 @@ fn expand_metric_name_queries(
             query
         })
         .collect()
+}
+
+/// Rejects a non-equality `__name__` matcher that resolved to more than one metric,
+/// unless the expression partitions its result by metric name.
+///
+/// One PromQL expression is planned against a single metric table, so a
+/// `{__name__=~"foo|bar"}` selector is served by rewriting it into one equality
+/// matcher per matched metric name and concatenating the responses. That is
+/// sound when a single metric is matched, and also when the expression keeps
+/// every metric in its own result series: `count by(__name__)({__name__=~"foo|bar"})`
+/// aggregates each `__name__` group independently, so the per-metric queries
+/// produce exactly the groups the original query would and concatenation is
+/// lossless; see [`expr_partitions_by_metric_name`].
+///
+/// Everything else must evaluate the whole expression across every matching
+/// metric at once — `sum({__name__=~"foo|bar"})` or
+/// `topk(1, {__name__=~"foo|bar"})` aggregate or rank each metric on its own and
+/// the concatenation would silently return wrong data. Until cross-metric PromQL
+/// is supported, such queries are rejected.
+fn ensure_single_metric_name_matched(expr: &PromqlExpr, metric_names: &[String]) -> Result<()> {
+    if metric_names.len() <= 1 || expr_partitions_by_metric_name(expr) {
+        return Ok(());
+    }
+
+    NotSupportedSnafu {
+        feat: format!(
+            "cross-metric PromQL query: the non-equality `__name__` matcher matches {} metrics ({}), \
+             but one PromQL expression cannot be evaluated across multiple metrics yet; \
+             restrict the matcher to a single metric name, group every aggregation by `__name__` \
+             (e.g. `count by(__name__)(...)`), or issue one query per metric",
+            metric_names.len(),
+            metric_names.iter().take(5).join(", "),
+        ),
+    }
+    .fail()
+}
+
+/// Returns whether every aggregation in `expr` groups by `__name__`.
+///
+/// Only such aggregations partition the result by metric name: each group then
+/// holds series of exactly one metric, so splitting the input by metric name
+/// splits the aggregation into independent per-metric aggregations and
+/// concatenating their results is lossless. An expression without any
+/// aggregation cannot be partitioned this way — a bare multi-metric selector,
+/// `rate({__name__=~"foo|bar"}[5m])`, a binary operation or any other
+/// cross-metric shape is refused.
+///
+/// The check is deliberately conservative: it looks at every aggregation in the
+/// AST, subqueries included, and requires each of them to group by `__name__`.
+/// Shapes it cannot account for are rejected.
+fn expr_partitions_by_metric_name(expr: &PromqlExpr) -> bool {
+    let mut aggregations = 0;
+    let partitions = aggregate_groupings_by_metric_name(expr, &mut aggregations);
+
+    aggregations > 0 && partitions
+}
+
+/// Walks `expr` and returns whether every aggregation in it groups by
+/// `__name__`, counting the aggregations it saw into `aggregations`.
+fn aggregate_groupings_by_metric_name(expr: &PromqlExpr, aggregations: &mut usize) -> bool {
+    match expr {
+        PromqlExpr::Aggregate(AggregateExpr {
+            expr,
+            param,
+            modifier,
+            ..
+        }) => {
+            *aggregations += 1;
+
+            groups_by_metric_name(modifier.as_ref())
+                && aggregate_groupings_by_metric_name(expr, aggregations)
+                && param
+                    .as_ref()
+                    .is_none_or(|param| aggregate_groupings_by_metric_name(param, aggregations))
+        }
+        PromqlExpr::Unary(UnaryExpr { expr }) | PromqlExpr::Paren(ParenExpr { expr }) => {
+            aggregate_groupings_by_metric_name(expr, aggregations)
+        }
+        PromqlExpr::Binary(BinaryExpr { lhs, rhs, .. }) => {
+            aggregate_groupings_by_metric_name(lhs, aggregations)
+                && aggregate_groupings_by_metric_name(rhs, aggregations)
+        }
+        PromqlExpr::Subquery(SubqueryExpr { expr, .. }) => {
+            aggregate_groupings_by_metric_name(expr, aggregations)
+        }
+        PromqlExpr::Call(Call { args, .. }) => args
+            .args
+            .iter()
+            .all(|expr| aggregate_groupings_by_metric_name(expr, aggregations)),
+        PromqlExpr::VectorSelector(_)
+        | PromqlExpr::MatrixSelector(_)
+        | PromqlExpr::NumberLiteral(_)
+        | PromqlExpr::StringLiteral(_)
+        | PromqlExpr::Extension(_) => true,
+    }
+}
+
+/// Returns whether an aggregation modifier groups by `__name__`, i.e. is a
+/// `by (..., __name__, ...)` clause. `without`, `by` without `__name__` and a
+/// missing modifier all aggregate across metric names.
+fn groups_by_metric_name(modifier: Option<&LabelModifier>) -> bool {
+    matches!(
+        modifier,
+        Some(LabelModifier::Include(labels))
+            if labels.labels.iter().any(|label| label.as_str() == METRIC_NAME)
+    )
 }
 
 fn static_promql_targets(
@@ -3096,6 +3223,373 @@ mod tests {
             .collect_vec();
         targets.sort_unstable();
         assert_eq!(vec!["cpu_system", "cpu_user"], targets);
+    }
+
+    /// Builds a handler whose metric name lookup returns `metric_names` for any
+    /// `__name__` matcher.
+    fn metric_name_handler(metric_names: Vec<String>) -> Arc<TestPrometheusHandler> {
+        Arc::new(TestPrometheusHandler {
+            catalog_manager: MemoryCatalogManager::new(),
+            deny_operation: false,
+            denied_table: None,
+            metric_names,
+            queries: Mutex::new(Vec::new()),
+            ordered_outputs: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Returns the queries the handler was asked to execute.
+    fn executed_queries(handler: &Arc<TestPrometheusHandler>) -> Vec<String> {
+        handler.queries.lock().unwrap().clone()
+    }
+
+    /// Returns the `__name__` matchers of the first selector in `query`.
+    fn executed_metric_name_matchers(query: &str) -> Vec<Matcher> {
+        let expr = promql_parser::parser::parse(query).unwrap();
+        find_metric_name_and_matchers(&expr, |_, matchers| {
+            Some(matchers.find_matchers(METRIC_NAME))
+        })
+        .unwrap_or_else(|| panic!("no vector selector in `{query}`"))
+    }
+
+    /// Returns the metric name each executed query was rewritten to, sorted.
+    ///
+    /// Expanded queries run concurrently, so their execution order is not
+    /// deterministic; every one of them must carry a single equality matcher.
+    fn executed_metric_names(handler: &Arc<TestPrometheusHandler>) -> Vec<String> {
+        let mut metrics = executed_queries(handler)
+            .iter()
+            .map(|query| {
+                let matchers = executed_metric_name_matchers(query);
+                assert_eq!(1, matchers.len(), "{query}");
+                assert_eq!(MatchOp::Equal, matchers[0].op, "{query}");
+                matchers[0].value.clone()
+            })
+            .collect_vec();
+        metrics.sort_unstable();
+        metrics
+    }
+
+    async fn run_instant_query(
+        handler: &Arc<TestPrometheusHandler>,
+        query: &str,
+    ) -> PrometheusJsonResponse {
+        let state: PrometheusHandlerRef = handler.clone();
+        instant_query(
+            State(state),
+            Query(InstantQuery {
+                query: Some(query.to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(InstantQuery::default()),
+        )
+        .await
+    }
+
+    async fn run_range_query(
+        handler: &Arc<TestPrometheusHandler>,
+        query: &str,
+    ) -> PrometheusJsonResponse {
+        let state: PrometheusHandlerRef = handler.clone();
+        range_query(
+            State(state),
+            Query(RangeQuery {
+                query: Some(query.to_string()),
+                start: Some("1".to_string()),
+                end: Some("100".to_string()),
+                step: Some("5s".to_string()),
+                ..Default::default()
+            }),
+            Extension(QueryContext::with(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+            )),
+            Form(RangeQuery::default()),
+        )
+        .await
+    }
+
+    /// Parses a PromQL expression for the metric-name expansion tests.
+    fn parsed_expr(query: &str) -> PromqlExpr {
+        promql_parser::parser::parse(query).unwrap()
+    }
+
+    #[test]
+    fn test_expr_partitions_by_metric_name() {
+        // Cross-metric shapes: no aggregation at all, or an aggregation that
+        // does not group by `__name__`, anywhere in the AST.
+        for promql in [
+            r#"{__name__=~"cpu.*"}"#,
+            r#"{__name__=~"cpu.*"} + vector(1)"#,
+            r#"rate({__name__=~"cpu.*"}[5m])"#,
+            r#"sum({__name__=~"cpu.*"})"#,
+            r#"topk(1, {__name__=~"cpu.*"})"#,
+            r#"sum by(host)({__name__=~"cpu.*"})"#,
+            r#"sum without (__name__)({__name__=~"cpu.*"})"#,
+            r#"sum(count by(__name__)({__name__=~"cpu.*"}))"#,
+            r#"sum by(host)(count by(__name__)({__name__=~"cpu.*"}))"#,
+            r#"count by(__name__)({__name__=~"cpu.*"}) + sum(foo)"#,
+            r#"max_over_time(sum by(host)({__name__=~"cpu.*"})[5m:1m])"#,
+        ] {
+            assert!(
+                !expr_partitions_by_metric_name(&parsed_expr(promql)),
+                "{promql} must not be partitioned by metric name"
+            );
+        }
+
+        // Every aggregation groups by `__name__`, so each expanded per-metric
+        // query computes exactly the groups of the unexpanded one. Subqueries
+        // and calls around the aggregation are fine as long as they do not
+        // aggregate across metrics themselves.
+        for promql in [
+            r#"count by(__name__)({__name__=~"cpu.*"})"#,
+            r#"count by(__name__, host)({__name__=~"cpu.*"})"#,
+            r#"sum by(__name__)(rate({__name__=~"cpu.*"}[5m]))"#,
+            r#"count by(__name__)({__name__=~"cpu.*"}) / 2"#,
+            r#"max_over_time(sum by(__name__)({__name__=~"cpu.*"})[5m:1m])"#,
+        ] {
+            assert!(
+                expr_partitions_by_metric_name(&parsed_expr(promql)),
+                "{promql} must be partitioned by metric name"
+            );
+        }
+    }
+
+    #[test]
+    fn test_ensure_single_metric_name_matched() {
+        assert!(ensure_single_metric_name_matched(&parsed_expr("foo"), &[]).is_ok());
+        assert!(
+            ensure_single_metric_name_matched(&parsed_expr("foo"), &["cpu".to_string()]).is_ok()
+        );
+
+        // Grouping by `__name__` keeps the concatenated expansion lossless.
+        assert!(
+            ensure_single_metric_name_matched(
+                &parsed_expr(r#"count by(__name__)({__name__=~"cpu.*"})"#),
+                &["cpu_user".to_string(), "cpu_system".to_string()],
+            )
+            .is_ok()
+        );
+
+        let err = ensure_single_metric_name_matched(
+            &parsed_expr(r#"sum({__name__=~"cpu.*"})"#),
+            &["cpu_user".to_string(), "cpu_system".to_string()],
+        )
+        .unwrap_err();
+        // `NotSupported` maps to `InvalidArguments`, i.e. HTTP 400 BAD_REQUEST.
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        let msg = err.to_string();
+        assert!(msg.contains("cross-metric"), "{msg}");
+        assert!(
+            msg.contains("cpu_user") && msg.contains("cpu_system"),
+            "{msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_instant_query_rejects_multi_metric_name_regex() {
+        let handler = metric_name_handler(vec!["cpu_user".to_string(), "cpu_system".to_string()]);
+
+        for promql in [
+            r#"sum({__name__=~"cpu.*"})"#,
+            r#"topk(1, {__name__=~"cpu.*"})"#,
+            r#"rate({__name__=~"cpu.*"}[5m])"#,
+        ] {
+            let response = run_instant_query(&handler, promql).await;
+
+            assert_eq!(
+                Some(StatusCode::InvalidArguments),
+                response.status_code,
+                "{promql}: {:?}",
+                response.error
+            );
+            assert_eq!("error", response.status);
+            let error = response.error.unwrap_or_default();
+            assert!(error.contains("cross-metric"), "{promql}: {error}");
+            assert!(error.contains("2 metrics"), "{promql}: {error}");
+        }
+
+        // Rejected queries never reach the query engine.
+        assert!(executed_queries(&handler).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_range_query_rejects_multi_metric_name_regex() {
+        let handler = metric_name_handler(vec![
+            "foo".to_string(),
+            "bar".to_string(),
+            "baz".to_string(),
+        ]);
+
+        let response = run_range_query(&handler, r#"topk(1, {__name__=~"foo|bar|baz"})"#).await;
+
+        assert_eq!(
+            Some(StatusCode::InvalidArguments),
+            response.status_code,
+            "{:?}",
+            response.error
+        );
+        // The client sees a BAD_REQUEST HTTP status and the rejection reason.
+        let http_response = axum::response::IntoResponse::into_response(response);
+        assert_eq!(axum::http::StatusCode::BAD_REQUEST, http_response.status());
+
+        let response = run_range_query(&handler, r#"topk(1, {__name__=~"foo|bar|baz"})"#).await;
+        let error = response.error.unwrap_or_default();
+        assert!(error.contains("cross-metric"), "{error}");
+        assert!(error.contains("3 metrics"), "{error}");
+        assert!(executed_queries(&handler).is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_single_metric_name_regex_is_executed_as_exact_match() {
+        let handler = metric_name_handler(vec!["cpu_user".to_string()]);
+
+        let response = run_instant_query(&handler, r#"sum({__name__=~"cpu_.*"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+
+        let queries = executed_queries(&handler);
+        assert_eq!(1, queries.len());
+        assert_eq!(
+            vec![Matcher::new(MatchOp::Equal, METRIC_NAME, "cpu_user")],
+            executed_metric_name_matchers(&queries[0])
+        );
+
+        let response = run_range_query(&handler, r#"sum({__name__=~"cpu_.*"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(2, executed_queries(&handler).len());
+    }
+
+    #[tokio::test]
+    async fn test_multi_metric_name_regex_grouped_by_metric_name_is_expanded() {
+        // Grouping by `__name__` keeps every metric in its own group, so the
+        // per-metric expansion and its concatenation are lossless: the query is
+        // executed once per matched metric instead of being rejected.
+        let handler = metric_name_handler(vec!["cpu_user".to_string(), "cpu_system".to_string()]);
+
+        let response =
+            run_instant_query(&handler, r#"count by(__name__)({__name__=~"cpu.*"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            vec!["cpu_system", "cpu_user"],
+            executed_metric_names(&handler)
+        );
+
+        let handler = metric_name_handler(vec!["cpu_user".to_string(), "cpu_system".to_string()]);
+        let response =
+            run_range_query(&handler, r#"count by(__name__)({__name__=~"cpu.*"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            vec!["cpu_system", "cpu_user"],
+            executed_metric_names(&handler)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_exact_metric_name_query_is_not_touched_by_rejection() {
+        // The handler reports two matching metrics, but an equality `__name__`
+        // matcher is never expanded (nor rejected).
+        let handler = metric_name_handler(vec!["cpu_user".to_string(), "cpu_system".to_string()]);
+
+        for promql in [
+            r#"{__name__="cpu_user"}"#,
+            r#"{__name__="cpu_user",host="a"}"#,
+        ] {
+            let response = run_instant_query(&handler, promql).await;
+            assert!(
+                response.status_code.is_none(),
+                "{promql}: status={:?}, error={:?}",
+                response.status_code,
+                response.error
+            );
+            // Equality matchers are executed verbatim.
+            let queries = executed_queries(&handler);
+            assert_eq!(promql, queries[queries.len() - 1].as_str());
+            assert_eq!(
+                vec![Matcher::new(MatchOp::Equal, METRIC_NAME, "cpu_user")],
+                executed_metric_name_matchers(promql)
+            );
+        }
+        assert_eq!(2, executed_queries(&handler).len());
+    }
+
+    #[tokio::test]
+    async fn test_query_without_metric_name_matcher_is_not_touched_by_rejection() {
+        let handler = metric_name_handler(vec!["cpu_user".to_string(), "cpu_system".to_string()]);
+
+        for promql in [
+            r#"sum(cpu_user{host="a"})"#,
+            r#"topk(1, rate(cpu_user[5m]))"#,
+        ] {
+            let response = run_instant_query(&handler, promql).await;
+            assert!(
+                response.status_code.is_none(),
+                "{promql}: status={:?}, error={:?}",
+                response.status_code,
+                response.error
+            );
+        }
+        assert_eq!(2, executed_queries(&handler).len());
+    }
+
+    #[tokio::test]
+    async fn test_metric_name_regex_matching_nothing_returns_empty_result() {
+        let handler = metric_name_handler(Vec::new());
+
+        let response = run_instant_query(&handler, r#"sum({__name__=~"no_such_metric"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            PrometheusResponse::PromData(PromData {
+                result_type: ValueType::Vector.to_string(),
+                ..Default::default()
+            }),
+            response.data
+        );
+        assert!(executed_queries(&handler).is_empty());
+
+        let response = run_range_query(&handler, r#"sum({__name__=~"no_such_metric"})"#).await;
+        assert!(
+            response.status_code.is_none(),
+            "status={:?}, error={:?}",
+            response.status_code,
+            response.error
+        );
+        assert_eq!(
+            PrometheusResponse::PromData(PromData {
+                result_type: ValueType::Matrix.to_string(),
+                ..Default::default()
+            }),
+            response.data
+        );
+        assert!(executed_queries(&handler).is_empty());
     }
 
     #[test]
