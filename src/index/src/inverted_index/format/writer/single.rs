@@ -20,6 +20,7 @@ use snafu::ResultExt;
 use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::{FstCompileSnafu, FstInsertSnafu, Result, WriteSnafu};
+use crate::inverted_index::format::{FstValue, InlinePosting};
 
 /// `SingleIndexWriter` writes values to the blob storage for an individual inverted index
 pub struct SingleIndexWriter<W, S> {
@@ -43,6 +44,9 @@ pub struct SingleIndexWriter<W, S> {
 
     /// Buffer for writing the blob
     buf: Vec<u8>,
+
+    /// Whether small postings are stored in the FST value instead of a bitmap.
+    inline_postings: bool,
 }
 
 impl<W, S> SingleIndexWriter<W, S>
@@ -66,6 +70,7 @@ where
             fst: MapBuilder::memory(),
             bitmap_type,
             buf: Vec::new(),
+            inline_postings: false,
             meta: InvertedIndexMeta {
                 name,
                 base_offset,
@@ -74,6 +79,11 @@ where
                 ..Default::default()
             },
         }
+    }
+
+    pub fn with_inline_postings(mut self, inline_postings: bool) -> Self {
+        self.inline_postings = inline_postings;
+        self
     }
 
     /// Writes the null bitmap, values with their bitmaps, and constructs the FST map.
@@ -114,6 +124,18 @@ where
 
     /// Appends a value and its bitmap to the blob, updates the FST, and the metadata
     async fn append_value(&mut self, value: Bytes, bitmap: Bitmap) -> Result<()> {
+        let inline = self
+            .inline_postings
+            .then(|| InlinePosting::try_from_segments(bitmap.iter_ones().map(|s| s as u32)))
+            .flatten();
+        if let Some(posting) = inline {
+            self.fst
+                .insert(&value, FstValue::Inline(posting).encode())
+                .context(FstInsertSnafu)?;
+            self.update_value_stats(value);
+            return Ok(());
+        }
+
         self.buf.clear();
         bitmap
             .serialize_into(self.bitmap_type, &mut self.buf)
@@ -127,10 +149,13 @@ where
         let size = self.buf.len() as u32;
         self.meta.inverted_index_size += size as u64;
 
-        let packed = bytemuck::cast::<[u32; 2], u64>([offset, size]);
+        let packed = FstValue::Bitmap { offset, size }.encode();
         self.fst.insert(&value, packed).context(FstInsertSnafu)?;
+        self.update_value_stats(value);
+        Ok(())
+    }
 
-        // update stats
+    fn update_value_stats(&mut self, value: Bytes) {
         if let Some(stats) = self.meta.stats.as_mut() {
             stats.distinct_count += 1;
 
@@ -140,8 +165,6 @@ where
             }
             stats.max_value = value;
         }
-
-        Ok(())
     }
 
     /// Writes the compiled FST to the blob and finalizes the metadata
