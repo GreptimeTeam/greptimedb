@@ -181,7 +181,7 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
     async fn metadata(
         &self,
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<BloomFilterMeta> {
+    ) -> Result<Arc<BloomFilterMeta>> {
         if let Some(cached) =
             self.cache
                 .get_metadata((self.file_id, self.index_version, self.column_id, self.tag))
@@ -190,12 +190,12 @@ impl<R: BloomFilterReader + Send> BloomFilterReader for CachedBloomFilterIndexBl
             if let Some(m) = metrics {
                 m.cache_hit += 1;
             }
-            Ok((*cached).clone())
+            Ok(cached)
         } else {
             let meta = self.inner.metadata(metrics).await?;
             self.cache.put_metadata(
                 (self.file_id, self.index_version, self.column_id, self.tag),
-                Arc::new(meta.clone()),
+                meta.clone(),
             );
             CACHE_MISS.with_label_values(&[INDEX_METADATA_TYPE]).inc();
             Ok(meta)
