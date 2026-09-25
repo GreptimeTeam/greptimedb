@@ -15,6 +15,7 @@
 use std::collections::BTreeSet;
 use std::mem::size_of;
 
+use fst::{IntoStreamer, Streamer};
 use snafu::{ResultExt, ensure};
 
 use crate::Bytes;
@@ -36,6 +37,20 @@ pub struct KeysFstApplier {
 impl FstApplier for KeysFstApplier {
     fn apply(&self, fst: &FstMap) -> Vec<u64> {
         self.keys.iter().filter_map(|k| fst.get(k)).collect()
+    }
+
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<u64> {
+        let mut selected = Vec::new();
+        for key in &self.keys {
+            // The first block whose last key is not less than `key`.
+            if let Some((_, location)) = blocks.range().ge(key).into_stream().next()
+                && selected.last() != Some(&location)
+            {
+                selected.push(location);
+            }
+        }
+        selected.dedup();
+        selected
     }
 
     fn memory_usage(&self) -> usize {

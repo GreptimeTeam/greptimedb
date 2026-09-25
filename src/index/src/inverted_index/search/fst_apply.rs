@@ -31,6 +31,12 @@ pub trait FstApplier: Send + Sync {
     /// Returns a `Vec<u64>`, with each u64 being a value from the FstMap.
     fn apply(&self, fst: &FstMap) -> Vec<u64>;
 
+    /// Given a top-level FST of a chunked index (last key of each block -> block location),
+    /// returns the locations of the blocks that may hold matching keys, in key order.
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<u64> {
+        blocks.stream().into_values()
+    }
+
     /// Returns the memory usage of the applier.
     fn memory_usage(&self) -> usize;
 }

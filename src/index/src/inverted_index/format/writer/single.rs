@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::{FstCompileSnafu, FstInsertSnafu, Result, WriteSnafu};
-use crate::inverted_index::format::{FstValue, InlinePosting};
+use crate::inverted_index::format::{CHUNKED_FST_FLAG, FstValue, InlinePosting};
 
 /// `SingleIndexWriter` writes values to the blob storage for an individual inverted index
 pub struct SingleIndexWriter<W, S> {
@@ -47,6 +47,16 @@ pub struct SingleIndexWriter<W, S> {
 
     /// Whether small postings are stored in the FST value instead of a bitmap.
     inline_postings: bool,
+
+    /// When set, the FST is cut into blocks of about this many bytes and indexed by a
+    /// top-level FST keyed by each block's last key.
+    fst_block_size: Option<usize>,
+    /// Top-level FST: last key of a block -> block location.
+    fst_blocks: MapBuilder<Vec<u8>>,
+    /// Last key inserted into the current block.
+    last_key: Bytes,
+    block_keys: usize,
+    num_blocks: usize,
 }
 
 impl<W, S> SingleIndexWriter<W, S>
@@ -71,6 +81,11 @@ where
             bitmap_type,
             buf: Vec::new(),
             inline_postings: false,
+            fst_block_size: None,
+            fst_blocks: MapBuilder::memory(),
+            last_key: Bytes::new(),
+            block_keys: 0,
+            num_blocks: 0,
             meta: InvertedIndexMeta {
                 name,
                 base_offset,
@@ -84,6 +99,45 @@ where
     pub fn with_inline_postings(mut self, inline_postings: bool) -> Self {
         self.inline_postings = inline_postings;
         self
+    }
+
+    pub fn with_fst_block_size(mut self, fst_block_size: Option<usize>) -> Self {
+        self.fst_block_size = fst_block_size;
+        self
+    }
+
+    async fn insert_fst(&mut self, value: Bytes, fst_value: u64) -> Result<()> {
+        self.fst.insert(&value, fst_value).context(FstInsertSnafu)?;
+        if let Some(block_size) = self.fst_block_size {
+            self.last_key.clone_from(&value);
+            self.block_keys += 1;
+            if self.fst.bytes_written() as usize >= block_size {
+                self.flush_fst_block().await?;
+            }
+        }
+        self.update_value_stats(value);
+        Ok(())
+    }
+
+    async fn flush_fst_block(&mut self) -> Result<()> {
+        let block = std::mem::replace(&mut self.fst, MapBuilder::memory());
+        if std::mem::take(&mut self.block_keys) == 0 {
+            return Ok(());
+        }
+        let bytes = block.into_inner().context(FstCompileSnafu)?;
+        self.blob_writer
+            .write_all(&bytes)
+            .await
+            .context(WriteSnafu)?;
+        let location = FstValue::Bitmap {
+            offset: self.meta.inverted_index_size as u32,
+            size: bytes.len() as u32,
+        };
+        self.meta.inverted_index_size += bytes.len() as u64;
+        self.num_blocks += 1;
+        self.fst_blocks
+            .insert(&self.last_key, location.encode())
+            .context(FstInsertSnafu)
     }
 
     /// Writes the null bitmap, values with their bitmaps, and constructs the FST map.
@@ -129,11 +183,9 @@ where
             .then(|| InlinePosting::try_from_segments(bitmap.iter_ones().map(|s| s as u32)))
             .flatten();
         if let Some(posting) = inline {
-            self.fst
-                .insert(&value, FstValue::Inline(posting).encode())
-                .context(FstInsertSnafu)?;
-            self.update_value_stats(value);
-            return Ok(());
+            return self
+                .insert_fst(value, FstValue::Inline(posting).encode())
+                .await;
         }
 
         self.buf.clear();
@@ -150,9 +202,7 @@ where
         self.meta.inverted_index_size += size as u64;
 
         let packed = FstValue::Bitmap { offset, size }.encode();
-        self.fst.insert(&value, packed).context(FstInsertSnafu)?;
-        self.update_value_stats(value);
-        Ok(())
+        self.insert_fst(value, packed).await
     }
 
     fn update_value_stats(&mut self, value: Bytes) {
@@ -169,7 +219,14 @@ where
 
     /// Writes the compiled FST to the blob and finalizes the metadata
     async fn finish_fst_construction(mut self) -> Result<InvertedIndexMeta> {
-        let fst_bytes = self.fst.into_inner().context(FstCompileSnafu)?;
+        // An FST that never filled a block stays unchunked: one read, no top-level FST.
+        let fst_bytes = if self.fst_block_size.is_some() && self.num_blocks > 0 {
+            self.flush_fst_block().await?;
+            self.meta.bitmap_type |= CHUNKED_FST_FLAG;
+            self.fst_blocks.into_inner().context(FstCompileSnafu)?
+        } else {
+            self.fst.into_inner().context(FstCompileSnafu)?
+        };
         self.blob_writer
             .write_all(&fst_bytes)
             .await

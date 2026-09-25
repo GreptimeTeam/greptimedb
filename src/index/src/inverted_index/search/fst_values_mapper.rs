@@ -12,12 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
+use greptime_proto::v1::index::InvertedIndexMeta;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
-use crate::inverted_index::format::FstValue;
 use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
+use crate::inverted_index::format::{FstValue, bitmap_type};
 
 /// `ParallelFstValuesMapper` enables parallel mapping of multiple FST value groups to their
 /// corresponding bitmaps within an inverted index.
@@ -53,10 +53,7 @@ impl<'a> ParallelFstValuesMapper<'a> {
                     FstValue::Bitmap { offset, size } => {
                         let range = meta.base_offset + offset as u64
                             ..meta.base_offset + offset as u64 + size as u64;
-                        fetch_ranges.push((
-                            range,
-                            BitmapType::try_from(meta.bitmap_type).unwrap_or(BitmapType::BitVec),
-                        ));
+                        fetch_ranges.push((range, bitmap_type(meta)));
                         fetch_count += 1;
                     }
                 }
@@ -84,6 +81,8 @@ impl<'a> ParallelFstValuesMapper<'a> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+
+    use greptime_proto::v1::index::BitmapType;
 
     use super::*;
     use crate::inverted_index::format::reader::MockInvertedIndexReader;
