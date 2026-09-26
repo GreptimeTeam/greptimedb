@@ -21,7 +21,7 @@ use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use store_api::storage::{ColumnId, FileId};
 
-use crate::cache::file_keys::FileKeys;
+use crate::cache::file_keys::{FileKeys, arc_entry_id};
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
     FulltextQuery, FulltextRequest, FulltextTerm,
@@ -59,9 +59,7 @@ impl IndexResultCache {
             .max_capacity(capacity)
             .weigher(Self::index_result_cache_weight)
             .eviction_listener(move |k, v, cause| {
-                if cause != RemovalCause::Replaced {
-                    listener_keys.remove(k.1, &*k);
-                }
+                listener_keys.remove(k.1, &*k, arc_entry_id(&v));
                 let size = Self::index_result_cache_weight(&k, &v);
                 CACHE_BYTES
                     .with_label_values(&[INDEX_RESULT_TYPE])
@@ -83,7 +81,7 @@ impl IndexResultCache {
         CACHE_BYTES
             .with_label_values(&[INDEX_RESULT_TYPE])
             .add(size.into());
-        self.keys.add(file_id, key.clone());
+        self.keys.add(file_id, key.clone(), arc_entry_id(&result));
         self.cache.insert(key, result);
     }
 

@@ -22,11 +22,10 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use moka::notification::RemovalCause;
 use object_store::Buffer;
 use store_api::storage::FileId;
 
-use crate::cache::file_keys::FileKeys;
+use crate::cache::file_keys::{FileKeys, arc_entry_id, bytes_entry_id};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 
 /// Metrics for index metadata.
@@ -141,10 +140,8 @@ where
             .weigher(weight_of_metadata)
             .eviction_listener({
                 let keys = metadata_keys.clone();
-                move |k, v, cause| {
-                    if cause != RemovalCause::Replaced {
-                        keys.remove(file_of(&k), &*k);
-                    }
+                move |k, v, _cause| {
+                    keys.remove(file_of(&k), &*k, arc_entry_id(&v));
                     let size = weight_of_metadata(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[INDEX_METADATA_TYPE])
@@ -157,10 +154,8 @@ where
             .weigher(weight_of_content)
             .eviction_listener({
                 let keys = content_keys.clone();
-                move |k, v, cause| {
-                    if cause != RemovalCause::Replaced {
-                        keys.remove(file_of(&k.0), &*k);
-                    }
+                move |k, v, _cause| {
+                    keys.remove(file_of(&k.0), &*k, bytes_entry_id(&v));
                     let size = weight_of_content(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[INDEX_CONTENT_TYPE])
@@ -194,7 +189,8 @@ where
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
             .add((self.weight_of_metadata)(&key, &metadata).into());
-        self.metadata_keys.add((self.file_of)(&key), key);
+        self.metadata_keys
+            .add((self.file_of)(&key), key, arc_entry_id(&metadata));
         self.index_metadata.insert(key, metadata)
     }
 
@@ -277,7 +273,11 @@ where
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.content_keys.add((self.file_of)(&key), (key, page_key));
+        self.content_keys.add(
+            (self.file_of)(&key),
+            (key, page_key),
+            bytes_entry_id(&value),
+        );
         self.index.insert((key, page_key), value);
     }
 

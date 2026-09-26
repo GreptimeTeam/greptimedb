@@ -58,7 +58,7 @@ pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapper
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::file_keys::FileKeys;
+use crate::cache::file_keys::{FileKeys, arc_entry_id};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
@@ -650,9 +650,7 @@ fn new_prefilter_result_cache(
         .max_capacity(capacity)
         .weigher(prefilter_result_cache_weight)
         .eviction_listener(move |k, v, cause| {
-            if cause != RemovalCause::Replaced {
-                keys.remove(k.file_id, &*k);
-            }
+            keys.remove(k.file_id, &*k, arc_entry_id(&v));
             let size = prefilter_result_cache_weight(&k, &v);
             CACHE_BYTES
                 .with_label_values(&[PREFILTER_RESULT_TYPE])
@@ -1435,8 +1433,11 @@ impl CacheManager {
             CACHE_BYTES
                 .with_label_values(&[SELECTOR_RESULT_TYPE])
                 .add(selector_result_cache_weight(&selector_key, &result).into());
-            self.selector_result_keys
-                .add(selector_key.file_id, selector_key);
+            self.selector_result_keys.add(
+                selector_key.file_id,
+                selector_key,
+                arc_entry_id(&result),
+            );
             cache.insert(selector_key, result);
         }
     }
@@ -1464,7 +1465,8 @@ impl CacheManager {
                 .add(range_result_cache_weight(&key, &result).into());
             let shared_key = Arc::new(key.clone());
             for file_id in key.file_ids() {
-                self.range_result_keys.add(file_id, shared_key.clone());
+                self.range_result_keys
+                    .add(file_id, shared_key.clone(), arc_entry_id(&result));
             }
             cache.insert(key, result);
         }
@@ -1515,7 +1517,8 @@ impl CacheManager {
             CACHE_BYTES
                 .with_label_values(&[PREFILTER_RESULT_TYPE])
                 .add(prefilter_result_cache_weight(&key, &result).into());
-            self.prefilter_result_keys.add(key.file_id, key.clone());
+            self.prefilter_result_keys
+                .add(key.file_id, key.clone(), arc_entry_id(&result));
             cache.insert(key, result);
         }
     }
@@ -1704,9 +1707,7 @@ impl CacheManagerBuilder {
                 .max_capacity(self.selector_result_cache_size)
                 .weigher(selector_result_cache_weight)
                 .eviction_listener(move |k, v, cause| {
-                    if cause != RemovalCause::Replaced {
-                        keys.remove(k.file_id, &*k);
-                    }
+                    keys.remove(k.file_id, &*k, arc_entry_id(&v));
                     let size = selector_result_cache_weight(&k, &v);
                     CACHE_BYTES
                         .with_label_values(&[SELECTOR_RESULT_TYPE])
@@ -1724,10 +1725,8 @@ impl CacheManagerBuilder {
                 .max_capacity(self.range_result_cache_size)
                 .weigher(range_result_cache_weight)
                 .eviction_listener(move |k, v, cause| {
-                    if cause != RemovalCause::Replaced {
-                        for file_id in k.file_ids() {
-                            keys.remove(file_id, &k);
-                        }
+                    for file_id in k.file_ids() {
+                        keys.remove(file_id, &k, arc_entry_id(&v));
                     }
                     let size = range_result_cache_weight(&k, &v);
                     CACHE_BYTES
