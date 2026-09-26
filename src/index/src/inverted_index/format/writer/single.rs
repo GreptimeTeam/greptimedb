@@ -20,7 +20,7 @@ use snafu::ResultExt;
 use crate::Bytes;
 use crate::bitmap::{Bitmap, BitmapType};
 use crate::inverted_index::error::{FstCompileSnafu, FstInsertSnafu, Result, WriteSnafu};
-use crate::inverted_index::format::{CHUNKED_FST_FLAG, FstValue, InlinePosting};
+use crate::inverted_index::format::{FstValue, InlinePosting};
 
 /// `SingleIndexWriter` writes values to the blob storage for an individual inverted index
 pub struct SingleIndexWriter<W, S> {
@@ -219,14 +219,17 @@ where
 
     /// Writes the compiled FST to the blob and finalizes the metadata
     async fn finish_fst_construction(mut self) -> Result<InvertedIndexMeta> {
-        // An FST that never filled a block stays unchunked: one read, no top-level FST.
-        let fst_bytes = if self.fst_block_size.is_some() && self.num_blocks > 0 {
+        // An FST that never filled a block stays unchunked: one read, no block index.
+        if self.fst_block_size.is_some() && self.num_blocks > 0 {
             self.flush_fst_block().await?;
-            self.meta.bitmap_type |= CHUNKED_FST_FLAG;
-            self.fst_blocks.into_inner().context(FstCompileSnafu)?
-        } else {
-            self.fst.into_inner().context(FstCompileSnafu)?
-        };
+            // The block index lives in the metadata, so lookups read one block directly.
+            self.meta.fst_block_index = self.fst_blocks.into_inner().context(FstCompileSnafu)?;
+            self.meta.relative_fst_offset = self.meta.inverted_index_size as _;
+            self.meta.fst_size = 0;
+            return Ok(self.meta);
+        }
+
+        let fst_bytes = self.fst.into_inner().context(FstCompileSnafu)?;
         self.blob_writer
             .write_all(&fst_bytes)
             .await

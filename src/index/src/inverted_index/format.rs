@@ -55,19 +55,12 @@ pub mod writer;
 
 use greptime_proto::v1::index::InvertedIndexMeta;
 
-use crate::bitmap::{Bitmap, BitmapType};
+use crate::bitmap::Bitmap;
 
-/// Set in [`InvertedIndexMeta::bitmap_type`] when the FST region holds a top-level FST
-/// (last key of each block -> block location) instead of the whole FST.
-// TODO: a dedicated proto field instead of borrowing bits of `bitmap_type`.
-pub const CHUNKED_FST_FLAG: i32 = 1 << 8;
-
+/// Whether the tag's FST is split into blocks indexed by
+/// [`InvertedIndexMeta::fst_block_index`].
 pub fn is_chunked_fst(meta: &InvertedIndexMeta) -> bool {
-    meta.bitmap_type & CHUNKED_FST_FLAG != 0
-}
-
-pub fn bitmap_type(meta: &InvertedIndexMeta) -> BitmapType {
-    BitmapType::try_from(meta.bitmap_type & !CHUNKED_FST_FLAG).unwrap_or(BitmapType::BitVec)
+    !meta.fst_block_index.is_empty()
 }
 
 const FOOTER_PAYLOAD_SIZE_SIZE: u64 = 4;
