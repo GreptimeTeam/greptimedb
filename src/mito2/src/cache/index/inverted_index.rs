@@ -466,6 +466,8 @@ mod test {
 
     #[tokio::test]
     async fn test_get_or_load_vec_loads_missing_pages_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
         let mut rng = rand::rng();
         let mut data = vec![0u8; 64 * 1024];
         rng.fill_bytes(&mut data);
@@ -486,9 +488,11 @@ mod test {
                 .map(|r| bytes::Bytes::copy_from_slice(&data[r.start as usize..r.end as usize]))
                 .collect::<Vec<_>>();
 
-            let loads = std::sync::atomic::AtomicUsize::new(0);
+            let loads = AtomicUsize::new(0);
             let load = |pages: Vec<Range<u64>>| {
-                loads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                loads.fetch_add(1, Ordering::Relaxed);
+                // Pages are requested once each, in file order.
+                assert!(pages.windows(2).all(|w| w[0].end <= w[1].start));
                 let data = &data;
                 async move {
                     Ok::<_, std::io::Error>(
@@ -503,12 +507,13 @@ mod test {
                     )
                 }
             };
-            let (cold, _) = cache
+            let (cold, cold_metrics) = cache
                 .get_or_load_vec(key, file_size, &ranges, load)
                 .await
                 .unwrap();
             assert_eq!(cold, expected);
-            assert!(loads.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+            let cold_loads = usize::from(cold_metrics.cache_miss > 0);
+            assert_eq!(loads.load(Ordering::Relaxed), cold_loads);
 
             let (warm, metrics) = cache
                 .get_or_load_vec(key, file_size, &ranges, load)
@@ -516,7 +521,7 @@ mod test {
                 .unwrap();
             assert_eq!(warm, expected);
             assert_eq!(metrics.cache_miss, 0);
-            assert!(loads.load(std::sync::atomic::Ordering::Relaxed) <= 1);
+            assert_eq!(loads.load(Ordering::Relaxed), cold_loads);
         }
     }
 }
