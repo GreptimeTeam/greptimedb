@@ -43,6 +43,40 @@ impl BloomFilterApplier {
         Ok(Self { reader, meta })
     }
 
+    /// Runs [`Self::search`] over several groups of ranges (e.g. row groups) at once and
+    /// keeps in each group only its matching ranges.
+    ///
+    /// The filters of all groups are loaded with a single read instead of one read per
+    /// group. Groups must be ordered and their ranges sorted and disjoint, as for `search`.
+    pub async fn search_groups(
+        &mut self,
+        predicates: &[InListPredicate],
+        groups: &mut [&mut Vec<Range<usize>>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<()> {
+        let all = groups
+            .iter()
+            .flat_map(|g| g.iter().cloned())
+            .collect::<Vec<_>>();
+        if all.is_empty() {
+            return Ok(());
+        }
+        // Each matched range lies within one input range, so it belongs to one group.
+        let mut matched = self
+            .search(predicates, &all, metrics)
+            .await?
+            .into_iter()
+            .peekable();
+        for group in groups.iter_mut() {
+            for range in std::mem::take(*group) {
+                while let Some(m) = matched.next_if(|m| m.start < range.end) {
+                    group.push(m);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Searches ranges of rows that match all the given predicates in the search ranges.
     /// Each predicate represents an OR condition of probes, and all predicates must match (AND semantics).
     /// The logic is: (probe1 OR probe2 OR ...) AND (probe3 OR probe4 OR ...)
@@ -216,6 +250,64 @@ mod tests {
     use crate::bloom_filter::creator::BloomFilterCreator;
     use crate::bloom_filter::reader::BloomFilterReaderImpl;
     use crate::external_provider::MockExternalTempFileProvider;
+
+    #[tokio::test]
+    async fn test_search_groups_matches_per_group_search() {
+        let mut creator = BloomFilterCreator::new(
+            4,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+        // Row i holds "v{i / 3}", so values straddle segment boundaries.
+        for i in 0..40 {
+            creator
+                .push_row_elems([format!("v{}", i / 3).into_bytes()])
+                .await
+                .unwrap();
+        }
+        let mut writer = Cursor::new(Vec::new());
+        creator.finish(&mut writer).await.unwrap();
+        let bytes = writer.into_inner();
+
+        // Row groups of 10 rows, some already narrowed by other predicates.
+        let groups = vec![
+            vec![0..10],
+            vec![10..13, 15..20],
+            vec![],
+            vec![30..33, 37..40],
+        ];
+        for values in [
+            vec!["v1"],
+            vec!["v4", "v5"],
+            vec!["v3", "v10", "v12"],
+            vec!["x"],
+        ] {
+            let predicates = vec![InListPredicate {
+                list: values.iter().map(|v| v.as_bytes().to_vec()).collect(),
+            }];
+            let mut applier =
+                BloomFilterApplier::new(Box::new(BloomFilterReaderImpl::new(bytes.clone())))
+                    .await
+                    .unwrap();
+            let mut expected = Vec::new();
+            for group in &groups {
+                expected.push(if group.is_empty() {
+                    vec![]
+                } else {
+                    applier.search(&predicates, group, None).await.unwrap()
+                });
+            }
+            let mut actual = groups.clone();
+            let mut refs = actual.iter_mut().collect::<Vec<_>>();
+            applier
+                .search_groups(&predicates, &mut refs, None)
+                .await
+                .unwrap();
+            assert_eq!(actual, expected, "values: {values:?}");
+        }
+    }
 
     #[tokio::test]
     #[allow(clippy::single_range_in_vec_init)]
