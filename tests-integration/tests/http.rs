@@ -15,18 +15,20 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::metadata::MetricType as RemoteWriteV2MetricType;
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Sample as RemoteWriteV2Sample,
-    TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Request as RemoteWriteV2Request,
+    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
+use api::v1::RowInsertRequests;
 use auth::{UserProviderRef, user_provider_from_option};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -81,11 +83,13 @@ use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
+use session::context::QueryContextRef;
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
-    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
+    MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
+    setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
     setup_test_prom_app_with_frontend_batched,
 };
@@ -169,6 +173,8 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
                 test_prometheus_remote_write_batched_mixed_time_index_units,
+                test_prometheus_remote_write_batched_interceptor_time_index_units,
+                test_prometheus_remote_write_v2_batched_interceptor_time_index_units,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -3867,6 +3873,204 @@ pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_t
         &client,
         "SELECT COUNT(*), MAX(greptime_value) FROM us_metric",
         "[[2,3.5]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// A Prometheus write interceptor that redirects every remote write to the
+/// `tenant_redirect` schema, like a per-tenant redirection: the incoming
+/// context targets `public` while the destination tables live elsewhere.
+struct PromSchemaRedirectInterceptor;
+
+impl servers::interceptor::PromStoreProtocolInterceptor for PromSchemaRedirectInterceptor {
+    type Error = servers::error::Error;
+
+    fn pre_write(
+        &self,
+        _write_req: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> servers::error::Result<()> {
+        ctx.set_current_schema("tenant_redirect");
+        Ok(())
+    }
+}
+
+async fn setup_redirecting_batched_prom_app(
+    store_type: StorageType,
+    name: &str,
+) -> (TestClient, TestGuard) {
+    let plugins = Plugins::default();
+    plugins.insert::<servers::interceptor::PromStoreProtocolInterceptorRef<servers::error::Error>>(
+        Arc::new(PromSchemaRedirectInterceptor),
+    );
+    let standalone = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let server = build_test_prom_server(standalone.fe_instance().clone(), true)
+        .with_greptime_config_options(standalone.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    (client, standalone.guard)
+}
+
+async fn create_redirect_schema_with_microsecond_table(client: &TestClient, table: &str) {
+    for sql in [
+        "create database if not exists tenant_redirect",
+        "CREATE TABLE tenant_redirect.phy_us \
+         (ts timestamp(6) time index, val double, host string primary key) \
+         engine=metric with ('physical_metric_table' = 'true')",
+        &format!(
+            "CREATE TABLE tenant_redirect.{table} \
+             (ts timestamp(6) time index, val double, host string primary key) \
+             engine=metric with ('on_physical_table' = 'phy_us')"
+        ),
+    ] {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "setup: {sql}");
+    }
+}
+
+/// Regression test: with batching enabled and a pre_write interceptor that
+/// redirects the context to a schema holding same-named non-millisecond
+/// tables, the bulk eligibility must be evaluated against the redirected
+/// destinations (after preflight) and fall back to the ordinary insert path
+/// instead of failing in the bulk encode.
+pub async fn test_prometheus_remote_write_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_batched_interceptor_units").await;
+    create_redirect_schema_with_microsecond_table(&client, "intercept_metric").await;
+
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "intercept_metric".to_string(),
+                },
+                Label {
+                    name: "job".to_string(),
+                    value: "demo".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.intercept_metric",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// The v2 variant of the interceptor regression test: a mixed samples-plus-
+/// histograms request whose existing sample destination lives in the
+/// redirected schema with a microsecond time index must fall back to the
+/// ordinary insert path (both series land), not fail in the bulk encode.
+pub async fn test_prometheus_remote_write_v2_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_v2_batched_interceptor_units")
+            .await;
+    create_redirect_schema_with_microsecond_table(&client, "v2_mixed_sample").await;
+
+    // One sample series targeting the existing microsecond table, plus one
+    // histogram series for a new (millisecond) table.
+    let mut symbols = vec![String::new()];
+    let mut symbol = |value: &str| {
+        symbols.push(value.to_string());
+        (symbols.len() - 1) as u32
+    };
+    let name_ref = symbol("__name__");
+    let sample_ref = symbol("v2_mixed_sample");
+    let job_ref = symbol("job");
+    let demo_ref = symbol("demo");
+    let name_ref2 = symbol("__name__");
+    let histo_ref = symbol("v2_mixed_histo");
+    let request = RemoteWriteV2Request {
+        symbols,
+        timeseries: vec![
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref, sample_ref, job_ref, demo_ref],
+                samples: vec![RemoteWriteV2Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+                ..Default::default()
+            },
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref2, histo_ref, job_ref, demo_ref],
+                histograms: vec![Histogram {
+                    count: Some(Count::CountInt(1)),
+                    sum: 1.0,
+                    positive_spans: vec![BucketSpan {
+                        offset: 0,
+                        length: 1,
+                    }],
+                    positive_deltas: vec![1],
+                    timestamp: 1000,
+                    start_timestamp: 1000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+    };
+    let compressed = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_sample",
+        "[[1]]",
+    )
+    .await;
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_histo",
+        "[[1]]",
     )
     .await;
 
