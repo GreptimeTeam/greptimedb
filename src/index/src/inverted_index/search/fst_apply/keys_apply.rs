@@ -24,7 +24,7 @@ use crate::inverted_index::error::{
     EmptyPredicatesSnafu, KeysApplierUnexpectedPredicatesSnafu, KeysApplierWithoutInListSnafu,
     ParseRegexSnafu, Result,
 };
-use crate::inverted_index::search::fst_apply::FstApplier;
+use crate::inverted_index::search::fst_apply::{FstApplier, SelectedBlock};
 use crate::inverted_index::search::predicate::Predicate;
 
 /// `KeysFstApplier` is responsible for applying a search using a set of predefined keys
@@ -39,17 +39,24 @@ impl FstApplier for KeysFstApplier {
         self.keys.iter().filter_map(|k| fst.get(k)).collect()
     }
 
-    fn select_blocks(&self, blocks: &FstMap) -> Vec<u64> {
-        let mut selected = Vec::new();
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<SelectedBlock> {
+        let mut selected: Vec<SelectedBlock> = Vec::new();
+        // Keys are sorted, so keys of the same block are consecutive.
         for key in &self.keys {
             // The first block whose last key is not less than `key`.
-            if let Some((_, location)) = blocks.range().ge(key).into_stream().next()
-                && selected.last() != Some(&location)
-            {
-                selected.push(location);
+            let Some((_, location)) = blocks.range().ge(key).into_stream().next() else {
+                continue;
+            };
+            match selected.last_mut() {
+                Some(block) if block.location == location => {
+                    block.keys.get_or_insert_default().push(key.clone())
+                }
+                _ => selected.push(SelectedBlock {
+                    location,
+                    keys: Some(vec![key.clone()]),
+                }),
             }
         }
-        selected.dedup();
         selected
     }
 
@@ -334,5 +341,32 @@ mod tests {
             keys: vec![b("foo"), b("bar")],
         };
         assert_eq!(applier.memory_usage(), 2 * size_of::<Bytes>() + 6);
+    }
+
+    #[test]
+    fn test_select_blocks_routes_each_key_to_its_block() {
+        // Blocks end at keys "c", "f" and "k".
+        let blocks = create_fst_map(&[(b"c", 1), (b"f", 2), (b"k", 3)]);
+        let applier = KeysFstApplier::try_from(vec![Predicate::InList(InListPredicate {
+            list: [b"a", b"b", b"d", b"f", b"z"]
+                .iter()
+                .map(|k| k.to_vec())
+                .collect(),
+        })])
+        .unwrap();
+        let selected = applier.select_blocks(&blocks);
+        assert_eq!(
+            selected,
+            vec![
+                SelectedBlock {
+                    location: 1,
+                    keys: Some(vec![b"a".to_vec(), b"b".to_vec()]),
+                },
+                SelectedBlock {
+                    location: 2,
+                    keys: Some(vec![b"d".to_vec(), b"f".to_vec()]),
+                },
+            ]
+        );
     }
 }

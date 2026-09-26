@@ -18,10 +18,20 @@ mod keys_apply;
 pub use intersection_apply::IntersectionFstApplier;
 pub use keys_apply::KeysFstApplier;
 
+use crate::Bytes;
 use crate::inverted_index::FstMap;
 
 /// A trait for objects that can process a finite state transducer (FstMap) and return
 /// associated values.
+/// A block of a split FST that may hold matching keys.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedBlock {
+    /// Location of the block, packed like the FST values.
+    pub location: u64,
+    /// The keys to look up in this block, or `None` to run [`FstApplier::apply`] on it.
+    pub keys: Option<Vec<Bytes>>,
+}
+
 #[mockall::automock]
 pub trait FstApplier: Send + Sync {
     /// Retrieves values from an FstMap.
@@ -31,10 +41,18 @@ pub trait FstApplier: Send + Sync {
     /// Returns a `Vec<u64>`, with each u64 being a value from the FstMap.
     fn apply(&self, fst: &FstMap) -> Vec<u64>;
 
-    /// Given a top-level FST of a chunked index (last key of each block -> block location),
-    /// returns the locations of the blocks that may hold matching keys, in key order.
-    fn select_blocks(&self, blocks: &FstMap) -> Vec<u64> {
-        blocks.stream().into_values()
+    /// Given the block index of a split FST (last key of each block -> block location),
+    /// returns the blocks that may hold matching keys, in key order.
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<SelectedBlock> {
+        blocks
+            .stream()
+            .into_values()
+            .into_iter()
+            .map(|location| SelectedBlock {
+                location,
+                keys: None,
+            })
+            .collect()
     }
 
     /// Returns the memory usage of the applier.

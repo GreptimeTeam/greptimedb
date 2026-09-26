@@ -51,12 +51,12 @@ pub struct SingleIndexWriter<W, S> {
     /// When set, the FST is cut into blocks of about this many bytes and indexed by a
     /// top-level FST keyed by each block's last key.
     fst_block_size: Option<usize>,
-    /// Top-level FST: last key of a block -> block location.
-    fst_blocks: MapBuilder<Vec<u8>>,
+    /// Top-level FST: last key of a block -> block location. Created with the first block,
+    /// since an empty `MapBuilder` already allocates about 1 MiB.
+    fst_blocks: Option<MapBuilder<Vec<u8>>>,
     /// Last key inserted into the current block.
     last_key: Bytes,
     block_keys: usize,
-    num_blocks: usize,
 }
 
 impl<W, S> SingleIndexWriter<W, S>
@@ -82,10 +82,9 @@ where
             buf: Vec::new(),
             inline_postings: false,
             fst_block_size: None,
-            fst_blocks: MapBuilder::memory(),
+            fst_blocks: None,
             last_key: Bytes::new(),
             block_keys: 0,
-            num_blocks: 0,
             meta: InvertedIndexMeta {
                 name,
                 base_offset,
@@ -120,10 +119,11 @@ where
     }
 
     async fn flush_fst_block(&mut self) -> Result<()> {
-        let block = std::mem::replace(&mut self.fst, MapBuilder::memory());
-        if std::mem::take(&mut self.block_keys) == 0 {
+        if self.block_keys == 0 {
             return Ok(());
         }
+        self.block_keys = 0;
+        let block = std::mem::replace(&mut self.fst, MapBuilder::memory());
         let bytes = block.into_inner().context(FstCompileSnafu)?;
         self.blob_writer
             .write_all(&bytes)
@@ -134,8 +134,8 @@ where
             size: bytes.len() as u32,
         };
         self.meta.inverted_index_size += bytes.len() as u64;
-        self.num_blocks += 1;
         self.fst_blocks
+            .get_or_insert_with(MapBuilder::memory)
             .insert(&self.last_key, location.encode())
             .context(FstInsertSnafu)
     }
@@ -220,10 +220,11 @@ where
     /// Writes the compiled FST to the blob and finalizes the metadata
     async fn finish_fst_construction(mut self) -> Result<InvertedIndexMeta> {
         // An FST that never filled a block stays unchunked: one read, no block index.
-        if self.fst_block_size.is_some() && self.num_blocks > 0 {
+        if self.fst_blocks.is_some() {
             self.flush_fst_block().await?;
             // The block index lives in the metadata, so lookups read one block directly.
-            self.meta.fst_block_index = self.fst_blocks.into_inner().context(FstCompileSnafu)?;
+            let blocks = self.fst_blocks.take().unwrap();
+            self.meta.fst_block_index = blocks.into_inner().context(FstCompileSnafu)?;
             self.meta.relative_fst_offset = self.meta.inverted_index_size as _;
             self.meta.fst_size = 0;
             return Ok(self.meta);
