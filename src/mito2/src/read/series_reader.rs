@@ -33,6 +33,7 @@ use crate::read::BoxedRecordBatchStream;
 use crate::read::pruner::PartitionPruner;
 use crate::read::range_cache::{
     build_series_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+    range_key_files,
 };
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{
@@ -484,6 +485,7 @@ async fn build_series_partition_range(
         Some(key) => cache_flat_range_stream(
             stream,
             stream_ctx.input.cache_strategy.clone(),
+            range_key_files(&stream_ctx, &key),
             key,
             part_metrics,
         ),

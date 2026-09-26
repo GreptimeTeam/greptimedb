@@ -49,6 +49,7 @@ use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RowGroupIndex;
 use crate::read::range_cache::{
     build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+    range_key_files,
 };
 use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::{PartitionMetrics, new_filter_metrics, scan_flat_mem_ranges};
@@ -404,6 +405,7 @@ impl SeriesCandidateRangeBuilder {
             Some(key) => cache_flat_range_stream(
                 stream,
                 self.stream_ctx.input.cache_strategy.clone(),
+                range_key_files(&self.stream_ctx, &key),
                 key,
                 self.part_metrics.clone(),
             ),

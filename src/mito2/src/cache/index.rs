@@ -18,12 +18,15 @@ pub mod result_cache;
 
 use std::future::Future;
 use std::hash::Hash;
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use object_store::Buffer;
+use store_api::storage::FileId;
 
+use crate::cache::file_keys::{FileKeys, Tracked, insert_tracked};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 
 /// Metrics for index metadata.
@@ -98,9 +101,9 @@ impl PageKey {
 /// Cache for index metadata and content.
 pub struct IndexCache<K, M> {
     /// Cache for index metadata
-    index_metadata: moka::sync::Cache<K, Arc<M>>,
+    index_metadata: moka::sync::Cache<K, Tracked<Arc<M>>>,
     /// Cache for index content.
-    index: moka::sync::Cache<(K, PageKey), Bytes>,
+    index: moka::sync::Cache<(K, PageKey), Tracked<Bytes>>,
     // Page size for index content.
     page_size: u64,
 
@@ -108,11 +111,15 @@ pub struct IndexCache<K, M> {
     weight_of_metadata: fn(&K, &Arc<M>) -> u32,
     /// Weighter for content.
     weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
+    /// Returns the SST file of a key.
+    file_of: fn(&K) -> FileId,
+    metadata_keys: Arc<FileKeys<K>>,
+    content_keys: Arc<FileKeys<(K, PageKey)>>,
 }
 
 impl<K, M> IndexCache<K, M>
 where
-    K: Hash + Eq + Send + Sync + 'static,
+    K: Hash + Eq + Clone + Send + Sync + 'static,
     M: Send + Sync + 'static,
 {
     pub fn new_with_weighter(
@@ -122,31 +129,44 @@ where
         index_type: &'static str,
         weight_of_metadata: fn(&K, &Arc<M>) -> u32,
         weight_of_content: fn(&(K, PageKey), &Bytes) -> u32,
+        file_of: fn(&K) -> FileId,
     ) -> Self {
+        let metadata_keys = Arc::new(FileKeys::default());
+        let content_keys = Arc::new(FileKeys::default());
         common_telemetry::debug!(
             "Building IndexCache with metadata size: {index_metadata_cap}, content size: {index_content_cap}, page size: {page_size}, index type: {index_type}"
         );
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name(&format!("index_metadata_{}", index_type))
-            .weigher(weight_of_metadata)
-            .eviction_listener(move |k, v, _cause| {
-                let size = weight_of_metadata(&k, &v);
-                CACHE_BYTES
-                    .with_label_values(&[INDEX_METADATA_TYPE])
-                    .sub(size.into());
+            .weigher(move |k, v: &Tracked<Arc<M>>| {
+                weight_of_metadata(k, &v.1).saturating_add(mem::size_of::<u64>() as u32)
             })
-            .support_invalidation_closures()
+            .eviction_listener({
+                let keys = metadata_keys.clone();
+                move |k, v: Tracked<Arc<M>>, _cause| {
+                    keys.remove(file_of(&k), &*k, v.0);
+                    let size = weight_of_metadata(&k, &v.1);
+                    CACHE_BYTES
+                        .with_label_values(&[INDEX_METADATA_TYPE])
+                        .sub(size.into());
+                }
+            })
             .build();
         let index_cache = moka::sync::CacheBuilder::new(index_content_cap)
             .name(&format!("index_content_{}", index_type))
-            .weigher(weight_of_content)
-            .eviction_listener(move |k, v, _cause| {
-                let size = weight_of_content(&k, &v);
-                CACHE_BYTES
-                    .with_label_values(&[INDEX_CONTENT_TYPE])
-                    .sub(size.into());
+            .weigher(move |k, v: &Tracked<Bytes>| {
+                weight_of_content(k, &v.1).saturating_add(mem::size_of::<u64>() as u32)
             })
-            .support_invalidation_closures()
+            .eviction_listener({
+                let keys = content_keys.clone();
+                move |k, v: Tracked<Bytes>, _cause| {
+                    keys.remove(file_of(&k.0), &*k, v.0);
+                    let size = weight_of_content(&k, &v.1);
+                    CACHE_BYTES
+                        .with_label_values(&[INDEX_CONTENT_TYPE])
+                        .sub(size.into());
+                }
+            })
             .build();
         Self {
             index_metadata,
@@ -154,6 +174,9 @@ where
             page_size,
             weight_of_content,
             weight_of_metadata,
+            file_of,
+            metadata_keys,
+            content_keys,
         }
     }
 }
@@ -164,14 +187,17 @@ where
     M: Send + Sync + 'static,
 {
     pub fn get_metadata(&self, key: K) -> Option<Arc<M>> {
-        self.index_metadata.get(&key)
+        self.index_metadata.get(&key).map(|(_, metadata)| metadata)
     }
 
     pub fn put_metadata(&self, key: K, metadata: Arc<M>) {
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
             .add((self.weight_of_metadata)(&key, &metadata).into());
-        self.index_metadata.insert(key, metadata)
+        insert_tracked(&self.index_metadata, key, metadata, |generation| {
+            self.metadata_keys
+                .add((self.file_of)(&key), key, generation)
+        });
     }
 
     /// Gets given range of index data from cache, and loads from source if the file
@@ -244,7 +270,7 @@ where
     }
 
     fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
-        self.index.get(&(key, page_key))
+        self.index.get(&(key, page_key)).map(|(_, page)| page)
     }
 
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
@@ -253,24 +279,20 @@ where
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.index.insert((key, page_key), value);
+        insert_tracked(&self.index, (key, page_key), value, |generation| {
+            self.content_keys
+                .add((self.file_of)(&key), (key, page_key), generation)
+        });
     }
 
-    /// Invalidates all cache entries whose keys satisfy `predicate`.
-    pub fn invalidate_if<F>(&self, predicate: F)
-    where
-        F: Fn(&K) -> bool + Send + Sync + 'static,
-    {
-        let predicate = Arc::new(predicate);
-        let metadata_predicate = Arc::clone(&predicate);
-
-        self.index_metadata
-            .invalidate_entries_if(move |key, _| metadata_predicate(key))
-            .expect("cache should support invalidation closures");
-
-        self.index
-            .invalidate_entries_if(move |(key, _), _| predicate(key))
-            .expect("cache should support invalidation closures");
+    /// Removes all cached entries for the given `file_id`.
+    pub fn invalidate_file(&self, file_id: FileId) {
+        for key in self.metadata_keys.take(file_id) {
+            self.index_metadata.invalidate(&key);
+        }
+        for key in self.content_keys.take(file_id) {
+            self.index.invalidate(&key);
+        }
     }
 }
 
