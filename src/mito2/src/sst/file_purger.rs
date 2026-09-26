@@ -112,6 +112,7 @@ pub fn create_file_purger(
         Arc::new(ObjectStoreFilePurger {
             file_ref_manager,
             scheduler,
+            cache_manager,
             range_index_deleter,
         })
     } else {
@@ -215,6 +216,9 @@ impl FilePurger for LocalFilePurger {
 pub struct ObjectStoreFilePurger {
     file_ref_manager: FileReferenceManagerRef,
     scheduler: SchedulerRef,
+    /// The GC worker deletes the objects later; in-memory entries are dropped
+    /// as soon as the file leaves the region.
+    cache_manager: Option<CacheManagerRef>,
     range_index_deleter: Option<RangeIndexDeleter>,
 }
 
@@ -253,6 +257,9 @@ impl FilePurger for ObjectStoreFilePurger {
         // for same reason, we don't care about index_outdated here.
         self.file_ref_manager.remove_file(&file_meta);
         if is_delete {
+            if let Some(cache_manager) = &self.cache_manager {
+                cache_manager.remove_file_entries(file_meta.file_id());
+            }
             schedule_range_index_deletion(
                 &self.scheduler,
                 self.range_index_deleter.as_ref(),
@@ -279,6 +286,7 @@ mod tests {
 
     use super::*;
     use crate::access_layer::AccessLayer;
+    use crate::cache::CacheManager;
     use crate::schedule::scheduler::{LocalScheduler, Scheduler};
     use crate::sst::file::{
         ColumnIndexMetadata, FileHandle, FileMeta, FileTimeRange, IndexType, RegionFileId,
@@ -330,12 +338,20 @@ mod tests {
         let owner = RegionId::new(9, 1);
         let index_path = crate::sst::range_index::range_index_path(owner, sst_file_id.file_id());
         index_store.write(&index_path, "range index").await.unwrap();
+        let cache_manager = Arc::new(CacheManager::builder().page_cache_size(1024).build());
+        let page = 0..16;
+        cache_manager.put_page_ranges(
+            sst_file_id.file_id(),
+            0,
+            std::slice::from_ref(&page),
+            &[bytes::Bytes::from(vec![1; 16])],
+        );
         let file_purger = create_file_purger(
             gc_enabled,
             PathType::Bare,
             scheduler.clone(),
             layer,
-            None,
+            Some(cache_manager.clone()),
             Arc::new(crate::sst::file_ref::FileReferenceManager::new(None)),
             Some(RangeIndexDeleter::new(index_store.clone(), owner)),
         );
@@ -378,6 +394,12 @@ mod tests {
             gc_enabled || !is_delete
         );
         assert_eq!(index_store.exists(&index_path).await.unwrap(), !is_delete);
+        // In GC mode the object outlives the handle, but its cached pages must not.
+        let page_cached = cache_manager
+            .get_page_ranges(sst_file_id.file_id(), 0, std::slice::from_ref(&page))
+            .unwrap()
+            .is_fully_cached();
+        assert_eq!(page_cached, !is_delete);
     }
 
     #[tokio::test]

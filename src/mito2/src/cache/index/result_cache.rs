@@ -21,6 +21,7 @@ use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use store_api::storage::{ColumnId, FileId};
 
+use crate::cache::file_keys::FileKeys;
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
     FulltextQuery, FulltextRequest, FulltextTerm,
@@ -37,6 +38,7 @@ const INDEX_RESULT_TYPE: &str = "index_result";
 /// User can retrieve the partial results and handle uncontained row groups required by the predicate subsequently.
 pub struct IndexResultCache {
     cache: Cache<(PredicateKey, FileId), Arc<RowGroupSelection>>,
+    keys: Arc<FileKeys<(PredicateKey, FileId)>>,
 }
 
 impl IndexResultCache {
@@ -51,10 +53,15 @@ impl IndexResultCache {
             }
         }
 
+        let keys: Arc<FileKeys<(PredicateKey, FileId)>> = Arc::new(FileKeys::default());
+        let listener_keys = keys.clone();
         let cache = Cache::builder()
             .max_capacity(capacity)
             .weigher(Self::index_result_cache_weight)
-            .eviction_listener(|k, v, cause| {
+            .eviction_listener(move |k, v, cause| {
+                if cause != RemovalCause::Replaced {
+                    listener_keys.remove(k.1, &*k);
+                }
                 let size = Self::index_result_cache_weight(&k, &v);
                 CACHE_BYTES
                     .with_label_values(&[INDEX_RESULT_TYPE])
@@ -63,9 +70,8 @@ impl IndexResultCache {
                     .with_label_values(&[INDEX_RESULT_TYPE, to_str(cause)])
                     .inc();
             })
-            .support_invalidation_closures()
             .build();
-        Self { cache }
+        Self { cache, keys }
     }
 
     /// Puts a query result into the cache.
@@ -77,6 +83,7 @@ impl IndexResultCache {
         CACHE_BYTES
             .with_label_values(&[INDEX_RESULT_TYPE])
             .add(size.into());
+        self.keys.add(file_id, key.clone());
         self.cache.insert(key, result);
     }
 
@@ -101,9 +108,9 @@ impl IndexResultCache {
 
     /// Removes cached results for the given file.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.cache
-            .invalidate_entries_if(move |(_, cached_file_id), _| *cached_file_id == file_id)
-            .expect("cache should support invalidation closures");
+        for key in self.keys.take(file_id) {
+            self.cache.invalidate(&key);
+        }
     }
 }
 

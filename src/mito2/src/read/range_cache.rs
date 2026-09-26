@@ -29,6 +29,7 @@ use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::value::scalar_value_to_timestamp;
 use futures::TryStreamExt;
+use itertools::Itertools;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::{FileId, RegionId, SequenceRange, TimeSeriesRowSelector};
@@ -237,6 +238,12 @@ pub(crate) struct RangeScanCacheKey {
 }
 
 impl RangeScanCacheKey {
+    /// Returns the distinct files of the row groups.
+    pub(crate) fn file_ids(&self) -> impl Iterator<Item = FileId> + '_ {
+        // `row_groups` is sorted by file id.
+        self.row_groups.iter().map(|(file_id, _)| *file_id).dedup()
+    }
+
     pub(crate) fn estimated_size(&self) -> usize {
         mem::size_of::<Self>()
             + self.row_groups.capacity() * mem::size_of::<(FileId, i64)>()
