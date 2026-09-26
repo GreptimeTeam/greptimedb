@@ -4372,10 +4372,11 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
         .collect()
 }
 
-/// Row group read-ahead hands its bytes to the reader instead of letting both fetch the
-/// same column chunks.
-#[tokio::test]
-async fn test_readahead_does_not_read_row_groups_twice() {
+/// Returns a mock layer that counts the bytes read from parquet files.
+fn parquet_read_counter() -> (
+    object_store::layers::mock::MockLayer,
+    Arc<std::sync::atomic::AtomicU64>,
+) {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use object_store::layers::mock::{
@@ -4417,6 +4418,16 @@ async fn test_readahead_does_not_read_row_groups_twice() {
         }))
         .build()
         .unwrap();
+    (layer, read_bytes)
+}
+
+/// Row group read-ahead hands its bytes to the reader instead of letting both fetch the
+/// same column chunks.
+#[tokio::test]
+async fn test_readahead_does_not_read_row_groups_twice() {
+    use std::sync::atomic::Ordering;
+
+    let (layer, read_bytes) = parquet_read_counter();
     let mut env = TestEnv::new().await.with_mock_layer(layer);
     let engine = env
         .create_engine(MitoConfig {
@@ -4464,6 +4475,101 @@ async fn test_readahead_does_not_read_row_groups_twice() {
     let read = read_bytes.load(Ordering::Relaxed);
     assert!(
         read <= file_size,
+        "read {read} bytes from a {file_size} byte file"
+    );
+}
+
+/// Read-ahead fetches only the prefilter columns, so a filter that matches no rows still
+/// skips the other columns.
+#[tokio::test]
+async fn test_readahead_keeps_prefilter_from_reading_other_columns() {
+    use std::sync::atomic::Ordering;
+
+    use api::v1::value::ValueData;
+
+    let (layer, read_bytes) = parquet_read_counter();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::string_datatype())
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // A wide, poorly compressible field column.
+    let mut seed = 42u64;
+    let rows = (0..20000)
+        .map(|i| {
+            let payload = (0..500)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (b'a' + (seed >> 59) as u8) as char
+                })
+                .collect::<String>();
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue(format!("a{:02}", i % 100))),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue(payload)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                    },
+                ],
+            }
+        })
+        .collect();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows,
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+    let file_size = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().file_size)
+        .sum::<u64>();
+
+    read_bytes.store(0, Ordering::Relaxed);
+    // Inside every row group's tag range, so only the prefilter can rule it out.
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                filters: vec![col("tag_0").eq(lit("a50x"))],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(0, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    let read = read_bytes.load(Ordering::Relaxed);
+    // Well below a single row group of the wide column.
+    assert!(
+        read < file_size / 100,
         "read {read} bytes from a {file_size} byte file"
     );
 }

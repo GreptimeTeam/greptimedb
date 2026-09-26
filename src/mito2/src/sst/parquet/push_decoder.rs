@@ -20,6 +20,7 @@ use std::sync::Arc;
 use bytes::{Bytes, BytesMut};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
+use futures::future::{BoxFuture, FutureExt, Shared};
 use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use parquet::DecodeResult;
@@ -27,6 +28,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
 use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
 use snafu::{ResultExt, ensure};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageRangePart};
@@ -55,25 +57,23 @@ pub struct SstParquetRangeFetcher {
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
     /// Column chunks of this row group fetched ahead of the decoder.
-    prefetched: Option<Arc<PrefetchedRowGroup>>,
+    prefetched: Option<PrefetchSlot>,
 }
+
+/// Result of a row group prefetch. Awaiting it waits for the fetch; dropping every
+/// clone aborts the fetch.
+pub(crate) type PrefetchSlot = Shared<BoxFuture<'static, Option<Arc<PrefetchedRowGroup>>>>;
 
 /// Column chunk bytes of one row group, read while previous row groups were decoded.
 pub(crate) struct PrefetchedRowGroup {
     parts: Vec<PageRangePart>,
+    /// Fetch metrics of the prefetch, merged into the first reader that uses the bytes.
+    fetch_metrics: std::sync::Mutex<Option<ParquetFetchMetrics>>,
+    /// Readahead budget held while the bytes are alive.
+    _permit: OwnedSemaphorePermit,
 }
 
 impl PrefetchedRowGroup {
-    pub(crate) fn new(ranges: Vec<Range<u64>>, data: Vec<Bytes>) -> Self {
-        Self {
-            parts: ranges
-                .into_iter()
-                .zip(data)
-                .map(|(range, bytes)| PageRangePart { range, bytes })
-                .collect(),
-        }
-    }
-
     /// Returns the bytes of `ranges` if every range lies inside one prefetched part.
     fn get(&self, ranges: &[Range<u64>]) -> Option<Vec<Bytes>> {
         ranges
@@ -90,6 +90,60 @@ impl PrefetchedRowGroup {
             })
             .collect()
     }
+}
+
+/// Aborts the task when dropped, e.g. when the scan that started a prefetch ends.
+struct AbortOnDrop<T>(common_runtime::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+/// Spawns a fetch of `ranges` that holds `permit` as long as the fetched bytes live.
+pub(crate) fn spawn_prefetch(
+    fetcher: SstParquetRangeFetcher,
+    ranges: Vec<Range<u64>>,
+    permit: OwnedSemaphorePermit,
+    compaction: bool,
+) -> PrefetchSlot {
+    let task = async move {
+        let data = match fetcher.fetch_bytes_with_cache(ranges.clone()).await {
+            Ok(data) => data,
+            // A failed prefetch only means the reader fetches the data itself.
+            Err(e) => {
+                common_telemetry::debug!("Failed to prefetch row group: {e}");
+                return None;
+            }
+        };
+        Some(Arc::new(PrefetchedRowGroup {
+            parts: ranges
+                .into_iter()
+                .zip(data)
+                .map(|(range, bytes)| PageRangePart { range, bytes })
+                .collect(),
+            fetch_metrics: std::sync::Mutex::new(fetcher.fetch_metrics),
+            _permit: permit,
+        }))
+    };
+    let handle = AbortOnDrop(if compaction {
+        common_runtime::spawn_compact(task)
+    } else {
+        common_runtime::spawn_query(task)
+    });
+    async move { handle.await.ok().flatten() }.boxed().shared()
 }
 
 impl SstParquetRangeFetcher {
@@ -113,7 +167,7 @@ impl SstParquetRangeFetcher {
         }
     }
 
-    pub(crate) fn with_prefetched(mut self, prefetched: Option<Arc<PrefetchedRowGroup>>) -> Self {
+    pub(crate) fn with_prefetched(mut self, prefetched: Option<PrefetchSlot>) -> Self {
         self.prefetched = prefetched;
         self
     }
@@ -123,11 +177,15 @@ impl SstParquetRangeFetcher {
         &self,
         ranges: Vec<Range<u64>>,
     ) -> Result<Vec<Bytes>> {
-        if let Some(data) = self
-            .prefetched
-            .as_ref()
-            .and_then(|prefetched| prefetched.get(&ranges))
+        if let Some(slot) = &self.prefetched
+            && let Some(prefetched) = slot.clone().await
+            && let Some(data) = prefetched.get(&ranges)
         {
+            if let Some(prefetch_metrics) = prefetched.fetch_metrics.lock().unwrap().take()
+                && let Some(metrics) = &self.fetch_metrics
+            {
+                metrics.merge_from(&prefetch_metrics);
+            }
             return Ok(data);
         }
 
@@ -411,13 +469,23 @@ mod tests {
 
     #[test]
     fn test_prefetched_row_group_serves_only_covered_ranges() {
-        let prefetched = PrefetchedRowGroup::new(
-            vec![100..200, 300..400],
-            vec![
-                Bytes::from((0..100).map(|v| v as u8).collect::<Vec<_>>()),
-                Bytes::from(vec![9; 100]),
+        let permit = Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap();
+        let prefetched = PrefetchedRowGroup {
+            parts: vec![
+                PageRangePart {
+                    range: 100..200,
+                    bytes: Bytes::from((0..100).map(|v| v as u8).collect::<Vec<_>>()),
+                },
+                PageRangePart {
+                    range: 300..400,
+                    bytes: Bytes::from(vec![9; 100]),
+                },
             ],
-        );
+            fetch_metrics: std::sync::Mutex::new(None),
+            _permit: permit,
+        };
 
         let data = prefetched.get(&[120..130, 300..400]).unwrap();
         assert_eq!(

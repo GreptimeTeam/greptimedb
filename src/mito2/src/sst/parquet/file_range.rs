@@ -39,6 +39,7 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::cache::CacheStrategy;
 use crate::error::{
@@ -190,29 +191,32 @@ impl FileRange {
             .unwrap_or(true) // unexpected, not skip just in case
     }
 
-    /// Fetches this range's column chunks ahead of [Self::flat_reader].
-    pub(crate) async fn prefetch(&self) -> Result<()> {
+    /// Starts fetching this range's column chunks for [Self::flat_reader], holding
+    /// `permit` until the bytes are released.
+    pub(crate) fn start_prefetch(&self, permit: OwnedSemaphorePermit, compaction: bool) {
         self.context
             .reader_builder
-            .prefetch(self.row_group_idx)
-            .await
+            .start_prefetch(self.row_group_idx, permit, compaction);
     }
 
-    /// Returns true if the page cache already holds the data [Self::prefetch] reads.
-    pub(crate) fn is_cached(&self) -> bool {
-        self.context
-            .reader_builder
-            .is_row_group_cached(self.row_group_idx)
+    /// Returns true if a prefetch can read this range: it reads whole column chunks, so
+    /// ranges with a row selection keep reading only the selected pages.
+    pub(crate) fn can_prefetch(&self) -> bool {
+        self.select_all()
+            && !self
+                .context
+                .reader_builder
+                .is_row_group_cached(self.row_group_idx)
     }
 
-    /// Returns the number of bytes [Self::prefetch] reads.
+    /// Returns the number of bytes a prefetch of this range reads.
     pub(crate) fn prefetch_bytes(&self) -> u64 {
         self.context
             .reader_builder
-            .projected_chunk_bytes(self.row_group_idx)
+            .prefetch_bytes(self.row_group_idx)
     }
 
-    /// Drops the bytes kept by [Self::prefetch].
+    /// Drops the bytes kept by [Self::start_prefetch].
     pub(crate) fn release_prefetched(&self) {
         self.context
             .reader_builder
