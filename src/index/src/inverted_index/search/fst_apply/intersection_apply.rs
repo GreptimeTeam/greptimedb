@@ -97,8 +97,8 @@ impl IntersectionFstApplier {
                     }
                 }
             }
-            // Block locations grow with keys.
-            selected.sort_unstable();
+            // Blocks are written in key order, so their offsets grow with keys.
+            selected.sort_unstable_by_key(|&location| bytemuck::cast::<u64, [u32; 2]>(location)[0]);
             selected.dedup();
             return selected;
         }
@@ -209,6 +209,9 @@ impl FstApplier for IntersectionFstApplier {
         for dfa in &self.dfas {
             size += dfa.0.memory_usage();
         }
+        for prefix in self.required_prefixes.iter().flatten() {
+            size += size_of::<Vec<u8>>() + prefix.capacity();
+        }
         size
     }
 }
@@ -260,7 +263,14 @@ fn anchored_literal_prefixes(pattern: &str) -> Option<Vec<Vec<u8>>> {
     if literals.is_empty() || literals.iter().any(|l| l.as_bytes().is_empty()) {
         return None;
     }
-    Some(literals.iter().map(|l| l.as_bytes().to_vec()).collect())
+    let mut prefixes = literals
+        .iter()
+        .map(|l| l.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    // Drop duplicates and literals covered by a shorter one; each left costs a scan.
+    prefixes.sort_unstable();
+    prefixes.dedup_by(|longer, shorter| longer.starts_with(shorter));
+    Some(prefixes)
 }
 
 impl TryFrom<Vec<Predicate>> for IntersectionFstApplier {
@@ -513,6 +523,21 @@ mod tests {
             })
         };
         assert_eq!(prefixes("^pod-1a.*"), Some(vec!["pod-1a".to_string()]));
+        // "abc" is covered by "ab" and not scanned again.
+        assert_eq!(prefixes("^(?:ab|abc).*"), Some(vec!["ab".to_string()]));
+        assert_eq!(
+            prefixes("(?i)^ab.*"),
+            Some(
+                vec!["AB", "Ab", "aB", "ab"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        // Anchors that do not pin every match to the start of the value.
+        assert_eq!(prefixes("(?m)^abc"), None);
+        assert_eq!(prefixes("(?:^a|b)"), None);
+        assert_eq!(prefixes("^(?:abc|)"), None);
         assert_eq!(
             prefixes("^(?:api|web)-.+$"),
             Some(vec!["api-".to_string(), "web-".to_string()])
