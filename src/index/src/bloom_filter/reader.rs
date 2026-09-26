@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::ops::{Range, Rem};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -164,7 +165,7 @@ pub trait BloomFilterReader: Sync {
     async fn metadata(
         &self,
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<BloomFilterMeta>;
+    ) -> Result<Arc<BloomFilterMeta>>;
 
     /// Reads a bloom filter with the given location.
     async fn bloom_filter(
@@ -265,13 +266,13 @@ impl<R: RangeReader> BloomFilterReader for BloomFilterReaderImpl<R> {
     async fn metadata(
         &self,
         metrics: Option<&mut BloomFilterReadMetrics>,
-    ) -> Result<BloomFilterMeta> {
+    ) -> Result<Arc<BloomFilterMeta>> {
         let metadata = self.reader.metadata().await.context(IoSnafu)?;
         let file_size = metadata.content_length;
 
         let mut meta_reader =
             BloomFilterMetaReader::new(&self.reader, file_size, Some(DEFAULT_PREFETCH_SIZE));
-        meta_reader.metadata(metrics).await
+        meta_reader.metadata(metrics).await.map(Arc::new)
     }
 }
 

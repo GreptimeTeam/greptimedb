@@ -130,25 +130,16 @@ impl<R: InvertedIndexReader> InvertedIndexReader for CachedInvertedIndexBlobRead
     ) -> Result<Vec<Bytes>> {
         let start = metrics.as_ref().map(|_| Instant::now());
 
-        let mut pages = Vec::with_capacity(ranges.len());
-        let mut total_cache_metrics = crate::cache::index::IndexCacheMetrics::default();
-        for range in ranges {
-            let inner = &self.inner;
-            let (page, cache_metrics) = self
-                .cache
-                .get_or_load(
-                    (self.file_id, self.index_version),
-                    self.blob_size,
-                    range.start,
-                    (range.end - range.start) as u32,
-                    move |ranges| async move { inner.read_vec(&ranges, None).await },
-                )
-                .await?;
-
-            total_cache_metrics.merge(&cache_metrics);
-            pages.push(Bytes::from(page));
-        }
-
+        let inner = &self.inner;
+        let (pages, total_cache_metrics) = self
+            .cache
+            .get_or_load_vec(
+                (self.file_id, self.index_version),
+                self.blob_size,
+                ranges,
+                move |ranges| async move { inner.read_vec(&ranges, None).await },
+            )
+            .await?;
         if let Some(m) = metrics {
             m.total_bytes += total_cache_metrics.page_bytes;
             m.total_ranges += total_cache_metrics.num_pages;
@@ -470,6 +461,67 @@ mod test {
                 .await
                 .unwrap();
             assert_eq!(read, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_get_or_load_vec_loads_missing_pages_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let mut rng = rand::rng();
+        let mut data = vec![0u8; 64 * 1024];
+        rng.fill_bytes(&mut data);
+        let file_size = data.len() as u64;
+        let cache = InvertedIndexCache::new(1024 * 1024, 1024 * 1024, 1000);
+        let key = (FileId::random(), 0);
+
+        for _ in 0..FUZZ_REPEAT_TIMES {
+            cache.invalidate_file(key.0);
+            let ranges = (0..rng.random_range(1..20))
+                .map(|_| {
+                    let start = rng.random_range(0..file_size);
+                    start..rng.random_range(start..=file_size.min(start + 5000))
+                })
+                .collect::<Vec<_>>();
+            let expected = ranges
+                .iter()
+                .map(|r| bytes::Bytes::copy_from_slice(&data[r.start as usize..r.end as usize]))
+                .collect::<Vec<_>>();
+
+            let loads = AtomicUsize::new(0);
+            let load = |pages: Vec<Range<u64>>| {
+                loads.fetch_add(1, Ordering::Relaxed);
+                // Pages are requested once each, in file order.
+                assert!(pages.windows(2).all(|w| w[0].end <= w[1].start));
+                let data = &data;
+                async move {
+                    Ok::<_, std::io::Error>(
+                        pages
+                            .iter()
+                            .map(|r| {
+                                bytes::Bytes::copy_from_slice(
+                                    &data[r.start as usize..r.end as usize],
+                                )
+                            })
+                            .collect(),
+                    )
+                }
+            };
+            let (cold, cold_metrics) = cache
+                .get_or_load_vec(key, file_size, &ranges, load)
+                .await
+                .unwrap();
+            assert_eq!(cold, expected);
+            let cold_loads = usize::from(cold_metrics.cache_miss > 0);
+            assert_eq!(loads.load(Ordering::Relaxed), cold_loads);
+
+            let (warm, metrics) = cache
+                .get_or_load_vec(key, file_size, &ranges, load)
+                .await
+                .unwrap();
+            assert_eq!(warm, expected);
+            assert_eq!(metrics.cache_miss, 0);
+            assert_eq!(loads.load(Ordering::Relaxed), cold_loads);
         }
     }
 }

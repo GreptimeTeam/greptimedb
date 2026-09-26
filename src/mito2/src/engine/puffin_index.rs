@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::convert::TryFrom;
+use std::sync::Arc;
 
 use common_base::range_read::RangeReader;
 use common_telemetry::warn;
@@ -111,7 +112,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 )
                 .await;
 
-                let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
+                let bloom_value = bloom_meta.as_deref().map(bloom_meta_value);
                 let (target_type, target_json) = decode_target_info(target_key);
                 let meta_json = build_meta_json(bloom_value, None, None);
                 let entry = build_index_entry(
@@ -137,7 +138,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
                 )
                 .await;
 
-                let bloom_value = bloom_meta.as_ref().map(bloom_meta_value);
+                let bloom_value = bloom_meta.as_deref().map(bloom_meta_value);
                 let fulltext_value = Some(fulltext_meta_value(blob));
                 let (target_type, target_json) = decode_target_info(target_key);
                 let meta_json = build_meta_json(bloom_value, fulltext_value, None);
@@ -294,7 +295,7 @@ async fn try_read_bloom_meta(
     cache: Option<&BloomFilterIndexCacheRef>,
     tag: Tag,
     context: &IndexEntryContext<'_>,
-) -> Option<BloomFilterMeta> {
+) -> Option<Arc<BloomFilterMeta>> {
     let column_id = decode_column_id(target_key);
 
     // Failures are logged but do not abort the overall metadata collection.
