@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "bytes_to_u64_vec"
 harness = false
+
+[[bench]]
+name = "index_build_bench"
+harness = false
