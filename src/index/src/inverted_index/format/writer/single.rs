@@ -51,9 +51,9 @@ pub struct SingleIndexWriter<W, S> {
     /// When set, the FST is cut into blocks of about this many bytes and indexed by a
     /// top-level FST keyed by each block's last key.
     fst_block_size: Option<usize>,
-    /// Top-level FST: last key of a block -> block location. Created with the first block,
-    /// since an empty `MapBuilder` already allocates about 1 MiB.
-    fst_blocks: Option<MapBuilder<Vec<u8>>>,
+    /// Finished blocks with their last keys. They are written together after the bitmaps,
+    /// so reading every block is one contiguous range as in the unsplit layout.
+    fst_blocks: Vec<(Bytes, Vec<u8>)>,
     /// Last key inserted into the current block.
     last_key: Bytes,
     block_keys: usize,
@@ -82,7 +82,7 @@ where
             buf: Vec::new(),
             inline_postings: false,
             fst_block_size: None,
-            fst_blocks: None,
+            fst_blocks: Vec::new(),
             last_key: Bytes::new(),
             block_keys: 0,
             meta: InvertedIndexMeta {
@@ -111,33 +111,22 @@ where
             self.last_key.clone_from(&value);
             self.block_keys += 1;
             if self.fst.bytes_written() as usize >= block_size {
-                self.flush_fst_block().await?;
+                self.flush_fst_block()?;
             }
         }
         self.update_value_stats(value);
         Ok(())
     }
 
-    async fn flush_fst_block(&mut self) -> Result<()> {
+    fn flush_fst_block(&mut self) -> Result<()> {
         if self.block_keys == 0 {
             return Ok(());
         }
         self.block_keys = 0;
         let block = std::mem::replace(&mut self.fst, MapBuilder::memory());
         let bytes = block.into_inner().context(FstCompileSnafu)?;
-        self.blob_writer
-            .write_all(&bytes)
-            .await
-            .context(WriteSnafu)?;
-        let location = FstValue::Bitmap {
-            offset: self.meta.inverted_index_size as u32,
-            size: bytes.len() as u32,
-        };
-        self.meta.inverted_index_size += bytes.len() as u64;
-        self.fst_blocks
-            .get_or_insert_with(MapBuilder::memory)
-            .insert(&self.last_key, location.encode())
-            .context(FstInsertSnafu)
+        self.fst_blocks.push((self.last_key.clone(), bytes));
+        Ok(())
     }
 
     /// Writes the null bitmap, values with their bitmaps, and constructs the FST map.
@@ -220,13 +209,29 @@ where
     /// Writes the compiled FST to the blob and finalizes the metadata
     async fn finish_fst_construction(mut self) -> Result<InvertedIndexMeta> {
         // An FST that never filled a block stays unchunked: one read, no block index.
-        if self.fst_blocks.is_some() {
-            self.flush_fst_block().await?;
-            // The block index lives in the metadata, so lookups read one block directly.
-            let blocks = self.fst_blocks.take().unwrap();
-            self.meta.fst_block_index = blocks.into_inner().context(FstCompileSnafu)?;
+        if !self.fst_blocks.is_empty() {
+            self.flush_fst_block()?;
             self.meta.relative_fst_offset = self.meta.inverted_index_size as _;
-            self.meta.fst_size = 0;
+            let mut block_index = MapBuilder::memory();
+            for (last_key, bytes) in std::mem::take(&mut self.fst_blocks) {
+                self.blob_writer
+                    .write_all(&bytes)
+                    .await
+                    .context(WriteSnafu)?;
+                let location = FstValue::Bitmap {
+                    offset: self.meta.inverted_index_size as u32,
+                    size: bytes.len() as u32,
+                };
+                self.meta.inverted_index_size += bytes.len() as u64;
+                block_index
+                    .insert(&last_key, location.encode())
+                    .context(FstInsertSnafu)?;
+            }
+            // `relative_fst_offset..+fst_size` spans all blocks; the block index lives in the
+            // metadata, so a lookup reads only the blocks it needs.
+            self.meta.fst_size =
+                (self.meta.inverted_index_size - self.meta.relative_fst_offset as u64) as u32;
+            self.meta.fst_block_index = block_index.into_inner().context(FstCompileSnafu)?;
             return Ok(self.meta);
         }
 

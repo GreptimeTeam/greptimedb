@@ -305,10 +305,14 @@ impl InvertedIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
+        // With the metadata cache, `index_blob` reads the puffin footer once.
+        let puffin_manager = self
+            .puffin_manager_factory
+            .build(
+                file_cache.local_store(),
+                WriteCachePathProvider::new(file_cache.clone()),
+            )
+            .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
         let reader = puffin_manager
@@ -409,15 +413,19 @@ impl InvertedIndexApplier {
     }
 }
 
-/// Opens the SST's inverted index blob, v2 first.
+/// Opens the SST's inverted index blob, whichever format the file holds.
 async fn index_blob<R: PuffinReader>(reader: &R) -> Result<GuardWithMetadata<R::Blob>> {
-    match reader.blob(INDEX_BLOB_TYPE_V2).await {
-        Err(puffin::error::Error::BlobNotFound { .. }) => reader
-            .blob(INDEX_BLOB_TYPE)
-            .await
-            .context(PuffinReadBlobSnafu),
-        other => other.context(PuffinReadBlobSnafu),
-    }
+    let metadata = reader.metadata().await.context(PuffinReadBlobSnafu)?;
+    let blob_type = if metadata
+        .blobs
+        .iter()
+        .any(|blob| blob.blob_type == INDEX_BLOB_TYPE_V2)
+    {
+        INDEX_BLOB_TYPE_V2
+    } else {
+        INDEX_BLOB_TYPE
+    };
+    reader.blob(blob_type).await.context(PuffinReadBlobSnafu)
 }
 
 impl Drop for InvertedIndexApplier {
