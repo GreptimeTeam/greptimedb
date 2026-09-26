@@ -41,7 +41,9 @@ use crate::sst::index::fulltext_index::{
     INDEX_BLOB_TYPE_BLOOM as FULLTEXT_BLOOM_BLOB_TYPE,
     INDEX_BLOB_TYPE_TANTIVY as FULLTEXT_TANTIVY_BLOB_TYPE,
 };
-use crate::sst::index::inverted_index::INDEX_BLOB_TYPE as INVERTED_BLOB_TYPE;
+use crate::sst::index::inverted_index::{
+    INDEX_BLOB_TYPE as INVERTED_BLOB_TYPE, INDEX_BLOB_TYPE_V2 as INVERTED_BLOB_TYPE_V2,
+};
 use crate::sst::index::puffin_manager::{SstPuffinManager, SstPuffinReader};
 
 const TARGET_TYPE_UNKNOWN: &str = "unknown";
@@ -170,6 +172,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
             Some(BlobIndexTypeTargetKey::Inverted) => {
                 let mut inverted_entries = collect_inverted_entries(
                     &reader,
+                    &blob.blob_type,
                     region_index_id,
                     inverted_index_cache.as_ref(),
                     &context,
@@ -186,6 +189,7 @@ pub(crate) async fn collect_index_entries_from_puffin(
 
 async fn collect_inverted_entries(
     reader: &SstPuffinReader,
+    blob_type: &str,
     region_index_id: RegionIndexId,
     cache: Option<&InvertedIndexCacheRef>,
     context: &IndexEntryContext<'_>,
@@ -193,7 +197,7 @@ async fn collect_inverted_entries(
     // Read the inverted index blob and surface its per-column metadata entries.
     let file_id = region_index_id.file_id();
 
-    let guard = match reader.blob(INVERTED_BLOB_TYPE).await {
+    let guard = match reader.blob(blob_type).await {
         Ok(guard) => guard,
         Err(err) => {
             warn!(
@@ -457,7 +461,7 @@ impl<'a> BlobIndexTypeTargetKey<'a> {
             Self::target_key_from_blob(blob_type, FULLTEXT_TANTIVY_BLOB_TYPE)
         {
             Some(BlobIndexTypeTargetKey::FulltextTantivy(target_key))
-        } else if blob_type == INVERTED_BLOB_TYPE {
+        } else if blob_type == INVERTED_BLOB_TYPE || blob_type == INVERTED_BLOB_TYPE_V2 {
             Some(BlobIndexTypeTargetKey::Inverted)
         } else {
             None

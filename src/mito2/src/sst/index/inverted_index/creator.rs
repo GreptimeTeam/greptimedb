@@ -24,6 +24,7 @@ use datatypes::vectors::Helper;
 use index::inverted_index::create::InvertedIndexCreator;
 use index::inverted_index::create::sort::external_sort::ExternalSorter;
 use index::inverted_index::create::sort_create::SortIndexCreator;
+use index::inverted_index::format::DEFAULT_FST_BLOCK_SIZE;
 use index::inverted_index::format::writer::InvertedIndexBlobWriter;
 use index::target::IndexTarget;
 use mito_codec::index::{IndexValueCodec, IndexValuesCodec};
@@ -48,7 +49,7 @@ use crate::sst::index::column::column_index_rows;
 use crate::sst::index::intermediate::{
     IntermediateLocation, IntermediateManager, TempFileProvider,
 };
-use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
+use crate::sst::index::inverted_index::{INDEX_BLOB_TYPE, INDEX_BLOB_TYPE_V2};
 use crate::sst::index::primary_key::PrimaryKeyRuns;
 use crate::sst::index::puffin_manager::SstPuffinWriter;
 use crate::sst::index::statistics::{ByteCount, RowCount, Statistics};
@@ -86,6 +87,9 @@ pub struct InvertedIndexer {
 
     /// Region metadata for column lookups.
     metadata: RegionMetadataRef,
+
+    /// Writes [`INDEX_BLOB_TYPE_V2`] instead of [`INDEX_BLOB_TYPE`].
+    format_v2: bool,
 }
 
 impl InvertedIndexer {
@@ -136,7 +140,13 @@ impl InvertedIndexer {
             memory_usage,
             indexed_column_ids,
             metadata: metadata.clone(),
+            format_v2: false,
         }
+    }
+
+    pub fn with_format_v2(mut self, format_v2: bool) -> Self {
+        self.format_v2 = format_v2;
+        self
     }
 
     /// Updates index with a batch of rows.
@@ -372,14 +382,21 @@ impl InvertedIndexer {
         let mut guard = self.stats.record_finish();
 
         let (tx, rx) = duplex(PIPE_BUFFER_SIZE_FOR_SENDING_BLOB);
-        let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write());
+        let (blob_type, fst_block_size) = if self.format_v2 {
+            (INDEX_BLOB_TYPE_V2, Some(DEFAULT_FST_BLOCK_SIZE))
+        } else {
+            (INDEX_BLOB_TYPE, None)
+        };
+        let mut index_writer = InvertedIndexBlobWriter::new(tx.compat_write())
+            .with_inline_postings(self.format_v2)
+            .with_fst_block_size(fst_block_size);
 
         let (index_finish, puffin_add_blob) = futures::join!(
             // TODO(zhongzc): config bitmap type
             self.index_creator
                 .finish(&mut index_writer, index::bitmap::BitmapType::Roaring),
             puffin_writer.put_blob(
-                INDEX_BLOB_TYPE,
+                blob_type,
                 rx.compat(),
                 PutOptions::default(),
                 Default::default(),

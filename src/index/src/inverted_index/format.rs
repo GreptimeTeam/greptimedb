@@ -57,6 +57,10 @@ use greptime_proto::v1::index::InvertedIndexMeta;
 
 use crate::bitmap::Bitmap;
 
+/// FST block size used when writing split FSTs. A point lookup reads one block of about
+/// this size instead of the whole FST.
+pub const DEFAULT_FST_BLOCK_SIZE: usize = 16 * 1024;
+
 /// Whether the tag's FST is split into blocks indexed by
 /// [`InvertedIndexMeta::fst_block_index`].
 pub fn is_chunked_fst(meta: &InvertedIndexMeta) -> bool {
