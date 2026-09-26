@@ -102,10 +102,8 @@ impl IntersectionFstApplier {
             selected.dedup();
             return selected;
         }
-        if !self.dfas.is_empty() {
-            return blocks.stream().into_values();
-        }
-        // Keys within every range lie in [max lower, min upper].
+        // Keys within every range lie in [max lower, min upper]. Without ranges this is
+        // every block, which is also what a regex without a literal prefix needs.
         let lower = self
             .ranges
             .iter()

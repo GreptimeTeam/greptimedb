@@ -532,7 +532,23 @@ mod tests {
             .metadata(None)
             .await
             .unwrap();
-        assert!(is_chunked_fst(&split_meta.metas["tag"]));
+        let tag_meta = &split_meta.metas["tag"];
+        assert!(is_chunked_fst(tag_meta));
+        // Blocks are contiguous and exactly fill the FST region.
+        let mut next = tag_meta.relative_fst_offset;
+        let mut blocks = FstMap::new(tag_meta.fst_block_index.clone())
+            .unwrap()
+            .stream()
+            .into_values();
+        assert!(blocks.len() > 1);
+        for location in blocks.drain(..) {
+            let FstValue::Bitmap { offset, size } = FstValue::decode(location) else {
+                panic!("inline block location");
+            };
+            assert_eq!(offset, next);
+            next += size;
+        }
+        assert_eq!(next, tag_meta.relative_fst_offset + tag_meta.fst_size);
 
         let key = |k: &str| k.as_bytes().to_vec();
         let cases = vec![
