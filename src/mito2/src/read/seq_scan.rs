@@ -42,7 +42,7 @@ use crate::read::last_row::FlatLastRowReader;
 use crate::read::pruner::{PartitionPruner, Pruner};
 use crate::read::range::RangeMeta;
 use crate::read::range_cache::{
-    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
+    build_range_cache_key, cache_flat_range_stream, cached_flat_range_stream, range_key_files,
 };
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{
@@ -320,6 +320,7 @@ impl SeqScan {
             Some(key) => cache_flat_range_stream(
                 stream,
                 stream_ctx.input.cache_strategy.clone(),
+                range_key_files(stream_ctx, &key),
                 key,
                 part_metrics.clone(),
             ),

@@ -44,6 +44,7 @@ use crate::read::scan_region::StreamContext;
 use crate::read::scan_util::PartitionMetrics;
 use crate::read::series_reader::SeriesRange;
 use crate::region::options::MergeMode;
+use crate::sst::file::FileHandle;
 use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 
 const RANGE_CACHE_COMPACT_THRESHOLD_BYTES: usize = 8 * 1024 * 1024;
@@ -618,6 +619,9 @@ enum CacheConcatCommand {
     Finish {
         pending: Vec<RecordBatch>,
         key: RangeScanCacheKey,
+        /// Keeps the files of the key alive until the value is inserted. Otherwise a file
+        /// could be purged, and its cache entries dropped, before this insert.
+        files: Vec<FileHandle>,
         cache_strategy: CacheStrategy,
         part_metrics: PartitionMetrics,
         result_tx: Option<oneshot::Sender<Result<Arc<RangeScanCacheValue>>>>,
@@ -704,6 +708,7 @@ async fn run_cache_concat_task(
             CacheConcatCommand::Finish {
                 pending,
                 key,
+                files,
                 cache_strategy,
                 part_metrics,
                 result_tx,
@@ -718,6 +723,7 @@ async fn run_cache_concat_task(
                         part_metrics
                             .inc_range_cache_size(key.estimated_size() + value.estimated_size());
                         cache_strategy.put_range_result(key, value.clone());
+                        drop(files);
 
                         Ok(value)
                     }
@@ -812,6 +818,7 @@ impl CacheBatchBuffer {
     fn finish(
         mut self,
         key: RangeScanCacheKey,
+        files: Vec<FileHandle>,
         cache_strategy: CacheStrategy,
         part_metrics: PartitionMetrics,
         result_tx: Option<oneshot::Sender<Result<Arc<RangeScanCacheValue>>>>,
@@ -824,6 +831,7 @@ impl CacheBatchBuffer {
             .send(CacheConcatCommand::Finish {
                 pending: mem::take(&mut self.buffered_batches),
                 key,
+                files,
                 cache_strategy,
                 part_metrics,
                 result_tx,
@@ -848,10 +856,30 @@ impl Drop for CacheBatchBuffer {
     }
 }
 
+/// Returns the handles of the files a range cache key covers.
+pub(crate) fn range_key_files(
+    stream_ctx: &StreamContext,
+    key: &RangeScanCacheKey,
+) -> Vec<FileHandle> {
+    key.file_ids()
+        .filter_map(|file_id| {
+            stream_ctx
+                .input
+                .files
+                .iter()
+                .find(|file| file.file_id().file_id() == file_id)
+                .cloned()
+        })
+        .collect()
+}
+
 /// Wraps a stream to cache its output for future range cache hits.
+///
+/// `files` are the files of `key`; they are kept alive until the value is cached.
 pub(crate) fn cache_flat_range_stream(
     mut stream: BoxedRecordBatchStream,
     cache_strategy: CacheStrategy,
+    files: Vec<FileHandle>,
     key: RangeScanCacheKey,
     part_metrics: PartitionMetrics,
 ) -> BoxedRecordBatchStream {
@@ -862,7 +890,7 @@ pub(crate) fn cache_flat_range_stream(
             yield batch;
         }
 
-        buffer.finish(key, cache_strategy, part_metrics, None);
+        buffer.finish(key, files, cache_strategy, part_metrics, None);
     })
 }
 
@@ -913,7 +941,7 @@ pub fn bench_cache_flat_range_stream(
     let part_metrics =
         PartitionMetrics::new(region_id, 0, "bench", Instant::now(), false, &metrics_set);
 
-    cache_flat_range_stream(stream, cache_strategy, key, part_metrics)
+    cache_flat_range_stream(stream, cache_strategy, Vec::new(), key, part_metrics)
 }
 
 #[cfg(test)]
@@ -995,7 +1023,7 @@ mod tests {
     ) -> Result<Arc<RangeScanCacheValue>> {
         let (tx, rx) = oneshot::channel();
         common_telemetry::info!("finish start");
-        buffer.finish(key, cache_strategy, part_metrics, Some(tx));
+        buffer.finish(key, Vec::new(), cache_strategy, part_metrics, Some(tx));
         common_telemetry::info!("finish end");
         rx.await.context(crate::error::RecvSnafu)?
     }
@@ -1595,6 +1623,88 @@ mod tests {
         assert_eq!(replayed.len(), 2);
         assert_eq!(replayed[0].num_rows(), 2);
         assert_eq!(replayed[1].num_rows(), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_range_is_dropped_when_its_file_is_purged_during_fill() {
+        use crate::sst::file::FileMeta;
+        use crate::sst::file_purger::FilePurger;
+
+        /// Drops cache entries on purge, like the purgers do.
+        struct CachePurger(
+            crate::cache::CacheManagerRef,
+            Arc<std::sync::atomic::AtomicBool>,
+        );
+
+        impl std::fmt::Debug for CachePurger {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("CachePurger")
+            }
+        }
+
+        impl FilePurger for CachePurger {
+            fn remove_file(&self, file_meta: FileMeta, is_delete: bool, _index_outdated: bool) {
+                if is_delete {
+                    self.0.remove_file_entries(file_meta.file_id());
+                    self.1.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+
+        let cache_manager = Arc::new(
+            CacheManager::builder()
+                .range_result_cache_size(1024 * 1024)
+                .build(),
+        );
+        let strategy = CacheStrategy::EnableAll(cache_manager.clone());
+        let region_id = RegionId::new(1, 1);
+        let file_id = FileId::random();
+        let purged = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let file = FileHandle::new(
+            FileMeta {
+                region_id,
+                file_id,
+                ..Default::default()
+            },
+            Arc::new(CachePurger(cache_manager.clone(), purged.clone())),
+        );
+        let (mut key, part_metrics) = test_cache_context(&strategy);
+        key.row_groups = vec![(file_id, 0)];
+
+        // Keep the fill task from inserting until the file is released by the scan.
+        let limiter = strategy.range_result_memory_limiter().unwrap().clone();
+        let permit = limiter
+            .acquire(limiter.available_permits() * limiter.permit_bytes())
+            .await
+            .unwrap();
+        let input = make_batch(&[1, 2, 3]);
+        let stream = cache_flat_range_stream(
+            Box::pin(futures::stream::iter(vec![Ok(input)])),
+            strategy.clone(),
+            vec![file.clone()],
+            key.clone(),
+            part_metrics,
+        );
+        let _: Vec<_> = stream.try_collect().await.unwrap();
+        file.mark_deleted();
+        drop(file);
+        drop(permit);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !purged.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("file was not purged");
+        // A fill that finished after the purge would insert a dead entry here.
+        for _ in 0..50 {
+            assert!(
+                strategy.get_range_result(&key).is_none(),
+                "purged file left a cached range"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
     }
 
     #[tokio::test]
