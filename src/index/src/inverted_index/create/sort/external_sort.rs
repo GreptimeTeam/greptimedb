@@ -22,9 +22,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use async_trait::async_trait;
 use common_telemetry::{debug, error};
 use futures::stream;
-use snafu::ResultExt;
-
 use roaring::RoaringBitmap;
+use snafu::ResultExt;
 
 use crate::bitmap::Bitmap;
 use crate::external_provider::ExternalTempFileProvider;
@@ -43,8 +42,6 @@ struct Posting {
     last_segment: u32,
 }
 
-/// Estimated fixed heap cost of a buffered value besides its bytes and segment ids.
-const POSTING_OVERHEAD: usize = 64;
 /// Estimated cost of one segment id in a roaring array container.
 const SEGMENT_SIZE: usize = size_of::<u16>();
 
@@ -223,14 +220,14 @@ impl ExternalSorter {
         match self.values_buffer.get_mut(value) {
             Some(posting) => posting.push(start, end),
             None => {
-                let mut posting = Posting {
-                    segments: RoaringBitmap::new(),
-                    last_segment: 0,
+                let mut segments = RoaringBitmap::new();
+                segments.insert_range(start..=end);
+                let posting = Posting {
+                    segments,
+                    last_segment: end,
                 };
-                posting.segments.insert_range(start..=end);
-                posting.last_segment = end;
                 self.values_buffer.insert(value.to_vec(), posting);
-                value.len() + POSTING_OVERHEAD + (end - start + 1) as usize * SEGMENT_SIZE
+                value.len() + (end - start + 1) as usize * SEGMENT_SIZE
             }
         }
     }
@@ -269,6 +266,11 @@ impl ExternalSorter {
     }
 
     async fn dump_buffer(&mut self) -> Result<()> {
+        // A second spill request before any new value would write an empty file with the
+        // same id and replace the first one.
+        if self.values_buffer.is_empty() {
+            return Ok(());
+        }
         let memory_usage = self.current_memory_usage;
         let file_id = &format!("{:012}", self.total_row_count);
         let index_name = &self.index_name;
@@ -308,7 +310,7 @@ impl ExternalSorter {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::iter;
     use std::sync::Mutex;
 
@@ -316,8 +318,6 @@ mod tests {
     use rand::Rng;
     use tokio::io::duplex;
     use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
-
-    use std::collections::BTreeMap;
 
     use super::*;
     use crate::external_provider::MockExternalTempFileProvider;
