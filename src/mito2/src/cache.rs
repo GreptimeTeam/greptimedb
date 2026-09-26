@@ -1909,7 +1909,7 @@ impl PageRangeCache {
                             .inc();
 
                         if let Some(cache) = weak_cache.upgrade() {
-                            cache.remove_index_entry(*k, Some(v.0));
+                            cache.remove_index_entry(*k, v.0);
                         }
                     }
                 })
@@ -1940,8 +1940,10 @@ impl PageRangeCache {
             }
 
             let mut parts = Vec::new();
+            // An indexed fragment may be missing from the cache while its insert is
+            // still in flight or its removal notification is pending. The removal
+            // listener of that generation drops the index entry.
             let candidates = self.find_index_candidates(file_id, row_group_idx, range);
-            let mut stale_keys = Vec::new();
 
             for fragment_key in candidates {
                 if let Some((_, bytes)) = self.cache.get(&fragment_key) {
@@ -1953,12 +1955,7 @@ impl PageRangeCache {
                         range: part_start..part_end,
                         bytes: bytes.slice(slice_start..slice_end),
                     });
-                } else {
-                    stale_keys.push(fragment_key);
                 }
-            }
-            for key in stale_keys {
-                self.remove_uncached_index_entry(key);
             }
 
             let mut cursor = range.start;
@@ -2022,16 +2019,20 @@ impl PageRangeCache {
             let size = page_cache_weight(&key, &bytes);
             CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
             insert_tracked(&self.cache, key, bytes, |generation| {
-                self.index
-                    .write()
-                    .unwrap()
-                    .entry(file_id)
-                    .or_default()
-                    .entry(row_group_idx)
-                    .or_default()
-                    .insert((key.start, key.end), (key, generation));
+                self.register_fragment(key, generation)
             });
         }
+    }
+
+    fn register_fragment(&self, key: PageFragmentKey, generation: u64) {
+        self.index
+            .write()
+            .unwrap()
+            .entry(key.file_id)
+            .or_default()
+            .entry(key.row_group_idx)
+            .or_default()
+            .insert((key.start, key.end), (key, generation));
     }
 
     /// Removes all fragments of `file_id`.
@@ -2067,27 +2068,9 @@ impl PageRangeCache {
             .unwrap_or_default()
     }
 
-    fn remove_uncached_index_entry(&self, key: PageFragmentKey) {
+    /// Removes the index entry of `key` if it belongs to the insert `generation`.
+    fn remove_index_entry(&self, key: PageFragmentKey, generation: u64) {
         let mut index = self.index.write().unwrap();
-        if self.cache.contains_key(&key) {
-            return;
-        }
-
-        Self::remove_index_entry_locked(&mut index, key, None);
-    }
-
-    /// Removes the index entry of `key` if it belongs to the insert `generation`, or
-    /// unconditionally when `generation` is `None`.
-    fn remove_index_entry(&self, key: PageFragmentKey, generation: Option<u64>) {
-        let mut index = self.index.write().unwrap();
-        Self::remove_index_entry_locked(&mut index, key, generation);
-    }
-
-    fn remove_index_entry_locked(
-        index: &mut PageFragmentIndex,
-        key: PageFragmentKey,
-        generation: Option<u64>,
-    ) {
         let Some(row_groups) = index.get_mut(&key.file_id) else {
             return;
         };
@@ -2099,7 +2082,7 @@ impl PageRangeCache {
             ranges
                 .get(&(key.start, key.end))
                 .is_some_and(|(current, current_generation)| {
-                    current == &key && generation.is_none_or(|g| g == *current_generation)
+                    current == &key && generation == *current_generation
                 });
         if removed {
             ranges.remove(&(key.start, key.end));
@@ -2767,10 +2750,34 @@ mod tests {
             &[Bytes::from(vec![1; 10])],
         );
         cache.cache.run_pending_tasks();
+        assert!(cache.find_index_candidates(file_id, 0, &range).is_empty());
 
         let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
         assert!(!lookup.is_fully_cached());
         assert_eq!(vec![0..10], lookup.missing_ranges);
+    }
+
+    #[test]
+    fn test_page_cache_lookup_during_insert_keeps_index_entry() {
+        let cache = PageRangeCache::new(1024);
+        let file_id = FileId::random();
+        let range = 0..10;
+        let key = PageFragmentKey::new(file_id, 0, &range);
+
+        // The lookup runs after the fragment is indexed but before its bytes are published.
+        insert_tracked(&cache.cache, key, Bytes::from(vec![1; 10]), |generation| {
+            cache.register_fragment(key, generation);
+            let lookup = cache.lookup(file_id, 0, std::slice::from_ref(&range));
+            assert!(!lookup.is_fully_cached());
+        });
+        assert!(
+            cache
+                .lookup(file_id, 0, std::slice::from_ref(&range))
+                .is_fully_cached()
+        );
+
+        cache.invalidate_file(file_id);
+        assert!(!cache.cache.contains_key(&key));
     }
 
     #[test]
