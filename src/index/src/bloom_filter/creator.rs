@@ -16,7 +16,6 @@ mod finalize_segment;
 mod intermediate_codec;
 
 use std::collections::HashSet;
-use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -28,7 +27,7 @@ use snafu::ResultExt;
 
 use crate::Bytes;
 use crate::bloom_filter::error::{IoSnafu, Result};
-use crate::bloom_filter::{PrehashedHasher, element_hash};
+use crate::bloom_filter::{PrehashedBuildHasher, element_hash};
 use crate::external_provider::ExternalTempFileProvider;
 
 /// `BloomFilterCreator` is responsible for creating and managing bloom filters
@@ -57,7 +56,7 @@ pub struct BloomFilterCreator {
     ///
     /// Elements with equal hashes set the same bits, so deduplicating by hash loses
     /// nothing and avoids copying the values.
-    cur_seg_distinct_elems: HashSet<u64, BuildHasherDefault<PrehashedHasher>>,
+    cur_seg_distinct_elems: HashSet<u64, PrehashedBuildHasher>,
 
     /// The memory usage of the current segment's distinct elements.
     cur_seg_distinct_elems_mem_usage: usize,
