@@ -176,7 +176,11 @@ impl BloomFilterCreator {
 
     fn insert_hashes(&mut self, hashes: impl IntoIterator<Item = u64>) {
         let old_len = self.cur_seg_distinct_elems.len();
-        self.cur_seg_distinct_elems.extend(hashes);
+        // Not `extend`: it reserves for the iterator's length, which counts duplicate
+        // tokens, and the capacity survives `drain` at segment boundaries.
+        for hash in hashes {
+            self.cur_seg_distinct_elems.insert(hash);
+        }
         let mem_diff = (self.cur_seg_distinct_elems.len() - old_len) * size_of::<u64>();
         if mem_diff > 0 {
             self.cur_seg_distinct_elems_mem_usage += mem_diff;
@@ -270,6 +274,23 @@ mod tests {
             .chunks_exact(std::mem::size_of::<u64>())
             .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()))
             .collect()
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_hashes_do_not_grow_segment_set() {
+        let mut creator = BloomFilterCreator::new(
+            4,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+        creator
+            .push_row_hashes(std::iter::repeat_n(7, 1_000_000))
+            .await
+            .unwrap();
+        assert_eq!(creator.cur_seg_distinct_elems.len(), 1);
+        assert!(creator.cur_seg_distinct_elems.capacity() < 16);
     }
 
     #[tokio::test]
