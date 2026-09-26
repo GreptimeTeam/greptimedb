@@ -309,9 +309,15 @@ impl RangeReader for InstrumentedRangeReader<'_> {
     }
 
     async fn read_vec(&self, ranges: &[Range<u64>]) -> io::Result<Vec<Bytes>> {
+        // OpenDAL merges ranges less than 1 MiB apart by default without bounding the merged
+        // length, so sparse page reads could fetch most of the file. Only merge adjacent
+        // ranges.
+        // TODO: evaluate bounded concurrent reads, then decide whether to merge across gaps
+        // based on object store latency, bytes read and query latency.
         let bufs = self
             .store
-            .reader(&self.path)
+            .reader_with(&self.path)
+            .gap(0)
             .await?
             .fetch(ranges.to_owned())
             .await?;
