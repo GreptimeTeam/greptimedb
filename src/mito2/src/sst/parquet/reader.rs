@@ -15,6 +15,7 @@
 //! Parquet reader.
 
 use std::collections::{HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -86,7 +87,7 @@ use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
-    SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
+    PrefetchedRowGroup, SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
 };
 use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -669,6 +670,7 @@ impl ParquetReaderBuilder {
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
             batch_size: self.batch_size,
+            prefetched: Default::default(),
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -1768,6 +1770,8 @@ pub(crate) struct RowGroupReaderBuilder {
     prefilter_builder: Option<PrefilterContextBuilder>,
     /// Hint for rows in a decoded batch.
     batch_size: usize,
+    /// Row groups fetched ahead of their readers.
+    prefetched: std::sync::Mutex<HashMap<usize, Arc<PrefetchedRowGroup>>>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1942,6 +1946,62 @@ impl RowGroupReaderBuilder {
     }
 
     /// Builds a parquet record batch stream with a custom projection mask.
+    /// Returns the byte ranges of the projected column chunks in `row_group_idx`.
+    fn projected_chunk_ranges(&self, row_group_idx: usize) -> Vec<Range<u64>> {
+        let row_group = self.parquet_meta.row_group(row_group_idx);
+        (0..row_group.num_columns())
+            .filter(|&leaf| self.projection.mask.leaf_included(leaf))
+            .map(|leaf| {
+                let (start, len) = row_group.column(leaf).byte_range();
+                start..start + len
+            })
+            .collect()
+    }
+
+    /// Returns the compressed size of the projected column chunks in `row_group_idx`.
+    pub(crate) fn projected_chunk_bytes(&self, row_group_idx: usize) -> u64 {
+        self.projected_chunk_ranges(row_group_idx)
+            .iter()
+            .map(|range| range.end - range.start)
+            .sum()
+    }
+
+    /// Returns true if the page cache holds all projected column chunks of `row_group_idx`.
+    pub(crate) fn is_row_group_cached(&self, row_group_idx: usize) -> bool {
+        self.cache_strategy
+            .get_page_ranges(
+                self.file_handle.file_id().file_id(),
+                row_group_idx,
+                &self.projected_chunk_ranges(row_group_idx),
+            )
+            .is_some_and(|lookup| lookup.is_fully_cached())
+    }
+
+    /// Reads the projected column chunks of `row_group_idx` so its reader doesn't wait
+    /// for storage. The bytes are released by [Self::release_prefetched].
+    pub(crate) async fn prefetch(&self, row_group_idx: usize) -> Result<()> {
+        let ranges = self.projected_chunk_ranges(row_group_idx);
+        let data = SstParquetRangeFetcher::new(
+            self.file_handle.file_id(),
+            self.file_path.clone(),
+            self.object_store.clone(),
+            self.cache_strategy.clone(),
+            row_group_idx,
+            None,
+        )
+        .fetch_bytes_with_cache(ranges.clone())
+        .await?;
+        self.prefetched.lock().unwrap().insert(
+            row_group_idx,
+            Arc::new(PrefetchedRowGroup::new(ranges, data)),
+        );
+        Ok(())
+    }
+
+    pub(crate) fn release_prefetched(&self, row_group_idx: usize) {
+        self.prefetched.lock().unwrap().remove(&row_group_idx);
+    }
+
     pub(crate) async fn build_with_projection(
         &self,
         row_group_idx: usize,
@@ -1949,6 +2009,7 @@ impl RowGroupReaderBuilder {
         projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
     ) -> Result<ProjectedRecordBatchStream> {
+        let prefetched = self.prefetched.lock().unwrap().get(&row_group_idx).cloned();
         let range_fetcher = SstParquetRangeFetcher::new(
             self.file_handle.file_id(),
             self.file_path.clone(),
@@ -1956,7 +2017,8 @@ impl RowGroupReaderBuilder {
             self.cache_strategy.clone(),
             row_group_idx,
             fetch_metrics.cloned(),
-        );
+        )
+        .with_prefetched(prefetched);
 
         build_sst_parquet_record_batch_stream(
             self.arrow_metadata.clone(),
@@ -2583,6 +2645,7 @@ mod tests {
                 cache_strategy,
                 prefilter_builder: filter_plan.prefilter_builder,
                 batch_size: DEFAULT_READ_BATCH_SIZE,
+                prefetched: Default::default(),
             },
             metadata,
         )

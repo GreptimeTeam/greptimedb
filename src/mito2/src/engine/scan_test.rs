@@ -4371,3 +4371,99 @@ fn scan_field_values(batches: &[common_recordbatch::RecordBatch]) -> Vec<f64> {
         })
         .collect()
 }
+
+/// Row group read-ahead hands its bytes to the reader instead of letting both fetch the
+/// same column chunks.
+#[tokio::test]
+async fn test_readahead_does_not_read_row_groups_twice() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use object_store::layers::mock::{
+        Buffer, BytesRange, MockLayerBuilder, Result as MockResult, RpRead, oio,
+    };
+
+    struct CountingReader {
+        inner: oio::Reader,
+        bytes: Arc<AtomicU64>,
+    }
+
+    impl oio::Read for CountingReader {
+        async fn open(
+            &self,
+            range: BytesRange,
+        ) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+            self.inner.open(range).await
+        }
+
+        async fn read(&self, range: BytesRange) -> MockResult<(RpRead, Buffer)> {
+            let (rp, buffer) = self.inner.read(range).await?;
+            self.bytes.fetch_add(buffer.len() as u64, Ordering::Relaxed);
+            Ok((rp, buffer))
+        }
+    }
+
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let counter = read_bytes.clone();
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new(move |path, _args, reader| {
+            if path.ends_with(".parquet") {
+                Box::new(CountingReader {
+                    inner: reader,
+                    bytes: counter.clone(),
+                }) as oio::Reader
+            } else {
+                reader
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 20000),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+    let file_size = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .flat_map(|level| level.files())
+        .map(|file| file.meta_ref().file_size)
+        .sum::<u64>();
+
+    read_bytes.store(0, Ordering::Relaxed);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(20000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    let read = read_bytes.load(Ordering::Relaxed);
+    assert!(
+        read <= file_size,
+        "read {read} bytes from a {file_size} byte file"
+    );
+}

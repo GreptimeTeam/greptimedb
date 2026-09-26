@@ -190,6 +190,35 @@ impl FileRange {
             .unwrap_or(true) // unexpected, not skip just in case
     }
 
+    /// Fetches this range's column chunks ahead of [Self::flat_reader].
+    pub(crate) async fn prefetch(&self) -> Result<()> {
+        self.context
+            .reader_builder
+            .prefetch(self.row_group_idx)
+            .await
+    }
+
+    /// Returns true if the page cache already holds the data [Self::prefetch] reads.
+    pub(crate) fn is_cached(&self) -> bool {
+        self.context
+            .reader_builder
+            .is_row_group_cached(self.row_group_idx)
+    }
+
+    /// Returns the number of bytes [Self::prefetch] reads.
+    pub(crate) fn prefetch_bytes(&self) -> u64 {
+        self.context
+            .reader_builder
+            .projected_chunk_bytes(self.row_group_idx)
+    }
+
+    /// Drops the bytes kept by [Self::prefetch].
+    pub(crate) fn release_prefetched(&self) {
+        self.context
+            .reader_builder
+            .release_prefetched(self.row_group_idx);
+    }
+
     /// Creates a flat reader that returns RecordBatch.
     pub async fn flat_reader(
         &self,
