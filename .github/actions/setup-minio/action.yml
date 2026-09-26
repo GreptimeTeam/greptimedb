@@ -19,6 +19,8 @@ runs:
       --set rootUser=rootuser,rootPassword=rootpass123 \
       --set buckets[0].name=default \
       --set service.port=80,service.targetPort=9000 \
+      --set image.repository=pgsty/silo,image.tag=RELEASE.2026-09-16T00-00-00Z \
+      --set mcImage.repository=pgsty/mc,mcImage.tag=RELEASE.2026-09-16T00-00-00Z \
       minio/minio \
       --create-namespace \
       -n minio
