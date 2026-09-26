@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::ops::Range;
 
 use fastbloom::BloomFilter;
@@ -22,6 +22,9 @@ use itertools::Itertools;
 use crate::Bytes;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
+
+/// Filter bytes searched together by [`BloomFilterApplier::search_groups`].
+const MAX_BATCH_FILTER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
 /// one of the elements (logical OR semantic) for the predicate to be satisfied.
@@ -43,12 +46,63 @@ impl BloomFilterApplier {
         Ok(Self { reader, meta })
     }
 
-    /// Runs [`Self::search`] over several groups of ranges (e.g. row groups) at once and
-    /// keeps in each group only its matching ranges.
+    /// Runs [`Self::search`] over several groups of ranges (e.g. row groups) and keeps in
+    /// each group only its matching ranges.
     ///
-    /// The filters of all groups are loaded with a single read instead of one read per
-    /// group. Groups must be ordered and their ranges sorted and disjoint, as for `search`.
+    /// Consecutive groups are searched together, one read per batch, as long as the
+    /// filters of a batch stay within [`MAX_BATCH_FILTER_BYTES`]. This saves a round trip
+    /// per group on object storage without holding the filters of a whole file at once.
+    /// Groups must be ordered and their ranges sorted and disjoint, as for `search`.
     pub async fn search_groups(
+        &mut self,
+        predicates: &[InListPredicate],
+        groups: &mut [&mut Vec<Range<usize>>],
+        metrics: Option<&mut BloomFilterReadMetrics>,
+    ) -> Result<()> {
+        self.search_groups_in_batches(predicates, groups, metrics, MAX_BATCH_FILTER_BYTES)
+            .await
+    }
+
+    async fn search_groups_in_batches(
+        &mut self,
+        predicates: &[InListPredicate],
+        groups: &mut [&mut Vec<Range<usize>>],
+        mut metrics: Option<&mut BloomFilterReadMetrics>,
+        max_batch_bytes: u64,
+    ) -> Result<()> {
+        let mut start = 0;
+        while start < groups.len() {
+            let mut locs = HashSet::new();
+            let mut batch_bytes = 0;
+            let mut end = start;
+            while end < groups.len() {
+                let new_locs = self
+                    .row_ranges_to_segments(groups[end])
+                    .into_iter()
+                    .map(|seg| self.meta.segment_loc_indices[seg])
+                    .filter(|loc| !locs.contains(loc))
+                    .collect::<HashSet<_>>();
+                let bytes = new_locs
+                    .iter()
+                    .map(|&loc| self.meta.bloom_filter_locs[loc as usize].size)
+                    .sum::<u64>();
+                // A group whose filters alone exceed the budget still forms its own batch.
+                if end > start && batch_bytes + bytes > max_batch_bytes {
+                    break;
+                }
+                locs.extend(new_locs);
+                batch_bytes += bytes;
+                end += 1;
+            }
+            self.search_batch(predicates, &mut groups[start..end], metrics.as_deref_mut())
+                .await?;
+            start = end;
+        }
+        Ok(())
+    }
+
+    /// Searches `groups` with one `search`, i.e. one read for all their filters.
+    async fn search_batch(
         &mut self,
         predicates: &[InListPredicate],
         groups: &mut [&mut Vec<Range<usize>>],
@@ -291,6 +345,7 @@ mod tests {
                 BloomFilterApplier::new(Box::new(BloomFilterReaderImpl::new(bytes.clone())))
                     .await
                     .unwrap();
+            let filter_size = applier.meta.bloom_filter_locs[0].size;
             let mut expected = Vec::new();
             for group in &groups {
                 expected.push(if group.is_empty() {
@@ -299,13 +354,16 @@ mod tests {
                     applier.search(&predicates, group, None).await.unwrap()
                 });
             }
-            let mut actual = groups.clone();
-            let mut refs = actual.iter_mut().collect::<Vec<_>>();
-            applier
-                .search_groups(&predicates, &mut refs, None)
-                .await
-                .unwrap();
-            assert_eq!(actual, expected, "values: {values:?}");
+            // Budgets of zero (a batch per group), one filter and unlimited (one batch).
+            for budget in [0, filter_size, u64::MAX] {
+                let mut actual = groups.clone();
+                let mut refs = actual.iter_mut().collect::<Vec<_>>();
+                applier
+                    .search_groups_in_batches(&predicates, &mut refs, None, budget)
+                    .await
+                    .unwrap();
+                assert_eq!(actual, expected, "values: {values:?}, budget: {budget}");
+            }
         }
     }
 
