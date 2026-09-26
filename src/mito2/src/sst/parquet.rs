@@ -491,6 +491,118 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prefetch_holds_budget_until_released() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        use object_store::layers::mock::{
+            Buffer, BytesRange, MockLayerBuilder, Result as MockResult, RpRead, oio,
+        };
+
+        /// Never completes a read once `block` is set.
+        struct BlockingReader {
+            inner: oio::Reader,
+            block: Arc<AtomicBool>,
+        }
+
+        impl oio::Read for BlockingReader {
+            async fn open(
+                &self,
+                range: BytesRange,
+            ) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+                if self.block.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                self.inner.open(range).await
+            }
+
+            async fn read(&self, range: BytesRange) -> MockResult<(RpRead, Buffer)> {
+                if self.block.load(Ordering::Relaxed) {
+                    std::future::pending::<()>().await;
+                }
+                self.inner.read(range).await
+            }
+        }
+
+        let block = Arc::new(AtomicBool::new(false));
+        let reader_block = block.clone();
+        let layer = MockLayerBuilder::default()
+            .reader_factory(Arc::new(move |_path, _args, reader| {
+                Box::new(BlockingReader {
+                    inner: reader,
+                    block: reader_block.clone(),
+                }) as oio::Reader
+            }))
+            .build()
+            .unwrap();
+        let mut env = TestEnv::new().await.with_mock_layer(layer);
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let metadata = Arc::new(sst_region_metadata());
+        let source = new_flat_source_from_record_batches(vec![
+            new_record_batch_by_range(&["a", "d"], 0, 60),
+            new_record_batch_by_range(&["b", "f"], 0, 40),
+            new_record_batch_by_range(&["b", "h"], 100, 200),
+        ]);
+        let write_opts = WriteOptions {
+            row_group_size: 50,
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata.clone(),
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+
+        let builder = ParquetReaderBuilder::new(
+            FILE_DIR.to_string(),
+            PathType::Bare,
+            handle.clone(),
+            object_store,
+        );
+        let (context, _) = builder
+            .build_reader_input(&mut ReaderMetrics::default())
+            .await
+            .unwrap()
+            .unwrap();
+        let budget = Arc::new(tokio::sync::Semaphore::new(100));
+
+        let reader_builder = context.reader_builder();
+        reader_builder.start_prefetch(1, budget.clone().try_acquire_many_owned(10).unwrap(), false);
+        let prefetched = reader_builder.prefetch_slot(1).unwrap().await;
+        assert!(prefetched.is_some());
+        drop(prefetched);
+        // Fetched bytes keep their budget until the reader releases them.
+        assert_eq!(90, budget.available_permits());
+        reader_builder.release_prefetched(1);
+        assert_eq!(100, budget.available_permits());
+
+        // Ending the scan aborts a prefetch stuck on storage and returns its budget.
+        block.store(true, Ordering::Relaxed);
+        reader_builder.start_prefetch(2, budget.clone().try_acquire_many_owned(10).unwrap(), false);
+        tokio::task::yield_now().await;
+        assert_eq!(90, budget.available_permits());
+        drop(context);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while budget.available_permits() != 100 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("dropped prefetch kept its budget");
+    }
+
+    #[tokio::test]
     async fn test_read_with_cache() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();

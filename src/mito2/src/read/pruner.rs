@@ -24,7 +24,7 @@ use smallvec::SmallVec;
 use snafu::ResultExt;
 use store_api::region_engine::PartitionRange;
 use store_api::storage::FileId;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::error::{PruneFileSnafu, Result};
@@ -38,18 +38,13 @@ use crate::sst::parquet::reader::ReaderMetrics;
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
-/// Maximum number of row groups fetched ahead of the reader in one partition.
+/// Maximum number of row group indices fetched ahead of the reader in one partition.
 const READAHEAD_ROW_GROUPS: usize = 8;
-/// Maximum bytes fetched ahead of the reader in one partition. The first row group
-/// ahead is always fetched even if it is larger.
-const READAHEAD_BYTES: u64 = 16 * 1024 * 1024;
-
-struct Readahead {
-    /// Position in the partition's scan order.
-    pos: usize,
-    bytes: u64,
-    handle: common_runtime::JoinHandle<()>,
-}
+/// Maximum bytes fetched ahead of the reader in one partition, counted until the reader
+/// releases them.
+const READAHEAD_BYTES: usize = 16 * 1024 * 1024;
+/// Unit of the readahead budget semaphore.
+const READAHEAD_PERMIT_BYTES: usize = 1024;
 
 /// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
@@ -67,8 +62,8 @@ pub struct PartitionPruner {
     scan_position: AtomicUsize,
     /// Positions in `scan_order` before this one have been considered for readahead.
     readahead_until: AtomicUsize,
-    /// Data prefetches of the row groups expected to be read next, in scan order.
-    readahead: Mutex<std::collections::VecDeque<Readahead>>,
+    /// Bytes of prefetched row group data this partition may hold.
+    readahead_budget: Arc<Semaphore>,
     /// Whether to read row group data ahead. Only enabled by callers whose readers
     /// release the prefetched data after reading a range.
     readahead_enabled: bool,
@@ -117,7 +112,7 @@ impl PartitionPruner {
             scan_order_ranges,
             scan_position: AtomicUsize::new(0),
             readahead_until: AtomicUsize::new(0),
-            readahead: Mutex::new(Default::default()),
+            readahead_budget: Arc::new(Semaphore::new(READAHEAD_BYTES / READAHEAD_PERMIT_BYTES)),
             readahead_enabled: false,
         }
     }
@@ -149,19 +144,12 @@ impl PartitionPruner {
         let file_index = index.index - self.pruner.inner.stream_ctx.input.num_memtables();
         let pre_filter_mode = self.pre_filter_mode(file_index);
 
-        // Waits for the data prefetch of this row group so the reader doesn't issue the
-        // same reads again.
-        let pending = self.take_readahead(index);
-        if let Some(handle) = pending {
-            let _ = handle.await;
-        }
-
         // Delegate to underlying Pruner
         let ranges = self
             .pruner
             .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
             .await?;
-        self.start_readahead(index);
+        self.start_readahead(index, &ranges);
 
         // Find position and trigger pre-fetch for upcoming files
         if let Some(pos) = self.file_indices.iter().position(|&idx| idx == file_index) {
@@ -203,11 +191,12 @@ impl PartitionPruner {
         pruned
     }
 
-    /// Starts fetching the data of the row group scanned after `current`.
+    /// Starts fetching the data of the row groups scanned after the first range of `current`.
     ///
     /// Row groups in a partition are read one after another, so without this each one
-    /// waits a full storage round trip before decoding starts.
-    fn start_readahead(&self, current: RowGroupIndex) {
+    /// waits a full storage round trip before decoding starts. Readers wait for their
+    /// prefetch instead of fetching the same data again.
+    fn start_readahead(&self, current: RowGroupIndex, current_ranges: &[FileRange]) {
         if !self.readahead_enabled {
             return;
         }
@@ -221,55 +210,57 @@ impl PartitionPruner {
         };
         self.scan_position.store(pos, Ordering::Relaxed);
 
-        let mut readahead = self.readahead.lock().unwrap();
-        let first_unscheduled = self.readahead_until.load(Ordering::Relaxed).max(pos + 1);
-        let end = (pos + 1 + READAHEAD_ROW_GROUPS).min(self.scan_order.len());
-        let mut inflight_bytes: u64 = readahead.iter().map(|r| r.bytes).sum();
-        for next_pos in first_unscheduled..end {
-            let next = self.scan_order[next_pos];
-            // The scan reads nothing from files for a partition the range cache serves.
-            if self.range_cached(&self.scan_order_ranges[next_pos]) {
-                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
-                continue;
+        // The other row groups of the current file come first.
+        for range in current_ranges.iter().skip(1) {
+            if !self.try_prefetch(range) {
+                return;
             }
-            let file_index = next.index - self.pruner.inner.stream_ctx.input.num_memtables();
-            // Only prefetch when pruning is done; the background pruner usually has it ready.
-            let Some(builder) = self.pruner.cached_file_builder(file_index) else {
-                break;
-            };
-            let mut ranges = SmallVec::<[FileRange; 2]>::new();
-            builder.build_ranges(next.row_group_index, &mut ranges);
-            let Some(range) = ranges.into_iter().next() else {
-                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
-                continue;
-            };
-            if range.is_cached() {
-                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
-                continue;
-            }
-            let bytes = range.prefetch_bytes();
-            if !readahead.is_empty() && inflight_bytes + bytes > READAHEAD_BYTES {
-                break;
-            }
-            inflight_bytes += bytes;
-            self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
-            let prefetch = async move {
-                // A failed prefetch only means the reader fetches the data itself.
-                if let Err(e) = range.prefetch().await {
-                    debug!("Failed to prefetch row group: {e}");
-                }
-            };
-            let handle = if self.pruner.inner.stream_ctx.input.compaction {
-                common_runtime::spawn_compact(prefetch)
-            } else {
-                common_runtime::spawn_query(prefetch)
-            };
-            readahead.push_back(Readahead {
-                pos: next_pos,
-                bytes,
-                handle,
-            });
         }
+
+        let end = (pos + 1 + READAHEAD_ROW_GROUPS).min(self.scan_order.len());
+        let first = self.readahead_until.load(Ordering::Relaxed).max(pos + 1);
+        for next_pos in first..end {
+            // The scan reads nothing from files for a partition the range cache serves.
+            if !self.range_cached(&self.scan_order_ranges[next_pos]) {
+                let next = self.scan_order[next_pos];
+                let file_index = next.index - self.pruner.inner.stream_ctx.input.num_memtables();
+                // Only prefetch when pruning is done; the background pruner usually has it ready.
+                let Some(builder) = self.pruner.cached_file_builder(file_index) else {
+                    return;
+                };
+                let mut ranges = SmallVec::<[FileRange; 2]>::new();
+                builder.build_ranges(next.row_group_index, &mut ranges);
+                if let Some(range) = ranges.first()
+                    && !self.try_prefetch(range)
+                {
+                    return;
+                }
+            }
+            self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
+        }
+    }
+
+    /// Starts prefetching `range` if the budget allows. Returns false when the budget is
+    /// used up.
+    fn try_prefetch(&self, range: &FileRange) -> bool {
+        if !range.can_prefetch() {
+            return true;
+        }
+        let permits = (range.prefetch_bytes() as usize)
+            .div_ceil(READAHEAD_PERMIT_BYTES)
+            .max(1);
+        let Ok(permits) = u32::try_from(permits) else {
+            return false;
+        };
+        let Ok(permit) = self
+            .readahead_budget
+            .clone()
+            .try_acquire_many_owned(permits)
+        else {
+            return false;
+        };
+        range.start_prefetch(permit, self.pruner.inner.stream_ctx.input.compaction);
+        true
     }
 
     /// Returns true if the range result cache serves `part_range` for this scan.
@@ -280,24 +271,6 @@ impl PartitionPruner {
             return false;
         };
         stream_ctx.input.cache_strategy.contains_range_result(&key)
-    }
-
-    /// Removes and returns the prefetch of `index`, dropping prefetches scheduled before it.
-    fn take_readahead(&self, index: RowGroupIndex) -> Option<common_runtime::JoinHandle<()>> {
-        let mut readahead = self.readahead.lock().unwrap();
-        while let Some(front) = readahead.front() {
-            if self.scan_order[front.pos] == index {
-                return readahead.pop_front().map(|r| r.handle);
-            }
-            if front.pos > self.scan_position.load(Ordering::Relaxed) + 1 {
-                return None;
-            }
-            // The scan skipped this row group.
-            if let Some(skipped) = readahead.pop_front() {
-                skipped.handle.abort();
-            }
-        }
-        None
     }
 
     /// Pre-fetches upcoming files starting from the given position.
@@ -447,15 +420,6 @@ struct PruneRequest {
     response_tx: Option<oneshot::Sender<Result<Arc<FileRangeBuilder>>>>,
     /// Partition metrics for merging reader metrics.
     partition_metrics: Option<PartitionMetrics>,
-}
-
-impl Drop for PartitionPruner {
-    fn drop(&mut self) {
-        // A scan stopped early (e.g. by a limit) doesn't read the prefetched row groups.
-        for readahead in self.readahead.get_mut().unwrap().drain(..) {
-            readahead.handle.abort();
-        }
-    }
 }
 
 impl Pruner {
