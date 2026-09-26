@@ -474,6 +474,55 @@ mod tests {
                 .unwrap();
             assert_eq!(*reads.lock().unwrap(), expected_reads, "budget: {budget}");
         }
+
+        // Segments 0..3 hold the same value and share one filter, which a batch counts
+        // and reads once even across row groups.
+        let mut creator = BloomFilterCreator::new(
+            4,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+        for i in 0..24 {
+            let value = if i < 12 {
+                "a".to_string()
+            } else {
+                format!("v{i}")
+            };
+            creator.push_row_elems([value.into_bytes()]).await.unwrap();
+        }
+        let mut writer = Cursor::new(Vec::new());
+        creator.finish(&mut writer).await.unwrap();
+        let reader = RecordingReader {
+            inner: BloomFilterReaderImpl::new(writer.into_inner()),
+            reads: reads.clone(),
+        };
+        let mut applier = BloomFilterApplier::new(Box::new(reader)).await.unwrap();
+        assert_eq!(applier.meta.bloom_filter_locs.len(), 4);
+        let filter_size = applier.meta.bloom_filter_locs[0].size;
+        assert!(
+            applier
+                .meta
+                .bloom_filter_locs
+                .iter()
+                .all(|l| l.size == filter_size)
+        );
+        reads.lock().unwrap().clear();
+        let mut groups = (0..24)
+            .step_by(6)
+            .map(|s| vec![s..s + 6])
+            .collect::<Vec<_>>();
+        let mut refs = groups.iter_mut().collect::<Vec<_>>();
+        applier
+            .search_groups_in_batches(&predicates, &mut refs, None, 2 * filter_size)
+            .await
+            .unwrap();
+        // Row groups 0 and 1 need only the shared filter; 2 and 3 need two each.
+        assert_eq!(
+            *reads.lock().unwrap(),
+            vec![filter_size, 2 * filter_size, 2 * filter_size]
+        );
     }
 
     #[tokio::test]
