@@ -57,9 +57,11 @@ use greptime_proto::v1::index::InvertedIndexMeta;
 
 use crate::bitmap::Bitmap;
 
-/// FST block size used when writing split FSTs. A point lookup reads one block of about
-/// this size instead of the whole FST.
-pub const DEFAULT_FST_BLOCK_SIZE: usize = 16 * 1024;
+/// FST block size used when writing split FSTs. A point lookup reads one block instead of
+/// the whole FST. It matches the 64 KiB index cache page, so a block costs about one page;
+/// every block also starts a new FST builder, which allocates about 1 MiB, and smaller
+/// blocks would make writing noticeably slower.
+pub const DEFAULT_FST_BLOCK_SIZE: usize = 64 * 1024;
 
 /// Whether the tag's FST is split into blocks indexed by
 /// [`InvertedIndexMeta::fst_block_index`].
