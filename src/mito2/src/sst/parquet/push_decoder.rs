@@ -15,10 +15,12 @@
 //! Push decoder stream implementation for SST parquet files.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
+use futures::future::{BoxFuture, FutureExt, Shared};
 use futures::stream::BoxStream;
 use object_store::ObjectStore;
 use parquet::DecodeResult;
@@ -26,6 +28,7 @@ use parquet::arrow::ProjectionMask;
 use parquet::arrow::arrow_reader::{ArrowReaderMetadata, RowSelection};
 use parquet::arrow::push_decoder::ParquetPushDecoderBuilder;
 use snafu::{ResultExt, ensure};
+use tokio::sync::OwnedSemaphorePermit;
 
 use crate::cache::file_cache::{FileType, IndexKey};
 use crate::cache::{CacheStrategy, PageRangePart};
@@ -53,6 +56,99 @@ pub struct SstParquetRangeFetcher {
     row_group_idx: usize,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
+    /// Column chunks of this row group fetched ahead of the decoder.
+    prefetched: Option<PrefetchSlot>,
+}
+
+/// Number of fetches served from prefetched data.
+#[cfg(test)]
+pub(crate) static PREFETCH_SERVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Result of a row group prefetch. Awaiting it waits for the fetch; dropping every
+/// clone aborts the fetch.
+pub(crate) type PrefetchSlot = Shared<BoxFuture<'static, Option<Arc<PrefetchedRowGroup>>>>;
+
+/// Column chunk bytes of one row group, read while previous row groups were decoded.
+pub(crate) struct PrefetchedRowGroup {
+    parts: Vec<PageRangePart>,
+    /// Fetch metrics of the prefetch, merged into the first reader that uses the bytes.
+    fetch_metrics: std::sync::Mutex<Option<ParquetFetchMetrics>>,
+    /// Readahead budget held while the bytes are alive.
+    _permit: OwnedSemaphorePermit,
+}
+
+impl PrefetchedRowGroup {
+    /// Returns the bytes of `ranges` if every range lies inside one prefetched part.
+    fn get(&self, ranges: &[Range<u64>]) -> Option<Vec<Bytes>> {
+        ranges
+            .iter()
+            .map(|range| {
+                self.parts
+                    .iter()
+                    .find(|part| part.range.start <= range.start && range.end <= part.range.end)
+                    .map(|part| {
+                        let start = (range.start - part.range.start) as usize;
+                        let end = (range.end - part.range.start) as usize;
+                        part.bytes.slice(start..end)
+                    })
+            })
+            .collect()
+    }
+}
+
+/// Aborts the task when dropped, e.g. when the scan that started a prefetch ends.
+struct AbortOnDrop<T>(common_runtime::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = std::result::Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
+
+/// Spawns a fetch of `ranges` that holds `permit` as long as the fetched bytes live.
+pub(crate) fn spawn_prefetch(
+    fetcher: SstParquetRangeFetcher,
+    ranges: Vec<Range<u64>>,
+    permit: OwnedSemaphorePermit,
+    compaction: bool,
+) -> PrefetchSlot {
+    let task = async move {
+        let data = match fetcher.fetch_bytes_with_cache(ranges.clone()).await {
+            Ok(data) => data,
+            // A failed prefetch only means the reader fetches the data itself.
+            Err(e) => {
+                common_telemetry::debug!("Failed to prefetch row group: {e}");
+                return None;
+            }
+        };
+        Some(Arc::new(PrefetchedRowGroup {
+            parts: ranges
+                .into_iter()
+                .zip(data)
+                .map(|(range, bytes)| PageRangePart { range, bytes })
+                .collect(),
+            fetch_metrics: std::sync::Mutex::new(fetcher.fetch_metrics),
+            _permit: permit,
+        }))
+    };
+    let handle = AbortOnDrop(if compaction {
+        common_runtime::spawn_compact(task)
+    } else {
+        common_runtime::spawn_query(task)
+    });
+    async move { handle.await.ok().flatten() }.boxed().shared()
 }
 
 impl SstParquetRangeFetcher {
@@ -72,11 +168,34 @@ impl SstParquetRangeFetcher {
             cache_strategy,
             row_group_idx,
             fetch_metrics,
+            prefetched: None,
         }
     }
 
-    /// Fetches byte ranges from page cache, write cache, or object store.
-    async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
+    pub(crate) fn with_prefetched(mut self, prefetched: Option<PrefetchSlot>) -> Self {
+        self.prefetched = prefetched;
+        self
+    }
+
+    /// Fetches byte ranges from prefetched data, page cache, write cache, or object store.
+    pub(crate) async fn fetch_bytes_with_cache(
+        &self,
+        ranges: Vec<Range<u64>>,
+    ) -> Result<Vec<Bytes>> {
+        if let Some(slot) = &self.prefetched
+            && let Some(prefetched) = slot.clone().await
+            && let Some(data) = prefetched.get(&ranges)
+        {
+            #[cfg(test)]
+            PREFETCH_SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(prefetch_metrics) = prefetched.fetch_metrics.lock().unwrap().take()
+                && let Some(metrics) = &self.fetch_metrics
+            {
+                metrics.merge_from(&prefetch_metrics);
+            }
+            return Ok(data);
+        }
+
         let fetch_start = self
             .fetch_metrics
             .as_ref()
@@ -354,6 +473,38 @@ pub fn build_sst_parquet_record_batch_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prefetched_row_group_serves_only_covered_ranges() {
+        let permit = Arc::new(tokio::sync::Semaphore::new(1))
+            .try_acquire_owned()
+            .unwrap();
+        let prefetched = PrefetchedRowGroup {
+            parts: vec![
+                PageRangePart {
+                    range: 100..200,
+                    bytes: Bytes::from((0..100).map(|v| v as u8).collect::<Vec<_>>()),
+                },
+                PageRangePart {
+                    range: 300..400,
+                    bytes: Bytes::from(vec![9; 100]),
+                },
+            ],
+            fetch_metrics: std::sync::Mutex::new(None),
+            _permit: permit,
+        };
+
+        let data = prefetched.get(&[120..130, 300..400]).unwrap();
+        assert_eq!(
+            &(20..30).map(|v| v as u8).collect::<Vec<_>>()[..],
+            &data[0][..]
+        );
+        assert_eq!(&[9; 100][..], &data[1][..]);
+        // A range spanning a gap or lying outside the prefetched chunks falls back to the
+        // regular fetch path.
+        assert!(prefetched.get(std::slice::from_ref(&(150..350))).is_none());
+        assert!(prefetched.get(&[120..130, 500..510]).is_none());
+    }
 
     #[test]
     fn test_assemble_range_from_cached_subrange_and_fetched_tail() {

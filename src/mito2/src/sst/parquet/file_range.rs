@@ -39,6 +39,9 @@ use store_api::metadata::RegionMetadataRef;
 use store_api::storage::{ColumnId, TimeSeriesRowSelector};
 use table::predicate::Predicate;
 use tokio::sync::OnceCell;
+use tokio::sync::OwnedSemaphorePermit;
+
+use crate::sst::parquet::push_decoder::PrefetchSlot;
 
 use crate::cache::CacheStrategy;
 use crate::error::{
@@ -101,6 +104,9 @@ pub struct FileRange {
     row_group_idx: usize,
     /// Row selection for the row group. `None` means all rows.
     row_selection: Option<RowSelection>,
+    /// Column chunks fetched ahead of the reader. Owned by the range, so the fetch ends
+    /// with the scan that holds it.
+    prefetched: Option<PrefetchSlot>,
 }
 
 impl FileRange {
@@ -141,6 +147,7 @@ impl FileRange {
             context,
             row_group_idx,
             row_selection,
+            prefetched: None,
         }
     }
 
@@ -190,6 +197,40 @@ impl FileRange {
             .unwrap_or(true) // unexpected, not skip just in case
     }
 
+    /// Starts fetching this range's column chunks in the background, holding `permit` as
+    /// long as the fetched bytes. Pass the slot to [Self::set_prefetched].
+    pub(crate) fn prefetch(&self, permit: OwnedSemaphorePermit, compaction: bool) -> PrefetchSlot {
+        self.context
+            .reader_builder
+            .prefetch(self.row_group_idx, permit, compaction)
+    }
+
+    /// Hands a prefetch started for this range to it.
+    pub(crate) fn set_prefetched(&mut self, prefetched: PrefetchSlot) {
+        self.prefetched = Some(prefetched);
+    }
+
+    pub(crate) fn has_prefetch(&self) -> bool {
+        self.prefetched.is_some()
+    }
+
+    /// Returns true if a prefetch can read this range: it reads whole column chunks, so
+    /// ranges with a row selection keep reading only the selected pages.
+    pub(crate) fn can_prefetch(&self) -> bool {
+        self.select_all()
+            && !self
+                .context
+                .reader_builder
+                .is_row_group_cached(self.row_group_idx)
+    }
+
+    /// Returns the number of bytes a prefetch of this range reads.
+    pub(crate) fn prefetch_bytes(&self) -> u64 {
+        self.context
+            .reader_builder
+            .prefetch_bytes(self.row_group_idx)
+    }
+
     /// Creates a flat reader that returns RecordBatch.
     pub async fn flat_reader(
         &self,
@@ -208,6 +249,7 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
+                self.prefetched.clone(),
             ))
             .await?;
 
@@ -289,6 +331,7 @@ impl FileRange {
                 self.row_group_idx,
                 self.row_selection.clone(),
                 fetch_metrics,
+                self.prefetched.clone(),
             ))
             .await?;
         if self.context.compat_batch().is_none() {
@@ -344,6 +387,7 @@ impl FileRange {
                 self.row_group_idx,
                 Some(selected),
                 fetch_metrics,
+                self.prefetched.clone(),
             ))
             .await?;
         Ok(Some(FlatRowGroupReader::new(self.context.clone(), stream)))
@@ -378,6 +422,7 @@ impl FileRange {
                 self.row_group_idx,
                 Some(selected),
                 fetch_metrics,
+                self.prefetched.clone(),
             ))
             .await?;
         Ok(Some(FlatRowGroupReader::new(self.context.clone(), stream)))
@@ -573,11 +618,13 @@ impl FileRangeContext {
         row_group_idx: usize,
         row_selection: Option<RowSelection>,
         fetch_metrics: Option<&'a ParquetFetchMetrics>,
+        prefetched: Option<PrefetchSlot>,
     ) -> RowGroupBuildContext<'a> {
         RowGroupBuildContext {
             row_group_idx,
             row_selection,
             fetch_metrics,
+            prefetched,
         }
     }
 
