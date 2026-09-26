@@ -253,7 +253,7 @@ where
         let mut pages: HashMap<u64, Bytes> = HashMap::new();
         let mut missing: Vec<u64> = Vec::new();
         let mut seen = HashSet::new();
-        for range in ranges {
+        for range in ranges.iter().filter(|r| r.end > r.start) {
             let size = (range.end - range.start) as u32;
             for page_key in PageKey::generate_page_keys(range.start, size, self.page_size) {
                 if !seen.insert(page_key.page_id) {
@@ -286,6 +286,7 @@ where
                 })
                 .collect();
             let loaded = load(load_ranges).await?;
+            debug_assert_eq!(loaded.len(), missing.len());
             for (page_id, page) in missing.into_iter().zip(loaded) {
                 metrics.page_bytes += page.len() as u64;
                 self.put_page(key, PageKey { page_id }, page.clone());
