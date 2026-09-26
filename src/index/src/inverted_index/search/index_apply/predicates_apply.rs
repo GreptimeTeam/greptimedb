@@ -15,10 +15,12 @@
 use std::mem::size_of;
 
 use async_trait::async_trait;
+use snafu::ResultExt;
 use greptime_proto::v1::index::InvertedIndexMetas;
 
 use crate::bitmap::Bitmap;
-use crate::inverted_index::error::{IndexNotFoundSnafu, Result};
+use crate::inverted_index::FstMap;
+use crate::inverted_index::error::{DecodeFstSnafu, IndexNotFoundSnafu, Result};
 use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use crate::inverted_index::format::{FstValue, is_chunked_fst};
 use crate::inverted_index::search::fst_apply::{
@@ -76,59 +78,42 @@ impl IndexApplier for PredicatesIndexApplier {
                     }
                 }
             };
-            let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
-            let fst_size = meta.fst_size as u64;
-            appliers.push((fst_applier, meta));
-            fst_ranges.push(fst_offset..fst_offset + fst_size);
+            // A split FST reads only the blocks its block index selects; others read whole.
+            let ranges_before = fst_ranges.len();
+            if is_chunked_fst(meta) {
+                let blocks = FstMap::new(meta.fst_block_index.clone()).context(DecodeFstSnafu)?;
+                for location in fst_applier.select_blocks(&blocks) {
+                    let FstValue::Bitmap { offset, size } = FstValue::decode(location) else {
+                        unreachable!("block locations are never inline")
+                    };
+                    let start = meta.base_offset + offset as u64;
+                    fst_ranges.push(start..start + size as u64);
+                }
+            } else {
+                let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
+                fst_ranges.push(fst_offset..fst_offset + meta.fst_size as u64);
+            }
+            appliers.push((fst_applier, meta, fst_ranges.len() - ranges_before));
         }
 
-        if fst_ranges.is_empty() {
+        if appliers.is_empty() {
             output.matched_segment_ids = Self::bitmap_full_range(&metadata);
             return Ok(output);
         }
 
-        let fsts = reader.fst_vec(&fst_ranges, metrics.as_deref_mut()).await?;
-
-        // Chunked columns: `fsts` holds their top-level FST; fetch the selected blocks of all
-        // such columns in one read.
-        let mut block_ranges = Vec::new();
-        let mut blocks_per_column = Vec::with_capacity(fsts.len());
-        for (fst, (fst_applier, meta)) in fsts.iter().zip(&appliers) {
-            if !is_chunked_fst(meta) {
-                blocks_per_column.push(0);
-                continue;
-            }
-            let selected = fst_applier.select_blocks(fst);
-            blocks_per_column.push(selected.len());
-            for location in selected {
-                let FstValue::Bitmap { offset, size } = FstValue::decode(location) else {
-                    unreachable!("block locations are never inline")
-                };
-                let start = meta.base_offset + offset as u64;
-                block_ranges.push(start..start + size as u64);
-            }
-        }
-        let mut blocks = if block_ranges.is_empty() {
+        let mut fsts = if fst_ranges.is_empty() {
             Vec::new()
         } else {
-            reader
-                .fst_vec(&block_ranges, metrics.as_deref_mut())
-                .await?
+            reader.fst_vec(&fst_ranges, metrics.as_deref_mut()).await?
         }
         .into_iter();
-
-        let value_and_meta_vec = fsts
+        let value_and_meta_vec = appliers
             .into_iter()
-            .zip(appliers)
-            .zip(blocks_per_column)
-            .map(|((fst, (fst_applier, meta)), num_blocks)| {
-                if !is_chunked_fst(meta) {
-                    return (fst_applier.apply(&fst), meta);
-                }
-                let values = blocks
+            .map(|(fst_applier, meta, num_fsts)| {
+                let values = fsts
                     .by_ref()
-                    .take(num_blocks)
-                    .flat_map(|block| fst_applier.apply(&block))
+                    .take(num_fsts)
+                    .flat_map(|fst| fst_applier.apply(&fst))
                     .collect();
                 (values, meta)
             })
