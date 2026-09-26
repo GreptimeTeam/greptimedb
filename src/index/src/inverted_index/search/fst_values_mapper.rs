@@ -16,8 +16,8 @@ use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::error::Result;
-use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use crate::inverted_index::format::FstValue;
+use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 
 /// `ParallelFstValuesMapper` enables parallel mapping of multiple FST value groups to their
 /// corresponding bitmaps within an inverted index.

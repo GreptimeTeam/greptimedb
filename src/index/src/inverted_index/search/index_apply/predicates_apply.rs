@@ -15,8 +15,8 @@
 use std::mem::size_of;
 
 use async_trait::async_trait;
-use snafu::ResultExt;
 use greptime_proto::v1::index::InvertedIndexMetas;
+use snafu::ResultExt;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::FstMap;
@@ -461,5 +461,104 @@ mod tests {
             applier.memory_usage(),
             size_of::<(IndexName, Box<dyn FstApplier>)>() + 5 + 100
         );
+    }
+
+    /// Writes one tag with 3000 values in the given layout. Value `k{i}` covers segment
+    /// `i` and, for every seventh value, also segments far away, so both inline and
+    /// bitmap postings occur.
+    async fn build_blob(inline: bool, fst_block_size: Option<usize>) -> Vec<u8> {
+        use futures::stream;
+
+        use crate::inverted_index::format::writer::{InvertedIndexBlobWriter, InvertedIndexWriter};
+
+        let values = (0..3000u32)
+            .map(|i| {
+                let mut bitmap = Bitmap::new_roaring();
+                bitmap.insert_range(i as usize..=i as usize);
+                if i % 7 == 0 {
+                    bitmap.insert_range(5000..=5000);
+                    bitmap.insert_range(6000..=6003);
+                }
+                Ok((format!("k{i:05}").into_bytes(), bitmap))
+            })
+            .collect::<Vec<_>>();
+        let mut blob = Vec::new();
+        let mut writer = InvertedIndexBlobWriter::new(&mut blob)
+            .with_inline_postings(inline)
+            .with_fst_block_size(fst_block_size);
+        writer
+            .add_index(
+                s("tag"),
+                Bitmap::new_roaring(),
+                Box::new(stream::iter(values)),
+                BitmapType::Roaring,
+            )
+            .await
+            .unwrap();
+        writer
+            .finish(7000, std::num::NonZeroUsize::new(1).unwrap())
+            .await
+            .unwrap();
+        blob
+    }
+
+    #[tokio::test]
+    async fn test_inline_and_split_fst_match_plain_layout() {
+        use crate::inverted_index::format::reader::{InvertedIndexBlobReader, InvertedIndexReader};
+        use crate::inverted_index::search::predicate::{
+            Bound, InListPredicate, Range, RangePredicate, RegexMatchPredicate,
+        };
+
+        let plain = build_blob(false, None).await;
+        let inline = build_blob(true, None).await;
+        let split = build_blob(true, Some(256)).await;
+        let split_meta = InvertedIndexBlobReader::new(split.clone())
+            .metadata(None)
+            .await
+            .unwrap();
+        assert!(is_chunked_fst(&split_meta.metas["tag"]));
+
+        let key = |k: &str| k.as_bytes().to_vec();
+        let cases = vec![
+            Predicate::InList(InListPredicate {
+                list: [key("k00007"), key("k02999"), key("k01500"), key("nope")].into(),
+            }),
+            Predicate::InList(InListPredicate {
+                list: [key("k00000")].into(),
+            }),
+            Predicate::Range(RangePredicate {
+                range: Range {
+                    lower: Some(Bound {
+                        inclusive: false,
+                        value: key("k00100"),
+                    }),
+                    upper: Some(Bound {
+                        inclusive: true,
+                        value: key("k00700"),
+                    }),
+                },
+            }),
+            Predicate::RegexMatch(RegexMatchPredicate {
+                pattern: s("^k012.*"),
+            }),
+            Predicate::RegexMatch(RegexMatchPredicate { pattern: s("7$") }),
+        ];
+        for predicate in cases {
+            let applier =
+                PredicatesIndexApplier::try_from(vec![(s("tag"), vec![predicate.clone()])])
+                    .unwrap();
+            let mut outputs = Vec::new();
+            for blob in [&plain, &inline, &split] {
+                let mut reader = InvertedIndexBlobReader::new(blob.clone());
+                let output = applier
+                    .apply(SearchContext::default(), &mut reader, None)
+                    .await
+                    .unwrap();
+                outputs.push(output.matched_segment_ids.iter_ones().collect::<Vec<_>>());
+            }
+            assert!(!outputs[0].is_empty(), "{predicate:?}");
+            assert_eq!(outputs[0], outputs[1], "inline: {predicate:?}");
+            assert_eq!(outputs[0], outputs[2], "split: {predicate:?}");
+        }
     }
 }
