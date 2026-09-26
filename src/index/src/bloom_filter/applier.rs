@@ -23,9 +23,9 @@ use crate::Bytes;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 
-/// Filter bytes read by one batch of [`BloomFilterApplier::search_groups`]. A batch holds
-/// the raw bytes and the decoded filters at once, so its transient memory is up to about
-/// twice this.
+/// Filter bytes one batch of [`BloomFilterApplier::search_groups`] reads. A single row
+/// group larger than this is still read as one batch, so this is not a memory limit; a
+/// batch holds both its raw bytes and the decoded filters.
 const MAX_BATCH_FILTER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
@@ -407,6 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::single_range_in_vec_init)]
     async fn test_search_groups_respects_budget() {
         let mut creator = BloomFilterCreator::new(
             4,
