@@ -388,24 +388,28 @@ fn bench_bloom_search(c: &mut Criterion) {
         })
         .collect::<Vec<_>>();
     group.bench_function("three_terms_per_row_group", |b| {
-        b.iter(|| {
-            let blob = blob.clone();
-            let predicates = &predicates;
-            rt.block_on(async move {
-                let reader = BloomFilterReaderImpl::new(blob);
-                let mut applier = BloomFilterApplier::new(Box::new(reader)).await.unwrap();
-                let mut matched = 0;
-                for start in (0..num_rows).step_by(ROW_GROUP_ROWS) {
-                    let end = (start + ROW_GROUP_ROWS).min(num_rows);
-                    matched += applier
-                        .search(predicates, &[start..end], None)
-                        .await
-                        .unwrap()
-                        .len();
-                }
-                black_box(matched)
-            })
-        })
+        b.iter_batched(
+            || {
+                let reader = BloomFilterReaderImpl::new(blob.clone());
+                rt.block_on(BloomFilterApplier::new(Box::new(reader)))
+                    .unwrap()
+            },
+            |mut applier| {
+                rt.block_on(async {
+                    let mut matched = 0;
+                    for start in (0..num_rows).step_by(ROW_GROUP_ROWS) {
+                        let end = (start + ROW_GROUP_ROWS).min(num_rows);
+                        matched += applier
+                            .search(&predicates, &[start..end], None)
+                            .await
+                            .unwrap()
+                            .len();
+                    }
+                    black_box(matched)
+                })
+            },
+            BatchSize::SmallInput,
+        )
     });
     group.finish();
 }
