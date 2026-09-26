@@ -4573,3 +4573,232 @@ async fn test_readahead_keeps_prefilter_from_reading_other_columns() {
         "read {read} bytes from a {file_size} byte file"
     );
 }
+
+/// Returns rows with a wide, poorly compressible field for read-ahead tests.
+fn wide_rows(rows: usize, width: usize) -> Vec<api::v1::Row> {
+    use api::v1::value::ValueData;
+
+    let mut seed = 42u64;
+    (0..rows)
+        .map(|i| {
+            let payload = (0..width)
+                .map(|_| {
+                    seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    (b'a' + (seed >> 59) as u8) as char
+                })
+                .collect::<String>();
+            api::v1::Row {
+                values: vec![
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue(format!("a{:02}", i % 100))),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::StringValue(payload)),
+                    },
+                    api::v1::Value {
+                        value_data: Some(ValueData::TimestampMillisecondValue(i as i64 * 1000)),
+                    },
+                ],
+            }
+        })
+        .collect()
+}
+
+/// Dropping a scan stream aborts its prefetches even while the scanner is alive, e.g.
+/// after a limit is reached.
+#[tokio::test]
+async fn test_dropping_scan_stream_aborts_readahead() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use futures::StreamExt;
+    use object_store::layers::mock::{
+        Buffer, BytesRange, MockLayerBuilder, Result as MockResult, RpRead, oio,
+    };
+
+    /// Counts reads in flight; a read that is dropped before finishing counts as done.
+    struct InFlight(Arc<AtomicUsize>);
+
+    impl Drop for InFlight {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct HangingReader {
+        inner: oio::Reader,
+        hang: Arc<AtomicBool>,
+        in_flight: Arc<AtomicUsize>,
+    }
+
+    impl oio::Read for HangingReader {
+        async fn open(
+            &self,
+            range: BytesRange,
+        ) -> MockResult<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+            self.inner.open(range).await
+        }
+
+        async fn read(&self, range: BytesRange) -> MockResult<(RpRead, Buffer)> {
+            self.in_flight.fetch_add(1, Ordering::SeqCst);
+            let _guard = InFlight(self.in_flight.clone());
+            if self.hang.load(Ordering::SeqCst) {
+                std::future::pending::<()>().await;
+            }
+            self.inner.read(range).await
+        }
+    }
+
+    let hang = Arc::new(AtomicBool::new(false));
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let layer = MockLayerBuilder::default()
+        .reader_factory(Arc::new({
+            let hang = hang.clone();
+            let in_flight = in_flight.clone();
+            move |path, _args, reader| {
+                if path.ends_with(".parquet") {
+                    Box::new(HangingReader {
+                        inner: reader,
+                        hang: hang.clone(),
+                        in_flight: in_flight.clone(),
+                    }) as oio::Reader
+                } else {
+                    reader
+                }
+            }
+        }))
+        .build()
+        .unwrap();
+    let mut env = TestEnv::new().await.with_mock_layer(layer);
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    // Append mode reads row groups one after another instead of merging them.
+    let request = CreateRequestBuilder::new()
+        .insert_option("append_mode", "true")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 20000),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let Scanner::Unordered(unordered_scan) = &scanner else {
+        panic!("expect UnorderedScan");
+    };
+    let mut stream = unordered_scan.build_stream().await.unwrap();
+    stream.next().await.unwrap().unwrap();
+    // Keep reading until a prefetch scheduled ahead of the reader hangs on storage.
+    hang.store(true, Ordering::SeqCst);
+    for _ in 0..40 {
+        if in_flight.load(Ordering::SeqCst) > 0 {
+            break;
+        }
+        let _ = tokio::time::timeout(Duration::from_millis(50), stream.next()).await;
+    }
+    assert!(
+        in_flight.load(Ordering::SeqCst) > 0,
+        "no prefetch in flight"
+    );
+
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while in_flight.load(Ordering::SeqCst) != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("prefetch outlived its scan stream");
+    drop(scanner);
+}
+
+/// Compaction reads each input file as one range index. Files much larger than the
+/// readahead budget keep being prefetched as reading frees budget, not only up to the
+/// first budget's worth of row groups.
+#[tokio::test]
+async fn test_readahead_refills_within_large_files() {
+    use std::sync::atomic::Ordering;
+
+    use crate::sst::parquet::push_decoder::PREFETCH_SERVED;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new()
+        .field_datatype(ConcreteDataType::string_datatype())
+        .insert_option("compaction.type", "twcs")
+        .insert_option("compaction.twcs.trigger_file_num", "100")
+        .build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // Two files of 20 row groups of about 1 MiB, 2.5 times the 16 MiB budget in total.
+    for _ in 0..2 {
+        test_util::put_rows(
+            &engine,
+            region_id,
+            Rows {
+                schema: column_schemas.clone(),
+                rows: wide_rows(20000, 1000),
+            },
+        )
+        .await;
+        test_util::flush_region(&engine, region_id, Some(1000)).await;
+    }
+
+    PREFETCH_SERVED.store(0, Ordering::Relaxed);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Compact(RegionCompactRequest {
+                options: api::v1::region::compact_request::Options::StrictWindow(
+                    api::v1::region::StrictWindow { window_seconds: 0 },
+                ),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    let files = engine
+        .get_region(region_id)
+        .unwrap()
+        .version()
+        .ssts
+        .levels()
+        .iter()
+        .map(|level| level.files().count())
+        .sum::<usize>();
+    assert_eq!(1, files);
+    // Each input's first row group is read before its source starts prefetching.
+    let served = PREFETCH_SERVED.load(Ordering::Relaxed);
+    assert!(
+        served >= 30,
+        "only {served} of 38 row groups were prefetched"
+    );
+}

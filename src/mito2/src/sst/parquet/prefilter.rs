@@ -996,6 +996,7 @@ async fn build_prefilter_masks(
             build_ctx.row_selection.clone(),
             projection,
             build_ctx.fetch_metrics,
+            build_ctx.prefetched.as_ref(),
         )
         .await?;
 
