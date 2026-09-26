@@ -777,8 +777,11 @@ pub async fn delete_files(
     cache_manager: &Option<CacheManagerRef>,
 ) -> crate::error::Result<()> {
     if let Some(cache) = &cache_manager {
-        for (file_id, _) in file_ids {
-            cache.remove_file_entries(RegionFileId::new(region_id, *file_id));
+        for (file_id, index_version) in file_ids {
+            cache.remove_file_entries(RegionIndexId::new(
+                RegionFileId::new(region_id, *file_id),
+                *index_version,
+            ));
         }
     }
     let mut attempted_files = Vec::with_capacity(file_ids.len());

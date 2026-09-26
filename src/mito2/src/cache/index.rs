@@ -18,6 +18,7 @@ pub mod result_cache;
 
 use std::future::Future;
 use std::hash::Hash;
+use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -25,7 +26,7 @@ use bytes::Bytes;
 use object_store::Buffer;
 use store_api::storage::FileId;
 
-use crate::cache::file_keys::{FileKeys, arc_entry_id, bytes_entry_id};
+use crate::cache::file_keys::{FileKeys, Tracked, insert_tracked};
 use crate::metrics::{CACHE_BYTES, CACHE_HIT, CACHE_MISS};
 
 /// Metrics for index metadata.
@@ -100,9 +101,9 @@ impl PageKey {
 /// Cache for index metadata and content.
 pub struct IndexCache<K, M> {
     /// Cache for index metadata
-    index_metadata: moka::sync::Cache<K, Arc<M>>,
+    index_metadata: moka::sync::Cache<K, Tracked<Arc<M>>>,
     /// Cache for index content.
-    index: moka::sync::Cache<(K, PageKey), Bytes>,
+    index: moka::sync::Cache<(K, PageKey), Tracked<Bytes>>,
     // Page size for index content.
     page_size: u64,
 
@@ -137,12 +138,14 @@ where
         );
         let index_metadata = moka::sync::CacheBuilder::new(index_metadata_cap)
             .name(&format!("index_metadata_{}", index_type))
-            .weigher(weight_of_metadata)
+            .weigher(move |k, v: &Tracked<Arc<M>>| {
+                weight_of_metadata(k, &v.1).saturating_add(mem::size_of::<u64>() as u32)
+            })
             .eviction_listener({
                 let keys = metadata_keys.clone();
-                move |k, v, _cause| {
-                    keys.remove(file_of(&k), &*k, arc_entry_id(&v));
-                    let size = weight_of_metadata(&k, &v);
+                move |k, v: Tracked<Arc<M>>, _cause| {
+                    keys.remove(file_of(&k), &*k, v.0);
+                    let size = weight_of_metadata(&k, &v.1);
                     CACHE_BYTES
                         .with_label_values(&[INDEX_METADATA_TYPE])
                         .sub(size.into());
@@ -151,12 +154,14 @@ where
             .build();
         let index_cache = moka::sync::CacheBuilder::new(index_content_cap)
             .name(&format!("index_content_{}", index_type))
-            .weigher(weight_of_content)
+            .weigher(move |k, v: &Tracked<Bytes>| {
+                weight_of_content(k, &v.1).saturating_add(mem::size_of::<u64>() as u32)
+            })
             .eviction_listener({
                 let keys = content_keys.clone();
-                move |k, v, _cause| {
-                    keys.remove(file_of(&k.0), &*k, bytes_entry_id(&v));
-                    let size = weight_of_content(&k, &v);
+                move |k, v: Tracked<Bytes>, _cause| {
+                    keys.remove(file_of(&k.0), &*k, v.0);
+                    let size = weight_of_content(&k, &v.1);
                     CACHE_BYTES
                         .with_label_values(&[INDEX_CONTENT_TYPE])
                         .sub(size.into());
@@ -182,16 +187,17 @@ where
     M: Send + Sync + 'static,
 {
     pub fn get_metadata(&self, key: K) -> Option<Arc<M>> {
-        self.index_metadata.get(&key)
+        self.index_metadata.get(&key).map(|(_, metadata)| metadata)
     }
 
     pub fn put_metadata(&self, key: K, metadata: Arc<M>) {
         CACHE_BYTES
             .with_label_values(&[INDEX_METADATA_TYPE])
             .add((self.weight_of_metadata)(&key, &metadata).into());
-        self.metadata_keys
-            .add((self.file_of)(&key), key, arc_entry_id(&metadata));
-        self.index_metadata.insert(key, metadata)
+        insert_tracked(&self.index_metadata, key, metadata, |generation| {
+            self.metadata_keys
+                .add((self.file_of)(&key), key, generation)
+        });
     }
 
     /// Gets given range of index data from cache, and loads from source if the file
@@ -264,7 +270,7 @@ where
     }
 
     fn get_page(&self, key: K, page_key: PageKey) -> Option<Bytes> {
-        self.index.get(&(key, page_key))
+        self.index.get(&(key, page_key)).map(|(_, page)| page)
     }
 
     fn put_page(&self, key: K, page_key: PageKey, value: Bytes) {
@@ -273,12 +279,10 @@ where
         CACHE_BYTES
             .with_label_values(&[INDEX_CONTENT_TYPE])
             .add((self.weight_of_content)(&(key, page_key), &value).into());
-        self.content_keys.add(
-            (self.file_of)(&key),
-            (key, page_key),
-            bytes_entry_id(&value),
-        );
-        self.index.insert((key, page_key), value);
+        insert_tracked(&self.index, (key, page_key), value, |generation| {
+            self.content_keys
+                .add((self.file_of)(&key), (key, page_key), generation)
+        });
     }
 
     /// Removes all cached entries for the given `file_id`.

@@ -58,7 +58,7 @@ pub use write_cache::{WriteCacheUploadStoreWrapper, WriteCacheUploadStoreWrapper
 
 use crate::cache::cache_size::parquet_meta_size;
 use crate::cache::file_cache::{FileType, IndexKey};
-use crate::cache::file_keys::{FileKeys, arc_entry_id};
+use crate::cache::file_keys::{FileKeys, Tracked, insert_tracked};
 use crate::cache::index::inverted_index::{InvertedIndexCache, InvertedIndexCacheRef};
 use crate::cache::write_cache::WriteCacheRef;
 use crate::error::{
@@ -640,7 +640,7 @@ impl PrefilterKey {
     }
 }
 
-type PrefilterResultCache = Cache<PrefilterKey, Arc<BooleanBuffer>>;
+type PrefilterResultCache = Cache<PrefilterKey, Tracked<Arc<BooleanBuffer>>>;
 
 fn new_prefilter_result_cache(
     capacity: u64,
@@ -648,10 +648,10 @@ fn new_prefilter_result_cache(
 ) -> PrefilterResultCache {
     Cache::builder()
         .max_capacity(capacity)
-        .weigher(prefilter_result_cache_weight)
+        .weigher(|k, v: &Tracked<Arc<BooleanBuffer>>| prefilter_result_cache_weight(k, &v.1))
         .eviction_listener(move |k, v, cause| {
-            keys.remove(k.file_id, &*k, arc_entry_id(&v));
-            let size = prefilter_result_cache_weight(&k, &v);
+            keys.remove(k.file_id, &*k, v.0);
+            let size = prefilter_result_cache_weight(&k, &v.1);
             CACHE_BYTES
                 .with_label_values(&[PREFILTER_RESULT_TYPE])
                 .sub(size.into());
@@ -663,7 +663,7 @@ fn new_prefilter_result_cache(
 }
 
 fn prefilter_result_cache_weight(k: &PrefilterKey, v: &Arc<BooleanBuffer>) -> u32 {
-    (k.mem_usage() + mem::size_of::<BooleanBuffer>() + v.values().len()) as u32
+    (k.mem_usage() + mem::size_of::<Tracked<BooleanBuffer>>() + v.values().len()) as u32
 }
 
 /// Cache strategies that may only enable a subset of caches.
@@ -1281,9 +1281,12 @@ impl CacheManager {
     /// Entries of a removed file can never be read again, but TinyLFU admission
     /// keeps them if they were hot, so they would block admission of the
     /// compaction outputs that replaced them.
-    pub(crate) fn remove_file_entries(&self, file_id: RegionFileId) {
-        self.remove_parquet_meta_data(file_id);
-        let file_id = file_id.file_id();
+    pub(crate) fn remove_file_entries(&self, index_id: RegionIndexId) {
+        self.remove_parquet_meta_data(index_id.file_id);
+        if let Some(cache) = &self.puffin_metadata_cache {
+            cache.remove(&index_id.to_string());
+        }
+        let file_id = index_id.file_id();
         if let Some(cache) = &self.page_cache {
             cache.invalidate_file(file_id);
         }
@@ -1421,6 +1424,7 @@ impl CacheManager {
         self.selector_result_cache
             .as_ref()
             .and_then(|selector_result_cache| selector_result_cache.get(selector_key))
+            .map(|(_, value)| value)
     }
 
     /// Puts result of the selector into the cache.
@@ -1433,12 +1437,10 @@ impl CacheManager {
             CACHE_BYTES
                 .with_label_values(&[SELECTOR_RESULT_TYPE])
                 .add(selector_result_cache_weight(&selector_key, &result).into());
-            self.selector_result_keys.add(
-                selector_key.file_id,
-                selector_key,
-                arc_entry_id(&result),
-            );
-            cache.insert(selector_key, result);
+            insert_tracked(cache, selector_key, result, |generation| {
+                self.selector_result_keys
+                    .add(selector_key.file_id, selector_key, generation)
+            });
         }
     }
 
@@ -1448,9 +1450,9 @@ impl CacheManager {
         &self,
         key: &RangeScanCacheKey,
     ) -> Option<Arc<RangeScanCacheValue>> {
-        self.range_result_cache
-            .as_ref()
-            .and_then(|cache| update_hit_miss(cache.get(key), RANGE_RESULT_TYPE))
+        self.range_result_cache.as_ref().and_then(|cache| {
+            update_hit_miss(cache.get(key).map(|(_, value)| value), RANGE_RESULT_TYPE)
+        })
     }
 
     /// Puts range scan result into cache.
@@ -1464,11 +1466,12 @@ impl CacheManager {
                 .with_label_values(&[RANGE_RESULT_TYPE])
                 .add(range_result_cache_weight(&key, &result).into());
             let shared_key = Arc::new(key.clone());
-            for file_id in key.file_ids() {
-                self.range_result_keys
-                    .add(file_id, shared_key.clone(), arc_entry_id(&result));
-            }
-            cache.insert(key, result);
+            insert_tracked(cache, key, result, |generation| {
+                for file_id in shared_key.file_ids() {
+                    self.range_result_keys
+                        .add(file_id, shared_key.clone(), generation);
+                }
+            });
         }
     }
 
@@ -1507,9 +1510,12 @@ impl CacheManager {
     }
 
     pub(crate) fn get_prefilter_result(&self, key: &PrefilterKey) -> Option<Arc<BooleanBuffer>> {
-        self.prefilter_result_cache
-            .as_ref()
-            .and_then(|cache| update_hit_miss(cache.get(key), PREFILTER_RESULT_TYPE))
+        self.prefilter_result_cache.as_ref().and_then(|cache| {
+            update_hit_miss(
+                cache.get(key).map(|(_, value)| value),
+                PREFILTER_RESULT_TYPE,
+            )
+        })
     }
 
     pub(crate) fn put_prefilter_result(&self, key: PrefilterKey, result: Arc<BooleanBuffer>) {
@@ -1517,9 +1523,11 @@ impl CacheManager {
             CACHE_BYTES
                 .with_label_values(&[PREFILTER_RESULT_TYPE])
                 .add(prefilter_result_cache_weight(&key, &result).into());
-            self.prefilter_result_keys
-                .add(key.file_id, key.clone(), arc_entry_id(&result));
-            cache.insert(key, result);
+            let registered = key.clone();
+            insert_tracked(cache, key, result, |generation| {
+                self.prefilter_result_keys
+                    .add(registered.file_id, registered, generation)
+            });
         }
     }
 }
@@ -1705,10 +1713,12 @@ impl CacheManagerBuilder {
             let keys = selector_result_keys.clone();
             Cache::builder()
                 .max_capacity(self.selector_result_cache_size)
-                .weigher(selector_result_cache_weight)
+                .weigher(|k, v: &Tracked<Arc<SelectorResultValue>>| {
+                    selector_result_cache_weight(k, &v.1)
+                })
                 .eviction_listener(move |k, v, cause| {
-                    keys.remove(k.file_id, &*k, arc_entry_id(&v));
-                    let size = selector_result_cache_weight(&k, &v);
+                    keys.remove(k.file_id, &*k, v.0);
+                    let size = selector_result_cache_weight(&k, &v.1);
                     CACHE_BYTES
                         .with_label_values(&[SELECTOR_RESULT_TYPE])
                         .sub(size.into());
@@ -1723,12 +1733,14 @@ impl CacheManagerBuilder {
             let keys = range_result_keys.clone();
             Cache::builder()
                 .max_capacity(self.range_result_cache_size)
-                .weigher(range_result_cache_weight)
+                .weigher(|k, v: &Tracked<Arc<RangeScanCacheValue>>| {
+                    range_result_cache_weight(k, &v.1)
+                })
                 .eviction_listener(move |k, v, cause| {
                     for file_id in k.file_ids() {
-                        keys.remove(file_id, &k, arc_entry_id(&v));
+                        keys.remove(file_id, &k, v.0);
                     }
-                    let size = range_result_cache_weight(&k, &v);
+                    let size = range_result_cache_weight(&k, &v.1);
                     CACHE_BYTES
                         .with_label_values(&[RANGE_RESULT_TYPE])
                         .sub(size.into());
@@ -1781,15 +1793,15 @@ fn vector_cache_weight(_k: &(ConcreteDataType, Value), v: &VectorRef) -> u32 {
 }
 
 fn page_cache_weight(k: &PageFragmentKey, v: &Bytes) -> u32 {
-    (k.estimated_size() + mem::size_of::<Bytes>() + v.len()) as u32
+    (k.estimated_size() + mem::size_of::<Tracked<Bytes>>() + v.len()) as u32
 }
 
 fn selector_result_cache_weight(k: &SelectorResultKey, v: &Arc<SelectorResultValue>) -> u32 {
-    (mem::size_of_val(k) + v.estimated_size()) as u32
+    (mem::size_of_val(k) + mem::size_of::<u64>() + v.estimated_size()) as u32
 }
 
 fn range_result_cache_weight(k: &RangeScanCacheKey, v: &Arc<RangeScanCacheValue>) -> u32 {
-    (k.estimated_size() + v.estimated_size()) as u32
+    (k.estimated_size() + mem::size_of::<u64>() + v.estimated_size()) as u32
 }
 
 /// Updates cache hit/miss metrics.
@@ -1869,14 +1881,15 @@ impl PageRangeLookup {
     }
 }
 
-type PageFragmentRangeIndex = BTreeMap<(u64, u64), PageFragmentKey>;
+/// Fragment range -> (key, insert generation of the cached bytes).
+type PageFragmentRangeIndex = BTreeMap<(u64, u64), (PageFragmentKey, u64)>;
 /// File id -> row group index -> cached fragments. Grouping by file lets a purged
 /// file drop all of its fragments without scanning the whole index.
 type PageFragmentIndex = HashMap<FileId, HashMap<usize, PageFragmentRangeIndex>>;
 
 /// Byte-fragment cache for Parquet row-group reads.
 pub struct PageRangeCache {
-    cache: Cache<PageFragmentKey, Bytes>,
+    cache: Cache<PageFragmentKey, Tracked<Bytes>>,
     index: RwLock<PageFragmentIndex>,
 }
 
@@ -1885,20 +1898,18 @@ impl PageRangeCache {
         Arc::new_cyclic(|weak_cache: &std::sync::Weak<PageRangeCache>| {
             let cache = Cache::builder()
                 .max_capacity(capacity)
-                .weigher(page_cache_weight)
+                .weigher(|k, v: &Tracked<Bytes>| page_cache_weight(k, &v.1))
                 .eviction_listener({
                     let weak_cache = weak_cache.clone();
                     move |k, v, cause| {
-                        let size = page_cache_weight(&k, &v);
+                        let size = page_cache_weight(&k, &v.1);
                         CACHE_BYTES.with_label_values(&[PAGE_TYPE]).sub(size.into());
                         CACHE_EVICTION
                             .with_label_values(&[PAGE_TYPE, removal_cause_str(cause)])
                             .inc();
 
-                        if let Some(cache) = weak_cache.upgrade()
-                            && !matches!(cause, RemovalCause::Replaced)
-                        {
-                            cache.remove_index_entry(*k);
+                        if let Some(cache) = weak_cache.upgrade() {
+                            cache.remove_index_entry(*k, Some(v.0));
                         }
                     }
                 })
@@ -1933,7 +1944,7 @@ impl PageRangeCache {
             let mut stale_keys = Vec::new();
 
             for fragment_key in candidates {
-                if let Some(bytes) = self.cache.get(&fragment_key) {
+                if let Some((_, bytes)) = self.cache.get(&fragment_key) {
                     let part_start = range.start.max(fragment_key.start);
                     let part_end = range.end.min(fragment_key.end);
                     let slice_start = (part_start - fragment_key.start) as usize;
@@ -2010,14 +2021,16 @@ impl PageRangeCache {
             let bytes = Bytes::copy_from_slice(bytes.as_ref());
             let size = page_cache_weight(&key, &bytes);
             CACHE_BYTES.with_label_values(&[PAGE_TYPE]).add(size.into());
-            self.cache.insert(key, bytes);
-            let mut index = self.index.write().unwrap();
-            index
-                .entry(file_id)
-                .or_default()
-                .entry(row_group_idx)
-                .or_default()
-                .insert((key.start, key.end), key);
+            insert_tracked(&self.cache, key, bytes, |generation| {
+                self.index
+                    .write()
+                    .unwrap()
+                    .entry(file_id)
+                    .or_default()
+                    .entry(row_group_idx)
+                    .or_default()
+                    .insert((key.start, key.end), (key, generation));
+            });
         }
     }
 
@@ -2029,7 +2042,7 @@ impl PageRangeCache {
             .flat_map(|row_groups| row_groups.into_values())
             .flat_map(|ranges| ranges.into_values())
         {
-            self.cache.invalidate(&key);
+            self.cache.invalidate(&key.0);
         }
     }
 
@@ -2046,7 +2059,7 @@ impl PageRangeCache {
             .map(|ranges| {
                 ranges
                     .range(..(range.end, 0))
-                    .filter_map(|(_, fragment_key)| {
+                    .filter_map(|(_, (fragment_key, _))| {
                         (fragment_key.end > range.start).then_some(*fragment_key)
                     })
                     .collect()
@@ -2060,15 +2073,21 @@ impl PageRangeCache {
             return;
         }
 
-        Self::remove_index_entry_locked(&mut index, key);
+        Self::remove_index_entry_locked(&mut index, key, None);
     }
 
-    fn remove_index_entry(&self, key: PageFragmentKey) {
+    /// Removes the index entry of `key` if it belongs to the insert `generation`, or
+    /// unconditionally when `generation` is `None`.
+    fn remove_index_entry(&self, key: PageFragmentKey, generation: Option<u64>) {
         let mut index = self.index.write().unwrap();
-        Self::remove_index_entry_locked(&mut index, key);
+        Self::remove_index_entry_locked(&mut index, key, generation);
     }
 
-    fn remove_index_entry_locked(index: &mut PageFragmentIndex, key: PageFragmentKey) {
+    fn remove_index_entry_locked(
+        index: &mut PageFragmentIndex,
+        key: PageFragmentKey,
+        generation: Option<u64>,
+    ) {
         let Some(row_groups) = index.get_mut(&key.file_id) else {
             return;
         };
@@ -2076,9 +2095,12 @@ impl PageRangeCache {
             return;
         };
 
-        let removed = ranges
-            .get(&(key.start, key.end))
-            .is_some_and(|current| current == &key);
+        let removed =
+            ranges
+                .get(&(key.start, key.end))
+                .is_some_and(|(current, current_generation)| {
+                    current == &key && generation.is_none_or(|g| g == *current_generation)
+                });
         if removed {
             ranges.remove(&(key.start, key.end));
         }
@@ -2168,9 +2190,9 @@ type SstDecodedMetaCache = Cache<SstMetaKey, Arc<CachedSstMeta>>;
 /// e.g. `"hello" => ["hello", "hello", "hello"]`
 type VectorCache = Cache<(ConcreteDataType, Value), VectorRef>;
 /// Maps (file id, row group id, time series row selector) to [SelectorResultValue].
-type SelectorResultCache = Cache<SelectorResultKey, Arc<SelectorResultValue>>;
+type SelectorResultCache = Cache<SelectorResultKey, Tracked<Arc<SelectorResultValue>>>;
 /// Maps partition-range scan key to cached flat batches.
-type RangeResultCache = Cache<RangeScanCacheKey, Arc<RangeScanCacheValue>>;
+type RangeResultCache = Cache<RangeScanCacheKey, Tracked<Arc<RangeScanCacheValue>>>;
 
 #[cfg(test)]
 mod tests {
@@ -2944,10 +2966,24 @@ mod tests {
             .selector_result_cache_size(4096)
             .range_result_cache_size(1024 * 1024)
             .prefilter_result_cache_size(4096)
+            .puffin_metadata_size(4096)
             .build();
         let region_id = RegionId::new(1, 1);
         let purged = FileId::random();
         let live = FileId::random();
+        // Puffin metadata is keyed by index version.
+        let purged_index = RegionIndexId::new(RegionFileId::new(region_id, purged), 1);
+        let live_index = RegionIndexId::new(RegionFileId::new(region_id, live), 1);
+        let puffin_metadata_cache = cache.puffin_metadata_cache().unwrap().clone();
+        for index_id in [purged_index, live_index] {
+            puffin_metadata_cache.put_metadata(
+                index_id.to_string(),
+                Arc::new(puffin::file_metadata::FileMetadata {
+                    blobs: Vec::new(),
+                    properties: std::collections::HashMap::new(),
+                }),
+            );
+        }
         let page = 0..8;
         let selector_key = |file_id| SelectorResultKey {
             file_id,
@@ -3003,7 +3039,7 @@ mod tests {
             Arc::new(RangeScanCacheValue::new(Vec::new(), 0)),
         );
 
-        cache.remove_file_entries(RegionFileId::new(region_id, purged));
+        cache.remove_file_entries(purged_index);
 
         let page_cached = |file_id, row_group| {
             cache
@@ -3023,6 +3059,16 @@ mod tests {
         assert!(cache.get_range_result(&range_key(vec![live])).is_some());
         // A range that also covers a live file is useless once one of its files is gone.
         assert!(cache.get_range_result(&shared_range).is_none());
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&purged_index.to_string())
+                .is_none()
+        );
+        assert!(
+            puffin_metadata_cache
+                .get_metadata(&live_index.to_string())
+                .is_some()
+        );
     }
 
     #[test]
