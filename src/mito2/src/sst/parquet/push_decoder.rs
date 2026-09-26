@@ -60,6 +60,11 @@ pub struct SstParquetRangeFetcher {
     prefetched: Option<PrefetchSlot>,
 }
 
+/// Number of fetches served from prefetched data.
+#[cfg(test)]
+pub(crate) static PREFETCH_SERVED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Result of a row group prefetch. Awaiting it waits for the fetch; dropping every
 /// clone aborts the fetch.
 pub(crate) type PrefetchSlot = Shared<BoxFuture<'static, Option<Arc<PrefetchedRowGroup>>>>;
@@ -181,6 +186,8 @@ impl SstParquetRangeFetcher {
             && let Some(prefetched) = slot.clone().await
             && let Some(data) = prefetched.get(&ranges)
         {
+            #[cfg(test)]
+            PREFETCH_SERVED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Some(prefetch_metrics) = prefetched.fetch_metrics.lock().unwrap().take()
                 && let Some(metrics) = &self.fetch_metrics
             {

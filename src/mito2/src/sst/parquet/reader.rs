@@ -671,7 +671,6 @@ impl ParquetReaderBuilder {
             cache_strategy: self.cache_strategy.clone(),
             prefilter_builder: filter_plan.prefilter_builder,
             batch_size: self.batch_size,
-            prefetched: Default::default(),
         };
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
@@ -1771,8 +1770,6 @@ pub(crate) struct RowGroupReaderBuilder {
     prefilter_builder: Option<PrefilterContextBuilder>,
     /// Hint for rows in a decoded batch.
     batch_size: usize,
-    /// Row groups fetched ahead of their readers.
-    prefetched: std::sync::Mutex<HashMap<usize, PrefetchSlot>>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1784,6 +1781,8 @@ pub(crate) struct RowGroupBuildContext<'a> {
     pub(crate) row_selection: Option<RowSelection>,
     /// Metrics for tracking fetch operations.
     pub(crate) fetch_metrics: Option<&'a ParquetFetchMetrics>,
+    /// Column chunks of the row group fetched ahead of the reader.
+    pub(crate) prefetched: Option<PrefetchSlot>,
 }
 
 impl RowGroupReaderBuilder {
@@ -1848,6 +1847,7 @@ impl RowGroupReaderBuilder {
                     build_ctx.row_selection,
                     self.projection.mask.clone(),
                     build_ctx.fetch_metrics,
+                    build_ctx.prefetched.as_ref(),
                 )
                 .await?;
             return self.make_projected_stream(stream);
@@ -1869,6 +1869,7 @@ impl RowGroupReaderBuilder {
                 refined_selection,
                 self.projection.mask.clone(),
                 build_ctx.fetch_metrics,
+                build_ctx.prefetched.as_ref(),
             )
             .await?;
         self.make_projected_stream(stream)
@@ -1888,6 +1889,7 @@ impl RowGroupReaderBuilder {
                 build_ctx.row_selection,
                 self.projection.mask.clone(),
                 build_ctx.fetch_metrics,
+                build_ctx.prefetched.as_ref(),
             )
             .await?;
         self.make_projected_stream(stream)
@@ -1917,6 +1919,7 @@ impl RowGroupReaderBuilder {
             build_ctx.row_selection,
             projection,
             build_ctx.fetch_metrics,
+            build_ctx.prefetched.as_ref(),
         )
         .await
     }
@@ -1985,21 +1988,16 @@ impl RowGroupReaderBuilder {
             .is_some_and(|lookup| lookup.is_fully_cached())
     }
 
-    /// Starts fetching `row_group_idx` in the background unless it is already fetched.
+    /// Starts fetching the column chunks of `row_group_idx` in the background.
     ///
-    /// `permit` is held until the fetched bytes are released by
-    /// [Self::release_prefetched] or the builder is dropped, which also aborts an
-    /// unfinished fetch.
-    pub(crate) fn start_prefetch(
+    /// `permit` is held as long as the fetched bytes. Dropping every clone of the returned
+    /// slot aborts an unfinished fetch.
+    pub(crate) fn prefetch(
         &self,
         row_group_idx: usize,
         permit: OwnedSemaphorePermit,
         compaction: bool,
-    ) {
-        let mut prefetched = self.prefetched.lock().unwrap();
-        if prefetched.contains_key(&row_group_idx) {
-            return;
-        }
+    ) -> PrefetchSlot {
         let fetcher = SstParquetRangeFetcher::new(
             self.file_handle.file_id(),
             self.file_path.clone(),
@@ -2008,22 +2006,12 @@ impl RowGroupReaderBuilder {
             row_group_idx,
             Some(ParquetFetchMetrics::default()),
         );
-        let slot = spawn_prefetch(
+        spawn_prefetch(
             fetcher,
             self.prefetch_ranges(row_group_idx),
             permit,
             compaction,
-        );
-        prefetched.insert(row_group_idx, slot);
-    }
-
-    pub(crate) fn release_prefetched(&self, row_group_idx: usize) {
-        self.prefetched.lock().unwrap().remove(&row_group_idx);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prefetch_slot(&self, row_group_idx: usize) -> Option<PrefetchSlot> {
-        self.prefetched.lock().unwrap().get(&row_group_idx).cloned()
+        )
     }
 
     pub(crate) async fn build_with_projection(
@@ -2032,8 +2020,8 @@ impl RowGroupReaderBuilder {
         row_selection: Option<RowSelection>,
         projection: ProjectionMask,
         fetch_metrics: Option<&ParquetFetchMetrics>,
+        prefetched: Option<&PrefetchSlot>,
     ) -> Result<ProjectedRecordBatchStream> {
-        let prefetched = self.prefetched.lock().unwrap().get(&row_group_idx).cloned();
         let range_fetcher = SstParquetRangeFetcher::new(
             self.file_handle.file_id(),
             self.file_path.clone(),
@@ -2042,7 +2030,7 @@ impl RowGroupReaderBuilder {
             row_group_idx,
             fetch_metrics.cloned(),
         )
-        .with_prefetched(prefetched);
+        .with_prefetched(prefetched.cloned());
 
         build_sst_parquet_record_batch_stream(
             self.arrow_metadata.clone(),
@@ -2401,6 +2389,7 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&self.fetch_metrics),
+                    None,
                 ))
                 .await?;
             self.reader = Some(FlatPruneReader::new_with_row_group_reader(
@@ -2431,6 +2420,7 @@ impl ParquetReader {
                     row_group_idx,
                     Some(row_selection),
                     Some(&fetch_metrics),
+                    None,
                 ))
                 .await?;
             Some(FlatPruneReader::new_with_row_group_reader(
@@ -2669,7 +2659,6 @@ mod tests {
                 cache_strategy,
                 prefilter_builder: filter_plan.prefilter_builder,
                 batch_size: DEFAULT_READ_BATCH_SIZE,
-                prefetched: Default::default(),
             },
             metadata,
         )
@@ -2701,6 +2690,7 @@ mod tests {
                     row_group_idx: 0,
                     row_selection: original_selection.clone(),
                     fetch_metrics: Some(&fetch_metrics),
+                    prefetched: None,
                 },
             )
             .await
@@ -2752,6 +2742,7 @@ mod tests {
                         RowSelector::skip(1),
                     ])),
                     fetch_metrics: fetch_metrics_ref,
+                    prefetched: None,
                 },
             )
             .await
@@ -2785,6 +2776,7 @@ mod tests {
                 row_group_idx: 1,
                 row_selection: None,
                 fetch_metrics: None,
+                prefetched: None,
             },
         )
         .await

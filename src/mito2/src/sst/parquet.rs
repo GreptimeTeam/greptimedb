@@ -578,21 +578,23 @@ mod tests {
         let budget = Arc::new(tokio::sync::Semaphore::new(100));
 
         let reader_builder = context.reader_builder();
-        reader_builder.start_prefetch(1, budget.clone().try_acquire_many_owned(10).unwrap(), false);
-        let prefetched = reader_builder.prefetch_slot(1).unwrap().await;
+        let slot =
+            reader_builder.prefetch(1, budget.clone().try_acquire_many_owned(10).unwrap(), false);
+        let prefetched = slot.clone().await;
         assert!(prefetched.is_some());
         drop(prefetched);
-        // Fetched bytes keep their budget until the reader releases them.
+        // Fetched bytes keep their budget until the reader drops them.
         assert_eq!(90, budget.available_permits());
-        reader_builder.release_prefetched(1);
+        drop(slot);
         assert_eq!(100, budget.available_permits());
 
-        // Ending the scan aborts a prefetch stuck on storage and returns its budget.
+        // Dropping the prefetch aborts a fetch stuck on storage and returns its budget.
         block.store(true, Ordering::Relaxed);
-        reader_builder.start_prefetch(2, budget.clone().try_acquire_many_owned(10).unwrap(), false);
+        let slot =
+            reader_builder.prefetch(2, budget.clone().try_acquire_many_owned(10).unwrap(), false);
         tokio::task::yield_now().await;
         assert_eq!(90, budget.available_permits());
-        drop(context);
+        drop(slot);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while budget.available_permits() != 100 {
                 tokio::task::yield_now().await;

@@ -41,6 +41,7 @@ use crate::metrics::{
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
+use crate::read::pruner::{READAHEAD_ROW_GROUPS, Readahead, ReadaheadStart};
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
@@ -1467,6 +1468,7 @@ pub(crate) async fn scan_flat_file_ranges(
         read_type,
         ranges,
         init_per_file_metrics,
+        partition_pruner.readahead(),
     ))
 }
 
@@ -1518,12 +1520,13 @@ pub(crate) fn filter_flat_batch_by_sequence(
     skip_all,
     fields(read_type = read_type, range_count = ranges.len())
 )]
-pub fn build_flat_file_range_scan_stream(
+pub(crate) fn build_flat_file_range_scan_stream(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     read_type: &'static str,
     ranges: SmallVec<[FileRange; 2]>,
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
+    readahead: Option<Readahead>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
         let fetch_metrics = if part_metrics.explain_verbose() {
@@ -1535,7 +1538,28 @@ pub fn build_flat_file_range_scan_stream(
             fetch_metrics: fetch_metrics.clone(),
             ..Default::default()
         };
-        for range in ranges.iter() {
+        let mut ranges = ranges.into_iter().map(Some).collect::<Vec<_>>();
+        // Ranges before this one are prefetched or not worth prefetching.
+        let mut readahead_until = 1;
+        for range_idx in 0..ranges.len() {
+            // Keeps the next ranges of the file prefetched as reading frees the budget.
+            if let Some(readahead) = &readahead {
+                let end = (range_idx + 1 + READAHEAD_ROW_GROUPS).min(ranges.len());
+                readahead_until = readahead_until.max(range_idx + 1);
+                while readahead_until < end {
+                    let next = ranges[readahead_until].as_mut().unwrap();
+                    if !next.has_prefetch() {
+                        match readahead.try_start(next) {
+                            ReadaheadStart::Started(slot) => next.set_prefetched(slot),
+                            ReadaheadStart::NoBudget => break,
+                            ReadaheadStart::Skipped => {}
+                        }
+                    }
+                    readahead_until += 1;
+                }
+            }
+            // Dropping the range after reading it releases its prefetched bytes.
+            let range = ranges[range_idx].take().unwrap();
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
@@ -1602,7 +1626,6 @@ pub fn build_flat_file_range_scan_stream(
             }
 
             reader_metrics.merge_from(&prune_metrics);
-            range.release_prefetched();
         }
 
         // Reports metrics.
