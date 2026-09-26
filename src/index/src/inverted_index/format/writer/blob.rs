@@ -36,6 +36,10 @@ pub struct InvertedIndexBlobWriter<W> {
 
     /// Metadata about each index that has been written  
     metas: InvertedIndexMetas,
+
+    inline_postings: bool,
+
+    fst_block_size: Option<usize>,
 }
 
 #[async_trait]
@@ -54,7 +58,9 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexWriter for InvertedIndexBlobWrit
             values,
             &mut self.blob_writer,
             bitmap_type,
-        );
+        )
+        .with_inline_postings(self.inline_postings)
+        .with_fst_block_size(self.fst_block_size);
         let metadata = single_writer.write().await?;
 
         self.written_size += metadata.inverted_index_size;
@@ -95,7 +101,24 @@ impl<W: AsyncWrite + Send + Unpin> InvertedIndexBlobWriter<W> {
             blob_writer,
             written_size: 0,
             metas: InvertedIndexMetas::default(),
+            inline_postings: false,
+            fst_block_size: None,
         }
+    }
+
+    /// Cuts each column's FST into blocks of about `fst_block_size` bytes so that point
+    /// lookups read one block instead of the whole FST.
+    pub fn with_fst_block_size(mut self, fst_block_size: Option<usize>) -> Self {
+        self.fst_block_size = fst_block_size;
+        self
+    }
+
+    /// Stores postings of at most two segment runs in the FST value (see
+    /// [`crate::inverted_index::format::FstValue`]). Readers without inline support
+    /// cannot read such indexes.
+    pub fn with_inline_postings(mut self, inline_postings: bool) -> Self {
+        self.inline_postings = inline_postings;
+        self
     }
 }
 

@@ -21,13 +21,15 @@ use regex_automata::dfa::Automaton;
 use regex_automata::dfa::dense::DFA;
 use regex_automata::util::primitives::StateID;
 use regex_automata::util::start::Config;
+use regex_syntax::hir::Look;
+use regex_syntax::hir::literal::{ExtractKind, Extractor};
 use snafu::{ResultExt, ensure};
 
 use crate::inverted_index::FstMap;
 use crate::inverted_index::error::{
     EmptyPredicatesSnafu, IntersectionApplierWithInListSnafu, ParseDFASnafu, Result,
 };
-use crate::inverted_index::search::fst_apply::FstApplier;
+use crate::inverted_index::search::fst_apply::{FstApplier, SelectedBlock};
 use crate::inverted_index::search::predicate::{Predicate, Range};
 
 /// `IntersectionFstApplier` applies intersection operations on an FstMap using specified ranges and regex patterns.
@@ -37,6 +39,9 @@ pub struct IntersectionFstApplier {
 
     /// A list of `Dfa` compiled from regular expression patterns.
     dfas: Vec<DfaFstAutomaton>,
+
+    /// Literal prefixes that every match of some start-anchored pattern begins with.
+    required_prefixes: Option<Vec<Vec<u8>>>,
 }
 
 #[derive(Debug)]
@@ -79,9 +84,63 @@ impl fst::Automaton for DfaFstAutomaton {
 }
 
 impl IntersectionFstApplier {
-    fn new(ranges: Vec<Range>, dfas: Vec<DFA<Vec<u32>>>) -> Self {
+    fn select_block_locations(&self, blocks: &FstMap) -> Vec<u64> {
+        if let Some(prefixes) = &self.required_prefixes {
+            let mut selected = Vec::new();
+            for prefix in prefixes {
+                let mut stream = blocks.range().ge(prefix).into_stream();
+                while let Some((last_key, location)) = stream.next() {
+                    selected.push(location);
+                    if !last_key.starts_with(prefix) {
+                        // Every later key is past the keys starting with `prefix`.
+                        break;
+                    }
+                }
+            }
+            // Blocks are written in key order, so their offsets grow with keys.
+            selected.sort_unstable_by_key(|&location| bytemuck::cast::<u64, [u32; 2]>(location)[0]);
+            selected.dedup();
+            return selected;
+        }
+        // Keys within every range lie in [max lower, min upper]. Without ranges this is
+        // every block, which is also what a regex without a literal prefix needs.
+        let lower = self
+            .ranges
+            .iter()
+            .filter_map(|r| r.lower.as_ref())
+            .map(|b| &b.value)
+            .max();
+        let upper = self
+            .ranges
+            .iter()
+            .filter_map(|r| r.upper.as_ref())
+            .map(|b| &b.value)
+            .min();
+        let mut stream = match lower {
+            Some(lower) => blocks.range().ge(lower).into_stream(),
+            None => blocks.range().into_stream(),
+        };
+        let mut selected = Vec::new();
+        while let Some((last_key, location)) = stream.next() {
+            selected.push(location);
+            if upper.is_some_and(|upper| last_key >= upper.as_slice()) {
+                break;
+            }
+        }
+        selected
+    }
+
+    fn new(
+        ranges: Vec<Range>,
+        dfas: Vec<DFA<Vec<u32>>>,
+        required_prefixes: Option<Vec<Vec<u8>>>,
+    ) -> Self {
         let dfas = dfas.into_iter().map(DfaFstAutomaton).collect();
-        Self { ranges, dfas }
+        Self {
+            ranges,
+            dfas,
+            required_prefixes,
+        }
     }
 }
 
@@ -121,6 +180,16 @@ impl FstApplier for IntersectionFstApplier {
         values
     }
 
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<SelectedBlock> {
+        self.select_block_locations(blocks)
+            .into_iter()
+            .map(|location| SelectedBlock {
+                location,
+                keys: None,
+            })
+            .collect()
+    }
+
     fn memory_usage(&self) -> usize {
         let mut size = self.ranges.capacity() * size_of::<Range>();
         for range in &self.ranges {
@@ -138,6 +207,9 @@ impl FstApplier for IntersectionFstApplier {
         for dfa in &self.dfas {
             size += dfa.0.memory_usage();
         }
+        for prefix in self.required_prefixes.iter().flatten() {
+            size += size_of::<Vec<u8>>() + prefix.capacity();
+        }
         size
     }
 }
@@ -153,6 +225,7 @@ impl IntersectionFstApplier {
 
         let mut dfas = Vec::with_capacity(predicates.len());
         let mut ranges = Vec::with_capacity(predicates.len());
+        let mut required_prefixes = None;
 
         for predicate in predicates {
             match predicate {
@@ -161,6 +234,9 @@ impl IntersectionFstApplier {
                     let dfa = DFA::new(&regex.pattern);
                     let dfa = dfa.map_err(Box::new).context(ParseDFASnafu)?;
                     dfas.push(dfa);
+                    if required_prefixes.is_none() {
+                        required_prefixes = anchored_literal_prefixes(&regex.pattern);
+                    }
                 }
                 // Rejection of `InList` predicates is enforced here.
                 Predicate::InList(_) => {
@@ -169,8 +245,30 @@ impl IntersectionFstApplier {
             }
         }
 
-        Ok(Self::new(ranges, dfas))
+        Ok(Self::new(ranges, dfas, required_prefixes))
     }
+}
+
+/// Returns literals such that every match of `pattern` starts with one of them, if the
+/// pattern is anchored at the start of the value and the set is finite and non-empty.
+fn anchored_literal_prefixes(pattern: &str) -> Option<Vec<Vec<u8>>> {
+    let hir = regex_syntax::parse(pattern).ok()?;
+    if !hir.properties().look_set_prefix().contains(Look::Start) {
+        return None;
+    }
+    let seq = Extractor::new().kind(ExtractKind::Prefix).extract(&hir);
+    let literals = seq.literals()?;
+    if literals.is_empty() || literals.iter().any(|l| l.as_bytes().is_empty()) {
+        return None;
+    }
+    let mut prefixes = literals
+        .iter()
+        .map(|l| l.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    // Drop duplicates and literals covered by a shorter one; each left costs a scan.
+    prefixes.sort_unstable();
+    prefixes.dedup_by(|longer, shorter| longer.starts_with(shorter));
+    Some(prefixes)
 }
 
 impl TryFrom<Vec<Predicate>> for IntersectionFstApplier {
@@ -414,8 +512,43 @@ mod tests {
     }
 
     #[test]
+    fn test_anchored_literal_prefixes() {
+        let prefixes = |p: &str| {
+            anchored_literal_prefixes(p).map(|v| {
+                v.into_iter()
+                    .map(|l| String::from_utf8(l).unwrap())
+                    .collect::<Vec<_>>()
+            })
+        };
+        assert_eq!(prefixes("^pod-1a.*"), Some(vec!["pod-1a".to_string()]));
+        // "abc" is covered by "ab" and not scanned again.
+        assert_eq!(prefixes("^(?:ab|abc).*"), Some(vec!["ab".to_string()]));
+        assert_eq!(
+            prefixes("(?i)^ab.*"),
+            Some(
+                vec!["AB", "Ab", "aB", "ab"]
+                    .into_iter()
+                    .map(String::from)
+                    .collect()
+            )
+        );
+        // Anchors that do not pin every match to the start of the value.
+        assert_eq!(prefixes("(?m)^abc"), None);
+        assert_eq!(prefixes("(?:^a|b)"), None);
+        assert_eq!(prefixes("^(?:abc|)"), None);
+        assert_eq!(
+            prefixes("^(?:api|web)-.+$"),
+            Some(vec!["api-".to_string(), "web-".to_string()])
+        );
+        // Not anchored: SQL `~` matches anywhere in the value.
+        assert_eq!(prefixes("pod-1a.*"), None);
+        assert_eq!(prefixes("^.*-777$"), None);
+        assert_eq!(prefixes("^(?:a.*|.*b)$"), None);
+    }
+
+    #[test]
     fn test_intersection_fst_applier_memory_usage() {
-        let applier = IntersectionFstApplier::new(vec![], vec![]);
+        let applier = IntersectionFstApplier::new(vec![], vec![], None);
 
         assert_eq!(applier.memory_usage(), 0);
 
@@ -434,6 +567,7 @@ mod tests {
                 }),
             }],
             vec![dfa],
+            None,
         );
         assert_eq!(
             applier.memory_usage(),

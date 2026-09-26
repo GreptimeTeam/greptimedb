@@ -480,7 +480,8 @@ impl IndexerBuilderImpl {
             self.inverted_index_config.mem_threshold_on_create(),
             segment_row_count,
             indexed_column_ids,
-        );
+        )
+        .with_format_v2(self.inverted_index_config.experimental_format_v2);
 
         Some(indexer)
     }

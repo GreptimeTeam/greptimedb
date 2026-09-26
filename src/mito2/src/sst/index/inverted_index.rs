@@ -16,3 +16,6 @@ pub(crate) mod applier;
 pub(crate) mod creator;
 
 pub(crate) const INDEX_BLOB_TYPE: &str = "greptime-inverted-index-v1";
+/// Inline small postings and split large FSTs, with the FST block index in the metadata.
+/// Readers that do not know this blob type find no inverted index and scan instead.
+pub(crate) const INDEX_BLOB_TYPE_V2: &str = "greptime-inverted-index-v2";
