@@ -63,6 +63,8 @@ impl IndexApplier for PredicatesIndexApplier {
         // TODO(zhongzc): optimize the order of applying to make it quicker to return empty.
         let mut appliers = Vec::with_capacity(self.fst_appliers.len());
         let mut fst_ranges = Vec::with_capacity(self.fst_appliers.len());
+        // For each FST to read, the keys to look up in it, or `None` to run the applier.
+        let mut block_keys = Vec::with_capacity(self.fst_appliers.len());
 
         for (name, fst_applier) in &self.fst_appliers {
             let Some(meta) = metadata.metas.get(name) else {
@@ -82,16 +84,18 @@ impl IndexApplier for PredicatesIndexApplier {
             let ranges_before = fst_ranges.len();
             if is_chunked_fst(meta) {
                 let blocks = FstMap::new(meta.fst_block_index.clone()).context(DecodeFstSnafu)?;
-                for location in fst_applier.select_blocks(&blocks) {
-                    let FstValue::Bitmap { offset, size } = FstValue::decode(location) else {
+                for block in fst_applier.select_blocks(&blocks) {
+                    let FstValue::Bitmap { offset, size } = FstValue::decode(block.location) else {
                         unreachable!("block locations are never inline")
                     };
                     let start = meta.base_offset + offset as u64;
                     fst_ranges.push(start..start + size as u64);
+                    block_keys.push(block.keys);
                 }
             } else {
                 let fst_offset = meta.base_offset + meta.relative_fst_offset as u64;
                 fst_ranges.push(fst_offset..fst_offset + meta.fst_size as u64);
+                block_keys.push(None);
             }
             appliers.push((fst_applier, meta, fst_ranges.len() - ranges_before));
         }
@@ -101,19 +105,23 @@ impl IndexApplier for PredicatesIndexApplier {
             return Ok(output);
         }
 
-        let mut fsts = if fst_ranges.is_empty() {
+        let fsts = if fst_ranges.is_empty() {
             Vec::new()
         } else {
             reader.fst_vec(&fst_ranges, metrics.as_deref_mut()).await?
         }
         .into_iter();
+        let mut fsts = fsts.zip(block_keys);
         let value_and_meta_vec = appliers
             .into_iter()
             .map(|(fst_applier, meta, num_fsts)| {
                 let values = fsts
                     .by_ref()
                     .take(num_fsts)
-                    .flat_map(|fst| fst_applier.apply(&fst))
+                    .flat_map(|(fst, keys)| match keys {
+                        Some(keys) => keys.iter().filter_map(|k| fst.get(k)).collect(),
+                        None => fst_applier.apply(&fst),
+                    })
                     .collect();
                 (values, meta)
             })

@@ -29,7 +29,7 @@ use crate::inverted_index::FstMap;
 use crate::inverted_index::error::{
     EmptyPredicatesSnafu, IntersectionApplierWithInListSnafu, ParseDFASnafu, Result,
 };
-use crate::inverted_index::search::fst_apply::FstApplier;
+use crate::inverted_index::search::fst_apply::{FstApplier, SelectedBlock};
 use crate::inverted_index::search::predicate::{Predicate, Range};
 
 /// `IntersectionFstApplier` applies intersection operations on an FstMap using specified ranges and regex patterns.
@@ -84,6 +84,54 @@ impl fst::Automaton for DfaFstAutomaton {
 }
 
 impl IntersectionFstApplier {
+    fn select_block_locations(&self, blocks: &FstMap) -> Vec<u64> {
+        if let Some(prefixes) = &self.required_prefixes {
+            let mut selected = Vec::new();
+            for prefix in prefixes {
+                let mut stream = blocks.range().ge(prefix).into_stream();
+                while let Some((last_key, location)) = stream.next() {
+                    selected.push(location);
+                    if !last_key.starts_with(prefix) {
+                        // Every later key is past the keys starting with `prefix`.
+                        break;
+                    }
+                }
+            }
+            // Block locations grow with keys.
+            selected.sort_unstable();
+            selected.dedup();
+            return selected;
+        }
+        if !self.dfas.is_empty() {
+            return blocks.stream().into_values();
+        }
+        // Keys within every range lie in [max lower, min upper].
+        let lower = self
+            .ranges
+            .iter()
+            .filter_map(|r| r.lower.as_ref())
+            .map(|b| &b.value)
+            .max();
+        let upper = self
+            .ranges
+            .iter()
+            .filter_map(|r| r.upper.as_ref())
+            .map(|b| &b.value)
+            .min();
+        let mut stream = match lower {
+            Some(lower) => blocks.range().ge(lower).into_stream(),
+            None => blocks.range().into_stream(),
+        };
+        let mut selected = Vec::new();
+        while let Some((last_key, location)) = stream.next() {
+            selected.push(location);
+            if upper.is_some_and(|upper| last_key >= upper.as_slice()) {
+                break;
+            }
+        }
+        selected
+    }
+
     fn new(
         ranges: Vec<Range>,
         dfas: Vec<DFA<Vec<u32>>>,
@@ -134,52 +182,14 @@ impl FstApplier for IntersectionFstApplier {
         values
     }
 
-    fn select_blocks(&self, blocks: &FstMap) -> Vec<u64> {
-        if let Some(prefixes) = &self.required_prefixes {
-            let mut selected = Vec::new();
-            for prefix in prefixes {
-                let mut stream = blocks.range().ge(prefix).into_stream();
-                while let Some((last_key, location)) = stream.next() {
-                    selected.push(location);
-                    if !last_key.starts_with(prefix) {
-                        // Every later key is past the keys starting with `prefix`.
-                        break;
-                    }
-                }
-            }
-            // Block locations grow with keys.
-            selected.sort_unstable();
-            selected.dedup();
-            return selected;
-        }
-        if !self.dfas.is_empty() {
-            return blocks.stream().into_values();
-        }
-        // Keys within every range lie in [max lower, min upper].
-        let lower = self
-            .ranges
-            .iter()
-            .filter_map(|r| r.lower.as_ref())
-            .map(|b| &b.value)
-            .max();
-        let upper = self
-            .ranges
-            .iter()
-            .filter_map(|r| r.upper.as_ref())
-            .map(|b| &b.value)
-            .min();
-        let mut stream = match lower {
-            Some(lower) => blocks.range().ge(lower).into_stream(),
-            None => blocks.range().into_stream(),
-        };
-        let mut selected = Vec::new();
-        while let Some((last_key, location)) = stream.next() {
-            selected.push(location);
-            if upper.is_some_and(|upper| last_key >= upper.as_slice()) {
-                break;
-            }
-        }
-        selected
+    fn select_blocks(&self, blocks: &FstMap) -> Vec<SelectedBlock> {
+        self.select_block_locations(blocks)
+            .into_iter()
+            .map(|location| SelectedBlock {
+                location,
+                keys: None,
+            })
+            .collect()
     }
 
     fn memory_usage(&self) -> usize {
