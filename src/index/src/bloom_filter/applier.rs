@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 use fastbloom::BloomFilter;
@@ -23,7 +23,9 @@ use crate::Bytes;
 use crate::bloom_filter::error::Result;
 use crate::bloom_filter::reader::{BloomFilterReadMetrics, BloomFilterReader};
 
-/// Filter bytes searched together by [`BloomFilterApplier::search_groups`].
+/// Filter bytes read by one batch of [`BloomFilterApplier::search_groups`]. A batch holds
+/// the raw bytes and the decoded filters at once, so its transient memory is up to about
+/// twice this.
 const MAX_BATCH_FILTER_BYTES: u64 = 8 * 1024 * 1024;
 
 /// `InListPredicate` contains a list of acceptable values. A value needs to match at least
@@ -72,25 +74,27 @@ impl BloomFilterApplier {
     ) -> Result<()> {
         let mut start = 0;
         while start < groups.len() {
-            let mut locs = HashSet::new();
+            // Mirrors `load_bloom_filters`: segments map to filter locations in order and
+            // only consecutive equal locations share a read, so this is the exact number of
+            // bytes the batch requests.
+            let mut last_loc = None;
             let mut batch_bytes = 0;
             let mut end = start;
             while end < groups.len() {
-                let new_locs = self
-                    .row_ranges_to_segments(groups[end])
-                    .into_iter()
-                    .map(|seg| self.meta.segment_loc_indices[seg])
-                    .filter(|loc| !locs.contains(loc))
-                    .collect::<HashSet<_>>();
-                let bytes = new_locs
-                    .iter()
-                    .map(|&loc| self.meta.bloom_filter_locs[loc as usize].size)
-                    .sum::<u64>();
+                let mut group_last = last_loc;
+                let mut bytes = 0;
+                for seg in self.row_ranges_to_segments(groups[end]) {
+                    let loc = self.meta.segment_loc_indices[seg];
+                    if group_last != Some(loc) {
+                        bytes += self.meta.bloom_filter_locs[loc as usize].size;
+                        group_last = Some(loc);
+                    }
+                }
                 // A group whose filters alone exceed the budget still forms its own batch.
                 if end > start && batch_bytes + bytes > max_batch_bytes {
                     break;
                 }
-                locs.extend(new_locs);
+                last_loc = group_last;
                 batch_bytes += bytes;
                 end += 1;
             }
@@ -364,6 +368,110 @@ mod tests {
                     .unwrap();
                 assert_eq!(actual, expected, "values: {values:?}, budget: {budget}");
             }
+        }
+    }
+
+    /// Records the bytes of every `read_vec`, i.e. of every batch.
+    struct RecordingReader {
+        inner: BloomFilterReaderImpl<Vec<u8>>,
+        reads: Arc<std::sync::Mutex<Vec<u64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl BloomFilterReader for RecordingReader {
+        async fn range_read(
+            &self,
+            offset: u64,
+            size: u32,
+            metrics: Option<&mut BloomFilterReadMetrics>,
+        ) -> Result<bytes::Bytes> {
+            self.inner.range_read(offset, size, metrics).await
+        }
+
+        async fn read_vec(
+            &self,
+            ranges: &[Range<u64>],
+            metrics: Option<&mut BloomFilterReadMetrics>,
+        ) -> Result<Vec<bytes::Bytes>> {
+            let bytes = ranges.iter().map(|r| r.end - r.start).sum();
+            self.reads.lock().unwrap().push(bytes);
+            self.inner.read_vec(ranges, metrics).await
+        }
+
+        async fn metadata(
+            &self,
+            metrics: Option<&mut BloomFilterReadMetrics>,
+        ) -> Result<BloomFilterMeta> {
+            self.inner.metadata(metrics).await
+        }
+    }
+
+    #[tokio::test]
+    async fn test_search_groups_respects_budget() {
+        let mut creator = BloomFilterCreator::new(
+            4,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+        // Distinct values everywhere: 10 segments with filters of the same size.
+        for i in 0..40 {
+            creator
+                .push_row_elems([format!("v{i}").into_bytes()])
+                .await
+                .unwrap();
+        }
+        let mut writer = Cursor::new(Vec::new());
+        creator.finish(&mut writer).await.unwrap();
+        let bytes = writer.into_inner();
+        let predicates = vec![InListPredicate {
+            list: BTreeSet::from([b"v1".to_vec()]),
+        }];
+
+        let reads = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reader = RecordingReader {
+            inner: BloomFilterReaderImpl::new(bytes),
+            reads: reads.clone(),
+        };
+        let mut applier = BloomFilterApplier::new(Box::new(reader)).await.unwrap();
+        let filter_size = applier.meta.bloom_filter_locs[0].size;
+
+        // Row groups of 6 rows: most share a boundary segment with their neighbor, which
+        // a batch reads only once.
+        let groups = (0..40)
+            .step_by(6)
+            .map(|s| vec![s..(s + 6).min(40)])
+            .collect::<Vec<_>>();
+        for (budget, expected_reads) in [
+            (u64::MAX, vec![10 * filter_size]),
+            // Batches close before exceeding the budget; shared boundary filters count once.
+            (
+                5 * filter_size,
+                vec![5 * filter_size, 5 * filter_size, filter_size],
+            ),
+            // Smaller than any row group: one row group per batch, still above the budget.
+            (
+                filter_size,
+                vec![
+                    2 * filter_size,
+                    2 * filter_size,
+                    2 * filter_size,
+                    2 * filter_size,
+                    2 * filter_size,
+                    2 * filter_size,
+                    filter_size,
+                ],
+            ),
+        ] {
+            reads.lock().unwrap().clear();
+            let mut actual = groups.clone();
+            let mut refs = actual.iter_mut().collect::<Vec<_>>();
+            applier
+                .search_groups_in_batches(&predicates, &mut refs, None, budget)
+                .await
+                .unwrap();
+            assert_eq!(*reads.lock().unwrap(), expected_reads, "budget: {budget}");
         }
     }
 
