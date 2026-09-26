@@ -158,16 +158,17 @@ impl FstValue {
                 if p.num_runs == 1 && run_fits(p.runs[0], ONE_RUN_START_BITS, ONE_RUN_LEN_BITS) {
                     return s0 as u64 | ((l0 - 1) as u64) << ONE_RUN_START_BITS;
                 }
-                // A single run that only fits the two-run layout is stored as two halves.
-                let (s1, l1) = if p.num_runs == 1 { (s0, 0) } else { (s1, l1) };
-                let second = if l1 == 0 {
-                    // Empty second run: repeat the first run, which decodes to the same set.
-                    (s0 as u64) | ((l0 - 1) as u64) << TWO_RUN_START_BITS
+                let pack =
+                    |start: u32, len: u32| start as u64 | ((len - 1) as u64) << TWO_RUN_START_BITS;
+                // A single run that only fits the two-run layout repeats itself as the second
+                // run, which decodes to the same set.
+                let second = if p.num_runs == 1 {
+                    pack(s0, l0)
                 } else {
-                    (s1 as u64) | ((l1 - 1) as u64) << TWO_RUN_START_BITS
+                    pack(s1, l1)
                 };
                 let b = TWO_RUN_START_BITS + TWO_RUN_LEN_BITS;
-                TWO_RUNS_FLAG | s0 as u64 | ((l0 - 1) as u64) << TWO_RUN_START_BITS | second << b
+                TWO_RUNS_FLAG | pack(s0, l0) | second << b
             }
         }
     }
@@ -222,6 +223,12 @@ mod tests {
             vec![(1 << 21) - 3, (1 << 21) - 1],
             // One run that only fits the two-run layout.
             vec![1 << 20],
+            // Largest one-run value: start 2^20 - 1, length 4096.
+            ((1 << 20) - 1..(1 << 20) - 1 + 4096).collect(),
+            // Just past the one-run layout: start 2^20, longest two-run length 1024.
+            ((1 << 20)..(1 << 20) + 1024).collect(),
+            // Two runs, each at its layout's limit.
+            (0..1024).chain((1 << 21) - 1024..1 << 21).collect(),
         ] {
             let posting = InlinePosting::try_from_segments(segs.iter().copied())
                 .unwrap_or_else(|| panic!("{segs:?} should inline"));

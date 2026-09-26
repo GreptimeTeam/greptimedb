@@ -181,6 +181,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid FST block location in inverted index {name}"))]
+    InvalidFstBlockLocation {
+        name: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Failed to insert value to FST"))]
     FstInsert {
         #[snafu(source)]
@@ -250,6 +257,7 @@ impl ErrorExt for Error {
             | UnexpectedBlobSize { .. }
             | DecodeProto { .. }
             | DecodeFst { .. }
+            | InvalidFstBlockLocation { .. }
             | KeysApplierUnexpectedPredicates { .. }
             | CommonIo { .. }
             | UnknownIntermediateCodecMagic { .. }

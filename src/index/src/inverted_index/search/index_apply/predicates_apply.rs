@@ -20,7 +20,9 @@ use snafu::ResultExt;
 
 use crate::bitmap::Bitmap;
 use crate::inverted_index::FstMap;
-use crate::inverted_index::error::{DecodeFstSnafu, IndexNotFoundSnafu, Result};
+use crate::inverted_index::error::{
+    DecodeFstSnafu, IndexNotFoundSnafu, InvalidFstBlockLocationSnafu, Result,
+};
 use crate::inverted_index::format::reader::{InvertedIndexReadMetrics, InvertedIndexReader};
 use crate::inverted_index::format::{FstValue, is_chunked_fst};
 use crate::inverted_index::search::fst_apply::{
@@ -86,7 +88,7 @@ impl IndexApplier for PredicatesIndexApplier {
                 let blocks = FstMap::new(meta.fst_block_index.clone()).context(DecodeFstSnafu)?;
                 for block in fst_applier.select_blocks(&blocks) {
                     let FstValue::Bitmap { offset, size } = FstValue::decode(block.location) else {
-                        unreachable!("block locations are never inline")
+                        return InvalidFstBlockLocationSnafu { name }.fail();
                     };
                     let start = meta.base_offset + offset as u64;
                     fst_ranges.push(start..start + size as u64);
@@ -472,8 +474,8 @@ mod tests {
     }
 
     /// Writes one tag with 3000 values in the given layout. Value `k{i}` covers segment
-    /// `i` and, for every seventh value, also segments far away, so both inline and
-    /// bitmap postings occur.
+    /// `i` and some values also cover segments far away, so one-run, two-run and bitmap
+    /// postings all occur.
     async fn build_blob(inline: bool, fst_block_size: Option<usize>) -> Vec<u8> {
         use futures::stream;
 
@@ -483,9 +485,15 @@ mod tests {
             .map(|i| {
                 let mut bitmap = Bitmap::new_roaring();
                 bitmap.insert_range(i as usize..=i as usize);
-                if i % 7 == 0 {
-                    bitmap.insert_range(5000..=5000);
-                    bitmap.insert_range(6000..=6003);
+                match i % 7 {
+                    // Two runs: inline in v2.
+                    0 => bitmap.insert_range(5000..=5003),
+                    // Three runs: a roaring bitmap in every layout.
+                    1 => {
+                        bitmap.insert_range(5000..=5000);
+                        bitmap.insert_range(6000..=6003);
+                    }
+                    _ => {}
                 }
                 Ok((format!("k{i:05}").into_bytes(), bitmap))
             })
@@ -551,6 +559,32 @@ mod tests {
             }),
             Predicate::RegexMatch(RegexMatchPredicate { pattern: s("7$") }),
         ];
+        // A point lookup on the split FST reads one block instead of the whole FST.
+        let point = PredicatesIndexApplier::try_from(vec![(
+            s("tag"),
+            vec![Predicate::InList(InListPredicate {
+                list: [key("k01500")].into(),
+            })],
+        )])
+        .unwrap();
+        let mut bytes_read = Vec::new();
+        for blob in [&inline, &split] {
+            let mut metrics = InvertedIndexReadMetrics::default();
+            point
+                .apply(
+                    SearchContext::default(),
+                    &mut InvertedIndexBlobReader::new(blob.clone()),
+                    Some(&mut metrics),
+                )
+                .await
+                .unwrap();
+            bytes_read.push(metrics.total_bytes);
+        }
+        assert!(
+            bytes_read[1] * 4 < bytes_read[0],
+            "bytes read: {bytes_read:?}"
+        );
+
         for predicate in cases {
             let applier =
                 PredicatesIndexApplier::try_from(vec![(s("tag"), vec![predicate.clone()])])
