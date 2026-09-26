@@ -258,7 +258,7 @@ impl FilePurger for ObjectStoreFilePurger {
         self.file_ref_manager.remove_file(&file_meta);
         if is_delete {
             if let Some(cache_manager) = &self.cache_manager {
-                cache_manager.remove_file_entries(file_meta.file_id());
+                cache_manager.remove_file_entries(file_meta.index_id());
             }
             schedule_range_index_deletion(
                 &self.scheduler,

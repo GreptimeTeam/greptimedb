@@ -14,10 +14,16 @@
 
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use bytes::Bytes;
 use store_api::storage::FileId;
+
+/// A cached value and the generation of the insert that stored it.
+pub(crate) type Tracked<V> = (u64, V);
+
+/// Generations are unique across caches, so they only need to be compared per key.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Keys of a cache grouped by the SST file they belong to.
 ///
@@ -25,12 +31,12 @@ use store_api::storage::FileId;
 /// for hot caches: moka evaluates every pending predicate on each `get` until its
 /// housekeeper has scanned the whole cache, which falls behind under a steady purge rate.
 ///
-/// Each key is registered with the id of the entry it belongs to, see [arc_entry_id]. The
-/// eviction listener of an old entry may run after the same key was inserted again, so it
-/// only removes the registration if the ids match.
+/// Each key is registered with the generation of its latest insert, see [insert_tracked].
+/// The eviction listener of an older insert may run after the key was inserted again, so
+/// it only removes the registration of the generation it evicts.
 #[derive(Debug)]
 pub(crate) struct FileKeys<K> {
-    keys: Mutex<HashMap<FileId, HashMap<K, usize>>>,
+    keys: Mutex<HashMap<FileId, HashMap<K, u64>>>,
 }
 
 impl<K> Default for FileKeys<K> {
@@ -42,22 +48,22 @@ impl<K> Default for FileKeys<K> {
 }
 
 impl<K: Hash + Eq> FileKeys<K> {
-    pub(crate) fn add(&self, file_id: FileId, key: K, entry_id: usize) {
+    pub(crate) fn add(&self, file_id: FileId, key: K, generation: u64) {
         self.keys
             .lock()
             .unwrap()
             .entry(file_id)
             .or_default()
-            .insert(key, entry_id);
+            .insert(key, generation);
     }
 
-    /// Forgets a key whose entry `entry_id` was removed from the cache.
-    pub(crate) fn remove(&self, file_id: FileId, key: &K, entry_id: usize) {
+    /// Forgets a key whose insert `generation` was removed from the cache.
+    pub(crate) fn remove(&self, file_id: FileId, key: &K, generation: u64) {
         let mut keys = self.keys.lock().unwrap();
         let Some(file_keys) = keys.get_mut(&file_id) else {
             return;
         };
-        if file_keys.get(key) == Some(&entry_id) {
+        if file_keys.get(key) == Some(&generation) {
             file_keys.remove(key);
         }
         if file_keys.is_empty() {
@@ -76,21 +82,33 @@ impl<K: Hash + Eq> FileKeys<K> {
     }
 }
 
-/// Returns the id of a cache entry whose value is `value`.
+/// Inserts `value` under `key` with a new generation, and calls `register` with that
+/// generation while moka holds the key's entry lock.
 ///
-/// Values are allocated for each insert and the eviction listener holds the old value, so
-/// an evicted entry and an entry inserted again under the same key never share an id.
-pub(crate) fn arc_entry_id<T: ?Sized>(value: &Arc<T>) -> usize {
-    Arc::as_ptr(value).cast::<()>() as usize
-}
-
-/// Same as [arc_entry_id] for values stored as [Bytes] copied on insert.
-pub(crate) fn bytes_entry_id(value: &Bytes) -> usize {
-    value.as_ptr() as usize
+/// Registrations of a key then happen in the same order as its inserts, so the latest
+/// registration always belongs to the value in the cache.
+pub(crate) fn insert_tracked<K, V>(
+    cache: &moka::sync::Cache<K, Tracked<V>>,
+    key: K,
+    value: V,
+    register: impl FnOnce(u64),
+) where
+    K: Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+    cache.entry(key).and_upsert_with(|_| {
+        register(generation);
+        (generation, value)
+    });
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
     use super::*;
 
     #[test]
@@ -98,7 +116,7 @@ mod tests {
         let keys = FileKeys::default();
         let file_id = FileId::random();
         keys.add(file_id, "k", 1);
-        // The key is inserted again before the listener of the evicted entry runs.
+        // The key is inserted again before the listener of the evicted insert runs.
         keys.add(file_id, "k", 2);
         keys.remove(file_id, &"k", 1);
         assert_eq!(vec!["k"], keys.take(file_id));
@@ -106,5 +124,41 @@ mod tests {
         keys.add(file_id, "k", 2);
         keys.remove(file_id, &"k", 2);
         assert!(keys.take(file_id).is_empty());
+    }
+
+    #[test]
+    fn test_concurrent_inserts_register_in_insert_order() {
+        let file_id = FileId::random();
+        let keys = Arc::new(FileKeys::default());
+        let cache: moka::sync::Cache<&'static str, Tracked<u32>> = moka::sync::Cache::builder()
+            .eviction_listener({
+                let keys = keys.clone();
+                move |k, v: Tracked<u32>, _cause| keys.remove(file_id, &*k, v.0)
+            })
+            .build();
+        let second_registered = Arc::new(AtomicBool::new(false));
+
+        insert_tracked(&cache, "k", 1, |generation| {
+            keys.add(file_id, "k", generation);
+            // Another insert of the key can't register until this one is stored.
+            let cache = cache.clone();
+            let keys = keys.clone();
+            let registered = second_registered.clone();
+            std::thread::spawn(move || {
+                insert_tracked(&cache, "k", 2, |generation| {
+                    registered.store(true, Ordering::SeqCst);
+                    keys.add(file_id, "k", generation);
+                })
+            });
+            std::thread::sleep(Duration::from_millis(100));
+            assert!(!second_registered.load(Ordering::SeqCst));
+        });
+        // Wait for the second insert and the replacement callback of the first value.
+        while cache.get(&"k").map(|(_, value)| value) != Some(2) {
+            std::thread::yield_now();
+        }
+        cache.run_pending_tasks();
+
+        assert_eq!(vec!["k"], keys.take(file_id));
     }
 }

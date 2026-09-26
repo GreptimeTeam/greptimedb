@@ -1645,7 +1645,7 @@ mod tests {
         impl FilePurger for CachePurger {
             fn remove_file(&self, file_meta: FileMeta, is_delete: bool, _index_outdated: bool) {
                 if is_delete {
-                    self.0.remove_file_entries(file_meta.file_id());
+                    self.0.remove_file_entries(file_meta.index_id());
                     self.1.store(true, std::sync::atomic::Ordering::Release);
                 }
             }
