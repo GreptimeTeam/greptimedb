@@ -548,18 +548,61 @@ impl PromPlanner {
         subquery_expr: &SubqueryExpr,
     ) -> Result<LogicalPlan> {
         let SubqueryExpr {
-            expr, range, step, ..
+            expr,
+            range,
+            step,
+            offset,
+            ..
         } = subquery_expr;
+
+        // Prometheus shifts a subquery's own evaluation window back by its offset: the inner
+        // expression is evaluated over `(start - offset - range, end - offset]`
+        // (`evaluator.subqueryTimeRange` in `promql/engine.go`), producing samples that keep
+        // their real, un-shifted timestamps. `evalSubquery` then hands those samples to the
+        // outer range-vector function as a `MatrixSelector` whose `VectorSelector` still
+        // carries `subq.Offset`, so the function slices `(ts - offset - range, ts - offset]`.
+        // The offset is therefore applied once semantically, never twice.
+        //
+        // Here the same shift is expressed as: evaluate the inner plan over the shifted
+        // window, then let `RangeManipulate` map the resulting samples forward by `offset_ms`
+        // onto the evaluation timeline before bucketing them into ranges -- exactly what the
+        // plain matrix-selector path above does.
+        //
+        // An offset on the inner selector composes additively with this one, because the inner
+        // selector subtracts its own offset from the already shifted step timestamps
+        // (`subqueryTimes` documents this as "the sum of offsets ... of all subqueries in the
+        // path").
+        //
+        // Pre-existing divergence, neither introduced nor widened by this offset handling:
+        // GreptimeDB anchors subquery step points on the evaluation start (see the `ctx.start`
+        // arithmetic below), while Prometheus anchors them on absolute epoch multiples of the
+        // step. Results differ whenever `(start - offset)` is not a multiple of the subquery
+        // step. An offset is *not* required for this -- an unaligned evaluation timestamp
+        // alone is enough: `sum_over_time(fine[20s:10s])` evaluated at t=57 samples 47s and
+        // 57s here but 40s and 50s in Prometheus. `subquery.sql` already pins an instance that
+        // predates this commit (`tql eval (359, 359, '1s')
+        // sum_over_time(metric_total[60s:10s])`, where `359 - 60 + 10 = 309` is not a multiple
+        // of the 10s step). An offset merely adds another way to land off the grid, and a
+        // sub-step offset is not rejected here: `foo[20s:10s] offset 5s` is a valid Prometheus
+        // query, erroring on it would be a regression, and it would not close the gap anyway.
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
 
         let current_interval = self.ctx.interval;
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
         let current_start = self.ctx.start;
-        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
+        let current_end = self.ctx.end;
+        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
+        self.ctx.end -= offset_ms;
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
+        self.ctx.end = current_end;
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -614,6 +657,8 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)?;
+        // Only the `offset_ms != 0` branch below needs a second copy of the series keys.
+        let normalize_key_columns = (offset_ms != 0).then(|| series_key_columns.clone());
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
                 series_key_columns,
@@ -622,11 +667,57 @@ impl PromPlanner {
             )),
         });
 
+        // `RangeManipulate`'s protobuf message has no offset field: on the decode path it
+        // recovers the offset from an immediately underlying `SeriesNormalize`
+        // (`local_offset`, see `range_manipulate.rs` and `instant_manipulate.rs`), and
+        // `RangeManipulate` is `Commutative` in `dist_plan`, so the node can be pushed below a
+        // `MergeScan` and round-tripped through that encoding.
+        //
+        // This carrier is load-bearing in BOTH standalone and distributed mode. Standalone is
+        // *not* exempt: GreptimeDB routes PromQL plans through `MergeScan`/substrait there too
+        // -- see the `MergeScan [is_placeholder=false, remote_input=[...]]` lines in the
+        // standalone results `tests/cases/standalone/common/promql/encode_substrait.result`
+        // and `precisions.result`. Remove this node and the offset decodes as zero, emptying
+        // subquery-with-offset results in standalone as well, while the logical-plan unit test
+        // for this path (`count_over_time_subquery_with_offset`, below) keeps passing because
+        // it asserts the plan *before* serialization. Anything touching this node must be
+        // checked against `tests/cases/standalone/common/promql/subquery.sql`, which exercises
+        // the encode/decode round trip for real.
+        //
+        // The node is also not semantically inert. `SeriesNormalizeStream::normalize` shifts
+        // native histogram `start_timestamp` payloads by `offset` whenever `offset != 0`
+        // (`normalize.rs`); the millisecond time index is deliberately left raw there and is
+        // shifted by `RangeManipulate` instead. That is intended here: both shifts move
+        // forward by the same `offset_ms`, so a histogram's reset/rate metadata stays aligned
+        // with the sample timestamp it describes, exactly as on the plain selector path -- and
+        // it composes with an offset the inner selector already applied, since that one
+        // shifted the time index and the start timestamp together. Pinned by
+        // `promql::extension_plan::normalize::test::
+        // subquery_offset_shifts_histogram_start_and_time_index_together`; it cannot be a
+        // sqlness case, because native histograms are a struct column with no SQL type or
+        // literal and can only be ingested over gRPC/remote-write v2.
+        //
+        // Stale-marker filtering stays off: the input here is a computed inner result, not raw
+        // storage samples.
+        let divide_plan = if let Some(normalize_key_columns) = normalize_key_columns {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(SeriesNormalize::new(
+                    offset_ms,
+                    time_index_column.clone(),
+                    false,
+                    normalize_key_columns,
+                    divide_plan,
+                )),
+            })
+        } else {
+            divide_plan
+        };
+
         let manipulate = RangeManipulate::new(
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
-            0,
+            offset_ms,
             range_ms,
             time_index_column,
             self.ctx.field_columns.clone(),
@@ -12190,6 +12281,28 @@ mod test {
             \n              Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n                Filter: some_metric.timestamp >= TimestampMillisecond(-540999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
             \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        );
+        indie_query_plan_compare(query, expected).await;
+    }
+
+    /// `offset` on a subquery must shift the inner evaluation window back and be
+    /// carried into the outer range manipulation. See
+    /// <https://github.com/GreptimeTeam/greptimedb/issues/9330>.
+    #[tokio::test]
+    async fn count_over_time_subquery_with_offset() {
+        let query = "count_over_time(some_metric[10m:1m] offset 5m)";
+        let expected = String::from(
+            "Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n  Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n      PromSeriesNormalize: offset=[300000], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            PromInstantManipulate: range=[-840000..99700000], lookback=[1000], interval=[60000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  Filter: some_metric.timestamp >= TimestampMillisecond(-840999, None) AND some_metric.timestamp <= TimestampMillisecond(99700000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                    TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
         );
         indie_query_plan_compare(query, expected).await;
     }
