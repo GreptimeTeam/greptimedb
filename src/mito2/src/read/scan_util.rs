@@ -1535,7 +1535,27 @@ pub fn build_flat_file_range_scan_stream(
             fetch_metrics: fetch_metrics.clone(),
             ..Default::default()
         };
-        for range in ranges {
+        let mut pending_prefetch: Option<common_runtime::JoinHandle<()>> = None;
+        for (range_idx, range) in ranges.iter().enumerate() {
+            // The previous iteration started fetching this range; wait for it so the
+            // reader doesn't issue the same reads again.
+            if let Some(handle) = pending_prefetch.take() {
+                let _ = handle.await;
+            }
+            if let Some(next) = ranges.get(range_idx + 1).filter(|next| !next.is_cached()) {
+                let next = next.clone();
+                let prefetch = async move {
+                    // A failed prefetch only means the reader fetches the data itself.
+                    if let Err(e) = next.prefetch().await {
+                        common_telemetry::debug!("Failed to prefetch row group: {e}");
+                    }
+                };
+                pending_prefetch = Some(if stream_ctx.input.compaction {
+                    common_runtime::spawn_compact(prefetch)
+                } else {
+                    common_runtime::spawn_query(prefetch)
+                });
+            }
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(
@@ -1602,6 +1622,10 @@ pub fn build_flat_file_range_scan_stream(
             }
 
             reader_metrics.merge_from(&prune_metrics);
+            range.release_prefetched();
+        }
+        if let Some(handle) = pending_prefetch.take() {
+            handle.abort();
         }
 
         // Reports metrics.

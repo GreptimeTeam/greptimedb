@@ -15,6 +15,7 @@
 //! Push decoder stream implementation for SST parquet files.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -53,6 +54,42 @@ pub struct SstParquetRangeFetcher {
     row_group_idx: usize,
     /// Optional metrics for tracking fetch operations.
     fetch_metrics: Option<ParquetFetchMetrics>,
+    /// Column chunks of this row group fetched ahead of the decoder.
+    prefetched: Option<Arc<PrefetchedRowGroup>>,
+}
+
+/// Column chunk bytes of one row group, read while previous row groups were decoded.
+pub(crate) struct PrefetchedRowGroup {
+    parts: Vec<PageRangePart>,
+}
+
+impl PrefetchedRowGroup {
+    pub(crate) fn new(ranges: Vec<Range<u64>>, data: Vec<Bytes>) -> Self {
+        Self {
+            parts: ranges
+                .into_iter()
+                .zip(data)
+                .map(|(range, bytes)| PageRangePart { range, bytes })
+                .collect(),
+        }
+    }
+
+    /// Returns the bytes of `ranges` if every range lies inside one prefetched part.
+    fn get(&self, ranges: &[Range<u64>]) -> Option<Vec<Bytes>> {
+        ranges
+            .iter()
+            .map(|range| {
+                self.parts
+                    .iter()
+                    .find(|part| part.range.start <= range.start && range.end <= part.range.end)
+                    .map(|part| {
+                        let start = (range.start - part.range.start) as usize;
+                        let end = (range.end - part.range.start) as usize;
+                        part.bytes.slice(start..end)
+                    })
+            })
+            .collect()
+    }
 }
 
 impl SstParquetRangeFetcher {
@@ -72,11 +109,28 @@ impl SstParquetRangeFetcher {
             cache_strategy,
             row_group_idx,
             fetch_metrics,
+            prefetched: None,
         }
     }
 
-    /// Fetches byte ranges from page cache, write cache, or object store.
-    async fn fetch_bytes_with_cache(&self, ranges: Vec<Range<u64>>) -> Result<Vec<Bytes>> {
+    pub(crate) fn with_prefetched(mut self, prefetched: Option<Arc<PrefetchedRowGroup>>) -> Self {
+        self.prefetched = prefetched;
+        self
+    }
+
+    /// Fetches byte ranges from prefetched data, page cache, write cache, or object store.
+    pub(crate) async fn fetch_bytes_with_cache(
+        &self,
+        ranges: Vec<Range<u64>>,
+    ) -> Result<Vec<Bytes>> {
+        if let Some(data) = self
+            .prefetched
+            .as_ref()
+            .and_then(|prefetched| prefetched.get(&ranges))
+        {
+            return Ok(data);
+        }
+
         let fetch_start = self
             .fetch_metrics
             .as_ref()
@@ -354,6 +408,28 @@ pub fn build_sst_parquet_record_batch_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_prefetched_row_group_serves_only_covered_ranges() {
+        let prefetched = PrefetchedRowGroup::new(
+            vec![100..200, 300..400],
+            vec![
+                Bytes::from((0..100).map(|v| v as u8).collect::<Vec<_>>()),
+                Bytes::from(vec![9; 100]),
+            ],
+        );
+
+        let data = prefetched.get(&[120..130, 300..400]).unwrap();
+        assert_eq!(
+            &(20..30).map(|v| v as u8).collect::<Vec<_>>()[..],
+            &data[0][..]
+        );
+        assert_eq!(&[9; 100][..], &data[1][..]);
+        // A range spanning a gap or lying outside the prefetched chunks falls back to the
+        // regular fetch path.
+        assert!(prefetched.get(std::slice::from_ref(&(150..350))).is_none());
+        assert!(prefetched.get(&[120..130, 500..510]).is_none());
+    }
 
     #[test]
     fn test_assemble_range_from_cached_subrange_and_fetched_tail() {

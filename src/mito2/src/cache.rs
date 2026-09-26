@@ -921,6 +921,17 @@ impl CacheStrategy {
         }
     }
 
+    /// Returns true if the range result cache holds `key`, without counting it as an access.
+    pub(crate) fn contains_range_result(&self, key: &RangeScanCacheKey) -> bool {
+        match self {
+            CacheStrategy::EnableAll(cache_manager) => cache_manager
+                .range_result_cache
+                .as_ref()
+                .is_some_and(|cache| cache.contains_key(key)),
+            CacheStrategy::Compaction(_) | CacheStrategy::Disabled => false,
+        }
+    }
+
     /// Returns true if the range result cache is enabled.
     pub(crate) fn has_range_result_cache(&self) -> bool {
         match self {

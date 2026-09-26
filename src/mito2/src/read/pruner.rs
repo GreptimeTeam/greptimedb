@@ -38,6 +38,19 @@ use crate::sst::parquet::reader::ReaderMetrics;
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
+/// Maximum number of row groups fetched ahead of the reader in one partition.
+const READAHEAD_ROW_GROUPS: usize = 8;
+/// Maximum bytes fetched ahead of the reader in one partition. The first row group
+/// ahead is always fetched even if it is larger.
+const READAHEAD_BYTES: u64 = 16 * 1024 * 1024;
+
+struct Readahead {
+    /// Position in the partition's scan order.
+    pos: usize,
+    bytes: u64,
+    handle: common_runtime::JoinHandle<()>,
+}
+
 /// Local pruner in a partition that supports prefetching files to prune.
 pub struct PartitionPruner {
     pruner: Arc<Pruner>,
@@ -47,6 +60,18 @@ pub struct PartitionPruner {
     pre_filter_modes: Vec<PreFilterMode>,
     /// Current position for tracking pre-fetch progress.
     current_position: AtomicUsize,
+    /// File row groups in the order to scan, with the partition range they belong to.
+    scan_order: Vec<RowGroupIndex>,
+    scan_order_ranges: Vec<PartitionRange>,
+    /// Position in `scan_order` of the last row group handed out.
+    scan_position: AtomicUsize,
+    /// Positions in `scan_order` before this one have been considered for readahead.
+    readahead_until: AtomicUsize,
+    /// Data prefetches of the row groups expected to be read next, in scan order.
+    readahead: Mutex<std::collections::VecDeque<Readahead>>,
+    /// Whether to read row group data ahead. Only enabled by callers whose readers
+    /// release the prefetched data after reading a range.
+    readahead_enabled: bool,
 }
 
 impl PartitionPruner {
@@ -58,6 +83,8 @@ impl PartitionPruner {
         let mut dedup_set = HashSet::with_capacity(pruner.inner.stream_ctx.input.num_files());
 
         let num_memtables = pruner.inner.stream_ctx.input.num_memtables();
+        let mut scan_order = Vec::new();
+        let mut scan_order_ranges = Vec::new();
         for part_range in partition_ranges {
             let range_meta = &pruner.inner.stream_ctx.ranges[part_range.identifier];
             let pre_filter_mode = pruner.inner.stream_ctx.range_pre_filter_mode(part_range);
@@ -67,6 +94,8 @@ impl PartitionPruner {
                     .stream_ctx
                     .is_file_range_index(*row_group_index)
                 {
+                    scan_order.push(*row_group_index);
+                    scan_order_ranges.push(*part_range);
                     let file_index = row_group_index.index - num_memtables;
                     if dedup_set.contains(&file_index) {
                         continue;
@@ -84,7 +113,21 @@ impl PartitionPruner {
             file_indices,
             pre_filter_modes,
             current_position: AtomicUsize::new(0),
+            scan_order,
+            scan_order_ranges,
+            scan_position: AtomicUsize::new(0),
+            readahead_until: AtomicUsize::new(0),
+            readahead: Mutex::new(Default::default()),
+            readahead_enabled: false,
         }
+    }
+
+    /// Reads row group data ahead of the scan. The caller must read ranges through
+    /// [build_flat_file_range_scan_stream](crate::read::scan_util::build_flat_file_range_scan_stream),
+    /// which releases the prefetched data.
+    pub(crate) fn with_readahead(mut self) -> Self {
+        self.readahead_enabled = true;
+        self
     }
 
     /// Excludes files replaced by another candidate source from prefetching.
@@ -106,11 +149,19 @@ impl PartitionPruner {
         let file_index = index.index - self.pruner.inner.stream_ctx.input.num_memtables();
         let pre_filter_mode = self.pre_filter_mode(file_index);
 
+        // Waits for the data prefetch of this row group so the reader doesn't issue the
+        // same reads again.
+        let pending = self.take_readahead(index);
+        if let Some(handle) = pending {
+            let _ = handle.await;
+        }
+
         // Delegate to underlying Pruner
         let ranges = self
             .pruner
             .build_file_ranges(index, pre_filter_mode, partition_metrics, reader_metrics)
             .await?;
+        self.start_readahead(index);
 
         // Find position and trigger pre-fetch for upcoming files
         if let Some(pos) = self.file_indices.iter().position(|&idx| idx == file_index) {
@@ -150,6 +201,103 @@ impl PartitionPruner {
             part_metrics.merge_reader_metrics(&reader_metrics, None);
         }
         pruned
+    }
+
+    /// Starts fetching the data of the row group scanned after `current`.
+    ///
+    /// Row groups in a partition are read one after another, so without this each one
+    /// waits a full storage round trip before decoding starts.
+    fn start_readahead(&self, current: RowGroupIndex) {
+        if !self.readahead_enabled {
+            return;
+        }
+        let start = self.scan_position.load(Ordering::Relaxed);
+        let Some(pos) = self.scan_order[start..]
+            .iter()
+            .position(|index| *index == current)
+            .map(|offset| start + offset)
+        else {
+            return;
+        };
+        self.scan_position.store(pos, Ordering::Relaxed);
+
+        let mut readahead = self.readahead.lock().unwrap();
+        let first_unscheduled = self.readahead_until.load(Ordering::Relaxed).max(pos + 1);
+        let end = (pos + 1 + READAHEAD_ROW_GROUPS).min(self.scan_order.len());
+        let mut inflight_bytes: u64 = readahead.iter().map(|r| r.bytes).sum();
+        for next_pos in first_unscheduled..end {
+            let next = self.scan_order[next_pos];
+            // The scan reads nothing from files for a partition the range cache serves.
+            if self.range_cached(&self.scan_order_ranges[next_pos]) {
+                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
+                continue;
+            }
+            let file_index = next.index - self.pruner.inner.stream_ctx.input.num_memtables();
+            // Only prefetch when pruning is done; the background pruner usually has it ready.
+            let Some(builder) = self.pruner.cached_file_builder(file_index) else {
+                break;
+            };
+            let mut ranges = SmallVec::<[FileRange; 2]>::new();
+            builder.build_ranges(next.row_group_index, &mut ranges);
+            let Some(range) = ranges.into_iter().next() else {
+                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
+                continue;
+            };
+            if range.is_cached() {
+                self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
+                continue;
+            }
+            let bytes = range.prefetch_bytes();
+            if !readahead.is_empty() && inflight_bytes + bytes > READAHEAD_BYTES {
+                break;
+            }
+            inflight_bytes += bytes;
+            self.readahead_until.store(next_pos + 1, Ordering::Relaxed);
+            let prefetch = async move {
+                // A failed prefetch only means the reader fetches the data itself.
+                if let Err(e) = range.prefetch().await {
+                    debug!("Failed to prefetch row group: {e}");
+                }
+            };
+            let handle = if self.pruner.inner.stream_ctx.input.compaction {
+                common_runtime::spawn_compact(prefetch)
+            } else {
+                common_runtime::spawn_query(prefetch)
+            };
+            readahead.push_back(Readahead {
+                pos: next_pos,
+                bytes,
+                handle,
+            });
+        }
+    }
+
+    /// Returns true if the range result cache serves `part_range` for this scan.
+    fn range_cached(&self, part_range: &PartitionRange) -> bool {
+        let stream_ctx = &self.pruner.inner.stream_ctx;
+        let Some(key) = crate::read::range_cache::build_range_cache_key(stream_ctx, part_range)
+        else {
+            return false;
+        };
+        stream_ctx.input.cache_strategy.contains_range_result(&key)
+    }
+
+    /// Removes and returns the prefetch of `index`, dropping prefetches scheduled before it.
+    fn take_readahead(&self, index: RowGroupIndex) -> Option<common_runtime::JoinHandle<()>> {
+        let mut readahead = self.readahead.lock().unwrap();
+        while let Some(front) = readahead.front() {
+            if self.scan_order[front.pos] == index {
+                return readahead.pop_front().map(|r| r.handle);
+            }
+            if front.pos > self.scan_position.load(Ordering::Relaxed) + 1 {
+                return None;
+            }
+            // The scan skipped this row group.
+            if let Some(skipped) = readahead.pop_front() {
+                skipped.handle.abort();
+            }
+        }
+        None
     }
 
     /// Pre-fetches upcoming files starting from the given position.
@@ -301,6 +449,15 @@ struct PruneRequest {
     partition_metrics: Option<PartitionMetrics>,
 }
 
+impl Drop for PartitionPruner {
+    fn drop(&mut self) {
+        // A scan stopped early (e.g. by a limit) doesn't read the prefetched row groups.
+        for readahead in self.readahead.get_mut().unwrap().drain(..) {
+            readahead.handle.abort();
+        }
+    }
+}
+
 impl Pruner {
     /// Creates a new Pruner with N worker tasks.
     ///
@@ -439,6 +596,15 @@ impl Pruner {
         }
         let file_index = index.index - self.inner.stream_ctx.input.num_memtables();
         self.decrement_and_maybe_clear(file_index, reader_metrics);
+    }
+
+    /// Returns the builder of a file if it has been pruned already.
+    fn cached_file_builder(&self, file_index: usize) -> Option<Arc<FileRangeBuilder>> {
+        self.inner.file_entries[file_index]
+            .lock()
+            .unwrap()
+            .builder
+            .clone()
     }
 
     /// Gets or creates the FileRangeBuilder for a file.
