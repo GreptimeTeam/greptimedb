@@ -18,6 +18,7 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use common_recordbatch::OptionalReservation;
 use datatypes::arrow::record_batch::RecordBatch;
 use futures::StreamExt;
 use futures::future::{BoxFuture, FutureExt, Shared};
@@ -74,8 +75,26 @@ pub(crate) struct PrefetchedRowGroup {
     parts: Vec<PageRangePart>,
     /// Fetch metrics of the prefetch, merged into the first reader that uses the bytes.
     fetch_metrics: std::sync::Mutex<Option<ParquetFetchMetrics>>,
-    /// Readahead budget held while the bytes are alive.
+    _budget: PrefetchBudget,
+}
+
+/// Memory a prefetch holds while its bytes are alive: the readahead budget of the scan and,
+/// for queries, a reservation from the engine's scan memory limit.
+pub(crate) struct PrefetchBudget {
     _permit: OwnedSemaphorePermit,
+    _reservation: Option<OptionalReservation>,
+}
+
+impl PrefetchBudget {
+    pub(crate) fn new(
+        permit: OwnedSemaphorePermit,
+        reservation: Option<OptionalReservation>,
+    ) -> Self {
+        Self {
+            _permit: permit,
+            _reservation: reservation,
+        }
+    }
 }
 
 impl PrefetchedRowGroup {
@@ -117,11 +136,11 @@ impl<T> std::future::Future for AbortOnDrop<T> {
     }
 }
 
-/// Spawns a fetch of `ranges` that holds `permit` as long as the fetched bytes live.
+/// Spawns a fetch of `ranges` that holds `budget` as long as the fetched bytes live.
 pub(crate) fn spawn_prefetch(
     fetcher: SstParquetRangeFetcher,
     ranges: Vec<Range<u64>>,
-    permit: OwnedSemaphorePermit,
+    budget: PrefetchBudget,
     compaction: bool,
 ) -> PrefetchSlot {
     let task = async move {
@@ -140,7 +159,7 @@ pub(crate) fn spawn_prefetch(
                 .map(|(range, bytes)| PageRangePart { range, bytes })
                 .collect(),
             fetch_metrics: std::sync::Mutex::new(fetcher.fetch_metrics),
-            _permit: permit,
+            _budget: budget,
         }))
     };
     let handle = AbortOnDrop(if compaction {
@@ -491,7 +510,7 @@ mod tests {
                 },
             ],
             fetch_metrics: std::sync::Mutex::new(None),
-            _permit: permit,
+            _budget: PrefetchBudget::new(permit, None),
         };
 
         let data = prefetched.get(&[120..130, 300..400]).unwrap();

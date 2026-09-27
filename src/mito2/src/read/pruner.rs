@@ -19,6 +19,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use common_recordbatch::QueryMemoryTracker;
 use common_telemetry::debug;
 use smallvec::SmallVec;
 use snafu::ResultExt;
@@ -30,32 +31,35 @@ use uuid::Uuid;
 use crate::error::{PruneFileSnafu, Result};
 use crate::metrics::PRUNER_ACTIVE_BUILDERS;
 use crate::read::range::{FileRangeBuilder, RowGroupIndex};
-use crate::read::scan_region::StreamContext;
+use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
-use crate::sst::parquet::push_decoder::PrefetchSlot;
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::push_decoder::{PrefetchBudget, PrefetchSlot};
+use crate::sst::parquet::reader::{PrefetchColumns, ReaderMetrics};
 
 /// Number of files to pre-fetch ahead of the current position.
 const PREFETCH_COUNT: usize = 8;
 
 /// Maximum number of row group indices fetched ahead of the reader in one partition.
-pub(crate) const READAHEAD_ROW_GROUPS: usize = 8;
+const READAHEAD_ROW_GROUPS: usize = 8;
 /// Maximum bytes fetched ahead of the readers of one partition, counted until the fetched
 /// bytes are dropped.
 const READAHEAD_BYTES: usize = 16 * 1024 * 1024;
 /// Unit of the readahead budget semaphore.
 const READAHEAD_PERMIT_BYTES: usize = 1024;
 
-/// Starts row group prefetches within the readahead budget of a partition.
+/// Starts row group prefetches within the readahead budget of a scan.
 #[derive(Clone)]
 pub(crate) struct Readahead {
     budget: Arc<Semaphore>,
+    /// Scan memory limit of the engine, `None` outside queries.
+    memory: Option<QueryMemoryTracker>,
+    columns: PrefetchColumns,
     compaction: bool,
 }
 
 /// Outcome of [Readahead::try_start].
-pub(crate) enum ReadaheadStart {
+enum ReadaheadStart {
     /// The range isn't worth prefetching.
     Skipped,
     /// The budget is used up; retry after readers release prefetched data.
@@ -64,27 +68,64 @@ pub(crate) enum ReadaheadStart {
 }
 
 impl Readahead {
-    fn new(compaction: bool) -> Self {
+    /// Creates a readahead for a scan whose readers read `columns` first.
+    pub(crate) fn new(input: &ScanInput, columns: PrefetchColumns) -> Self {
         Self {
             budget: Arc::new(Semaphore::new(READAHEAD_BYTES / READAHEAD_PERMIT_BYTES)),
-            compaction,
+            memory: input.scan_memory_tracker.clone(),
+            columns,
+            compaction: input.compaction,
         }
     }
 
     /// Starts prefetching `range` if it is worth it and the budget allows.
-    pub(crate) fn try_start(&self, range: &FileRange) -> ReadaheadStart {
-        if !range.can_prefetch() {
-            return ReadaheadStart::Skipped;
-        }
-        let permits = (range.prefetch_bytes() as usize)
-            .div_ceil(READAHEAD_PERMIT_BYTES)
-            .max(1);
-        let Ok(permits) = u32::try_from(permits) else {
+    fn try_start(&self, range: &FileRange) -> ReadaheadStart {
+        let Some(ranges) = range.prefetch_ranges(self.columns) else {
             return ReadaheadStart::Skipped;
         };
-        match self.budget.clone().try_acquire_many_owned(permits) {
-            Ok(permit) => ReadaheadStart::Started(range.prefetch(permit, self.compaction)),
-            Err(_) => ReadaheadStart::NoBudget,
+        let bytes: u64 = ranges.iter().map(|range| range.end - range.start).sum();
+        let Ok(permits) = u32::try_from((bytes as usize).div_ceil(READAHEAD_PERMIT_BYTES).max(1))
+        else {
+            return ReadaheadStart::Skipped;
+        };
+        let Ok(permit) = self.budget.clone().try_acquire_many_owned(permits) else {
+            return ReadaheadStart::NoBudget;
+        };
+        let reservation = match &self.memory {
+            Some(tracker) => match tracker.try_reserve_optional(bytes as usize) {
+                Some(reservation) => Some(reservation),
+                None => return ReadaheadStart::NoBudget,
+            },
+            None => None,
+        };
+        ReadaheadStart::Started(range.prefetch(
+            ranges,
+            PrefetchBudget::new(permit, reservation),
+            self.compaction,
+        ))
+    }
+
+    /// Keeps up to [READAHEAD_ROW_GROUPS] ranges after `current` prefetched while a reader
+    /// reads `ranges` in order. `next` is the first range not considered yet.
+    pub(crate) fn fill_window(
+        &self,
+        ranges: &mut [Option<FileRange>],
+        current: usize,
+        next: &mut usize,
+    ) {
+        let end = (current + 1 + READAHEAD_ROW_GROUPS).min(ranges.len());
+        *next = (*next).max(current + 1);
+        while *next < end {
+            if let Some(range) = ranges[*next].as_mut()
+                && !range.has_prefetch()
+            {
+                match self.try_start(range) {
+                    ReadaheadStart::Started(slot) => range.set_prefetched(slot),
+                    ReadaheadStart::NoBudget => return,
+                    ReadaheadStart::Skipped => {}
+                }
+            }
+            *next += 1;
         }
     }
 }
@@ -111,6 +152,9 @@ pub struct PartitionPruner {
     /// Set by callers that read ranges through
     /// [build_flat_file_range_scan_stream](crate::read::scan_util::build_flat_file_range_scan_stream).
     readahead: Option<Readahead>,
+    /// Whether [Self::build_file_ranges] also prefetches the next indices. Only valid when a
+    /// single reader builds the indices in scan order.
+    readahead_across_indices: bool,
 }
 
 impl PartitionPruner {
@@ -158,6 +202,7 @@ impl PartitionPruner {
             readahead_until: AtomicUsize::new(0),
             pending_prefetches: Mutex::new(HashMap::new()),
             readahead: None,
+            readahead_across_indices: false,
         }
     }
 
@@ -165,8 +210,17 @@ impl PartitionPruner {
     /// [build_flat_file_range_scan_stream](crate::read::scan_util::build_flat_file_range_scan_stream)
     /// with [Self::readahead], which extends the readahead within each file.
     pub(crate) fn with_readahead(mut self) -> Self {
+        self.readahead_across_indices = true;
+        self.with_file_readahead()
+    }
+
+    /// Like [Self::with_readahead] but only within files, for pruners whose indices are built
+    /// by concurrent readers. The prefetch of a next index is handed over when that index is
+    /// built, which concurrent readers do out of scan order.
+    pub(crate) fn with_file_readahead(mut self) -> Self {
         self.readahead = Some(Readahead::new(
-            self.pruner.inner.stream_ctx.input.compaction,
+            &self.pruner.inner.stream_ctx.input,
+            PrefetchColumns::Scan,
         ));
         self
     }
@@ -249,7 +303,11 @@ impl PartitionPruner {
     /// waits a full storage round trip before decoding starts. The row groups after the
     /// first range of a file are prefetched by its scan stream.
     fn start_readahead(&self, current: RowGroupIndex, current_ranges: &mut [FileRange]) {
-        let Some(readahead) = &self.readahead else {
+        let Some(readahead) = self
+            .readahead
+            .as_ref()
+            .filter(|_| self.readahead_across_indices)
+        else {
             return;
         };
         let start = self.scan_position.load(Ordering::Relaxed);

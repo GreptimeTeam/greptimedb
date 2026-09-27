@@ -4802,3 +4802,202 @@ async fn test_readahead_refills_within_large_files() {
         "only {served} of 38 row groups were prefetched"
     );
 }
+
+#[tokio::test]
+async fn test_series_scan_reads_ahead_within_files() {
+    use std::sync::atomic::Ordering;
+
+    use crate::sst::parquet::push_decoder::PREFETCH_SERVED;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 20000),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+
+    PREFETCH_SERVED.store(0, Ordering::Relaxed);
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(20000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    let served = PREFETCH_SERVED.load(Ordering::Relaxed);
+    assert!(
+        served >= 15,
+        "only {served} of 19 row groups were prefetched"
+    );
+}
+
+#[tokio::test]
+async fn test_two_phase_series_scan_reads_primary_keys_ahead() {
+    use std::sync::atomic::Ordering;
+
+    use crate::sst::parquet::push_decoder::PREFETCH_SERVED;
+
+    let mut env = TestEnv::new().await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_series_scan_v2: true,
+            page_cache_size: ReadableSize(0),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let metadata = Arc::new(sst_region_metadata_with_encoding(
+        PrimaryKeyEncoding::Sparse,
+    ));
+    let mut request = CreateRequestBuilder::new().build();
+    request.column_metadatas = metadata.column_metadatas.clone();
+    request.primary_key = metadata.primary_key.clone();
+    request
+        .options
+        .insert(PRIMARY_KEY_ENCODING.to_string(), "sparse".to_string());
+    request
+        .options
+        .insert("memtable.type".to_string(), "bulk".to_string());
+    request
+        .options
+        .insert("sst_format".to_string(), "flat".to_string());
+    let full_row_schema = test_util::rows_schema(&request);
+    let mut encoded_primary_key_schema = full_row_schema[0].clone();
+    encoded_primary_key_schema.column_name = PRIMARY_KEY_COLUMN_NAME.to_string();
+    encoded_primary_key_schema.datatype = ColumnDataType::Binary.into();
+    encoded_primary_key_schema.semantic_type = SemanticType::Tag.into();
+    let row_schema = vec![
+        encoded_primary_key_schema,
+        full_row_schema[5].clone(),
+        full_row_schema[4].clone(),
+    ];
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    // 10 series of 2000 points, flushed as 20 row groups.
+    let rows = (0..20000u64)
+        .map(|i| {
+            let tsid = i % 10;
+            row(vec![
+                ValueData::BinaryValue(new_sparse_primary_key(
+                    &[&tsid.to_string(), "x"],
+                    &metadata,
+                    10,
+                    tsid,
+                )),
+                ValueData::TimestampMillisecondValue(i as i64),
+                ValueData::U64Value(i),
+            ])
+        })
+        .collect();
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
+                rows: Rows {
+                    schema: row_schema,
+                    rows,
+                },
+                hint: Some(WriteHint {
+                    primary_key_encoding: api::v1::PrimaryKeyEncoding::Sparse.into(),
+                }),
+                partition_expr_version: None,
+            }),
+        )
+        .await
+        .unwrap();
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+
+    PREFETCH_SERVED.store(0, Ordering::Relaxed);
+    let stream = engine
+        .scan_to_stream(
+            region_id,
+            ScanRequest {
+                distribution: Some(TimeSeriesDistribution::PerSeries),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(20000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    // Only candidate discovery reads through prefetches: the data phase builds its own ranges.
+    let served = PREFETCH_SERVED.load(Ordering::Relaxed);
+    assert!(
+        served >= 15,
+        "only {served} of 19 row groups were prefetched"
+    );
+}
+
+#[tokio::test]
+async fn test_readahead_stays_within_scan_memory_limit() {
+    use std::sync::atomic::Ordering;
+
+    use common_base::memory_limit::MemoryLimit;
+
+    use crate::sst::parquet::push_decoder::PREFETCH_SERVED;
+
+    let mut env = TestEnv::new().await;
+    // Half of the limit, the most read-ahead may reserve, is smaller than any row group.
+    let engine = env
+        .create_engine(MitoConfig {
+            default_flat_format: true,
+            page_cache_size: ReadableSize(0),
+            scan_memory_limit: MemoryLimit::Size(ReadableSize::kb(4)),
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    let request = CreateRequestBuilder::new().build();
+    let column_schemas = test_util::rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+    test_util::put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: test_util::build_rows(0, 20000),
+        },
+    )
+    .await;
+    test_util::flush_region(&engine, region_id, Some(1000)).await;
+
+    PREFETCH_SERVED.store(0, Ordering::Relaxed);
+    let stream = engine
+        .scan_to_stream(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    let batches = RecordBatches::try_collect(stream).await.unwrap();
+    assert_eq!(20000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    assert_eq!(0, PREFETCH_SERVED.load(Ordering::Relaxed));
+    assert_eq!(0, engine.query_memory_tracker().unwrap().current());
+}

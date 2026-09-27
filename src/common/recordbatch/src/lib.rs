@@ -649,6 +649,21 @@ impl QueryMemoryTracker {
         self.manager.limit_bytes() as usize
     }
 
+    /// Reserves `bytes` for optional work outside the tracked streams, such as reading data
+    /// ahead of a scan. Returns `None` instead of waiting when the usage including `bytes`
+    /// would exceed half of the limit, so optional holders never take the quota query
+    /// streams need. Unlimited trackers always succeed and only record the usage.
+    pub fn try_reserve_optional(&self, bytes: usize) -> Option<OptionalReservation> {
+        let limit = self.limit();
+        // Checked before acquiring so a refusal is not reported as exhaustion.
+        if limit > 0 && self.current().saturating_add(bytes) > limit / 2 {
+            return None;
+        }
+        self.manager
+            .try_acquire(bytes as u64)
+            .map(|guard| OptionalReservation { _guard: guard })
+    }
+
     fn reject_error(
         &self,
         current: usize,
@@ -670,6 +685,11 @@ impl QueryMemoryTracker {
     fn inc_rejected(&self) {
         self.metrics.inc_rejected();
     }
+}
+
+/// Memory reserved by [`QueryMemoryTracker::try_reserve_optional`], released on drop.
+pub struct OptionalReservation {
+    _guard: MemoryGuard<CallbackMemoryMetrics>,
 }
 
 /// Builder for constructing a [`QueryMemoryTracker`] with optional callbacks.
@@ -1343,6 +1363,29 @@ mod tests {
 
         drop(stream);
         assert_eq!(tracker.current(), 0);
+    }
+
+    #[test]
+    fn test_optional_reservation_leaves_half_the_limit_to_streams() {
+        let exhausted = Arc::new(AtomicUsize::new(0));
+        let exhausted_counter = exhausted.clone();
+        let tracker = QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail)
+            .on_exhausted(move || {
+                exhausted_counter.fetch_add(1, Ordering::Relaxed);
+            })
+            .build();
+        let mut stream = tracker.new_stream_tracker();
+        stream.try_track(2 * MB).unwrap();
+
+        let reserved = tracker.try_reserve_optional(3 * MB).unwrap();
+        assert_eq!(tracker.current(), 5 * MB);
+        assert!(tracker.try_reserve_optional(1).is_none());
+        assert_eq!(exhausted.load(Ordering::Relaxed), 0);
+
+        stream.try_track(5 * MB).unwrap();
+        assert_eq!(tracker.current(), 10 * MB);
+        drop(reserved);
+        assert_eq!(tracker.current(), 7 * MB);
     }
 
     #[test]

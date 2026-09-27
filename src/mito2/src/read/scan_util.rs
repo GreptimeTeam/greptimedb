@@ -41,7 +41,7 @@ use crate::metrics::{
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
-use crate::read::pruner::{READAHEAD_ROW_GROUPS, Readahead, ReadaheadStart};
+use crate::read::pruner::Readahead;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
@@ -1539,24 +1539,10 @@ pub(crate) fn build_flat_file_range_scan_stream(
             ..Default::default()
         };
         let mut ranges = ranges.into_iter().map(Some).collect::<Vec<_>>();
-        // Ranges before this one are prefetched or not worth prefetching.
-        let mut readahead_until = 1;
+        let mut readahead_next = 0;
         for range_idx in 0..ranges.len() {
-            // Keeps the next ranges of the file prefetched as reading frees the budget.
             if let Some(readahead) = &readahead {
-                let end = (range_idx + 1 + READAHEAD_ROW_GROUPS).min(ranges.len());
-                readahead_until = readahead_until.max(range_idx + 1);
-                while readahead_until < end {
-                    let next = ranges[readahead_until].as_mut().unwrap();
-                    if !next.has_prefetch() {
-                        match readahead.try_start(next) {
-                            ReadaheadStart::Started(slot) => next.set_prefetched(slot),
-                            ReadaheadStart::NoBudget => break,
-                            ReadaheadStart::Skipped => {}
-                        }
-                    }
-                    readahead_until += 1;
-                }
+                readahead.fill_window(&mut ranges, range_idx, &mut readahead_next);
             }
             // Dropping the range after reading it releases its prefetched bytes.
             let range = ranges[range_idx].take().unwrap();

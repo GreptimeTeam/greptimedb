@@ -22,9 +22,9 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
@@ -244,6 +244,8 @@ pub(crate) struct ScanRegion {
     max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Scan memory limit of the engine, charged for data read ahead of queries.
+    scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
     /// Whether to ignore range indexes during scans.
@@ -283,6 +285,7 @@ impl ScanRegion {
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+            scan_memory_tracker: None,
             experimental_series_scan_v2: false,
             ignore_range_index: false,
             ignore_inverted_index: false,
@@ -328,6 +331,13 @@ impl ScanRegion {
     #[must_use]
     pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
         self.scan_memory_pool = scan_memory_pool;
+        self
+    }
+
+    /// Sets the tracker that bounds the memory of all query scans.
+    #[must_use]
+    pub(crate) fn with_scan_memory_tracker(mut self, tracker: QueryMemoryTracker) -> Self {
+        self.scan_memory_tracker = Some(tracker);
         self
     }
 
@@ -582,6 +592,7 @@ impl ScanRegion {
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_scan_memory_pool(self.scan_memory_pool)
+            .with_scan_memory_tracker(self.scan_memory_tracker)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -946,6 +957,8 @@ pub struct ScanInput {
     pub(crate) max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Scan memory limit of the engine. `None` for scans outside queries, e.g. compaction.
+    pub(crate) scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
@@ -1025,6 +1038,7 @@ impl ScanInput {
                 ignore_file_not_found: false,
                 max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
                 scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+                scan_memory_tracker: None,
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
@@ -1277,6 +1291,12 @@ impl ScanInputBuilder {
     #[must_use]
     pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
         self.input.scan_memory_pool = scan_memory_pool;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_scan_memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
+        self.input.scan_memory_tracker = tracker;
         self
     }
 

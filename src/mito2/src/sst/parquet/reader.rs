@@ -51,7 +51,6 @@ use store_api::region_request::PathType;
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{ColumnId, FileId};
 use table::predicate::Predicate;
-use tokio::sync::OwnedSemaphorePermit;
 
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
@@ -88,7 +87,8 @@ use crate::sst::parquet::prefilter::{
     PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
-    PrefetchSlot, SstParquetRangeFetcher, build_sst_parquet_record_batch_stream, spawn_prefetch,
+    PrefetchBudget, PrefetchSlot, SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
+    spawn_prefetch,
 };
 use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_plan};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
@@ -1772,6 +1772,16 @@ pub(crate) struct RowGroupReaderBuilder {
     batch_size: usize,
 }
 
+/// Columns a prefetch reads, matching the reader that consumes it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrefetchColumns {
+    /// Columns a scan reads first: the prefilter columns if there is a prefilter, otherwise
+    /// the projection.
+    Scan,
+    /// Only the encoded primary key, read to find candidate series.
+    PrimaryKey,
+}
+
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
 /// needed for prefiltering decisions.
 pub(crate) struct RowGroupBuildContext<'a> {
@@ -1949,53 +1959,87 @@ impl RowGroupReaderBuilder {
         .boxed())
     }
 
-    /// Builds a parquet record batch stream with a custom projection mask.
-    /// Returns the byte ranges of the column chunks a prefetch of `row_group_idx` reads.
+    /// Returns the byte ranges the parquet decoder requests for `columns` of `row_group_idx`
+    /// under `selection`, so that prefetching them serves the read.
     ///
-    /// With a prefilter, only the columns it may read are prefetched: the other columns are
-    /// read after the prefilter narrows the rows, and may not be read at all.
-    fn prefetch_ranges(&self, row_group_idx: usize) -> Vec<Range<u64>> {
-        let prefilter_mask = self.prefilter_builder.as_ref().map(|builder| {
-            builder.projection_mask(self.parquet_meta.file_metadata().schema_descr())
-        });
-        let mask = prefilter_mask.as_ref().unwrap_or(&self.projection.mask);
+    /// With a prefilter, [PrefetchColumns::Scan] only covers the columns it may read: the
+    /// other columns are read after the prefilter narrows the rows, and may not be read at all.
+    pub(crate) fn prefetch_ranges(
+        &self,
+        row_group_idx: usize,
+        selection: Option<&RowSelection>,
+        columns: PrefetchColumns,
+    ) -> Vec<Range<u64>> {
+        let schema = self.parquet_meta.file_metadata().schema_descr();
+        let mask = match columns {
+            PrefetchColumns::Scan => self
+                .prefilter_builder
+                .as_ref()
+                .map(|builder| builder.projection_mask(schema))
+                .unwrap_or_else(|| self.projection.mask.clone()),
+            PrefetchColumns::PrimaryKey => {
+                let Some(leaf) = schema
+                    .columns()
+                    .iter()
+                    .position(|column| column.name() == PRIMARY_KEY_COLUMN_NAME)
+                else {
+                    return Vec::new();
+                };
+                ProjectionMask::leaves(schema, [leaf])
+            }
+        };
         let row_group = self.parquet_meta.row_group(row_group_idx);
-        (0..row_group.num_columns())
-            .filter(|&leaf| mask.leaf_included(leaf))
-            .map(|leaf| {
-                let (start, len) = row_group.column(leaf).byte_range();
-                start..start + len
-            })
-            .collect()
+        // The decoder skips a row group whose selection keeps no rows and reads one whose
+        // selection keeps all rows as if it had no selection.
+        let selection = match selection {
+            Some(selection) if selection.row_count() == 0 => return Vec::new(),
+            Some(selection) if selection.row_count() == row_group.num_rows() as usize => None,
+            selection => selection,
+        };
+        let offset_index = self
+            .parquet_meta
+            .offset_index()
+            .filter(|index| !index.is_empty())
+            .map(|index| &index[row_group_idx]);
+
+        let mut ranges = Vec::new();
+        for leaf in (0..row_group.num_columns()).filter(|&leaf| mask.leaf_included(leaf)) {
+            let (start, len) = row_group.column(leaf).byte_range();
+            // Same rule as the decoder's `InMemoryRowGroup::fetch_ranges`: with a selection
+            // and an offset index it reads the dictionary page and the selected data pages,
+            // otherwise the whole column chunk.
+            match selection.zip(offset_index) {
+                Some((selection, offset_index)) => {
+                    let pages = offset_index[leaf].page_locations();
+                    if let Some(first) = pages.first()
+                        && first.offset as u64 != start
+                    {
+                        ranges.push(start..first.offset as u64);
+                    }
+                    ranges.extend(selection.scan_ranges(pages));
+                }
+                None => ranges.push(start..start + len),
+            }
+        }
+        ranges
     }
 
-    /// Returns the compressed size of the column chunks a prefetch of `row_group_idx` reads.
-    pub(crate) fn prefetch_bytes(&self, row_group_idx: usize) -> u64 {
-        self.prefetch_ranges(row_group_idx)
-            .iter()
-            .map(|range| range.end - range.start)
-            .sum()
-    }
-
-    /// Returns true if the page cache holds all column chunks a prefetch would read.
-    pub(crate) fn is_row_group_cached(&self, row_group_idx: usize) -> bool {
+    /// Returns true if the page cache holds all of `ranges` of `row_group_idx`.
+    pub(crate) fn is_cached(&self, row_group_idx: usize, ranges: &[Range<u64>]) -> bool {
         self.cache_strategy
-            .get_page_ranges(
-                self.file_handle.file_id().file_id(),
-                row_group_idx,
-                &self.prefetch_ranges(row_group_idx),
-            )
+            .get_page_ranges(self.file_handle.file_id().file_id(), row_group_idx, ranges)
             .is_some_and(|lookup| lookup.is_fully_cached())
     }
 
-    /// Starts fetching the column chunks of `row_group_idx` in the background.
+    /// Starts fetching `ranges` of `row_group_idx` in the background.
     ///
-    /// `permit` is held as long as the fetched bytes. Dropping every clone of the returned
+    /// `budget` is held as long as the fetched bytes. Dropping every clone of the returned
     /// slot aborts an unfinished fetch.
     pub(crate) fn prefetch(
         &self,
         row_group_idx: usize,
-        permit: OwnedSemaphorePermit,
+        ranges: Vec<Range<u64>>,
+        budget: PrefetchBudget,
         compaction: bool,
     ) -> PrefetchSlot {
         let fetcher = SstParquetRangeFetcher::new(
@@ -2006,14 +2050,10 @@ impl RowGroupReaderBuilder {
             row_group_idx,
             Some(ParquetFetchMetrics::default()),
         );
-        spawn_prefetch(
-            fetcher,
-            self.prefetch_ranges(row_group_idx),
-            permit,
-            compaction,
-        )
+        spawn_prefetch(fetcher, ranges, budget, compaction)
     }
 
+    /// Builds a parquet record batch stream with a custom projection mask.
     pub(crate) async fn build_with_projection(
         &self,
         row_group_idx: usize,
