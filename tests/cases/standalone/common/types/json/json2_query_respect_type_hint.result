@@ -13,9 +13,43 @@ Affected Rows: 0
 
 INSERT INTO json2_query_respect_type_hint VALUES
     (1, '{"a":9007199254740993,"b":"three"}', 2),
-    (2, '{"a":7,"b":"7"}', 2);
+    (2, '{"a":7,"b":"7"}', 2),
+    (3, '{}', 2),
+    (4, '{"a":null,"b":null}', 2);
 
-Affected Rows: 2
+Affected Rows: 4
+
+-- Both syntaxes use the hint when reading the memtable, including missing/null paths.
+SELECT j.a AS dotted, json_get(j, 'a') AS direct,
+       arrow_typeof(j.a) AS dotted_type, arrow_typeof(json_get(j, 'a')) AS direct_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
++------------------+------------------+-------------+-------------+
+| dotted           | direct           | dotted_type | direct_type |
++------------------+------------------+-------------+-------------+
+| 9007199254740993 | 9007199254740993 | Int64       | Int64       |
+| 7                | 7                | Int64       | Int64       |
+|                  |                  | Int64       | Int64       |
+|                  |                  | Int64       | Int64       |
++------------------+------------------+-------------+-------------+
+
+-- An explicit third argument takes precedence over the BIGINT path hint in memtable reads.
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
++------------------+--------------------+-------------+---------------+
+| hinted_bigint    | explicit_double    | hinted_type | explicit_type |
++------------------+--------------------+-------------+---------------+
+| 9007199254740993 | 9007199254740992.0 | Int64       | Float64       |
+| 7                | 7.0                | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
++------------------+--------------------+-------------+---------------+
 
 ADMIN FLUSH_TABLE('json2_query_respect_type_hint');
 
@@ -25,86 +59,180 @@ ADMIN FLUSH_TABLE('json2_query_respect_type_hint');
 | 0                                                  |
 +----------------------------------------------------+
 
+-- The explicit read type also overrides the hint in the plan and SST reads.
 -- SQLNESS REPLACE (peers.*) REDACTED
-EXPLAIN SELECT j.a AS hinted_bigint
+EXPLAIN SELECT json_get(j, 'a', NULL::DOUBLE) AS explicit_double
 FROM json2_query_respect_type_hint;
 
-+---------------+--------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                             |
-+---------------+--------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                  |
-|               | Projection: json_get(json2_query_respect_type_hint.j, Utf8("$.a"), Int64(NULL)) AS hinted_bigint |
-|               |   TableScan: json2_query_respect_type_hint                                                       |
-|               | ]]                                                                                               |
-| physical_plan | CooperativeExec                                                                                  |
++---------------+----------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                               |
++---------------+----------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                    |
+|               | Projection: json_get(json2_query_respect_type_hint.j, Utf8("a"), Float64(NULL)) AS explicit_double |
+|               |   TableScan: json2_query_respect_type_hint                                                         |
+|               | ]]                                                                                                 |
+| physical_plan | CooperativeExec                                                                                    |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                  |
-+---------------+--------------------------------------------------------------------------------------------------+
+|               |                                                                                                    |
++---------------+----------------------------------------------------------------------------------------------------+
+
+SELECT json_get(j, 'a') AS hinted_bigint,
+       json_get(j, 'a', NULL::DOUBLE) AS explicit_double,
+       arrow_typeof(json_get(j, 'a')) AS hinted_type,
+       arrow_typeof(json_get(j, 'a', NULL::DOUBLE)) AS explicit_type
+FROM json2_query_respect_type_hint
+ORDER BY ts;
+
++------------------+--------------------+-------------+---------------+
+| hinted_bigint    | explicit_double    | hinted_type | explicit_type |
++------------------+--------------------+-------------+---------------+
+| 9007199254740993 | 9007199254740992.0 | Int64       | Float64       |
+| 7                | 7.0                | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
+|                  |                    | Int64       | Float64       |
++------------------+--------------------+-------------+---------------+
+
+-- SQLNESS REPLACE (peers.*) REDACTED
+EXPLAIN SELECT j.a AS hinted_bigint, json_get(j, 'a') AS direct_bigint
+FROM json2_query_respect_type_hint;
+
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                      |
+|               | Projection: json_get(json2_query_respect_type_hint.j, Utf8("$.a"), Int64(NULL)) AS hinted_bigint, json_get(json2_query_respect_type_hint.j, Utf8("a"), Int64(NULL)) AS direct_bigint |
+|               |   TableScan: json2_query_respect_type_hint                                                                                                                                           |
+|               | ]]                                                                                                                                                                                   |
+| physical_plan | CooperativeExec                                                                                                                                                                      |
+|               |   MergeScanExec: REDACTED
+|               |                                                                                                                                                                                      |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Uncast paths use their JSON2 type hints.
 SELECT
     j.a AS hinted_bigint,
-    j.b AS hinted_string
+    json_get(j, 'a') AS direct_bigint,
+    json_get(j, '$.a') AS rooted_bigint,
+    j.b AS hinted_string,
+    json_get(j, 'b') AS direct_string
 FROM json2_query_respect_type_hint
 ORDER BY ts;
 
-+------------------+---------------+
-| hinted_bigint    | hinted_string |
-+------------------+---------------+
-| 9007199254740993 | three         |
-| 7                | 7             |
-+------------------+---------------+
++------------------+------------------+------------------+---------------+---------------+
+| hinted_bigint    | direct_bigint    | rooted_bigint    | hinted_string | direct_string |
++------------------+------------------+------------------+---------------+---------------+
+| 9007199254740993 | 9007199254740993 | 9007199254740993 | three         | three         |
+| 7                | 7                | 7                | 7             | 7             |
+|                  |                  |                  |               |               |
+|                  |                  |                  |               |               |
++------------------+------------------+------------------+---------------+---------------+
+
+-- The SST read keeps the same result types as the memtable read.
+SELECT arrow_typeof(j.a) AS dotted_type, arrow_typeof(json_get(j, 'a')) AS direct_type,
+       arrow_typeof(j.b) AS dotted_string_type, arrow_typeof(json_get(j, 'b')) AS direct_string_type
+FROM json2_query_respect_type_hint LIMIT 1;
+
++-------------+-------------+--------------------+--------------------+
+| dotted_type | direct_type | dotted_string_type | direct_string_type |
++-------------+-------------+--------------------+--------------------+
+| Int64       | Int64       | Utf8View           | Utf8View           |
++-------------+-------------+--------------------+--------------------+
 
 -- A JSON2 type hint takes precedence over an explicit SQL cast for the native
 -- read type.
 -- SQLNESS REPLACE (peers.*) REDACTED
-EXPLAIN SELECT j.a::STRING
+EXPLAIN SELECT j.a::STRING, json_get(j, 'a')::STRING
 FROM json2_query_respect_type_hint;
 
-+---------------+-----------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                          |
-+---------------+-----------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                               |
-|               | Projection: CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.a"), Int64(NULL)) AS Utf8) |
-|               |   TableScan: json2_query_respect_type_hint                                                    |
-|               | ]]                                                                                            |
-| physical_plan | CooperativeExec                                                                               |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                           |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                |
+|               | Projection: CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.a"), Int64(NULL)) AS Utf8), CAST(json_get(json2_query_respect_type_hint.j, Utf8("a"), Int64(NULL)) AS Utf8) |
+|               |   TableScan: json2_query_respect_type_hint                                                                                                                                     |
+|               | ]]                                                                                                                                                                             |
+| physical_plan | CooperativeExec                                                                                                                                                                |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                               |
-+---------------+-----------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- An explicit CAST changes the expression result type.
 SELECT
-    j.a::STRING AS cast_string
+    j.a::STRING AS cast_string,
+    json_get(j, 'a')::STRING AS direct_cast_string,
+    arrow_typeof(json_get(j, 'a')::STRING) AS cast_type
 FROM json2_query_respect_type_hint
 ORDER BY ts;
 
-+------------------+
-| cast_string      |
-+------------------+
-| 9007199254740993 |
-| 7                |
-+------------------+
++------------------+--------------------+-----------+
+| cast_string      | direct_cast_string | cast_type |
++------------------+--------------------+-----------+
+| 9007199254740993 | 9007199254740993   | Utf8      |
+| 7                | 7                  | Utf8      |
+|                  |                    | Utf8      |
+|                  |                    | Utf8      |
++------------------+--------------------+-----------+
 
 -- A JSON2 type hint takes precedence over expression-context inference.
 -- SQLNESS REPLACE (peers.*) REDACTED
-EXPLAIN SELECT coalesce(j.b, exponent)
+EXPLAIN SELECT coalesce(j.b, exponent), coalesce(json_get(j, 'b'), exponent)
 FROM json2_query_respect_type_hint;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                                                                                                                                            |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                 |
-|               | Projection: CASE WHEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) IS NOT NULL THEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) ELSE json2_query_respect_type_hint.exponent END AS coalesce(json_get(json2_query_respect_type_hint.j,Utf8("$.b"),Utf8View(NULL)),json2_query_respect_type_hint.exponent) |
-|               |   TableScan: json2_query_respect_type_hint                                                                                                                                                                                                                                                                                                                                                      |
-|               | ]]                                                                                                                                                                                                                                                                                                                                                                                              |
-| physical_plan | CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                 |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+|               | Projection: CASE WHEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) IS NOT NULL THEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("$.b"), Utf8View(NULL)) AS Float64) ELSE json2_query_respect_type_hint.exponent END AS coalesce(json_get(json2_query_respect_type_hint.j,Utf8("$.b"),Utf8View(NULL)),json2_query_respect_type_hint.exponent), CASE WHEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("b"), Utf8View(NULL)) AS Float64) IS NOT NULL THEN CAST(json_get(json2_query_respect_type_hint.j, Utf8("b"), Utf8View(NULL)) AS Float64) ELSE json2_query_respect_type_hint.exponent END AS coalesce(json_get(json2_query_respect_type_hint.j,Utf8("b"),Utf8View(NULL)),json2_query_respect_type_hint.exponent) |
+|               |   TableScan: json2_query_respect_type_hint                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+|               | ]]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| physical_plan | CooperativeExec                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                                                                                                                                 |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
++---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- Hint injection precedes scalar, aggregate, window and binary-expression inference.
+SELECT abs(j.a) AS dotted_abs, abs(json_get(j, 'a')) AS direct_abs,
+       j.a + 1 AS dotted_plus, json_get(j, 'a') + 1 AS direct_plus
+FROM json2_query_respect_type_hint ORDER BY ts;
+
++------------------+------------------+------------------+------------------+
+| dotted_abs       | direct_abs       | dotted_plus      | direct_plus      |
++------------------+------------------+------------------+------------------+
+| 9007199254740993 | 9007199254740993 | 9007199254740994 | 9007199254740994 |
+| 7                | 7                | 8                | 8                |
+|                  |                  |                  |                  |
+|                  |                  |                  |                  |
++------------------+------------------+------------------+------------------+
+
+SELECT sum(j.a) AS dotted_sum, sum(json_get(j, 'a')) AS direct_sum
+FROM json2_query_respect_type_hint;
+
++------------------+------------------+
+| dotted_sum       | direct_sum       |
++------------------+------------------+
+| 9007199254741000 | 9007199254741000 |
++------------------+------------------+
+
+SELECT sum(j.a) OVER (ORDER BY ts) AS dotted_sum,
+       sum(json_get(j, 'a')) OVER (ORDER BY ts) AS direct_sum
+FROM json2_query_respect_type_hint ORDER BY ts;
+
++------------------+------------------+
+| dotted_sum       | direct_sum       |
++------------------+------------------+
+| 9007199254740993 | 9007199254740993 |
+| 9007199254741000 | 9007199254741000 |
+| 9007199254741000 | 9007199254741000 |
+| 9007199254741000 | 9007199254741000 |
++------------------+------------------+
 
 -- A STRING type hint is respected, so numeric arithmetic requires an explicit cast.
 SELECT j.b + exponent
+FROM json2_query_respect_type_hint;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Utf8View + Float64 to valid types
+
+SELECT json_get(j, 'b') + exponent
 FROM json2_query_respect_type_hint;
 
 Error: 3000(PlanQuery), Failed to plan SQL: Error during planning: Cannot coerce arithmetic expression Utf8View + Float64 to valid types
@@ -116,7 +244,88 @@ FROM json2_query_respect_type_hint;
 
 Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'three' to value of Float64 type
 
+SELECT json_get(j, 'b')::DOUBLE + exponent
+FROM json2_query_respect_type_hint;
+
+Error: 3001(EngineExecuteQuery), Cast error: Cannot cast string 'three' to value of Float64 type
+
+-- Resolve the input field through table aliases and a renamed derived-table column.
+SELECT t.j.a AS dotted, json_get(t.j, 'a') AS direct
+FROM json2_query_respect_type_hint AS t ORDER BY t.ts;
+
++------------------+------------------+
+| dotted           | direct           |
++------------------+------------------+
+| 9007199254740993 | 9007199254740993 |
+| 7                | 7                |
+|                  |                  |
+|                  |                  |
++------------------+------------------+
+
+SELECT q.payload.a AS dotted, json_get(q.payload, 'a') AS direct
+FROM (SELECT ts, j AS payload FROM json2_query_respect_type_hint) AS q ORDER BY q.ts;
+
++------------------+------------------+
+| dotted           | direct           |
++------------------+------------------+
+| 9007199254740993 | 9007199254740993 |
+| 7                | 7                |
+|                  |                  |
+|                  |                  |
++------------------+------------------+
+
 DROP TABLE json2_query_respect_type_hint;
 
 Affected Rows: 0
+
+CREATE TABLE json2_hint_paths (
+    ts TIMESTAMP TIME INDEX,
+    j JSON2 (nested.a BIGINT, "nested.a" BOOLEAN)
+) WITH (
+    'append_mode' = 'true'
+);
+
+Affected Rows: 0
+
+INSERT INTO json2_hint_paths VALUES
+    (1, '{"nested":{"a":42},"nested.a":true,"unhinted":7}');
+
+Affected Rows: 1
+
+-- Quoted keys are literal names, not nested paths; unhinted paths retain their default type.
+SELECT j.nested.a AS dotted_nested, json_get(j, '$.nested.a') AS direct_nested,
+       j."nested.a" AS dotted_key, json_get(j, '$."nested.a"') AS direct_key,
+       arrow_typeof(json_get(j, 'nested.a')) AS nested_type,
+       arrow_typeof(json_get(j, '$."nested.a"')) AS key_type,
+       arrow_typeof(j.unhinted) AS dotted_unhinted_type,
+       arrow_typeof(json_get(j, 'unhinted')) AS direct_unhinted_type
+FROM json2_hint_paths;
+
++---------------+---------------+------------+------------+-------------+----------+----------------------+----------------------+
+| dotted_nested | direct_nested | dotted_key | direct_key | nested_type | key_type | dotted_unhinted_type | direct_unhinted_type |
++---------------+---------------+------------+------------+-------------+----------+----------------------+----------------------+
+| 42            | 42            | true       | true       | Int64       | Boolean  | Utf8View             | Utf8View             |
++---------------+---------------+------------+------------+-------------+----------+----------------------+----------------------+
+
+DROP TABLE json2_hint_paths;
+
+Affected Rows: 0
+
+-- Hint lookup must defer unqualified JOIN USING columns to DataFusion, even for legacy JSON.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r USING (j);
+
++-------+
+| value |
++-------+
+| x     |
++-------+
+
+-- Without USING, the unqualified column is genuinely ambiguous and must still fail.
+SELECT json_get(j, 'a') AS value
+FROM (SELECT parse_json('{"a":"x"}') AS j) AS l
+JOIN (SELECT parse_json('{"a":"x"}') AS j) AS r ON l.j = r.j;
+
+Error: 3000(PlanQuery), Failed to plan SQL: Ambiguous reference to unqualified field j
 
