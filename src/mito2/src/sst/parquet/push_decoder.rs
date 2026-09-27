@@ -59,6 +59,9 @@ pub struct SstParquetRangeFetcher {
     fetch_metrics: Option<ParquetFetchMetrics>,
     /// Column chunks of this row group fetched ahead of the decoder.
     prefetched: Option<PrefetchSlot>,
+    /// Returns every range in its own buffer instead of slices of cached fragments or of
+    /// merged reads, so holding the result holds nothing else.
+    copy_output: bool,
 }
 
 /// Number of fetches served from prefetched data.
@@ -159,13 +162,11 @@ fn range_bytes(ranges: &[Range<u64>]) -> u64 {
 
 /// Returns the peak memory of prefetching `ranges`, the budget [spawn_prefetch] needs.
 ///
-/// Fetching reads ranges less than a merge gap apart as one buffer, and the returned slices
-/// would keep the gaps alive. The prefetch copies the ranges out in that case, holding both
-/// until the fetched buffers are dropped.
+/// A prefetch copies each range into its own buffer. Until then it holds the reads of the
+/// ranges missing from the page cache, which cover the gaps between ranges less than a merge
+/// gap apart. Page cache memory the copies are built from stays charged to the page cache.
 pub(crate) fn prefetch_charge(ranges: &[Range<u64>]) -> u64 {
-    let fetched = fetched_bytes(ranges);
-    let kept = range_bytes(ranges);
-    if fetched > kept { fetched + kept } else { kept }
+    fetched_bytes(ranges) + range_bytes(ranges)
 }
 
 /// Spawns a fetch of `ranges` that holds `budget` as long as the fetched bytes live.
@@ -173,11 +174,12 @@ pub(crate) fn prefetch_charge(ranges: &[Range<u64>]) -> u64 {
 /// `budget` must cover [prefetch_charge] of `ranges`. It shrinks to the bytes kept once the
 /// ranges are fetched.
 pub(crate) fn spawn_prefetch(
-    fetcher: SstParquetRangeFetcher,
+    mut fetcher: SstParquetRangeFetcher,
     ranges: Vec<Range<u64>>,
     mut budget: PrefetchBudget,
     compaction: bool,
 ) -> PrefetchSlot {
+    fetcher.copy_output = true;
     let task = async move {
         let data = match fetcher.fetch_bytes_with_cache(ranges.clone()).await {
             Ok(data) => data,
@@ -187,18 +189,7 @@ pub(crate) fn spawn_prefetch(
                 return None;
             }
         };
-        let kept = range_bytes(&ranges);
-        let data = if fetched_bytes(&ranges) > kept {
-            let copied = data
-                .iter()
-                .map(|bytes| Bytes::copy_from_slice(bytes))
-                .collect();
-            drop(data);
-            budget.shrink_to(kept);
-            copied
-        } else {
-            data
-        };
+        budget.shrink_to(range_bytes(&ranges));
         Some(Arc::new(PrefetchedRowGroup {
             parts: ranges
                 .into_iter()
@@ -235,6 +226,7 @@ impl SstParquetRangeFetcher {
             row_group_idx,
             fetch_metrics,
             prefetched: None,
+            copy_output: false,
         }
     }
 
@@ -296,7 +288,7 @@ impl SstParquetRangeFetcher {
             {
                 metrics.data.lock().unwrap().total_fetch_elapsed += start.elapsed();
             }
-            return assemble_ranges(&ranges, lookup.cached_parts, &[]);
+            return assemble_ranges(&ranges, lookup.cached_parts, &[], self.copy_output);
         }
 
         let missing_ranges = page_lookup
@@ -396,9 +388,20 @@ impl SstParquetRangeFetcher {
                 .zip(fetched_pages)
                 .map(|(range, bytes)| PageRangePart { range, bytes })
                 .collect::<Vec<_>>();
-            return assemble_ranges(&ranges, lookup.cached_parts, &fetched_parts);
+            return assemble_ranges(
+                &ranges,
+                lookup.cached_parts,
+                &fetched_parts,
+                self.copy_output,
+            );
         }
 
+        if self.copy_output {
+            return Ok(fetched_pages
+                .iter()
+                .map(|bytes| Bytes::copy_from_slice(bytes))
+                .collect());
+        }
         Ok(fetched_pages)
     }
 }
@@ -407,6 +410,7 @@ fn assemble_ranges(
     ranges: &[Range<u64>],
     cached_parts: Vec<Vec<PageRangePart>>,
     fetched_parts: &[PageRangePart],
+    copy_output: bool,
 ) -> Result<Vec<Bytes>> {
     ensure!(
         ranges.len() == cached_parts.len(),
@@ -428,7 +432,7 @@ fn assemble_ranges(
                     .iter()
                     .filter_map(|part| overlapping_part(range, part)),
             );
-            assemble_range(range, parts)
+            assemble_range(range, parts, copy_output)
         })
         .collect()
 }
@@ -448,13 +452,17 @@ fn overlapping_part(range: &Range<u64>, part: &PageRangePart) -> Option<PageRang
     })
 }
 
-fn assemble_range(range: &Range<u64>, mut parts: Vec<PageRangePart>) -> Result<Bytes> {
+fn assemble_range(
+    range: &Range<u64>,
+    mut parts: Vec<PageRangePart>,
+    copy_output: bool,
+) -> Result<Bytes> {
     if range.start >= range.end {
         return Ok(Bytes::new());
     }
 
     parts.sort_unstable_by_key(|part| part.range.start);
-    if parts.len() == 1 && parts[0].range == *range {
+    if !copy_output && parts.len() == 1 && parts[0].range == *range {
         return Ok(parts.pop().unwrap().bytes);
     }
 
@@ -540,6 +548,74 @@ pub fn build_sst_parquet_record_batch_stream(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn test_prefetch_copies_ranges_out_of_cached_fragments() {
+        use object_store::services::Memory;
+        use store_api::storage::{FileId, RegionId};
+
+        use crate::cache::CacheManager;
+
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let file: Vec<u8> = (0..8192).map(|v| v as u8).collect();
+        object_store.write("sst", file.clone()).await.unwrap();
+        let region_file_id = RegionFileId::new(RegionId::new(1, 1), FileId::random());
+        let cache_strategy = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder().page_cache_size(1 << 20).build(),
+        ));
+        cache_strategy.put_page_ranges(
+            region_file_id.file_id(),
+            0,
+            std::slice::from_ref(&(0..4096)),
+            &[Bytes::copy_from_slice(&file[..4096])],
+        );
+        let cached = cache_strategy
+            .get_page_ranges(
+                region_file_id.file_id(),
+                0,
+                std::slice::from_ref(&(0..4096)),
+            )
+            .unwrap()
+            .cached_parts
+            .remove(0)
+            .remove(0)
+            .bytes;
+
+        // One range served whole by a cached fragment, one read from the store.
+        let ranges = vec![0..4096, 5000..6000];
+        let charge = prefetch_charge(&ranges);
+        let budget = Arc::new(tokio::sync::Semaphore::new(100));
+        let fetcher = SstParquetRangeFetcher::new(
+            region_file_id,
+            "sst".to_string(),
+            object_store,
+            cache_strategy,
+            0,
+            None,
+        );
+        let prefetched = spawn_prefetch(
+            fetcher,
+            ranges,
+            PrefetchBudget::new(
+                budget
+                    .clone()
+                    .try_acquire_many_owned(charge.div_ceil(PREFETCH_PERMIT_BYTES) as u32)
+                    .unwrap(),
+                None,
+            ),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let parts = &prefetched.parts;
+        assert_eq!(&file[..4096], &parts[0].bytes[..]);
+        assert_eq!(&file[5000..6000], &parts[1].bytes[..]);
+        let cached_allocation = cached.as_ptr_range();
+        assert!(!cached_allocation.contains(&parts[0].bytes.as_ptr()));
+        // 5 KiB kept, 4096 + 1000 bytes rounded up.
+        assert_eq!(95, budget.available_permits());
+    }
+
     #[test]
     fn test_prefetched_row_group_serves_only_covered_ranges() {
         let permit = Arc::new(tokio::sync::Semaphore::new(1))
@@ -588,6 +664,7 @@ mod tests {
             std::slice::from_ref(&requested),
             cached_parts,
             &fetched_parts,
+            false,
         )
         .unwrap();
         assert_eq!(1, output.len());
@@ -604,7 +681,8 @@ mod tests {
         }]];
 
         let requested = 10..16;
-        let output = assemble_ranges(std::slice::from_ref(&requested), cached_parts, &[]).unwrap();
+        let output =
+            assemble_ranges(std::slice::from_ref(&requested), cached_parts, &[], false).unwrap();
         assert_eq!(bytes, output[0]);
     }
 
@@ -615,7 +693,7 @@ mod tests {
             bytes: Bytes::from_static(b"0123456789"),
         }];
 
-        let output = assemble_range(&(2..5), parts).unwrap();
+        let output = assemble_range(&(2..5), parts, false).unwrap();
         assert_eq!(Bytes::from_static(b"234"), output);
     }
 }

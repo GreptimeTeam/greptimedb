@@ -206,7 +206,7 @@ mod tests {
     use crate::sst::index::{IndexBuildType, Indexer, IndexerBuilder, IndexerBuilderImpl};
     use crate::sst::parquet::flat_format::FlatWriteFormat;
     use crate::sst::parquet::metadata::extract_primary_key_range;
-    use crate::sst::parquet::push_decoder::PrefetchBudget;
+    use crate::sst::parquet::push_decoder::{PrefetchBudget, prefetch_charge};
     use crate::sst::parquet::reader::{
         ParquetReader, ParquetReaderBuilder, PrefetchColumns, ReaderMetrics,
     };
@@ -580,40 +580,51 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let budget = Arc::new(tokio::sync::Semaphore::new(100));
+        let budget = Arc::new(tokio::sync::Semaphore::new(1000));
         let tracker = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
 
         let reader_builder = context.reader_builder();
         let start = |row_group_idx| {
-            reader_builder.prefetch(
+            let ranges = reader_builder.prefetch_ranges(row_group_idx, None, PrefetchColumns::Scan);
+            let kept: u64 = ranges.iter().map(|range| range.end - range.start).sum();
+            let charge = prefetch_charge(&ranges);
+            let slot = reader_builder.prefetch(
                 row_group_idx,
-                reader_builder.prefetch_ranges(row_group_idx, None, PrefetchColumns::Scan),
+                ranges,
                 PrefetchBudget::new(
-                    budget.clone().try_acquire_many_owned(10).unwrap(),
-                    tracker.try_reserve_optional(1024),
+                    budget
+                        .clone()
+                        .try_acquire_many_owned(charge.div_ceil(1024) as u32)
+                        .unwrap(),
+                    tracker.try_reserve_optional(charge as usize),
                 ),
                 false,
-            )
+            );
+            (slot, kept)
         };
-        let slot = start(1);
+        let (slot, kept) = start(1);
         let prefetched = slot.clone().await;
         assert!(prefetched.is_some());
         drop(prefetched);
         // Fetched bytes keep their budget until the reader drops them.
-        assert_eq!(90, budget.available_permits());
-        assert_eq!(1024, tracker.current());
+        assert_eq!(
+            1000 - kept.div_ceil(1024) as usize,
+            budget.available_permits()
+        );
+        // The reservation keeps whole kilobytes.
+        assert!((kept..=kept.next_multiple_of(1024)).contains(&(tracker.current() as u64)));
         drop(slot);
-        assert_eq!(100, budget.available_permits());
+        assert_eq!(1000, budget.available_permits());
         assert_eq!(0, tracker.current());
 
         // Dropping the prefetch aborts a fetch stuck on storage and returns its budget.
         block.store(true, Ordering::Relaxed);
-        let slot = start(2);
+        let (slot, _) = start(2);
         tokio::task::yield_now().await;
-        assert_eq!(90, budget.available_permits());
+        assert!(budget.available_permits() < 1000);
         drop(slot);
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while budget.available_permits() != 100 || tracker.current() != 0 {
+            while budget.available_permits() != 1000 || tracker.current() != 0 {
                 tokio::task::yield_now().await;
             }
         })
@@ -710,8 +721,6 @@ mod tests {
     async fn test_prefetch_budget_shrinks_to_the_pages_kept() {
         use futures::TryStreamExt;
         use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
-
-        use crate::sst::parquet::push_decoder::prefetch_charge;
 
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();
