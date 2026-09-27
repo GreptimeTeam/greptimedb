@@ -1666,6 +1666,10 @@ impl ScanInput {
                             // The receiver is gone when the query is cancelled or finishes early,
                             // so stop reading the source.
                             if sender.send(Ok(batch)).await.is_err() {
+                                debug!(
+                                    "Stop parallel scan task, receiver dropped, region_id: {}",
+                                    region_id
+                                );
                                 break;
                             }
                         }
