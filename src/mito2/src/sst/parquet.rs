@@ -707,6 +707,93 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_prefetch_budget_shrinks_to_the_pages_kept() {
+        use futures::TryStreamExt;
+        use parquet::arrow::arrow_reader::{RowSelection, RowSelector};
+
+        use crate::sst::parquet::push_decoder::prefetch_charge;
+
+        let mut env = TestEnv::new().await;
+        let object_store = env.init_object_store_manager();
+        let handle = sst_file_handle(0, 1000);
+        let metadata = Arc::new(sst_region_metadata());
+        // One row group of three data pages per column (20k rows per page by default).
+        let source = new_flat_source_from_record_batches(vec![new_record_batch_by_range(
+            &["a", "d"],
+            0,
+            60000,
+        )]);
+        let write_opts = WriteOptions {
+            row_group_size: 60000,
+            ..Default::default()
+        };
+        let mut metrics = Metrics::new(WriteType::Flush);
+        let mut writer = ParquetWriter::new_with_object_store(
+            object_store.clone(),
+            metadata,
+            IndexConfig::default(),
+            NoopIndexBuilder,
+            FixedPathProvider {
+                region_file_id: handle.file_id(),
+            },
+            &mut metrics,
+        )
+        .await;
+        writer
+            .write_all_flat_as_primary_key(source, None, &write_opts)
+            .await
+            .unwrap();
+        let (context, _) =
+            ParquetReaderBuilder::new(FILE_DIR.to_string(), PathType::Bare, handle, object_store)
+                .page_index_policy(PageIndexPolicy::Required)
+                .build_reader_input(&mut ReaderMetrics::default())
+                .await
+                .unwrap()
+                .unwrap();
+        let reader_builder = context.reader_builder();
+        // The first and the last page of each column: their fetch also reads the page between.
+        let selection = RowSelection::from(vec![
+            RowSelector::select(1000),
+            RowSelector::skip(49000),
+            RowSelector::select(1000),
+            RowSelector::skip(9000),
+        ]);
+        let ranges = reader_builder.prefetch_ranges(0, Some(&selection), PrefetchColumns::Scan);
+        let kept: u64 = ranges.iter().map(|range| range.end - range.start).sum();
+        let charge = prefetch_charge(&ranges);
+        assert!(charge > 2 * kept);
+
+        let total = 100_000;
+        let budget = Arc::new(tokio::sync::Semaphore::new(total));
+        let tracker = QueryMemoryTracker::builder(0, OnExhaustedPolicy::Fail).build();
+        let slot = reader_builder.prefetch(
+            0,
+            ranges,
+            PrefetchBudget::new(
+                budget
+                    .clone()
+                    .try_acquire_many_owned(charge.div_ceil(1024) as u32)
+                    .unwrap(),
+                tracker.try_reserve_optional(charge as usize),
+            ),
+            false,
+        );
+        assert!(slot.clone().await.is_some());
+        assert_eq!(
+            total - kept.div_ceil(1024) as usize,
+            budget.available_permits()
+        );
+        assert_eq!(kept.next_multiple_of(1024) as usize, tracker.current());
+
+        let stream = reader_builder
+            .build(context.build_context(0, Some(selection), None, Some(slot)))
+            .await
+            .unwrap();
+        let batches = stream.try_collect::<Vec<_>>().await.unwrap();
+        assert_eq!(2000, batches.iter().map(|b| b.num_rows()).sum::<usize>());
+    }
+
+    #[tokio::test]
     async fn test_read_with_cache() {
         let mut env = TestEnv::new().await;
         let object_store = env.init_object_store_manager();

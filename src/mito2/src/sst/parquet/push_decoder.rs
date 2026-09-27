@@ -36,7 +36,7 @@ use crate::cache::{CacheStrategy, PageRangePart};
 use crate::error::{OpenDalSnafu, ReadParquetSnafu, Result, UnexpectedSnafu};
 use crate::metrics::{READ_STAGE_ELAPSED, READ_STAGE_FETCH_PAGES};
 use crate::sst::file::RegionFileId;
-use crate::sst::parquet::helper::fetch_byte_ranges;
+use crate::sst::parquet::helper::{fetch_byte_ranges, fetched_bytes};
 use crate::sst::parquet::row_group::{ParquetFetchMetrics, compute_total_range_size};
 
 /// Fetches parquet byte ranges through Greptime's cache hierarchy.
@@ -78,11 +78,14 @@ pub(crate) struct PrefetchedRowGroup {
     _budget: PrefetchBudget,
 }
 
+/// Bytes per permit of a readahead budget semaphore.
+pub(crate) const PREFETCH_PERMIT_BYTES: u64 = 1024;
+
 /// Memory a prefetch holds while its bytes are alive: the readahead budget of the scan and,
 /// for queries, a reservation from the engine's scan memory limit.
 pub(crate) struct PrefetchBudget {
-    _permit: OwnedSemaphorePermit,
-    _reservation: Option<OptionalReservation>,
+    permit: OwnedSemaphorePermit,
+    reservation: Option<OptionalReservation>,
 }
 
 impl PrefetchBudget {
@@ -91,8 +94,22 @@ impl PrefetchBudget {
         reservation: Option<OptionalReservation>,
     ) -> Self {
         Self {
-            _permit: permit,
-            _reservation: reservation,
+            permit,
+            reservation,
+        }
+    }
+
+    /// Returns the budget above `bytes` to its owners.
+    fn shrink_to(&mut self, bytes: u64) {
+        let keep = bytes.div_ceil(PREFETCH_PERMIT_BYTES).max(1) as usize;
+        if let Some(excess) = self
+            .permit
+            .split(self.permit.num_permits().saturating_sub(keep))
+        {
+            drop(excess);
+        }
+        if let Some(reservation) = &mut self.reservation {
+            reservation.shrink_to(bytes as usize);
         }
     }
 }
@@ -136,11 +153,29 @@ impl<T> std::future::Future for AbortOnDrop<T> {
     }
 }
 
+fn range_bytes(ranges: &[Range<u64>]) -> u64 {
+    ranges.iter().map(|range| range.end - range.start).sum()
+}
+
+/// Returns the peak memory of prefetching `ranges`, the budget [spawn_prefetch] needs.
+///
+/// Fetching reads ranges less than a merge gap apart as one buffer, and the returned slices
+/// would keep the gaps alive. The prefetch copies the ranges out in that case, holding both
+/// until the fetched buffers are dropped.
+pub(crate) fn prefetch_charge(ranges: &[Range<u64>]) -> u64 {
+    let fetched = fetched_bytes(ranges);
+    let kept = range_bytes(ranges);
+    if fetched > kept { fetched + kept } else { kept }
+}
+
 /// Spawns a fetch of `ranges` that holds `budget` as long as the fetched bytes live.
+///
+/// `budget` must cover [prefetch_charge] of `ranges`. It shrinks to the bytes kept once the
+/// ranges are fetched.
 pub(crate) fn spawn_prefetch(
     fetcher: SstParquetRangeFetcher,
     ranges: Vec<Range<u64>>,
-    budget: PrefetchBudget,
+    mut budget: PrefetchBudget,
     compaction: bool,
 ) -> PrefetchSlot {
     let task = async move {
@@ -151,6 +186,18 @@ pub(crate) fn spawn_prefetch(
                 common_telemetry::debug!("Failed to prefetch row group: {e}");
                 return None;
             }
+        };
+        let kept = range_bytes(&ranges);
+        let data = if fetched_bytes(&ranges) > kept {
+            let copied = data
+                .iter()
+                .map(|bytes| Bytes::copy_from_slice(bytes))
+                .collect();
+            drop(data);
+            budget.shrink_to(kept);
+            copied
+        } else {
+            data
         };
         Some(Arc::new(PrefetchedRowGroup {
             parts: ranges

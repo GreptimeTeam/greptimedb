@@ -34,7 +34,9 @@ use crate::read::range::{FileRangeBuilder, RowGroupIndex};
 use crate::read::scan_region::{ScanInput, StreamContext};
 use crate::read::scan_util::{FileScanMetrics, PartitionMetrics, new_filter_metrics};
 use crate::sst::parquet::file_range::{FileRange, PreFilterMode};
-use crate::sst::parquet::push_decoder::{PrefetchBudget, PrefetchSlot};
+use crate::sst::parquet::push_decoder::{
+    PREFETCH_PERMIT_BYTES, PrefetchBudget, PrefetchSlot, prefetch_charge,
+};
 use crate::sst::parquet::reader::{PrefetchColumns, ReaderMetrics};
 
 /// Number of files to pre-fetch ahead of the current position.
@@ -45,8 +47,6 @@ const READAHEAD_ROW_GROUPS: usize = 8;
 /// Maximum bytes fetched ahead of the readers of one partition, counted until the fetched
 /// bytes are dropped.
 const READAHEAD_BYTES: usize = 16 * 1024 * 1024;
-/// Unit of the readahead budget semaphore.
-const READAHEAD_PERMIT_BYTES: usize = 1024;
 
 /// Starts row group prefetches within the readahead budget of a scan.
 #[derive(Clone)]
@@ -71,7 +71,9 @@ impl Readahead {
     /// Creates a readahead for a scan whose readers read `columns` first.
     pub(crate) fn new(input: &ScanInput, columns: PrefetchColumns) -> Self {
         Self {
-            budget: Arc::new(Semaphore::new(READAHEAD_BYTES / READAHEAD_PERMIT_BYTES)),
+            budget: Arc::new(Semaphore::new(
+                READAHEAD_BYTES / PREFETCH_PERMIT_BYTES as usize,
+            )),
             memory: input.scan_memory_tracker.clone(),
             columns,
             compaction: input.compaction,
@@ -83,9 +85,8 @@ impl Readahead {
         let Some(ranges) = range.prefetch_ranges(self.columns) else {
             return ReadaheadStart::Skipped;
         };
-        let bytes: u64 = ranges.iter().map(|range| range.end - range.start).sum();
-        let Ok(permits) = u32::try_from((bytes as usize).div_ceil(READAHEAD_PERMIT_BYTES).max(1))
-        else {
+        let bytes = prefetch_charge(&ranges);
+        let Ok(permits) = u32::try_from(bytes.div_ceil(PREFETCH_PERMIT_BYTES).max(1)) else {
             return ReadaheadStart::Skipped;
         };
         let Ok(permit) = self.budget.clone().try_acquire_many_owned(permits) else {

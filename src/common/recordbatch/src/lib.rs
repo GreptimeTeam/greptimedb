@@ -30,7 +30,7 @@ use arc_swap::ArcSwapOption;
 use common_base::readable_size::ReadableSize;
 use common_error::ext::BoxedError;
 use common_memory_manager::{
-    MemoryGuard, MemoryManager, MemoryMetrics, OnExhaustedPolicy, PermitGranularity,
+    MemoryGuard, MemoryManager, MemoryMetrics, NoOpMetrics, OnExhaustedPolicy, PermitGranularity,
 };
 use common_telemetry::tracing::Span;
 pub use datafusion::physical_plan::SendableRecordBatchStream as DfSendableRecordBatchStream;
@@ -601,6 +601,8 @@ impl<S: Stream<Item = Result<RecordBatch>> + Unpin> Stream for RecordBatchStream
 #[derive(Clone)]
 pub struct QueryMemoryTracker {
     manager: MemoryManager<CallbackMemoryMetrics>,
+    /// Caps the memory of optional reservations at half of the limit. `None` when unlimited.
+    optional_quota: Option<MemoryManager<NoOpMetrics>>,
     metrics: CallbackMemoryMetrics,
     on_exhausted_policy: OnExhaustedPolicy,
 }
@@ -650,18 +652,21 @@ impl QueryMemoryTracker {
     }
 
     /// Reserves `bytes` for optional work outside the tracked streams, such as reading data
-    /// ahead of a scan. Returns `None` instead of waiting when the usage including `bytes`
-    /// would exceed half of the limit, so optional holders never take the quota query
-    /// streams need. Unlimited trackers always succeed and only record the usage.
+    /// ahead of a scan. Returns `None` instead of waiting. Optional reservations together hold
+    /// at most half of the limit, so they never take the quota query streams need. Unlimited
+    /// trackers always succeed and only record the usage.
     pub fn try_reserve_optional(&self, bytes: usize) -> Option<OptionalReservation> {
-        let limit = self.limit();
-        // Checked before acquiring so a refusal is not reported as exhaustion.
-        if limit > 0 && self.current().saturating_add(bytes) > limit / 2 {
+        let quota = match &self.optional_quota {
+            Some(quota) => Some(quota.try_acquire(bytes as u64)?),
+            None => None,
+        };
+        // Checked first so a refusal is not normally reported as exhaustion; the acquire
+        // below is what enforces the limit.
+        if self.manager.available_bytes() < bytes as u64 {
             return None;
         }
-        self.manager
-            .try_acquire(bytes as u64)
-            .map(|guard| OptionalReservation { _guard: guard })
+        let guard = self.manager.try_acquire(bytes as u64)?;
+        Some(OptionalReservation { guard, quota })
     }
 
     fn reject_error(
@@ -689,7 +694,24 @@ impl QueryMemoryTracker {
 
 /// Memory reserved by [`QueryMemoryTracker::try_reserve_optional`], released on drop.
 pub struct OptionalReservation {
-    _guard: MemoryGuard<CallbackMemoryMetrics>,
+    guard: MemoryGuard<CallbackMemoryMetrics>,
+    quota: Option<MemoryGuard<NoOpMetrics>>,
+}
+
+impl OptionalReservation {
+    /// Returns the reserved memory above `bytes`, rounded up to a kilobyte, to the tracker.
+    pub fn shrink_to(&mut self, bytes: usize) {
+        let keep = (bytes as u64).next_multiple_of(1024);
+        release_down_to(&mut self.guard, keep);
+        if let Some(quota) = &mut self.quota {
+            release_down_to(quota, keep);
+        }
+    }
+}
+
+fn release_down_to<M: MemoryMetrics>(guard: &mut MemoryGuard<M>, keep: u64) {
+    // Limited guards grant whole kilobytes and `keep` is one too, so the release is exact.
+    guard.release_partial(guard.granted_bytes().saturating_sub(keep));
 }
 
 /// Builder for constructing a [`QueryMemoryTracker`] with optional callbacks.
@@ -748,8 +770,18 @@ impl QueryMemoryTrackerBuilder {
             metrics.clone(),
         );
 
+        // A zero limit would make the quota unlimited.
+        let optional_quota = (self.limit > 0).then(|| {
+            MemoryManager::with_granularity(
+                (self.limit as u64 / 2).max(1),
+                PermitGranularity::Kilobyte,
+                NoOpMetrics,
+            )
+        });
+
         QueryMemoryTracker {
             manager,
+            optional_quota,
             metrics,
             on_exhausted_policy: self.on_exhausted_policy,
         }
@@ -1366,7 +1398,7 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_reservation_leaves_half_the_limit_to_streams() {
+    fn test_optional_reservations_hold_at_most_half_the_limit() {
         let exhausted = Arc::new(AtomicUsize::new(0));
         let exhausted_counter = exhausted.clone();
         let tracker = QueryMemoryTracker::builder(10 * MB, OnExhaustedPolicy::Fail)
@@ -1374,18 +1406,45 @@ mod tests {
                 exhausted_counter.fetch_add(1, Ordering::Relaxed);
             })
             .build();
-        let mut stream = tracker.new_stream_tracker();
-        stream.try_track(2 * MB).unwrap();
 
-        let reserved = tracker.try_reserve_optional(3 * MB).unwrap();
-        assert_eq!(tracker.current(), 5 * MB);
+        let first = tracker.try_reserve_optional(3 * MB).unwrap();
+        let mut second = tracker.try_reserve_optional(2 * MB).unwrap();
         assert!(tracker.try_reserve_optional(1).is_none());
-        assert_eq!(exhausted.load(Ordering::Relaxed), 0);
-
+        let mut stream = tracker.new_stream_tracker();
         stream.try_track(5 * MB).unwrap();
         assert_eq!(tracker.current(), 10 * MB);
-        drop(reserved);
-        assert_eq!(tracker.current(), 7 * MB);
+
+        second.shrink_to(MB + 1);
+        assert_eq!(tracker.current(), 9 * MB + 1024);
+        drop(first);
+        stream.try_track(3 * MB).unwrap();
+        // The optional quota has room, but streams use most of the limit.
+        assert!(tracker.try_reserve_optional(MB).is_none());
+        assert_eq!(exhausted.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_concurrent_optional_reservations_hold_at_most_half_the_limit() {
+        let tracker = QueryMemoryTracker::builder(32 * MB, OnExhaustedPolicy::Fail).build();
+        for _ in 0..1000 {
+            let barrier = Arc::new(std::sync::Barrier::new(8));
+            let handles = (0..8)
+                .map(|_| {
+                    let tracker = tracker.clone();
+                    let barrier = barrier.clone();
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        tracker.try_reserve_optional(16 * MB)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let reservations = handles
+                .into_iter()
+                .filter_map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(1, reservations.len());
+            assert_eq!(16 * MB, tracker.current());
+        }
     }
 
     #[test]
