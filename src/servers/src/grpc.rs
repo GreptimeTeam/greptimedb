@@ -36,6 +36,7 @@ use common_grpc::channel_manager::{
 };
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
+use http::{HeaderName, HeaderValue, Method};
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -48,8 +49,13 @@ use tonic::transport::ServerTlsConfig;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
+use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 
-use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::error::{
+    AlreadyStartedSnafu, InternalSnafu, InvalidHeaderValueSnafu, Result, StartGrpcSnafu,
+    TcpBindSnafu,
+};
+use crate::grpc::memory_limit::MemoryLimiterExtensionService;
 use crate::install_default_crypto_provider;
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
@@ -86,6 +92,18 @@ pub struct GrpcOptions {
     /// The HTTP/2 keep-alive timeout.
     #[serde(with = "humantime_serde")]
     pub http2_keep_alive_timeout: Duration,
+    /// Whether to enable CORS on the gRPC server. Required by gRPC-Web clients
+    /// running in a browser, which send an `OPTIONS` preflight request first.
+    ///
+    /// It is off by default, unlike the HTTP server. `GrpcOptions` is shared by
+    /// every node type, and `serde` cannot tell the public `[grpc]` section
+    /// apart from `[internal_grpc]`, so a default of `true` would also turn CORS
+    /// on for the cluster-internal gRPC listeners (the internal gRPC server,
+    /// datanode and flownode), which do not authenticate their callers.
+    pub enable_cors: bool,
+    /// The origins allowed to access the gRPC server. An empty list allows any
+    /// origin. Only takes effect when `enable_cors` is true.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl GrpcOptions {
@@ -121,6 +139,8 @@ impl GrpcOptions {
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
             tls: self.tls.clone(),
             max_connection_age: self.max_connection_age,
+            enable_cors: self.enable_cors,
+            cors_allowed_origins: self.cors_allowed_origins.clone(),
         }
     }
 }
@@ -154,6 +174,8 @@ impl Default for GrpcOptions {
             max_connection_age: None,
             http2_keep_alive_interval: Duration::from_secs(10),
             http2_keep_alive_timeout: Duration::from_secs(3),
+            enable_cors: false,
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -175,6 +197,8 @@ impl GrpcOptions {
             max_connection_age: None,
             http2_keep_alive_interval: Duration::from_secs(10),
             http2_keep_alive_timeout: Duration::from_secs(3),
+            enable_cors: false,
+            cors_allowed_origins: Vec::new(),
         }
     }
 
@@ -249,6 +273,11 @@ pub struct GrpcServerConfig {
     /// Useful when the server wants to control the reconnection of its clients.
     /// Default to `None`, means infinite.
     pub max_connection_age: Option<Duration>,
+    /// Whether to enable CORS on the gRPC server.
+    pub enable_cors: bool,
+    /// The origins allowed to access the gRPC server. An empty list allows any
+    /// origin.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for GrpcServerConfig {
@@ -258,6 +287,8 @@ impl Default for GrpcServerConfig {
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
             tls: TlsOption::default(),
             max_connection_age: None,
+            enable_cors: false,
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -357,13 +388,50 @@ impl Server for GrpcServer {
             (incoming, addr)
         };
 
-        let metrics_layer = tower::ServiceBuilder::new()
+        let cors_layer = if self.config.enable_cors {
+            Some(
+                CorsLayer::new()
+                    .allow_methods([Method::POST, Method::OPTIONS])
+                    .allow_origin(if self.config.cors_allowed_origins.is_empty() {
+                        AllowOrigin::any()
+                    } else {
+                        AllowOrigin::from(
+                            self.config
+                                .cors_allowed_origins
+                                .iter()
+                                .map(|s| {
+                                    HeaderValue::from_str(s.as_str())
+                                        .context(InvalidHeaderValueSnafu)
+                                })
+                                .collect::<Result<Vec<HeaderValue>>>()?,
+                        )
+                    })
+                    .allow_headers(AllowHeaders::any())
+                    // gRPC-Web reports the call status in trailers, which the
+                    // browser can only read when they are exposed explicitly.
+                    .expose_headers([
+                        HeaderName::from_static("grpc-status"),
+                        HeaderName::from_static("grpc-message"),
+                        HeaderName::from_static("grpc-status-details-bin"),
+                    ]),
+            )
+        } else {
+            info!("gRPC server cross-origin is disabled");
+            None
+        };
+
+        // `tonic::transport::Server::layer` prepends to the layer stack, so the
+        // layer added first ends up outermost. CORS has to stay outside of the
+        // gRPC-Web layer to answer the `OPTIONS` preflight before the request
+        // reaches the gRPC routes.
+        let middleware_layer = tower::ServiceBuilder::new()
             .layer(MetricsMiddlewareLayer)
+            .option_layer(cors_layer)
             .into_inner();
 
         let mut builder = tonic::transport::Server::builder()
             .accept_http1(true)
-            .layer(metrics_layer)
+            .layer(middleware_layer)
             .layer(tonic_web::GrpcWebLayer::new());
 
         if let Some(tls_config) = self.tls_config.clone() {
@@ -423,9 +491,19 @@ impl Server for GrpcServer {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-    use super::{DEFAULT_GRPC_ADDR_PORT, format_server_addr, port_from_bind_addr};
+    use common_runtime::Runtime;
+    use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use super::{
+        DEFAULT_GRPC_ADDR_PORT, GrpcServer, GrpcServerConfig, format_server_addr,
+        port_from_bind_addr,
+    };
+    use crate::grpc::builder::GrpcServerBuilder;
+    use crate::server::Server;
 
     #[test]
     fn test_port_from_bind_addr() {
@@ -450,6 +528,122 @@ mod tests {
         assert_eq!(
             "[::1]:3002",
             format_server_addr(IpAddr::V6(Ipv6Addr::LOCALHOST), 3002)
+        );
+    }
+
+    /// Starts a gRPC server on an ephemeral port. The returned handle owns the
+    /// shutdown sender, so it has to outlive the requests sent to the server.
+    async fn start_test_grpc_server(config: GrpcServerConfig) -> (GrpcServer, SocketAddr) {
+        let runtime = Runtime::builder().build().unwrap();
+        let mut server = GrpcServerBuilder::new(config, runtime).build();
+        server
+            .start(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .unwrap();
+        let addr = server.bind_addr().unwrap();
+        (server, addr)
+    }
+
+    /// Builds the `OPTIONS` preflight request a gRPC-Web client sends before the
+    /// actual call, asking the server whether `origin` may call it.
+    fn build_preflight_request(origin: &str) -> String {
+        format!(
+            "OPTIONS /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Origin: {origin}\r\n\
+             Access-Control-Request-Method: POST\r\n\
+             Access-Control-Request-Headers: content-type,x-grpc-web\r\n\
+             Connection: close\r\n\r\n"
+        )
+    }
+
+    /// Sends a raw HTTP/1.1 request and returns the response head, lowercased.
+    async fn send_raw_request(addr: SocketAddr, request: &str) -> String {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = stream.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_lowercase()
+    }
+
+    #[tokio::test]
+    async fn test_grpc_web_cors_preflight() {
+        // The preflight must be answered by the CORS layer, which is stacked
+        // outside of the gRPC-Web layer; with the order reversed the request
+        // would reach the gRPC routes instead.
+        let config = GrpcServerConfig {
+            enable_cors: true,
+            ..Default::default()
+        };
+        let (_server, addr) = start_test_grpc_server(config).await;
+
+        let response =
+            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
+
+        assert!(response.starts_with("http/1.1 200"), "{response}");
+        assert!(
+            response.contains("access-control-allow-origin: *"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grpc_web_cors_custom_origins() {
+        let config = GrpcServerConfig {
+            enable_cors: true,
+            cors_allowed_origins: vec!["https://example.com".to_string()],
+            ..Default::default()
+        };
+        let (_server, addr) = start_test_grpc_server(config).await;
+
+        let response =
+            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
+        assert!(response.starts_with("http/1.1 200"), "{response}");
+        assert!(
+            response.contains("access-control-allow-origin: https://example.com"),
+            "{response}"
+        );
+
+        // An origin outside of the allow list is not rejected with an error
+        // status. The preflight simply carries no allow-origin header, and it
+        // is the browser that blocks the actual request.
+        let response =
+            send_raw_request(addr, &build_preflight_request("https://notallowed.com")).await;
+        assert!(response.starts_with("http/1.1 200"), "{response}");
+        assert!(
+            !response.contains("access-control-allow-origin"),
+            "{response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_grpc_web_cors_disabled() {
+        let config = GrpcServerConfig {
+            enable_cors: false,
+            ..Default::default()
+        };
+        let (_server, addr) = start_test_grpc_server(config).await;
+
+        let response =
+            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
+
+        // Without the CORS layer the preflight is an ordinary request and falls
+        // through to the gRPC routes, which reject it.
+        assert!(response.starts_with("http/1.1 400"), "{response}");
+        assert!(
+            !response.contains("access-control-allow-origin"),
+            "{response}"
         );
     }
 }

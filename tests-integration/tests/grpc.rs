@@ -2098,6 +2098,8 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
         max_send_message_size: 1024,
         tls,
         max_connection_age: None,
+        enable_cors: false,
+        cors_allowed_origins: Vec::new(),
     };
     let (_db, fe_grpc_server) =
         setup_grpc_server_with(store_type, "tls_create_table", None, Some(config), None).await;
@@ -2141,6 +2143,8 @@ pub async fn test_grpc_tls_config(store_type: StorageType) {
             max_send_message_size: 1024,
             tls,
             max_connection_age: None,
+            enable_cors: false,
+            cors_allowed_origins: Vec::new(),
         };
         let runtime = Runtime::builder().build().unwrap();
         let grpc_builder =
@@ -2158,6 +2162,8 @@ pub async fn test_grpc_memory_limit(store_type: StorageType) {
         max_send_message_size: 1024 * 1024,
         tls: Default::default(),
         max_connection_age: None,
+        enable_cors: false,
+        cors_allowed_origins: Vec::new(),
     };
 
     // Create memory limiter with 2KB limit and fail-fast policy.

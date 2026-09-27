@@ -445,6 +445,8 @@ impl<'a> FlownodeServiceBuilder<'a> {
             max_send_message_size: opts.grpc.max_send_message_size.as_bytes() as usize,
             tls: opts.grpc.tls.clone(),
             max_connection_age: opts.grpc.max_connection_age,
+            enable_cors: opts.grpc.enable_cors,
+            cors_allowed_origins: opts.grpc.cors_allowed_origins.clone(),
         };
         let service = flownode_server.create_flow_service();
         let runtime = common_runtime::global_runtime();
