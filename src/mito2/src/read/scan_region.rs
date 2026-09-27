@@ -1665,10 +1665,10 @@ impl ScanInput {
                         Some(Ok(batch)) => {
                             // The receiver is gone when the query is cancelled or finishes early,
                             // so stop reading the source.
-                            if sender.send(Ok(batch)).await.is_err() {
+                            if let Err(e) = sender.send(Ok(batch)).await {
                                 debug!(
-                                    "Stop parallel scan task, receiver dropped, region_id: {}",
-                                    region_id
+                                    "Stop parallel scan task, receiver dropped, region_id: {}, error: {}",
+                                    region_id, e
                                 );
                                 break;
                             }
