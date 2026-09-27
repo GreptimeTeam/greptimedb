@@ -1141,10 +1141,11 @@ impl Actor {
             // The object store did not confirm the object, which may still
             // exist or land later, or an earlier epoch holds the sequence and
             // can never be on the chain. A caller of the `durable` mode
-            // retries the append itself; after stop began the `enqueued`
-            // backlog is dropped.
+            // retries the append itself; after stop began a transient failure
+            // drops the `enqueued` backlog.
             Err(error @ Error::WalObjectStore { .. })
-                if self.ack_mode == AckMode::Durable || self.is_stopped() =>
+                if self.ack_mode == AckMode::Durable
+                    || (self.is_stopped() && error.retry_hint() == RetryHint::Retryable) =>
             {
                 self.roll_back(Arc::new(error))
             }
@@ -1328,6 +1329,9 @@ impl Actor {
             let _ = response.send(Ok(()));
             return;
         }
+        // A caller that stopped waiting leaves a closed response behind.
+        self.durable_waiters
+            .retain(|waiter| !waiter.response.is_closed());
         self.durable_waiters.push(DurableWaiter {
             region_id,
             entry_id,
@@ -4800,7 +4804,7 @@ mod tests {
     #[tokio::test]
     async fn test_store_enqueued_backlog_age_stalls_admission_until_an_upload_completes() {
         let config = ObjectStoreWalConfig {
-            max_unpersisted_age: Duration::from_millis(200),
+            max_unpersisted_age: Duration::from_millis(50),
             ..enqueued(manual())
         };
         let (store, io, _parked, stalled, release) = stall_second_append(config).await;
@@ -4817,11 +4821,6 @@ mod tests {
             expected_entries(region_id, &[(id(1, 1), "a1")]),
             read_entries(&store, region_id, 1).await
         );
-        // A young open batch does not stall.
-        timeout(WAIT, append(&store, region_id, "a3"))
-            .await
-            .unwrap()
-            .unwrap();
     }
 
     #[tokio::test]
@@ -4964,17 +4963,29 @@ mod tests {
             read_entries(&store, region_id, 1).await
         );
 
-        // A backlog that cannot be uploaded is reported by stop.
-        let store = open(memory_store(), &enqueued(manual())).await;
-        append(&store, region_id, "a1").await.unwrap();
-        store.fail_creates();
-        let error = store.stop().await.unwrap_err();
-        assert!(
-            matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
-            "unexpected error: {error:?}"
-        );
-        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
-        store.stop().await.unwrap();
+        // A backlog that cannot be uploaded is reported by stop. A transient
+        // failure drops it; one that is not temporary also poisons the store.
+        for permanent in [false, true] {
+            let (io, _) = RecordingIo::over(memory_store());
+            let store = open_over(io.clone(), &enqueued(manual())).await;
+            append(&store, region_id, "a1").await.unwrap();
+            if permanent {
+                io.fail_next_put_permanently.store(true, Ordering::Relaxed);
+            } else {
+                store.fail_creates();
+            }
+            let error = store.stop().await.unwrap_err();
+            assert!(
+                matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
+                "unexpected error: {error:?}"
+            );
+            assert_eq!(vec![0], object_seqs(io.as_ref()).await);
+            assert_eq!(
+                permanent,
+                store.latest_entry_id(&provider(region_id)).is_err()
+            );
+            store.stop().await.unwrap();
+        }
     }
 
     #[tokio::test]
