@@ -86,14 +86,29 @@ sweep.
 ### Building and updating the ECS image
 
 The runner `Dockerfile` in the parent directory stays the single source of the
-tool contract. Build a new ECS image from it:
+tool contract. The image is rebuilt **automatically** by the
+`rebuild-query-regression-runner-image` job in
+`.github/workflows/release-dev-builder-images.yaml` whenever
+`rust-toolchain.toml` or anything under this directory changes on main (or via
+manual dispatch): it runs the ops tool below, then bumps
+`RUNNER_IMAGE_EPOCH` in `query-regression.yml` and points the
+`QUERY_REGRESSION_ECS_IMAGE_ID` repo variable at the new image, so the next
+regression run picks up image and epoch together.
+
+The manual fallback (also what the workflow runs):
 
 ```bash
 ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
 uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
   --region-id <region> --vswitch-id <vsw-...> --security-group-id <sg-...> \
-  --base-image-id <ubuntu-24.04-image-id>
+  [--base-image-id <ubuntu-24.04-image-id>]
 ```
+
+`--base-image-id` is optional: the script defaults to the latest public
+Ubuntu 24.04 image in the region (the Dockerfile pins every tool version
+itself, so base drift is low-risk); pass it — or set the
+`ALIYUN_ECS_BASE_IMAGE_ID` repo variable consumed by the automated job —
+to pin a specific base image.
 
 The script boots a temporary builder instance, `docker build`s the runner
 image, materializes `/opt/rustup`, `/opt/cargo`, `/usr/local/bin` tools, and
@@ -158,10 +173,17 @@ overridable via `QUERY_REGRESSION_RUNNER_UID`/`QUERY_REGRESSION_RUNNER_GID`)
 and exact tool versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.40.4`,
 `Python 3.14.4`, `sccache 0.16.0`, `otelgen` commit
 `863a3f395d062c7322cc1de08a38774b7fdaa6c8`, root-owned `rustup 1.29.0`, and
-the image-baked `nightly-2026-03-21` Rust toolchain. `mold` and `python3`
-come from apt at image-build time (not Ubuntu 24.04's default 3.12); bump
-the Verify pins together with `QUERY_REGRESSION_ECS_IMAGE_ID` when the
-image is rebuilt. Rustup, Cargo, and Rustc
+the image-baked Rust toolchain matching `rust-toolchain.toml` (the image
+parses the pin from the toml at build time, and the workflow asserts it
+dynamically at run time — there is no separately pinned toolchain version).
+`mold` and `python3`
+come from apt at image-build time (not Ubuntu 24.04's default 3.12); if the
+Ubuntu archive ships a newer package revision between rebuilds, the Verify
+step fails with the observed version — bump those pins in `query-regression.yml`
+when that happens. Everything else (toolchain, uv, sccache, otelgen, rustup,
+the runner base) is pinned by digest/sha/commit in the Dockerfile, and the
+image id + `RUNNER_IMAGE_EPOCH` updates are automated by the rebuild job, so
+a routine rebuild needs no manual file updates. Rustup, Cargo, and Rustc
 must resolve from `/opt/cargo/bin`; the runner cannot write `/opt/rustup` or
 `/opt/cargo/bin`. Protobuf well-known includes, including
 `google/protobuf/any.proto` and `google/protobuf/empty.proto`, are an image

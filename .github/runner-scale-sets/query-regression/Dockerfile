@@ -22,11 +22,14 @@ ARG SCCACHE_SHA256=aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35
 ARG RUSTUP_INIT_VERSION=1.29.0
 ARG RUSTUP_INIT_TARGET=x86_64-unknown-linux-gnu
 ARG RUSTUP_INIT_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
-ARG RUST_TOOLCHAIN=nightly-2026-03-21
+
+# Single source of truth for the Rust toolchain: parsed from
+# rust-toolchain.toml at build time, so the image always bakes the
+# workspace toolchain without a second hard-coded pin here.
+COPY rust-toolchain.toml /opt/rust-toolchain.toml
 
 ENV RUSTUP_HOME=/opt/rustup \
     CARGO_HOME=/opt/cargo \
-    RUSTUP_TOOLCHAIN=${RUST_TOOLCHAIN} \
     RUSTUP_AUTO_INSTALL=0 \
     PATH=/opt/cargo/bin:${PATH}
 
@@ -70,12 +73,14 @@ RUN curl --fail --location --silent --show-error \
     && install --mode=0755 /tmp/sccache/sccache /usr/local/bin/sccache \
     && rm -rf /tmp/sccache.tar.gz /tmp/sccache
 
-RUN curl --fail --location --silent --show-error \
+RUN rust_toolchain="$(grep -E '^channel' /opt/rust-toolchain.toml | cut -d'"' -f2)" \
+    && test -n "${rust_toolchain}" \
+    && curl --fail --location --silent --show-error \
         --output /tmp/rustup-init \
         "https://static.rust-lang.org/rustup/archive/${RUSTUP_INIT_VERSION}/${RUSTUP_INIT_TARGET}/rustup-init" \
     && echo "${RUSTUP_INIT_SHA256}  /tmp/rustup-init" | sha256sum --check --status - \
     && chmod 0755 /tmp/rustup-init \
-    && /tmp/rustup-init -y --profile minimal --default-toolchain "${RUST_TOOLCHAIN}" --no-modify-path \
+    && /tmp/rustup-init -y --profile minimal --default-toolchain "${rust_toolchain}" --no-modify-path \
     && rm -f /tmp/rustup-init \
     && chown -R root:root /opt/rustup /opt/cargo \
     && chmod -R go-w /opt/rustup /opt/cargo \
@@ -86,6 +91,8 @@ USER runner
 
 RUN set -eu \
     && test "$(id -u)" = "1001" \
+    && rust_toolchain="$(grep -E '^channel' /opt/rust-toolchain.toml | cut -d'"' -f2)" \
+    && test -n "${rust_toolchain}" \
     && temporary_cargo_home="$(mktemp --directory)" \
     && temporary_proto_dir="" \
     && cleanup() { rm -rf "${temporary_cargo_home}" "${temporary_proto_dir}"; } \
@@ -97,7 +104,7 @@ RUN set -eu \
     && rustc --version \
     && active_toolchain="$(rustup show active-toolchain)" \
     && printf 'Active toolchain: %s\n' "${active_toolchain}" \
-    && case "${active_toolchain}" in "${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu"|"${RUST_TOOLCHAIN}-x86_64-unknown-linux-gnu "*) ;; *) exit 1;; esac \
+    && case "${active_toolchain}" in "${rust_toolchain}-x86_64-unknown-linux-gnu"|"${rust_toolchain}-x86_64-unknown-linux-gnu "*) ;; *) exit 1;; esac \
     && test ! -w /opt/rustup \
     && test ! -w /opt/cargo/bin \
     && test -r /usr/include/google/protobuf/any.proto \
