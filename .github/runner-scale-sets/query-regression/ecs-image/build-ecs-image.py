@@ -245,23 +245,37 @@ def resolve_base_image_id(client, region_id: str) -> str:
     """
     from alibabacloud_ecs20140526 import models as ecs_models
 
-    response = call_api_with_retry(
-        lambda: client.describe_images(
-            ecs_models.DescribeImagesRequest(
-                region_id=region_id,
-                image_owner_alias="system",
-                os_type="linux",
-            )
-        ),
-        "DescribeImages(system base)",
-    )
-    candidates = [
-        image
-        for image in (response.body.images.image or [])
-        if (image.architecture or "") == "x86_64"
-        and "Ubuntu" in (image.os_name or "")
-        and "24.04" in (image.os_name or "")
-    ]
+    def _is_ubuntu_2404(image) -> bool:
+        # osname is localized (e.g. "Ubuntu 24.04 64位"), osname_en the
+        # English form; accept either.
+        for os_name in (image.osname_en, image.osname):
+            if os_name and "Ubuntu" in os_name and "24.04" in os_name:
+                return True
+        return False
+
+    page_size = 100
+    images: list = []
+    page_number = 1
+    while True:
+        page = call_api_with_retry(
+            lambda: client.describe_images(
+                ecs_models.DescribeImagesRequest(
+                    region_id=region_id,
+                    image_owner_alias="system",
+                    ostype="linux",
+                    architecture="x86_64",
+                    page_number=page_number,
+                    page_size=page_size,
+                )
+            ),
+            f"DescribeImages(system base, page {page_number})",
+        ).body.images.image or []
+        images.extend(page)
+        if len(page) < page_size:
+            break
+        page_number += 1
+
+    candidates = [image for image in images if _is_ubuntu_2404(image)]
     if not candidates:
         raise SystemExit(
             "No public Ubuntu 24.04 x86_64 system image found in region "
@@ -270,7 +284,7 @@ def resolve_base_image_id(client, region_id: str) -> str:
     candidates.sort(key=lambda image: image.creation_time or "", reverse=True)
     picked = candidates[0]
     print(
-        f"Resolved base image: {picked.image_id} ({picked.os_name}, "
+        f"Resolved base image: {picked.image_id} ({picked.osname_en or picked.osname}, "
         f"created {picked.creation_time}) from {len(candidates)} candidates",
         flush=True,
     )
