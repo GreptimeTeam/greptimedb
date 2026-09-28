@@ -6578,6 +6578,406 @@ async fn test_non_bool_comparison_filters_mixed_sample_lanes() {
 }
 
 #[tokio::test]
+async fn test_and_unless_match_full_label_sets_and_preserve_left_samples() {
+    async fn evaluate(
+        expression: &str,
+        left: DirectOrSource,
+        right: DirectOrSource,
+    ) -> Vec<(Option<String>, Option<String>, f64)> {
+        let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
+            unreachable!()
+        };
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let left_context = direct_or_context(
+            "lhs",
+            &left.tags.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            "v",
+        );
+        let right_context = direct_or_context(
+            "rhs",
+            &right.tags.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+            "v",
+        );
+        let plan = planner
+            .set_op_on_non_field_columns(
+                scan(&left),
+                scan(&right),
+                left_context,
+                right_context,
+                binary.op,
+                &binary.modifier,
+            )
+            .unwrap();
+        let (_, batches) = execute(plan, &build_query_engine_state()).await;
+        batches
+            .iter()
+            .flat_map(|batch| {
+                let jobs = batch
+                    .column_by_name("job")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let keys = batch
+                    .column_by_name("k")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                let samples = batch
+                    .column_by_name("v")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                (0..batch.num_rows()).map(|row| {
+                    (
+                        (!jobs.is_null(row)).then(|| jobs.value(row).to_string()),
+                        (!keys.is_null(row)).then(|| keys.value(row).to_string()),
+                        samples.value(row),
+                    )
+                })
+            })
+            .collect()
+    }
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let absent = tagged_source(
+        "rhs",
+        true,
+        ("k", Some("right")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs and rhs", left, absent).await,
+        Vec::<(Option<String>, Option<String>, f64)>::new()
+    );
+
+    // An empty LHS remains empty regardless of a populated RHS.
+    let absent = tagged_source(
+        "lhs",
+        true,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = tagged_source(
+        "rhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs unless rhs", absent, right).await,
+        Vec::<(Option<String>, Option<String>, f64)>::new()
+    );
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let absent = tagged_source(
+        "rhs",
+        true,
+        ("k", Some("right")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs unless rhs", left, absent).await,
+        vec![(Some("job".to_string()), Some("left".to_string()), 10.0)]
+    );
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let empty_window = tagged_source(
+        "rhs",
+        true,
+        ("k", Some("left")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs and rhs", left, empty_window).await,
+        Vec::<(Option<String>, Option<String>, f64)>::new()
+    );
+
+    // With unequal source schemas, default matching treats the absent RHS k label as empty.
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![("job", Some("job"))],
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs and rhs", left, right).await,
+        Vec::<(Option<String>, Option<String>, f64)>::new()
+    );
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![("job", Some("job"))],
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs unless rhs", left, right).await,
+        vec![(Some("job".to_string()), Some("left".to_string()), 10.0)]
+    );
+
+    // on(job) ignores k and accepts a key absent from one operand; ignoring(k) retains job.
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = tagged_source(
+        "rhs",
+        false,
+        ("k", Some("right")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs and on(job) rhs", left, right).await,
+        vec![(Some("job".to_string()), Some("left".to_string()), 10.0)]
+    );
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![("job", Some("job"))],
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs unless on(k) rhs", left, right).await,
+        vec![(Some("job".to_string()), Some("left".to_string()), 10.0)]
+    );
+
+    let left = tagged_source(
+        "lhs",
+        false,
+        ("k", Some("left")),
+        DirectOrValue::Float64(10.0),
+    );
+    let right = tagged_source(
+        "rhs",
+        false,
+        ("k", Some("right")),
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs unless ignoring(k) rhs", left, right).await,
+        Vec::<(Option<String>, Option<String>, f64)>::new()
+    );
+
+    // Internal match-key names skip user labels without retrying a colliding name forever.
+    let left = source(
+        "lhs",
+        false,
+        1,
+        vec![
+            ("job", Some("job")),
+            ("k", Some("left")),
+            ("__promql_set_match_0", Some("x")),
+        ],
+        DirectOrValue::Float64(10.0),
+    );
+    let right = source(
+        "rhs",
+        false,
+        1,
+        vec![
+            ("job", Some("job")),
+            ("k", Some("left")),
+            ("__promql_set_match_0", Some("x")),
+        ],
+        DirectOrValue::Float64(1.0),
+    );
+    assert_eq!(
+        evaluate("lhs and rhs", left, right).await,
+        vec![(Some("job".to_string()), Some("left".to_string()), 10.0)]
+    );
+
+    // Null and empty-string label values normalize to the same PromQL match key.
+    let left = tagged_source("lhs", false, ("k", None), DirectOrValue::Float64(10.0));
+    let right = tagged_source("rhs", false, ("k", Some("")), DirectOrValue::Float64(1.0));
+    assert_eq!(
+        evaluate("lhs and on(k) rhs", left, right).await,
+        vec![(Some("job".to_string()), None, 10.0)]
+    );
+}
+
+#[tokio::test]
+async fn test_set_operator_numeric_and_incompatible_label_types() {
+    async fn plan(
+        expression: &str,
+        right_key_type: ArrowDataType,
+        left_key: Option<i64>,
+        right_key: Option<i64>,
+    ) -> std::result::Result<LogicalPlan, String> {
+        let make_source = |name: &str, key_type: ArrowDataType, key_value: Option<i64>| {
+            let schema = Arc::new(ArrowSchema::new(vec![
+                Field::new(
+                    "ts",
+                    ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                    false,
+                ),
+                Field::new("n", key_type.clone(), true),
+                Field::new("v", ArrowDataType::Float64, true),
+            ]));
+            let key: ArrayRef = match key_type {
+                ArrowDataType::Int64 => Arc::new(Int64Array::from(vec![key_value])),
+                ArrowDataType::Utf8 => Arc::new(StringArray::from(vec![
+                    key_value.map(|value| value.to_string()),
+                ])),
+                _ => unreachable!(),
+            };
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(TimestampMillisecondArray::from(vec![1])) as ArrayRef,
+                    key,
+                    Arc::new(Float64Array::from(vec![10.0])) as ArrayRef,
+                ],
+            )
+            .unwrap();
+            let provider = Arc::new(MemTable::try_new(schema, vec![vec![batch]]).unwrap());
+            LogicalPlanBuilder::scan(name, provider_as_source(provider), None)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+        let left = make_source("lhs", ArrowDataType::Int64, left_key);
+        let right = make_source("rhs", right_key_type, right_key);
+        let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
+            unreachable!()
+        };
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        planner
+            .set_op_on_non_field_columns(
+                left,
+                right,
+                direct_or_context("lhs", &["n"], "v"),
+                direct_or_context("rhs", &["n"], "v"),
+                binary.op,
+                &binary.modifier,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    for expression in ["lhs and on(n) rhs", "lhs unless on(n) rhs"] {
+        for (left_key, right_key, expected_values) in [
+            (
+                Some(7),
+                Some(7),
+                if expression.contains("unless") {
+                    vec![]
+                } else {
+                    vec![10.0]
+                },
+            ),
+            (
+                Some(7),
+                Some(8),
+                if expression.contains("unless") {
+                    vec![10.0]
+                } else {
+                    vec![]
+                },
+            ),
+            (
+                Some(7),
+                None,
+                if expression.contains("unless") {
+                    vec![10.0]
+                } else {
+                    vec![]
+                },
+            ),
+            (
+                None,
+                None,
+                if expression.contains("unless") {
+                    vec![]
+                } else {
+                    vec![10.0]
+                },
+            ),
+            (
+                None,
+                Some(7),
+                if expression.contains("unless") {
+                    vec![10.0]
+                } else {
+                    vec![]
+                },
+            ),
+        ] {
+            let plan = plan(expression, ArrowDataType::Int64, left_key, right_key)
+                .await
+                .unwrap();
+            let (_, batches) = execute(plan, &build_query_engine_state()).await;
+            assert_eq!(
+                values(&batches, "v"),
+                expected_values,
+                "{expression}, {left_key:?}, {right_key:?}"
+            );
+        }
+    }
+
+    let error = plan("lhs and on(n) rhs", ArrowDataType::Utf8, Some(7), Some(7))
+        .await
+        .unwrap_err();
+    assert!(error.contains("incompatible types"), "{error}");
+}
+
+#[tokio::test]
 async fn test_mixed_left_and_unless_preserve_sample_lanes() {
     for (expression, expected_sample_kind) in [
         ("lhs and on(k) mask", (false, true)),

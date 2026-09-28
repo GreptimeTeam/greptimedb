@@ -14,7 +14,7 @@
 
 //! Planning of the PromQL set operators (`and`, `unless`, and `or`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::logical_expr::{Cast, Extension, LogicalPlan, LogicalPlanBuilder};
@@ -29,9 +29,9 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::promql::error::{
-    ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    MultiFieldsNotSupportedSnafu, Result, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
-    UnexpectedTokenSnafu, UnsupportedVectorMatchSnafu,
+    ColumnNotFoundSnafu, DataFusionPlanningSnafu, MultiFieldsNotSupportedSnafu, Result,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnsupportedVectorMatchSnafu,
 };
 use crate::promql::planner::{
     OR_FLOAT_FIELD_PREFIX, OR_HISTOGRAM_FIELD_PREFIX, PromPlanner, PromPlannerContext,
@@ -679,14 +679,10 @@ impl PromPlanner {
         }
 
         let output_context = left_context.clone();
-        let visible_left_schema = left.schema().clone();
+        let output_schema = left.schema().clone();
         let mut left_context = left_context;
         let mut right_context = right_context;
-        let added_marker_to_left = if Self::only_temporality_match_label_mismatches(
-            &left_context,
-            &right_context,
-            modifier,
-        ) {
+        if Self::only_temporality_match_label_mismatches(&left_context, &right_context, modifier) {
             let aligned = Self::align_temporality_match_column(
                 left,
                 right,
@@ -695,50 +691,13 @@ impl PromPlanner {
             )?;
             left = aligned.0;
             right = aligned.1;
-            aligned.2
-        } else {
-            false
         };
 
-        let mut left_tag_col_set = left_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let mut right_tag_col_set = right_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if let Some(matching) = modifier
-            .as_ref()
-            .and_then(|modifier| modifier.matching.as_ref())
-        {
-            match matching {
-                LabelModifier::Include(on) => {
-                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                    left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
-                    right_tag_col_set = right_tag_col_set.intersection(&mask).cloned().collect();
-                }
-                LabelModifier::Exclude(ignoring) => {
-                    for label in &ignoring.labels {
-                        let _ = left_tag_col_set.remove(label);
-                        let _ = right_tag_col_set.remove(label);
-                    }
-                }
-            }
-        }
-        ensure!(
-            left_tag_col_set == right_tag_col_set,
-            CombineTableColumnMismatchSnafu {
-                left: left_tag_col_set.iter().cloned().collect::<Vec<_>>(),
-                right: right_tag_col_set.iter().cloned().collect::<Vec<_>>(),
-            }
-        );
+        let match_columns =
+            Self::selected_binary_match_labels(&left_context, &right_context, modifier);
 
         let left_time_index = left_context.time_index_column.clone().unwrap();
         let right_time_index = right_context.time_index_column.clone().unwrap();
-
         // alias right time index column if necessary
         if left_context.time_index_column != right_context.time_index_column {
             let right_project_exprs = right
@@ -761,10 +720,125 @@ impl PromPlanner {
                 .context(DataFusionPlanningSnafu)?;
         }
 
-        let join_keys = left_tag_col_set
-            .into_iter()
-            .chain([left_time_index])
+        let mut occupied_names = left
+            .schema()
+            .fields()
+            .iter()
+            .chain(right.schema().fields())
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        let mut next_internal_column = 0;
+        let mut left_projection = left
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
             .collect::<Vec<_>>();
+        let mut right_projection = right
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut join_keys = Vec::with_capacity(match_columns.len() + 1);
+        for label in &match_columns {
+            let internal_name = loop {
+                let candidate = format!("__promql_set_match_{next_internal_column}");
+                next_internal_column += 1;
+                if occupied_names.insert(candidate.clone()) {
+                    break candidate;
+                }
+            };
+            let left_field = if left_tag_col_set.contains(label) {
+                left.schema()
+                    .iter()
+                    .find(|(_, field)| field.name() == label)
+            } else {
+                None
+            };
+            let right_field = if right_tag_col_set.contains(label) {
+                right
+                    .schema()
+                    .iter()
+                    .find(|(_, field)| field.name() == label)
+            } else {
+                None
+            };
+            let key_type = match (left_field, right_field) {
+                (Some((_, left_field)), Some((_, right_field)))
+                    if Self::string_value_data_type(left_field.data_type()).is_some()
+                        && Self::string_value_data_type(right_field.data_type()).is_some() =>
+                {
+                    Self::common_label_data_type(
+                        Some(left_field.data_type()),
+                        Some(right_field.data_type()),
+                    )
+                    .unwrap_or(ArrowDataType::Utf8)
+                }
+                (Some((_, left_field)), Some((_, right_field)))
+                    if left_field.data_type() == right_field.data_type() =>
+                {
+                    left_field.data_type().clone()
+                }
+                (Some((_, left_field)), Some((_, right_field))) => {
+                    return UnexpectedPlanExprSnafu {
+                        desc: format!(
+                            "set match label {label} has incompatible types: {:?} and {:?}",
+                            left_field.data_type(),
+                            right_field.data_type()
+                        ),
+                    }
+                    .fail();
+                }
+                (Some((_, field)), None) | (None, Some((_, field))) => field.data_type().clone(),
+                (None, None) => ArrowDataType::Utf8,
+            };
+            if let Some(value_type) = Self::string_value_data_type(&key_type) {
+                left_projection.push(Self::normalized_match_key_expr(
+                    label,
+                    left_field
+                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone())),
+                    value_type,
+                    &internal_name,
+                ));
+                right_projection.push(Self::normalized_match_key_expr(
+                    label,
+                    right_field
+                        .map(|(qualifier, field)| (qualifier.cloned(), field.data_type().clone())),
+                    value_type,
+                    &internal_name,
+                ));
+            } else {
+                let left_expr = left_field
+                    .map(|(qualifier, _)| DfExpr::Column(Column::new(qualifier.cloned(), label)))
+                    .unwrap_or(DfExpr::Literal(
+                        ScalarValue::try_new_null(&key_type).context(DataFusionPlanningSnafu)?,
+                        None,
+                    ));
+                let right_expr = right_field
+                    .map(|(qualifier, _)| DfExpr::Column(Column::new(qualifier.cloned(), label)))
+                    .unwrap_or(DfExpr::Literal(
+                        ScalarValue::try_new_null(&key_type).context(DataFusionPlanningSnafu)?,
+                        None,
+                    ));
+                left_projection.push(left_expr.alias(&internal_name));
+                right_projection.push(right_expr.alias(&internal_name));
+            }
+            join_keys.push(internal_name);
+        }
+        join_keys.push(left_time_index.clone());
+        left = LogicalPlanBuilder::from(left)
+            .project(left_projection)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
+        right = LogicalPlanBuilder::from(right)
+            .project(right_projection)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         ensure!(
             left_context.field_columns.len() == 1
@@ -785,7 +859,7 @@ impl PromPlanner {
                 .join_detailed(
                     right,
                     JoinType::LeftSemi,
-                    (join_keys.clone(), join_keys),
+                    (join_keys.clone(), join_keys.clone()),
                     None,
                     NullEquality::NullEqualsNull,
                 )
@@ -812,17 +886,13 @@ impl PromPlanner {
             }
             _ => UnexpectedTokenSnafu { token: op }.fail(),
         }?;
-        let result = if added_marker_to_left {
-            LogicalPlanBuilder::from(result)
-                .project(visible_left_schema.iter().map(|(qualifier, field)| {
-                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-                }))
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu)?
-        } else {
-            result
-        };
+        let result = LogicalPlanBuilder::from(result)
+            .project(output_schema.iter().map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            }))
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)?;
 
         // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
         // markers are decoded.
