@@ -202,8 +202,9 @@ impl JaegerQueryHandler for Instance {
 
         let mut filters = vec![];
 
-        // `service_name` is already validated in `from_jaeger_query_params()`, so no additional check needed here.
-        filters.push(col(SERVICE_NAME_COLUMN).eq(lit(query_params.service_name)));
+        if let Some(service_name) = query_params.service_name {
+            filters.push(col(SERVICE_NAME_COLUMN).eq(lit(service_name)));
+        }
 
         if let Some(operation_name) = query_params.operation_name {
             filters.push(col(SPAN_NAME_COLUMN).eq(lit(operation_name)));
@@ -254,6 +255,7 @@ impl JaegerQueryHandler for Instance {
         .await?;
 
         // Get all traces that match the trace ids from the previous query.
+        // API v3 applies the time window only to the search, not to the returned spans.
         // It's equivalent to the following SQL query:
         //
         // ```
@@ -276,11 +278,15 @@ impl JaegerQueryHandler for Instance {
             ),
         ];
 
-        if let Some(start_time) = query_params.start_time {
+        if !query_params.fetch_full_trace
+            && let Some(start_time) = query_params.start_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).gt_eq(lit_timestamp_nano(start_time)));
         }
 
-        if let Some(end_time) = query_params.end_time {
+        if !query_params.fetch_full_trace
+            && let Some(end_time) = query_params.end_time
+        {
             filters.push(col(TIMESTAMP_COLUMN).lt_eq(lit_timestamp_nano(end_time)));
         }
 
