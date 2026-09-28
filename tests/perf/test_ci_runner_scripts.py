@@ -16,6 +16,7 @@
 """Offline regression coverage for CI runner selection and lifecycle."""
 
 import importlib.util
+import json
 import os
 import re
 import subprocess
@@ -400,6 +401,129 @@ class AwsTeardownTest(unittest.TestCase):
              patch.object(teardown, "deregister_runner", side_effect=[SystemExit("HTTP 403"), True]):
             self.assertEqual(teardown.teardown(Mock(), "owner/repo", "token", run_id="123-2"), 1)
             self.assertEqual([c.args[1] for c in delete.call_args_list], ["i-a", "i-b"])
+
+class BenchmarkImagePullTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}",
+                        PULL_TEST_ROOT=str(self.root))
+        self.tool("docker", '''
+            echo "$*" >> "$PULL_TEST_ROOT/docker.log"
+            count=$(wc -l < "$PULL_TEST_ROOT/docker.log")
+            codes=${PULL_TEST_CODES:-0}
+            code=$(printf '%s' "$codes" | cut -d, -f"$count")
+            exit "${code:-0}"
+        ''')
+        self.tool("timeout", '''
+            echo "$*" >> "$PULL_TEST_ROOT/timeout.log"
+            shift 2
+            if [[ ${PULL_TEST_TIMEOUT:-0} == 1 ]]; then exit 124; fi
+            exec "$@"
+        ''')
+        self.tool("sleep", 'echo "$*" >> "$PULL_TEST_ROOT/sleep.log"')
+
+    def tool(self, name, body):
+        p = self.root / name
+        p.write_text("#!/bin/bash\nset -eu\n" + textwrap.dedent(body))
+        p.chmod(0o755)
+
+    def lines(self, name):
+        p = self.root / (name + ".log")
+        return p.read_text().splitlines() if p.exists() else []
+
+    def pull(self, codes, *args):
+        self.env["PULL_TEST_CODES"] = codes
+        return subprocess.run(["bash", str(SCRIPTS / "pull-benchmark-image.sh"), *args],
+                              env=self.env, capture_output=True, text=True, timeout=5)
+
+    def test_success_does_not_retry(self):
+        result = self.pull("0", "registry/test@sha256:" + "a" * 64)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.lines("docker")), 1)
+        self.assertEqual(self.lines("sleep"), [])
+        self.assertTrue(self.lines("timeout")[0].startswith("--kill-after=10s 180s docker pull "))
+
+    def test_transient_failure_then_success(self):
+        result = self.pull("1,1,0", "registry/test:tag")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines("docker"), ["pull registry/test:tag"] * 3)
+        self.assertEqual(self.lines("sleep"), ["10", "20"])
+        self.assertIn("attempt 3/3", result.stderr)
+
+    def test_exhaustion_preserves_failure(self):
+        result = self.pull("1,1,7", "registry/test:tag")
+        self.assertEqual(result.returncode, 7)
+        self.assertEqual(len(self.lines("docker")), 3)
+        self.assertEqual(self.lines("sleep"), ["10", "20"])
+
+    def test_timeout_is_bounded_and_fatal(self):
+        self.env["PULL_TEST_TIMEOUT"] = "1"
+        result = self.pull("0", "registry/test:tag")
+        self.assertEqual(result.returncode, 124)
+        self.assertEqual(len(self.lines("timeout")), 3)
+        self.assertEqual(self.lines("sleep"), ["10", "20"])
+
+    def test_bad_arguments_do_not_call_docker(self):
+        for args in ([], [""], ["--help"], ["a", "b"]):
+            with self.subTest(args=args):
+                self.assertEqual(self.pull("0", *args).returncode, 2)
+        self.assertEqual(self.lines("docker"), [])
+
+    def test_traces_prefetch_executes_catalog_refs_and_stops_on_failure(self):
+        traces = (SCRIPTS.parent / 'workflows/tracesbench.yml').read_text()
+        start = traces.index('    - name: Pull database images before generating data')
+        end = traces.index('    - name: Generate selected dataset once')
+        command = textwrap.dedent(traces[start:end].split('      run: |\n', 1)[1])
+        helper = self.root / 'greptimedb/.github/scripts/pull-benchmark-image.sh'
+        helper.parent.mkdir(parents=True)
+        helper.write_text((SCRIPTS / helper.name).read_text())
+        catalogs = self.root / 'o11ybench/workloads/tracesbench/catalogs'
+        catalogs.mkdir(parents=True)
+        images = [f'registry/{name}@sha256:' + 'a' * 64
+                  for name in ('greptimedb', 'victoriatraces', 'tempo')]
+        for name, image in zip(('greptimedb', 'victoriatraces', 'tempo'), images):
+            (catalogs / f'{name}.json').write_text(json.dumps({'target_identity': {'image': image}}))
+        self.tool('docker', '''
+            echo "$*" >> "$PULL_TEST_ROOT/docker.log"
+            if [[ $1 == pull && $2 == ${PULL_FAIL_IMAGE:-} ]]; then exit 1; fi
+            if [[ $1 == image ]]; then echo '[]'; fi
+        ''')
+        self.env['METADATA_ROOT'] = str(self.root)
+        result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.lines('docker'),
+                         [call for image in images for call in (f'pull {image}', f'image inspect {image}')])
+        (self.root / 'docker.log').unlink()
+        self.env['PULL_FAIL_IMAGE'] = images[1]
+        result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
+                                capture_output=True, text=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.lines('docker'), [f'pull {images[0]}', f'image inspect {images[0]}']
+                         + [f'pull {images[1]}'] * 3)
+        self.assertNotIn(f'pull {images[2]}', self.lines('docker'))
+
+    def test_workflows_pull_before_generation(self):
+        workflows = SCRIPTS.parent / "workflows"
+        agent = (workflows / "agent-observability.yml").read_text()
+        traces = (workflows / "tracesbench.yml").read_text()
+        for content in (agent, traces):
+            self.assertNotIn("docker pull ", content)
+        self.assertIn('pull-benchmark-image.sh "$reference"', agent)
+        self.assertLess(agent.index('resolve_image runtime'), agent.index('- name: Generate dataset once'))
+        self.assertIn('pull-benchmark-image.sh "$RUNTIME_IMAGE"', traces)
+        self.assertIn('pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"', traces)
+        start = traces.index('    - name: Pull database images before generating data')
+        end = traces.index('    - name: Generate selected dataset once')
+        self.assertLess(start, end)
+        step = traces[start:end]
+        self.assertIn('for target in greptimedb victoriatraces tempo', step)
+        self.assertIn('o11ybench/workloads/tracesbench/catalogs/$target.json', step)
+        self.assertIn('pull-benchmark-image.sh "$image"', step)
+        self.assertIn('set -euo pipefail', step)
+        self.assertNotIn('continue-on-error', step)
 
 
 if __name__ == "__main__":

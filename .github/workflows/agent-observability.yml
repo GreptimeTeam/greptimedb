@@ -266,7 +266,7 @@ jobs:
           images='{}'
           resolve_image() {
             local target=$1 reference=$2 variable=$3 metadata resolved revision
-            docker pull "$reference"
+            bash greptimedb/.github/scripts/pull-benchmark-image.sh "$reference"
             metadata=$(docker image inspect "$reference")
             resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
             if [[ "$target" == runtime ]]; then

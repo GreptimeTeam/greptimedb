@@ -120,7 +120,7 @@ jobs:
         [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
         [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
         [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
-        docker pull "$RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
@@ -227,10 +227,19 @@ jobs:
           available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
           ((available >= minimum_gib * 1024 * 1024)) || { echo "Need at least $minimum_gib GiB free on $path"; exit 1; }
         done
-        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
     # Preserve the pinned catalog images and require all three targets in the report.
+    - name: Pull database images before generating data
+      run: |
+        set -euo pipefail
+        for target in greptimedb victoriatraces tempo; do
+          image=$(jq -er '.target_identity.image | select(test("@sha256:[a-f0-9]{64}$"))' \
+            "o11ybench/workloads/tracesbench/catalogs/$target.json")
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$image"
+          docker image inspect "$image" > "$METADATA_ROOT/$target-image.json"
+        done
     - name: Generate selected dataset once
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage generate \
