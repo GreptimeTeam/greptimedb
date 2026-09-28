@@ -47,7 +47,7 @@ use crate::error::{
     StaleWalObjectSnafu, UnconfirmedWalEpochStartSnafu, WalObjectSequenceExhaustedSnafu,
     WalObjectSequenceUnsettledSnafu,
 };
-use crate::object_store_wal::batch::{OBJECT_SEQ_LIMIT, OpenBatch, sequence_floor};
+use crate::object_store_wal::batch::{OBJECT_SEQ_LIMIT, OpenBatch, entry_id, sequence_floor};
 use crate::object_store_wal::catalog::ObjectCatalog;
 use crate::object_store_wal::format::{
     ChainLink, EncodedObject, FixedTrailer, FooterEntry, HEADER_LEN, Header, MIN_OBJECT_LEN,
@@ -1208,15 +1208,38 @@ impl Actor {
     }
 
     fn resolve_durable_waiters(&mut self) {
-        let catalog = self.catalog.read().unwrap_or_else(PoisonError::into_inner);
         let waiters = std::mem::take(&mut self.durable_waiters);
         for waiter in waiters {
-            if waiter.entry_id <= catalog.region_max_entry_id(waiter.region_id).unwrap_or(0) {
+            if self.is_durable_through(waiter.region_id, waiter.entry_id) {
                 let _ = waiter.response.send(Ok(()));
             } else {
                 self.durable_waiters.push(waiter);
             }
         }
+    }
+
+    /// Returns true when no id of the region at or below `entry_id` waits to
+    /// become durable. An id of a batch that failed will never be durable and
+    /// no longer waits.
+    fn is_durable_through(&self, region_id: RegionId, entry_id: EntryId) -> bool {
+        self.lowest_pending_entry_id(region_id)
+            .is_none_or(|pending| pending > entry_id)
+    }
+
+    /// Returns the lowest id of the region that was handed out and is not
+    /// durable yet. The sealed batches are in sequence order and the open
+    /// batch is above all of them.
+    fn lowest_pending_entry_id(&self, region_id: RegionId) -> Option<EntryId> {
+        self.sealed
+            .iter()
+            .flat_map(|batch| batch.footer.iter())
+            .find(|entry| entry.region_id == region_id)
+            .map(|entry| entry.min_entry_id)
+            .or_else(|| {
+                self.next_object_seq
+                    .filter(|_| self.open_batch.holds_region(region_id))
+                    .map(|object_seq| entry_id(object_seq, 1))
+            })
     }
 
     /// Fails every batch that is not indexed after a create failed
@@ -1319,13 +1342,7 @@ impl Actor {
             let _ = response.send(Err(shared(error)));
             return;
         }
-        // An id this store never handed out is not in its backlog, but the
-        // ids of the region it did hand out below it are waited for. An id of
-        // a batch that failed is answered once a later id of the region is
-        // durable.
-        let issued = self.issued_entry_ids.get(&region_id).copied().unwrap_or(0);
-        let entry_id = entry_id.min(issued);
-        if entry_id <= durable {
+        if self.is_durable_through(region_id, entry_id) {
             let _ = response.send(Ok(()));
             return;
         }
@@ -4681,6 +4698,49 @@ mod tests {
         );
         assert_eq!(0, store.durable_entry_id(&provider(region_two)).unwrap());
         assert_eq!(vec![0, 1], object_seqs(io.as_ref()).await);
+    }
+
+    #[tokio::test]
+    async fn test_store_enqueued_wait_ignores_later_pending_entries_of_the_region() {
+        let (store, _io, mut parked) =
+            open_parking_creates(memory_store(), &enqueued(eager())).await;
+        let region_a = region(1);
+        let region_b = region(2);
+        // Object 1 holds region A's id(1, 1) and object 2 region B's id(2, 1).
+        for (region_id, data) in [(region_a, "a1"), (region_b, "b1")] {
+            let response = append(&store, region_id, data).await.unwrap();
+            let (_, release) = next_create(&mut parked).await;
+            release.send(true).unwrap();
+            let entry_id = response.last_entry_ids[&region_id];
+            timeout(WAIT, store.wait_durable(&provider(region_id), entry_id))
+                .await
+                .unwrap()
+                .unwrap();
+        }
+        let response = append(&store, region_a, "a2").await.unwrap();
+        assert_eq!(
+            HashMap::from([(region_a, id(3, 1))]),
+            response.last_entry_ids
+        );
+        let (object_seq, release) = next_create(&mut parked).await;
+        assert_eq!(3, object_seq);
+
+        // Every entry of region A up to id(2, 1) is durable, so the wait does
+        // not depend on the parked create of object 3.
+        timeout(WAIT, store.wait_durable(&provider(region_a), id(2, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        let wait = {
+            let store = store.clone();
+            tokio::spawn(async move { store.wait_durable(&provider(region_a), id(3, 1)).await })
+        };
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        assert!(!wait.is_finished());
+        release.send(true).unwrap();
+        timeout(WAIT, wait).await.unwrap().unwrap().unwrap();
     }
 
     #[tokio::test]
