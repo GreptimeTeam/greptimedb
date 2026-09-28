@@ -18,10 +18,8 @@ mod island;
 
 mod matching_filters;
 
-mod or_operator;
+mod set_operator;
 
-#[cfg(test)]
-use std::collections::HashMap;
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
@@ -67,8 +65,6 @@ use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTi
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
 use itertools::Itertools;
 use once_cell::sync::Lazy;
-#[cfg(test)]
-use promql::extension_plan::HistogramFold;
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
     build_special_time_expr,
@@ -109,13 +105,12 @@ use crate::parser::{
     EXPLAIN_VERBOSE_NODE_NAME,
 };
 use crate::promql::error::{
-    CatalogSnafu, ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
-    ExpectRangeSelectorSnafu, FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu,
-    InvalidRegularExpressionSnafu, InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu,
-    MultipleMetricMatchersSnafu, MultipleVectorSnafu, NoMetricMatcherSnafu, Result,
-    SameLabelSetSnafu, TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
-    UnexpectedTokenSnafu, UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu,
-    UnsupportedVectorMatchSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
+    FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
+    InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
+    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
+    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -151,8 +146,6 @@ const FIELD_COLUMN_MATCHER: &str = "__field__";
 const SCHEMA_COLUMN_MATCHER: &str = "__schema__";
 const DB_COLUMN_MATCHER: &str = "__database__";
 
-/// Prefix for generated binary island leaf aliases.
-const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
 const OR_FLOAT_FIELD_PREFIX: &str = "__promql_or_float_";
 const OR_HISTOGRAM_FIELD_PREFIX: &str = "__promql_or_histogram_";
 const TIMESTAMP_VALUE_PREFIX: &str = "__promql_timestamp_value_";
@@ -5707,203 +5700,6 @@ impl PromPlanner {
         // `produce_one_row` is used for input-free plans that still emit one row;
         // only the false case is a statically proven empty vector.
         matches!(plan, LogicalPlan::EmptyRelation(relation) if !relation.produce_one_row)
-    }
-
-    /// Build a set operator (AND/OR/UNLESS)
-    fn set_op_on_non_field_columns(
-        &mut self,
-        mut left: LogicalPlan,
-        mut right: LogicalPlan,
-        left_context: PromPlannerContext,
-        right_context: PromPlannerContext,
-        op: TokenType,
-        modifier: &Option<BinModifier>,
-    ) -> Result<LogicalPlan> {
-        let left_tag_col_set = left_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let right_tag_col_set = right_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-
-        if matches!(op.id(), token::T_LOR) {
-            return self.or_operator(
-                left,
-                right,
-                left_tag_col_set,
-                right_tag_col_set,
-                left_context,
-                right_context,
-                modifier,
-            );
-        }
-
-        if let Some(modifier) = modifier {
-            ensure!(
-                matches!(
-                    modifier.card,
-                    VectorMatchCardinality::OneToOne | VectorMatchCardinality::ManyToMany
-                ),
-                UnsupportedVectorMatchSnafu {
-                    name: modifier.card.clone(),
-                },
-            );
-        }
-
-        let output_context = left_context.clone();
-        let visible_left_schema = left.schema().clone();
-        let mut left_context = left_context;
-        let mut right_context = right_context;
-        let added_marker_to_left = if Self::only_temporality_match_label_mismatches(
-            &left_context,
-            &right_context,
-            modifier,
-        ) {
-            let aligned = Self::align_temporality_match_column(
-                left,
-                right,
-                &mut left_context,
-                &mut right_context,
-            )?;
-            left = aligned.0;
-            right = aligned.1;
-            aligned.2
-        } else {
-            false
-        };
-
-        let mut left_tag_col_set = left_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let mut right_tag_col_set = right_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if let Some(matching) = modifier
-            .as_ref()
-            .and_then(|modifier| modifier.matching.as_ref())
-        {
-            match matching {
-                LabelModifier::Include(on) => {
-                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                    left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
-                    right_tag_col_set = right_tag_col_set.intersection(&mask).cloned().collect();
-                }
-                LabelModifier::Exclude(ignoring) => {
-                    for label in &ignoring.labels {
-                        let _ = left_tag_col_set.remove(label);
-                        let _ = right_tag_col_set.remove(label);
-                    }
-                }
-            }
-        }
-        ensure!(
-            left_tag_col_set == right_tag_col_set,
-            CombineTableColumnMismatchSnafu {
-                left: left_tag_col_set.iter().cloned().collect::<Vec<_>>(),
-                right: right_tag_col_set.iter().cloned().collect::<Vec<_>>(),
-            }
-        );
-
-        let left_time_index = left_context.time_index_column.clone().unwrap();
-        let right_time_index = right_context.time_index_column.clone().unwrap();
-
-        // alias right time index column if necessary
-        if left_context.time_index_column != right_context.time_index_column {
-            let right_project_exprs = right
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| {
-                    if field.name() == &right_time_index {
-                        DfExpr::Column(Column::from_name(&right_time_index)).alias(&left_time_index)
-                    } else {
-                        DfExpr::Column(Column::from_name(field.name()))
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            right = LogicalPlanBuilder::from(right)
-                .project(right_project_exprs)
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu)?;
-        }
-
-        let join_keys = left_tag_col_set
-            .into_iter()
-            .chain([left_time_index])
-            .collect::<Vec<_>>();
-
-        ensure!(
-            left_context.field_columns.len() == 1
-                || Self::field_columns_are_alternative_samples(
-                    left.schema(),
-                    &left_context.field_columns,
-                ),
-            MultiFieldsNotSupportedSnafu {
-                operator: "AND/UNLESS operator"
-            }
-        );
-        // Generate join plan.
-        // All set operations in PromQL are "distinct"
-        let result = match op.id() {
-            token::T_LAND => LogicalPlanBuilder::from(left)
-                .distinct()
-                .context(DataFusionPlanningSnafu)?
-                .join_detailed(
-                    right,
-                    JoinType::LeftSemi,
-                    (join_keys.clone(), join_keys),
-                    None,
-                    NullEquality::NullEqualsNull,
-                )
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu),
-            token::T_LUNLESS => LogicalPlanBuilder::from(left)
-                .distinct()
-                .context(DataFusionPlanningSnafu)?
-                .join_detailed(
-                    right,
-                    JoinType::LeftAnti,
-                    (join_keys.clone(), join_keys),
-                    None,
-                    NullEquality::NullEqualsNull,
-                )
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu),
-            token::T_LOR => {
-                // OR is handled at the beginning of this function, as it cannot
-                // be expressed using JOIN like AND and UNLESS.
-                unreachable!()
-            }
-            _ => UnexpectedTokenSnafu { token: op }.fail(),
-        }?;
-        let result = if added_marker_to_left {
-            LogicalPlanBuilder::from(result)
-                .project(visible_left_schema.iter().map(|(qualifier, field)| {
-                    DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
-                }))
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu)?
-        } else {
-            result
-        };
-
-        // AND/UNLESS preserve the complete left operand's visible columns and values; encoded
-        // markers are decoded.
-        self.ctx = output_context;
-        Ok(result)
     }
 
     fn string_value_data_type(data_type: &ArrowDataType) -> Option<&ArrowDataType> {

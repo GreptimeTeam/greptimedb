@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::time::{Duration, UNIX_EPOCH};
 
 use catalog::RegisterTableRequest;
@@ -38,6 +39,7 @@ use datafusion::execution::context::SessionContext;
 use datafusion::logical_expr::Extension;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
+use promql::extension_plan::HistogramFold;
 use promql_parser::label::Labels;
 use promql_parser::parser;
 use session::context::QueryContext;
