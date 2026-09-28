@@ -83,11 +83,11 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// when it reaches the size limit or the flush interval elapses and creates
 /// the object under the next sequence while it keeps admitting entries into
 /// the next batch; up to [`MAX_IN_FLIGHT_CREATES`] creates run at a time.
-/// Objects are indexed in the catalog and their batches acknowledged in
-/// sequence order, so an acknowledged entry never has a missing predecessor.
-/// In the `durable` acknowledgement mode an append returns once its object is
-/// durable and indexed; in the `enqueued` mode it returns on admission and the
-/// object is created in the background. While [`MAX_SEALED_BATCHES`] batches
+/// Objects are indexed in the catalog in sequence order. In the `durable`
+/// acknowledgement mode an append returns once its object is durable and
+/// indexed, so an acknowledged entry never has a missing predecessor; in the
+/// `enqueued` mode it returns on admission and the object is created in the
+/// background. While [`MAX_SEALED_BATCHES`] batches
 /// wait to become durable no append is admitted.
 pub(crate) struct ObjectStoreLogStore {
     prefix: String,
@@ -1274,9 +1274,10 @@ impl Actor {
     /// Records `error` as terminal and fails every waiter that is not
     /// acknowledged with it, or with the stopped error if the store was
     /// stopped meanwhile. Creates in flight run to completion, but their
-    /// outcome is ignored: the entries of an object they create were never
-    /// acknowledged, like those of a crash between creation and
-    /// acknowledgement. Returns the recorded error.
+    /// outcome is ignored: in the `durable` mode the entries of an object they
+    /// create were never acknowledged, like those of a crash between creation
+    /// and acknowledgement; in the `enqueued` mode the acknowledged backlog is
+    /// discarded and `stop` reports it. Returns the recorded error.
     fn poison(&mut self, error: Error) -> Arc<Error> {
         let error = set_terminal(&self.terminal_error, error);
         let stopped = self.is_stopped();
