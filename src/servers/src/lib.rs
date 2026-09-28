@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(try_blocks)]
-#![feature(exclusive_wrapper)]
-
 use datafusion_expr::LogicalPlan;
 use sql::statements::statement::Statement;
 // Re-export for use in add_service! macro
@@ -38,7 +35,6 @@ pub mod mysql;
 pub mod opentsdb;
 pub mod otel_arrow;
 pub mod otlp;
-pub mod pending_rows_batcher;
 mod pipeline;
 pub mod postgres;
 pub mod prom_remote_write;

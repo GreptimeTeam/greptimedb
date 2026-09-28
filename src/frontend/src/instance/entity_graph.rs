@@ -23,8 +23,8 @@
 //! the query engine. Injected into the catalog manager after the engine is built,
 //! breaking the `catalog -> query` cycle.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Weak;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use auth::{
@@ -41,13 +41,16 @@ use common_catalog::consts::{
 };
 use common_error::ext::{BoxedError, ErrorExt};
 use common_error::status_code::StatusCode;
+use common_function::scalars::json::json_get::JsonGetWithType;
+use common_function::scalars::udf::create_udf;
 use common_query::OutputData;
 use common_query::prelude::OTLP_AGGREGATION_TEMPORALITY_LABEL;
 use common_recordbatch::SendableRecordBatchStream;
 use common_telemetry::{debug, warn};
 use common_time::timestamp::TimeUnit;
+use datafusion::common::{Column, ScalarValue};
 use datafusion::dataframe::DataFrame;
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{Expr, LogicalPlan, lit};
 use futures::TryStreamExt;
 use operator::statement::semantic_graph::{
     CallsSource, CoDeclaredSource, Conventions, DeclaredSource, ENTITY_TYPE_GEN_AI_AGENT,
@@ -64,8 +67,8 @@ use table::metadata::TableInfo;
 use table::predicate::{TimeRangeExtraction, extract_time_range_strict};
 use table::requests::{
     EntityRole, SEMANTIC_METRIC_TYPE, SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SIGNAL_TYPE_METRIC,
-    SOURCE_OPENTELEMETRY, SOURCE_PROMETHEUS, is_trace_v1_table, parse_entity_columns,
-    parse_entity_option_key,
+    SOURCE_OPENTELEMETRY, SOURCE_PROMETHEUS, TABLE_DATA_MODEL_TRACE_V2, is_trace_table,
+    parse_entity_columns, parse_entity_option_key, trace_v2_attribute,
 };
 
 use crate::error;
@@ -164,12 +167,11 @@ impl EntityGraphProviderImpl {
                 |(entity_type, (id_columns, descriptive_columns, scope_columns))| {
                     // A stale declaration (e.g. its column was dropped later)
                     // must not poison every graph scan; skip it.
-                    let schema = &table_info.meta.schema;
                     if let Some(missing) = id_columns
                         .iter()
                         .chain(&descriptive_columns)
                         .chain(&scope_columns)
-                        .find(|c| schema.column_schema_by_name(c).is_none())
+                        .find(|c| !Self::can_resolve_entity_column(table_info, c))
                     {
                         warn!(
                             "Skipping entity declaration `{}` of table `{}`: column `{}` not found",
@@ -194,7 +196,7 @@ impl EntityGraphProviderImpl {
     }
 
     /// All entity declarations of one table: the explicit options plus the
-    /// zero-configuration conventions (`otlp_trace_entities` for trace-v1
+    /// zero-configuration conventions (`otlp_trace_entities` for trace-v1/v2
     /// tables — including the `service` identity of tables created before the
     /// ingest-side auto-stamp — and the Prometheus/OTel descriptor
     /// whitelists). An explicit declaration of a type always suppresses the
@@ -207,7 +209,7 @@ impl EntityGraphProviderImpl {
     ) -> Vec<EntityDeclaration> {
         let mut declarations = Self::parse_declarations(table_info);
         let mut supersessions = Vec::new();
-        if is_trace_v1_table(table_info) {
+        if is_trace_table(table_info) {
             Self::extend_with_implicit_entities(
                 table_info,
                 &conventions.otlp_trace_entities,
@@ -303,8 +305,8 @@ impl EntityGraphProviderImpl {
     }
 
     /// Synthesizes the applicable subset of `entities` on `table_info`:
-    /// explicit declarations win, every id column must exist (no guessing),
-    /// descriptive columns are filtered to those present.
+    /// explicit declarations win, every id reference must be resolvable,
+    /// and descriptive references are filtered by the same rule.
     fn extend_with_implicit_entities(
         table_info: &TableInfo,
         entities: &[ImplicitEntity],
@@ -330,7 +332,7 @@ impl EntityGraphProviderImpl {
             if let Some(missing) = implicit
                 .id
                 .iter()
-                .find(|c| schema.column_schema_by_name(c).is_none())
+                .find(|c| !Self::can_resolve_entity_column(table_info, c))
             {
                 debug!(
                     "Table `{}` lacks the id column `{}`; skipping the implicit `{}` declaration",
@@ -350,7 +352,7 @@ impl EntityGraphProviderImpl {
                 implicit
                     .descriptive
                     .iter()
-                    .filter(|c| schema.column_schema_by_name(c).is_some())
+                    .filter(|c| Self::can_resolve_entity_column(table_info, c))
                     .cloned()
                     .collect()
             };
@@ -359,7 +361,7 @@ impl EntityGraphProviderImpl {
             let id_qualifier = implicit
                 .qualified_by
                 .clone()
-                .filter(|c| schema.column_schema_by_name(c).is_some());
+                .filter(|c| Self::can_resolve_entity_column(table_info, c));
             if let Some(entity_type) = &implicit.superseded_by {
                 supersessions.push((declarations.len(), entity_type.clone()));
             }
@@ -434,7 +436,7 @@ impl EntityGraphProviderImpl {
             while let Some(table) = tables.try_next().await.map_err(BoxedError::new)? {
                 let table_info = table.table_info();
                 let table_declarations = Self::declarations_for(&table_info, conventions);
-                let is_trace = is_trace_v1_table(&table_info);
+                let is_trace = is_trace_table(&table_info);
                 // Authorize only tables that would contribute rows.
                 if per_table_auth
                     && (is_trace || !table_declarations.is_empty())
@@ -532,8 +534,63 @@ impl EntityGraphProviderImpl {
         }
     }
 
-    fn read_table(&self, table: TableRef) -> Result<DataFrame, BoxedError> {
-        self.query_engine.read_table(table).map_err(BoxedError::new)
+    fn can_resolve_entity_column(table_info: &TableInfo, column: &str) -> bool {
+        let table_schema = &table_info.meta.schema;
+        if table_schema.column_schema_by_name(column).is_some() {
+            return true;
+        }
+        let data_model = table_info.meta.options.data_model();
+        trace_v2_attribute(table_schema, data_model, column).is_some()
+    }
+
+    /// Projects referenced V2 attributes under their declaration names for
+    /// the shared entity and relationship plans. Other models scan unchanged.
+    fn read_table(
+        &self,
+        table: TableRef,
+        declarations: &[EntityDeclaration],
+    ) -> Result<DataFrame, BoxedError> {
+        let info = table.table_info();
+        let mut scan = self
+            .query_engine
+            .read_table(table)
+            .map_err(BoxedError::new)?;
+        let data_model = info.meta.options.data_model();
+        if data_model != Some(TABLE_DATA_MODEL_TRACE_V2) {
+            return Ok(scan);
+        }
+
+        // Read Trace V2 table:
+        let mut columns = BTreeSet::new();
+        for declaration in declarations {
+            columns.extend(declaration.id_columns.iter());
+            columns.extend(declaration.descriptive_columns.iter());
+            columns.extend(declaration.scope_columns.iter());
+            columns.extend(declaration.id_qualifier.iter());
+            columns.extend(declaration.superseded_by_columns.iter());
+        }
+        let conventions = conventions()
+            .map_err(datafusion::error::DataFusionError::Internal)
+            .context(error::DataFusionSnafu)
+            .map_err(BoxedError::new)?;
+        let virtual_candidates = &conventions.virtual_dst_candidates;
+        columns.extend(virtual_candidates.iter().map(|candidate| &candidate.column));
+        let get = create_udf(Arc::new(JsonGetWithType::default()));
+        for column in columns {
+            if let Some((root, key)) = trace_v2_attribute(&info.meta.schema, data_model, column) {
+                let path = format!("$.{}", serde_json::Value::String(key.to_string()));
+                let value = get.call(vec![
+                    Expr::Column(Column::from_name(root)),
+                    lit(path),
+                    lit(ScalarValue::Utf8View(None)),
+                ]);
+                scan = scan
+                    .with_column(column, value)
+                    .context(error::DataFusionSnafu)
+                    .map_err(BoxedError::new)?;
+            }
+        }
+        Ok(scan)
     }
 
     /// The declared-edge branch source, when the physical table exists, the
@@ -587,7 +644,7 @@ impl EntityGraphProviderImpl {
             ));
         }
         Ok(Some(DeclaredSource {
-            scan: self.read_table(table)?,
+            scan: self.read_table(table, &[])?,
         }))
     }
 
@@ -633,8 +690,8 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         let mut plans = Vec::with_capacity(sources.len());
         for source in sources {
             plans.push(RegistrySource {
+                scan: self.read_table(source.table, &source.declarations)?,
                 declarations: source.declarations,
-                scan: self.read_table(source.table)?,
             });
         }
         let Some(window) = Self::query_window(&request)? else {
@@ -658,18 +715,24 @@ impl EntityGraphProvider for EntityGraphProviderImpl {
         let (sources, traces) = self.enumerate(catalog, query_ctx.as_deref()).await?;
         let mut calls = Vec::with_capacity(traces.len());
         for trace in traces {
+            let declarations = trace
+                .service
+                .iter()
+                .chain(trace.agent.iter())
+                .cloned()
+                .collect::<Vec<_>>();
             calls.push(CallsSource {
+                scan: self.read_table(trace.table, &declarations)?,
                 service: trace.service,
                 agent: trace.agent,
-                scan: self.read_table(trace.table)?,
             });
         }
         let mut co_declared = Vec::with_capacity(sources.len());
         for source in sources {
             co_declared.push(CoDeclaredSource {
+                scan: self.read_table(source.table, &source.declarations)?,
                 declarations: source.declarations,
                 is_trace: source.is_trace,
-                scan: self.read_table(source.table)?,
             });
         }
         let declared = self.declared_source(catalog, query_ctx.as_deref()).await?;

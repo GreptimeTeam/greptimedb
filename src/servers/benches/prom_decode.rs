@@ -288,10 +288,9 @@ fn bench_prom_v1_vs_v2_decode(c: &mut Criterion) {
             group.bench_with_input(BenchmarkId::new("v2_manual", name), v2_bytes, |b, bytes| {
                 b.iter(|| {
                     black_box(
-                        remote_write_v2::decode_uncompressed_write_requests(
-                            black_box(bytes.as_slice()),
-                            true,
-                        )
+                        remote_write_v2::decode_uncompressed_write_requests(black_box(
+                            bytes.as_slice(),
+                        ))
                         .unwrap(),
                     );
                 });

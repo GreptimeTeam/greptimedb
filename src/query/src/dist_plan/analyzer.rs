@@ -247,7 +247,11 @@ fn unwrap_dictionary_literals(plan: LogicalPlan) -> DfResult<Transformed<Logical
 impl DistPlannerAnalyzer {
     /// Try push down as many nodes as possible
     fn try_push_down(&self, plan: LogicalPlan) -> DfResult<LogicalPlan> {
-        let plan = plan.transform(&Self::inspect_plan_with_subquery)?;
+        // Use the subquery-aware transform so expression subqueries (including
+        // nested scalar subqueries left in place by DataFusion 55's
+        // `enable_physical_uncorrelated_scalar_subquery`) are visited at every
+        // depth and their table scans get wrapped in `MergeScan`.
+        let plan = plan.transform_with_subqueries(&Self::inspect_plan_with_subquery)?;
         let mut rewriter = PlanRewriter::new(&plan.data);
         let result = plan.data.rewrite(&mut rewriter)?.data;
         Self::assign_merge_scan_remote_dyn_filter_producer_ids(result)

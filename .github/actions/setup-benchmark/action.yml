@@ -1,0 +1,38 @@
+name: Set up benchmark dependencies
+description: Reuse installed tools and install missing dependencies on an Ubuntu self-hosted runner
+runs:
+  using: composite
+  steps:
+    - name: Check host and install missing tools
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ "$(uname -m)" == x86_64 ]]
+        command -v git
+        missing=()
+        for tool in curl jq python3 rsync; do
+          command -v "$tool" >/dev/null || missing+=("$tool")
+        done
+        if ((${#missing[@]})); then
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends "${missing[@]}"
+        fi
+    - name: Install Docker if missing and verify access
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v docker >/dev/null; then
+          . /etc/os-release
+          [[ "$ID" == ubuntu ]]
+          sudo -n install -m 0755 -d /etc/apt/keyrings
+          curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo -n tee /etc/apt/keyrings/docker.asc >/dev/null
+          sudo -n chmod a+r /etc/apt/keyrings/docker.asc
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $VERSION_CODENAME stable" | sudo -n tee /etc/apt/sources.list.d/docker.list >/dev/null
+          sudo -n apt-get update
+          sudo -n env DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=l apt-get install -y --no-install-recommends docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+        fi
+        if ! docker info >/dev/null 2>&1; then
+          sudo -n systemctl enable --now docker
+        fi
+        # Membership must be configured before the runner starts, not in this job.
+        docker info

@@ -52,6 +52,7 @@ use frontend::frontend::Frontend;
 use frontend::instance::Instance;
 use frontend::instance::builder::FrontendBuilder;
 use frontend::server::Services;
+use frontend::service_config::{BatcherOptions, PendingRowsBatcherOptions};
 use meta_srv::metasrv::{FLOW_ID_SEQ, TABLE_ID_SEQ};
 use servers::grpc::GrpcOptions;
 use standalone::options::StandaloneOptions;
@@ -87,6 +88,10 @@ pub struct GreptimeDbStandaloneBuilder {
     slow_query_options: SlowQueryOptions,
     event_recorder_options: EventRecorderOptions,
     auto_create_table: bool,
+    experimental_metric_export: bool,
+    logical_batcher: Option<BatcherOptions>,
+    table_batcher: BatcherOptions,
+    mito_config: Option<mito2::config::MitoConfig>,
 }
 
 impl GreptimeDbStandaloneBuilder {
@@ -106,7 +111,39 @@ impl GreptimeDbStandaloneBuilder {
             },
             event_recorder_options: EventRecorderOptions::default(),
             auto_create_table: true,
+            experimental_metric_export: false,
+            logical_batcher: None,
+            table_batcher: BatcherOptions::default(),
+            mito_config: None,
         }
+    }
+
+    /// Overrides the Mito configuration for this test instance.
+    #[must_use]
+    pub fn with_mito_config(mut self, config: mito2::config::MitoConfig) -> Self {
+        self.mito_config = Some(config);
+        self
+    }
+
+    /// Enables experimental Metric export for the standalone test instance.
+    #[must_use]
+    pub fn with_experimental_metric_export(mut self) -> Self {
+        self.experimental_metric_export = true;
+        self
+    }
+
+    /// Configures ordinary-table batching for protocol integration tests.
+    #[must_use]
+    pub fn with_table_batcher(mut self, options: BatcherOptions) -> Self {
+        self.table_batcher = options;
+        self
+    }
+
+    /// Configures logical-table batching for integration tests.
+    #[must_use]
+    pub fn with_logical_batcher(mut self, options: BatcherOptions) -> Self {
+        self.logical_batcher = Some(options);
+        self
     }
 
     #[must_use]
@@ -358,7 +395,7 @@ impl GreptimeDbStandaloneBuilder {
         let (procedure_manager, event_recorder_handle) =
             standalone::build_procedure_manager(kv_backend.clone(), procedure_config);
 
-        let standalone_opts = StandaloneOptions {
+        let mut standalone_opts = StandaloneOptions {
             storage: opts.storage,
             procedure: procedure_config,
             metadata_store: kv_backend_config,
@@ -367,6 +404,11 @@ impl GreptimeDbStandaloneBuilder {
             slow_query: self.slow_query_options.clone(),
             event_recorder: self.event_recorder_options.clone(),
             auto_create_table: self.auto_create_table,
+            experimental_metric_export: self.experimental_metric_export,
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: self.logical_batcher.clone(),
+                table: self.table_batcher.clone(),
+            },
             // Tests cover the descriptor, so they run with it enabled.
             otlp: frontend::service_config::OtlpOptions {
                 experimental_enable_resource_info: true,
@@ -374,6 +416,14 @@ impl GreptimeDbStandaloneBuilder {
             },
             ..StandaloneOptions::default()
         };
+
+        if let Some(config) = &self.mito_config {
+            for engine in &mut standalone_opts.region_engine {
+                if let datanode::config::RegionEngineConfig::Mito(mito) = engine {
+                    *mito = config.clone();
+                }
+            }
+        }
 
         self.build_with(
             kv_backend,

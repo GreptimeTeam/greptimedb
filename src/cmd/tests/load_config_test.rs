@@ -30,6 +30,7 @@ use datanode::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlownodeOptions;
 use frontend::frontend::FrontendOptions;
+use frontend::service_config::PendingRowsBatcherOptions;
 use meta_client::MetaClientOptions;
 use meta_srv::metasrv::MetasrvOptions;
 use meta_srv::selector::SelectorType;
@@ -158,6 +159,7 @@ fn test_load_datanode_example_config() {
             },
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
+                    experimental_series_index_max_size: ReadableSize::gb(5),
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
@@ -198,14 +200,12 @@ fn test_load_frontend_example_config() {
     let options =
         GreptimeOptions::<FrontendOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    assert!(
-        !options
-            .component
-            .otlp
-            .experimental_enable_exponential_histogram
-    );
     let expected = GreptimeOptions::<FrontendOptions> {
         component: FrontendOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -381,14 +381,12 @@ fn test_load_standalone_example_config() {
     let options =
         GreptimeOptions::<StandaloneOptions>::load_layered_options(example_config.to_str(), "")
             .unwrap();
-    assert!(
-        !options
-            .component
-            .otlp
-            .experimental_enable_exponential_histogram
-    );
     let expected = GreptimeOptions::<StandaloneOptions> {
         component: StandaloneOptions {
+            pending_rows_batcher: PendingRowsBatcherOptions {
+                logical_table: Some(Default::default()),
+                ..Default::default()
+            },
             default_timezone: Some("UTC".to_string()),
             default_column_prefix: Some("greptime".to_string()),
             auto_create_table: true,
@@ -400,6 +398,7 @@ fn test_load_standalone_example_config() {
             }),
             region_engine: vec![
                 RegionEngineConfig::Mito(MitoConfig {
+                    experimental_series_index_max_size: ReadableSize::gb(5),
                     auto_flush_interval: Duration::from_secs(10 * 60),
                     default_region_write_buffer_size: ReadableSize::mb(0),
                     write_cache_ttl: Some(Duration::from_secs(60 * 60 * 8)),
@@ -439,40 +438,34 @@ fn test_load_standalone_example_config() {
 }
 
 #[test]
-fn test_load_otlp_exponential_histogram_option() {
-    let config = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(
-        config.path(),
-        "[otlp]\nexperimental_enable_exponential_histogram = true\n",
-    )
-    .unwrap();
+fn test_load_removed_histogram_options() {
+    for enabled in [false, true] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            format!(
+                "[otlp]\nexperimental_enable_exponential_histogram = {enabled}\n\
+                 [prom_store]\nenable = true\nwith_metric_engine = true\n\
+                 experimental_enable_prometheus_native_histogram = {enabled}\n"
+            ),
+        )
+        .unwrap();
 
-    let frontend =
-        GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
-            .unwrap();
-    assert!(
-        frontend
-            .component
-            .otlp
-            .experimental_enable_exponential_histogram
-    );
-
-    let standalone =
-        GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
-            .unwrap();
-    assert!(
-        standalone
-            .component
-            .otlp
-            .experimental_enable_exponential_histogram
-    );
-    assert!(
-        standalone
-            .component
-            .frontend_options()
-            .otlp
-            .experimental_enable_exponential_histogram
-    );
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let defaults = FrontendOptions::default();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp, defaults.otlp);
+            assert_eq!(options.prom_store, defaults.prom_store);
+            let serialized = toml::to_string(&options).unwrap();
+            assert!(!serialized.contains("experimental_enable_exponential_histogram"));
+            assert!(!serialized.contains("experimental_enable_prometheus_native_histogram"));
+        }
+    }
 }
 
 #[test]

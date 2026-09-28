@@ -14,11 +14,13 @@
 
 //! Datanode implementation.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common_base::Plugins;
+use common_catalog::consts::{FILE_ENGINE, METRIC_ENGINE, MITO_ENGINE};
 use common_datasource::object_store::LocalFileAccess;
 use common_error::ext::BoxedError;
 use common_greptimedb_telemetry::GreptimeDBTelemetryTask;
@@ -63,9 +65,10 @@ use tokio::sync::Notify;
 use crate::config::{DatanodeOptions, RegionEngineConfig, StorageConfig};
 use crate::error::{
     self, BuildDatanodeSnafu, BuildMetricEngineSnafu, BuildMitoEngineSnafu, CreateDirSnafu,
-    DataFusionSnafu, GetMetadataSnafu, InvalidObjectStoreWalConfigSnafu, MissingCacheSnafu,
-    MissingNodeIdSnafu, ObjectStoreWalNotSupportedSnafu, OpenLogStoreSnafu, Result,
-    ShutdownInstanceSnafu, ShutdownServerSnafu, StartServerSnafu,
+    DataFusionSnafu, DuplicateRegionEngineConfigSnafu, GetMetadataSnafu,
+    InvalidObjectStoreWalConfigSnafu, MissingCacheSnafu, MissingNodeIdSnafu,
+    ObjectStoreWalNotSupportedSnafu, OpenLogStoreSnafu, Result, ShutdownInstanceSnafu,
+    ShutdownServerSnafu, StartServerSnafu,
 };
 use crate::event_listener::{
     NoopRegionServerEventListener, RegionServerEventListenerRef, RegionServerEventReceiver,
@@ -253,6 +256,7 @@ impl DatanodeBuilder {
     }
 
     pub async fn build(mut self) -> Result<Datanode> {
+        validate_region_engine_config(&self.opts.region_engine)?;
         let node_id = self.opts.node_id.context(MissingNodeIdSnafu)?;
         set_default_prefix(self.opts.default_column_prefix.as_deref())
             .map_err(BoxedError::new)
@@ -710,6 +714,27 @@ impl DatanodeBuilder {
     }
 }
 
+/// Rejects repeated engine types before their configs can silently overwrite each other.
+fn validate_region_engine_config(configs: &[RegionEngineConfig]) -> Result<()> {
+    let mut engine_indices = HashMap::new();
+    for (index, config) in configs.iter().enumerate() {
+        let engine = match config {
+            RegionEngineConfig::Mito(_) => MITO_ENGINE,
+            RegionEngineConfig::File(_) => FILE_ENGINE,
+            RegionEngineConfig::Metric(_) => METRIC_ENGINE,
+        };
+        if let Some(first_index) = engine_indices.insert(engine, index) {
+            return DuplicateRegionEngineConfigSnafu {
+                engine,
+                first_index,
+                duplicate_index: index,
+            }
+            .fail();
+        }
+    }
+    Ok(())
+}
+
 /// Rejects an object store WAL config the log store cannot run on.
 fn validate_object_store_wal_config(config: &ObjectStoreWalConfig) -> Result<()> {
     let prefix = config.prefix.trim();
@@ -879,6 +904,7 @@ async fn open_all_regions(
 mod tests {
     use std::assert_matches;
     use std::collections::{BTreeMap, HashMap};
+    use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -886,6 +912,7 @@ mod tests {
     use cache::build_datanode_cache_registry;
     use common_base::Plugins;
     use common_base::readable_size::ReadableSize;
+    use common_config::Configurable;
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use common_meta::cache::LayeredCacheRegistryBuilder;
@@ -893,15 +920,17 @@ mod tests {
     use common_meta::key::datanode_table::DatanodeTableManager;
     use common_meta::kv_backend::KvBackendRef;
     use common_meta::kv_backend::memory::MemoryKvBackend;
-    use common_test_util::temp_dir::create_temp_dir;
+    use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
     use mito2::engine::MITO_ENGINE_NAME;
     use store_api::region_request::RegionRequest;
     use store_api::storage::RegionId;
 
-    use crate::config::DatanodeOptions;
-    use crate::datanode::{DatanodeBuilder, validate_object_store_wal_config};
+    use crate::config::{DatanodeOptions, RegionEngineConfig};
+    use crate::datanode::{
+        DatanodeBuilder, validate_object_store_wal_config, validate_region_engine_config,
+    };
     use crate::error::Error;
     use crate::tests::{MockRegionEngine, mock_region_server};
 
@@ -1012,6 +1041,74 @@ mod tests {
 
     fn is_empty_dir(dir: &Path) -> bool {
         std::fs::read_dir(dir).unwrap().next().is_none()
+    }
+
+    #[test]
+    fn test_validate_unique_region_engine_config() {
+        let mut opts = DatanodeOptions::default();
+        validate_region_engine_config(&opts.region_engine).unwrap();
+
+        opts.region_engine
+            .push(RegionEngineConfig::Metric(Default::default()));
+        validate_region_engine_config(&opts.region_engine).unwrap();
+
+        // Omitted engines still use their defaults during engine construction.
+        validate_region_engine_config(&[]).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_build_rejects_duplicate_region_engine_config() {
+        for (engine, first_index) in [("mito", 0), ("file", 1), ("metric", 2)] {
+            let mut file = create_named_temp_file();
+            write!(
+                file,
+                r#"
+                [[region_engine]]
+                [region_engine.mito]
+                global_write_buffer_size = "4GiB"
+                min_compaction_interval = "600s"
+
+                [[region_engine]]
+                [region_engine.file]
+
+                [[region_engine]]
+                [region_engine.metric]
+
+                [[region_engine]]
+                [region_engine.{engine}]
+                "#
+            )
+            .unwrap();
+            let opts = DatanodeOptions::load_layered_options(
+                Some(file.path().to_str().unwrap()),
+                "DATANODE_DUPLICATE_REGION_ENGINE_UT",
+            )
+            .unwrap();
+            let data_home = create_temp_dir("duplicate-region-engine-config");
+            let mut builder = datanode_builder(
+                data_home.path().to_str().unwrap(),
+                DatanodeWalConfig::default(),
+                Arc::new(MemoryKvBackend::new()),
+            );
+            builder.opts.region_engine = opts.region_engine;
+            let err = build_err(builder).await;
+
+            let Error::DuplicateRegionEngineConfig {
+                engine: actual_engine,
+                first_index: actual_first_index,
+                duplicate_index,
+                ..
+            } = &err
+            else {
+                panic!("unexpected error for {engine}: {err:?}");
+            };
+            assert_eq!(*actual_engine, engine);
+            assert_eq!(*actual_first_index, first_index);
+            assert_eq!(*duplicate_index, 3);
+            assert_eq!(err.status_code(), StatusCode::InvalidArguments);
+            // Rejected before the builder creates any storage or log store.
+            assert!(is_empty_dir(data_home.path()));
+        }
     }
 
     #[tokio::test]

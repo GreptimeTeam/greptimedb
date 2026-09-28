@@ -88,22 +88,22 @@ pub async fn put(
         .collect::<Vec<_>>();
 
     ctx.set_channel(Channel::Opentsdb);
-    let ctx = Arc::new(ctx);
+    let mut ctx = Arc::new(ctx);
 
     if summary || details {
         opentsdb_handler
             .preflight(&data_points, ctx.clone())
             .await?;
+        ctx = operator::insert::admit_write(data_points.len() as u64, &ctx)
+            .await
+            .map_err(common_error::ext::BoxedError::new)
+            .context(error::ExecuteGrpcQuerySnafu)?;
     }
 
     let response = if !summary && !details {
-        if let Err(e) = opentsdb_handler.exec_batch(data_points, ctx.clone()).await {
-            // Not debugging purpose, failed fast.
-            return error::InternalSnafu {
-                err_msg: e.to_string(),
-            }
-            .fail();
-        }
+        opentsdb_handler
+            .exec_batch(data_points, ctx.clone())
+            .await?;
         (HttpStatusCode::NO_CONTENT, Json(OpentsdbPutResponse::Empty))
     } else {
         let mut response = OpentsdbDebuggingResponse {

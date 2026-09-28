@@ -35,7 +35,9 @@ use crate::error::{self, InvalidDatabaseExportSnafu, Result};
 use crate::statement::StatementExecutor;
 use crate::statement::database_copy::{
     DatabaseExportFile, parse_parallelism_from_option_map, validate_database_directory,
+    validate_database_export_layout,
 };
+use crate::statement::export_logical_tables::writers::{ExportWriteBudget, retain_error};
 use crate::statement::export_logical_tables::{LogicalTableExport, LogicalTableExportLimits};
 
 /// A validated request-scoped selection, not a metadata snapshot or an ACL token.
@@ -68,6 +70,7 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
+        validate_database_export_layout(&req.with)?;
         validate_database_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(
@@ -200,46 +203,52 @@ impl StatementExecutor {
         }
         output_files.sort();
         let req = &plan.request;
-        let rows = run_database_export_jobs(
-            plan.jobs,
-            parse_parallelism_from_option_map(&req.with),
-            cancellation,
-            |job, token| {
-                let ctx = ctx.clone();
-                async move {
-                    match job {
-                        DatabaseExportJob::Metric(unit) => self
-                            .export_logical_tables(
-                                &unit,
-                                &req.location,
-                                &req.connection,
-                                req.time_range.as_ref(),
-                                LogicalTableExportLimits::default(),
-                                &token,
-                                ctx,
-                            )
-                            .await
-                            .map(|summary| summary.rows),
-                        DatabaseExportJob::Ordinary { table, output } => {
-                            let info = table.table_info();
-                            let copy = CopyTableRequest {
-                                catalog_name: info.catalog_name.clone(),
-                                schema_name: info.schema_name.clone(),
-                                table_name: info.name.clone(),
-                                location: output.location,
-                                with: req.with.clone(),
-                                connection: req.connection.clone(),
-                                pattern: None,
-                                direction: CopyDirection::Export,
-                                timestamp_range: req.time_range,
-                                limit: None,
-                            };
-                            self.copy_captured_table_to(table, copy, ctx).await
-                        }
+        let parallelism = parse_parallelism_from_option_map(&req.with);
+        let budget = ExportWriteBudget::new(parallelism);
+        let rows = run_database_export_jobs(plan.jobs, parallelism, cancellation, |job, token| {
+            let ctx = ctx.clone();
+            let budget = budget.clone();
+            async move {
+                match job {
+                    DatabaseExportJob::Metric(unit) => self
+                        .export_logical_tables_managed(
+                            &unit,
+                            &req.location,
+                            &req.connection,
+                            req.time_range.as_ref(),
+                            LogicalTableExportLimits::default(),
+                            &token,
+                            ctx,
+                            budget,
+                        )
+                        .await
+                        .map(|summary| summary.rows),
+                    DatabaseExportJob::Ordinary { table, output } => {
+                        let info = table.table_info();
+                        let copy = CopyTableRequest {
+                            catalog_name: info.catalog_name.clone(),
+                            schema_name: info.schema_name.clone(),
+                            table_name: info.name.clone(),
+                            location: output.location,
+                            with: req.with.clone(),
+                            connection: req.connection.clone(),
+                            pattern: None,
+                            direction: CopyDirection::Export,
+                            timestamp_range: req.time_range,
+                            limit: None,
+                        };
+                        let _permit = budget.writer(&token).await?;
+                        self.copy_captured_table_to_managed(
+                            table,
+                            copy,
+                            ctx,
+                            Some((&budget, &token)),
+                        )
+                        .await
                     }
                 }
-            },
-        )
+            }
+        })
         .await?;
         Ok(DatabaseExportSummary { rows, output_files })
     }
@@ -259,6 +268,7 @@ async fn run_database_export_jobs<J, F: Future<Output = Result<usize>>>(
     loop {
         while first_error.is_none()
             && !cancellation.is_cancelled()
+            && !token.is_cancelled()
             && active.len() < parallelism.max(1)
         {
             let Some(job) = jobs.next() else { break };
@@ -282,11 +292,12 @@ async fn run_database_export_jobs<J, F: Future<Output = Result<usize>>>(
         };
         match result {
             Some(Ok(count)) => rows += count,
-            Some(Err(err)) if first_error.is_none() => {
-                first_error = Some(err);
+            Some(Err(err)) => {
+                if !cancellation.is_cancelled() || first_error.is_none() {
+                    retain_error(&mut first_error, err);
+                }
                 token.cancel();
             }
-            Some(Err(err)) => common_telemetry::warn!(err; "Failed to drain database export job"),
             None => break,
         }
     }
@@ -337,7 +348,7 @@ mod tests {
                                 }
                                 .fail();
                             }
-                            // Ordinary COPY continues its I/O even when Metric jobs cancel.
+                            // Already-started ordinary I/O drains after cancellation.
                             token.cancelled().await;
                             started.send(10).unwrap();
                             finish_io.acquire().await.unwrap().forget();

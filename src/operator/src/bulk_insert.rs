@@ -30,7 +30,9 @@ use common_grpc::flight::{FlightEncoder, FlightMessage, record_batch_to_ipc};
 use common_telemetry::error;
 use common_telemetry::tracing_context::TracingContext;
 use futures::future::{join_all, try_join_all};
-use session::context::QueryContextRef;
+use meter_core::data::MeterRecord;
+use meter_macros::write_meter;
+use session::context::{Channel, QueryContextRef};
 use snafu::{ResultExt, ensure};
 use store_api::storage::RegionId;
 use table::TableRef;
@@ -128,6 +130,7 @@ impl Inserter {
         record_batch: RecordBatch,
         schema_bytes: Bytes,
         skip_wal: bool,
+        channel: Channel,
     ) -> Result<AffectedRows> {
         let table_info = table.table_info();
         let table_id = table_info.table_id();
@@ -136,6 +139,18 @@ impl Inserter {
         if record_batch.num_rows() == 0 {
             return Ok(0);
         }
+
+        // The zero value is WCU, not bytes. Bulk writes have no WCU accounting;
+        // preserve that behavior while admitting their rows before dispatch.
+        write_meter!(MeterRecord::new(
+            table_info.catalog_name.clone(),
+            table_info.schema_name.clone(),
+            0,
+            record_batch.num_rows() as u64,
+            channel as u8,
+        ))
+        .await
+        .context(error::WriteRejectedSnafu)?;
 
         let body_size = raw_flight_data.data_body.len();
         // TODO(yingwen): Fill record batch impure default values. Note that we should override `raw_flight_data` if we have to fill defaults.

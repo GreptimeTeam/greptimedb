@@ -17,9 +17,11 @@ mod dashboard;
 mod entity_graph;
 mod export_database;
 mod grpc;
+mod import_packed;
 mod influxdb;
 mod jaeger;
 mod log_handler;
+mod logical_batcher;
 mod logs;
 mod opentsdb;
 mod otlp;
@@ -30,7 +32,7 @@ mod region_query;
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic};
+use std::sync::{Arc, OnceLock, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -77,6 +79,7 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
     OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
@@ -122,12 +125,14 @@ lazy_static! {
 #[derive(Clone)]
 pub struct Instance {
     frontend_peer_addr: String,
+    experimental_metric_export: bool,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
     inserter: InserterRef,
+    logical_batcher: Arc<OnceLock<Option<Arc<LogicalTablePendingRowsBatcher>>>>,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,
@@ -391,6 +396,30 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
+                    CopyDatabase::From(arg),
+                )) = &stmt
+                    && arg.with.get("metric_data_layout").is_some()
+                {
+                    return self
+                        .copy_packed_database(arg.clone(), &stmt, query_ctx)
+                        .await;
+                }
+                if let Statement::ShowVariables(show) = &stmt
+                    && show
+                        .variable
+                        .to_string()
+                        .eq_ignore_ascii_case("experimental_metric_export")
+                {
+                    return self.show_metric_export_capability();
+                }
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
+                    arg,
+                ))) = &stmt
+                    && export_database::parse_metric_export_requested(&arg.with)?
+                {
+                    return self.copy_metric_database(arg.clone(), query_ctx).await;
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -2732,6 +2761,105 @@ mod tests {
             "greptime".to_string(),
             DEFAULT_PRIVATE_SCHEMA_NAME.to_string(),
         )
+    }
+
+    struct CancellableExportSource {
+        schema: GtSchemaRef,
+        channels: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    impl DataSource for CancellableExportSource {
+        fn get_stream(
+            &self,
+            _request: ScanRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            let (started, release) = self.channels.lock().unwrap().take().unwrap();
+            let schema = self.schema.clone();
+            let stream = futures::stream::once(async move {
+                started.send(()).unwrap();
+                release.await.unwrap();
+                Ok(RecordBatch::new_empty(schema))
+            });
+            Ok(Box::pin(RecordBatchStreamWrapper::new(
+                self.schema.clone(),
+                Box::pin(stream),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metric_export_http_timeout_cancels_ordinary_source() {
+        let destination = common_test_util::temp_dir::create_temp_dir("metric_export_timeout");
+        let (started_tx, started_rx) = oneshot::channel();
+        let (mut release_tx, release_rx) = oneshot::channel();
+        let info = test_table_info(1024, "source").unwrap();
+        let source = Arc::new(Table::new(
+            Arc::new(info.clone()),
+            FilterPushDownType::Unsupported,
+            Arc::new(CancellableExportSource {
+                schema: info.meta.schema.clone(),
+                channels: std::sync::Mutex::new(Some((started_tx, release_rx))),
+            }),
+        ));
+        let catalog = catalog::memory::MemoryCatalogManager::new_with_table(source);
+        let kv = Arc::new(MemoryKvBackend::new());
+        let instance = FrontendBuilder::new(
+            FrontendOptions {
+                experimental_metric_export: true,
+                ..Default::default()
+            },
+            kv.clone(),
+            test_cache_registry(kv).unwrap(),
+            catalog,
+            Arc::new(client::client_manager::NodeClients::default()),
+            Arc::new(NoopProcedureExecutor),
+            Arc::new(ProcessManager::new("export-timeout".into(), None)),
+        )
+        .with_local_file_access(
+            common_datasource::object_store::LocalFileAccess::sandboxed(destination.path())
+                .unwrap(),
+        )
+        .try_build()
+        .await
+        .unwrap();
+        let server = servers::http::HttpServerBuilder::new(servers::http::HttpOptions {
+            timeout: Duration::from_secs(2),
+            ..Default::default()
+        })
+        .with_sql_handler(Arc::new(instance))
+        .build();
+        let app = server.build(server.make_app()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let uri = reqwest::Url::from_directory_path(destination.path()).unwrap();
+        let sql = format!(
+            "COPY DATABASE greptime.public TO '{uri}' WITH (experimental_metric_export='true')"
+        );
+        let request = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!("http://{addr}/v1/sql"))
+                .form(&[("sql", sql)])
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
+        tokio::time::timeout(Duration::from_secs(5), release_tx.closed())
+            .await
+            .unwrap();
+        assert!(!destination.path().join("source.parquet").exists());
+        server_task.abort();
     }
 
     fn pending_table(

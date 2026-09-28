@@ -30,6 +30,7 @@ pub(super) struct CopyOptions {
     pub(super) format: DataFormat,
     pub(super) time_range: TimeRange,
     pub(super) parallelism: usize,
+    pub(crate) experimental_metric_export: bool,
 }
 
 pub(super) struct CopyTarget {
@@ -190,13 +191,19 @@ pub(crate) async fn execute_copy_database_from(
     schema: &str,
     source: &CopySource,
     format: DataFormat,
+    packed: bool,
 ) -> Result<()> {
     let sql = format!(
-        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'){};"#,
+        r#"COPY DATABASE "{}"."{}" FROM '{}' WITH (FORMAT='{}'{}){};"#,
         escape_sql_identifier(catalog),
         escape_sql_identifier(schema),
         escape_sql_literal(&source.location),
         format,
+        if packed {
+            ", metric_data_layout='packed'"
+        } else {
+            ""
+        },
         source.connection
     );
     let safe_sql = source.mask_sql(&sql);
@@ -210,6 +217,9 @@ pub(crate) async fn execute_copy_database_from(
 
 fn build_with_options(options: &CopyOptions) -> String {
     let mut parts = vec![format!("FORMAT='{}'", options.format)];
+    if options.experimental_metric_export {
+        parts.push("experimental_metric_export='true'".to_string());
+    }
     if let Some(start) = options.time_range.start {
         parts.push(format!(
             "START_TIME='{}'",

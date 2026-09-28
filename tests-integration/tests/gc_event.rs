@@ -43,6 +43,9 @@ async fn test_batch_gc_event() {
     common_telemetry::init_default_ut_logging();
     let (store_config, _guard) = get_test_store_config(&store_type);
     let home_dir = create_temp_dir("test_batch_gc_event_data_home");
+    // Keeps the production event-recorder flush interval: `assert_sst_count`
+    // counts SST files across every table, so eagerly flushed event rows would
+    // show up in the count.
     let cluster = GreptimeDbClusterBuilder::new("test_batch_gc_event")
         .await
         .with_datanodes(1)

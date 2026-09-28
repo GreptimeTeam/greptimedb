@@ -47,6 +47,11 @@ pub struct PrometheusGatewayService {
 impl PrometheusGateway for PrometheusGatewayService {
     async fn handle(&self, req: Request<PromqlRequest>) -> TonicResult<Response<PromqlResponse>> {
         let mut is_range_query = false;
+        let channel = req
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Promql);
         let inner = req.into_inner();
         let prom_query = match inner.promql.context(InvalidQuerySnafu {
             reason: "Expecting non-empty PromqlRequest.",
@@ -80,12 +85,8 @@ impl PrometheusGateway for PrometheusGatewayService {
         };
 
         let header = inner.header.as_ref();
-        let query_ctx = create_query_context(
-            Channel::Promql,
-            header,
-            Default::default(),
-            Default::default(),
-        )?;
+        let query_ctx =
+            create_query_context(channel, header, Default::default(), Default::default())?;
 
         let user_info = auth(self.user_provider.clone(), header, &query_ctx).await?;
         query_ctx.set_current_user(user_info);

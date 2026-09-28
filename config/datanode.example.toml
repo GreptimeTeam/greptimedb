@@ -464,6 +464,7 @@ skip_ssl_validation = false
 # endpoint = "https://storage.googleapis.com"
 
 ## The region engine options. You can configure multiple region engines.
+## Each engine type (mito, file, metric) may appear only once; duplicates cause startup to fail.
 [[region_engine]]
 
 ## The Mito engine options.
@@ -500,6 +501,13 @@ compress_manifest = false
 ## Under development; do not enable. Whether to enable series indexes.
 ## Indexes are stored on the local filesystem under `{data_home}/series_index`.
 #+ experimental_enable_series_index = false
+
+## Approximate series and range index size limit in open regions, shared across workers.
+## Workers periodically refresh usage and skip maintenance when full. In-flight reconciliation
+## can exceed the limit. Closed-region files, temporary output, catalogs, and old snapshots
+## retained by readers are not counted.
+## Minimum: 1KiB. Takes effect on restart.
+#+ experimental_series_index_max_size = "5GiB"
 
 ## Whether to build and query range indexes when series indexes are enabled.
 ## Obsolete range-index metadata and files are still cleaned up when disabled.

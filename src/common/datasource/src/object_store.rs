@@ -56,8 +56,17 @@ pub struct BuiltBackend {
 impl BuiltBackend {
     /// Checks an explicit input using the same file-type filter as directory listing.
     pub async fn is_file(&self, path: &str) -> object_store::Result<bool> {
-        // Stat first preserves errors for dangling or inaccessible symlink targets.
-        if self.object_store.stat(path).await?.mode() != object_store::EntryMode::FILE {
+        let meta = self.object_store.stat(path).await?;
+        self.is_file_with_mode(path, meta.mode()).await
+    }
+
+    /// Applies local file-type protections to a previously fetched object stat.
+    pub async fn is_file_with_mode(
+        &self,
+        path: &str,
+        mode: object_store::EntryMode,
+    ) -> object_store::Result<bool> {
+        if mode != object_store::EntryMode::FILE {
             return Ok(false);
         }
         if let Some(root) = &self.local_root {

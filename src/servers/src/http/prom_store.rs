@@ -40,12 +40,12 @@ use table::requests::{
     SOURCE_PROMETHEUS,
 };
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
     CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
 };
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
 use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
@@ -74,8 +74,7 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
-    pub experimental_enable_prometheus_native_histogram: bool,
-    pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pub pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -146,7 +145,6 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
-        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
     } = state;
 
@@ -228,7 +226,6 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
-        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
     } = state;
 
@@ -243,11 +240,7 @@ async fn remote_write_v2(
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let req = match decode_remote_write_v2(
-        is_zstd,
-        body,
-        experimental_enable_prometheus_native_histogram,
-    ) {
+    let req = match decode_remote_write_v2(is_zstd, body) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
@@ -366,9 +359,9 @@ trait PromWriteBatcher: Send + Sync {
 }
 
 #[async_trait]
-impl PromWriteBatcher for PendingRowsBatcher {
+impl PromWriteBatcher for LogicalTablePendingRowsBatcher {
     async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
-        PendingRowsBatcher::submit(self, requests, ctx).await
+        LogicalTablePendingRowsBatcher::submit(self, requests, ctx).await
     }
 }
 
@@ -380,12 +373,16 @@ async fn preflight_prometheus_rows(
     prom_store_handler: &PromStoreProtocolHandlerRef,
     batches: &mut [PromWriteBatch],
 ) -> Result<()> {
-    for (ctx, reqs) in batches {
+    for (ctx, reqs) in batches.iter_mut() {
         prom_store_handler.pre_write(reqs, ctx.clone()).await?;
         // Detach from context clones retained by pre-write hooks so the checked
         // schema cannot change before this prepared batch is written.
         *ctx = Arc::new(ctx.fork());
     }
+    operator::insert::admit_row_insert_batches(batches)
+        .await
+        .map_err(common_error::ext::BoxedError::new)
+        .context(error::ExecuteGrpcQuerySnafu)?;
     Ok(())
 }
 
@@ -395,7 +392,7 @@ async fn preflight_prometheus_rows(
 /// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -461,7 +458,7 @@ async fn write_prometheus_rows_with_progress(
 
 async fn write_prometheus_v2_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
     sample_batches: Vec<PromWriteBatch>,
     histogram_batches: Vec<PromWriteBatch>,
@@ -918,7 +915,8 @@ mod tests {
 
     #[async_trait]
     impl PromWriteBatcher for RecordingPromWriteBatcher {
-        async fn submit(&self, requests: RowInsertRequests, _ctx: QueryContextRef) -> Result<u64> {
+        async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
             record_write_event(&self.events, "batch", &requests);
             Ok(prom_write_row_count(&requests))
         }
@@ -942,9 +940,10 @@ mod tests {
         async fn write_prepared(
             &self,
             request: RowInsertRequests,
-            _ctx: QueryContextRef,
+            ctx: QueryContextRef,
             _with_metric_engine: bool,
         ) -> Result<Output> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
             record_write_event(&self.events, "direct", &request);
             Ok(Output::new_with_affected_rows(0))
         }
@@ -1011,7 +1010,6 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
         }
     }

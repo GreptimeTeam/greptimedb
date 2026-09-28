@@ -1285,13 +1285,17 @@ impl RegionServerInner {
         requests: Vec<(RegionId, RegionOpenRequest)>,
         ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
+        let request_count = requests.len();
         let region_changes = requests
             .iter()
             .map(|(region_id, open)| {
                 let attribute = parse_region_attribute(&open.engine, &open.options)?;
                 Ok((*region_id, RegionChange::Register(attribute)))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
+            .collect::<Result<HashMap<_, _>>>()
+            .inspect_err(|err| {
+                record_region_open_failures(engine.name(), err.status_code(), request_count);
+            })?;
 
         for (&region_id, region_change) in &region_changes {
             self.set_region_status_not_ready(region_id, &engine, region_change)
@@ -1314,6 +1318,7 @@ impl RegionServerInner {
                                 .await
                             {
                                 error!(e; "Failed to set region to ready: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(BoxedError::new(e));
                             } else {
                                 open_regions.push(region_id)
@@ -1327,6 +1332,7 @@ impl RegionServerInner {
                                 warn!("Region {} not found, ignore it, source: {:?}", region_id, e);
                             } else {
                                 error!(e; "Failed to open region: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(e);
                             }
                         }
@@ -1338,6 +1344,7 @@ impl RegionServerInner {
                     self.unset_region_status(region_id, &engine, *region_change);
                 }
                 error!(e; "Failed to open batch regions");
+                record_region_open_failures(engine.name(), e.status_code(), request_count);
                 errors.push(BoxedError::new(e));
             }
         }
@@ -1373,7 +1380,10 @@ impl RegionServerInner {
                 .read()
                 .unwrap()
                 .get(&engine)
-                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
+                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })
+                .inspect_err(|err| {
+                    record_region_open_failures(&engine, err.status_code(), requests.len());
+                })?
                 .clone();
             results.push(
                 self.handle_batch_open_requests_inner(
@@ -1571,6 +1581,24 @@ impl RegionServerInner {
     }
 
     pub async fn handle_request(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse> {
+        let open_engine = match &request {
+            RegionRequest::Open(open) => Some(open.engine.clone()),
+            _ => None,
+        };
+        self.handle_request_inner(region_id, request)
+            .await
+            .inspect_err(|err| {
+                if let Some(engine) = open_engine {
+                    record_region_open_failures(&engine, err.status_code(), 1);
+                }
+            })
+    }
+
+    async fn handle_request_inner(
         &self,
         region_id: RegionId,
         request: RegionRequest,
@@ -1944,6 +1972,17 @@ enum RegionChange {
 
 fn is_metric_engine(engine: &str) -> bool {
     engine == METRIC_ENGINE_NAME
+}
+
+/// Records failed open attempts without using arbitrary engine names as metric labels.
+fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
+    let engine = match engine {
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        _ => "unknown",
+    };
+    crate::metrics::REGION_OPEN_FAILURES_TOTAL
+        .with_label_values(&[engine, status_code.as_ref()])
+        .inc_by(count as u64);
 }
 
 fn parse_region_attribute(
