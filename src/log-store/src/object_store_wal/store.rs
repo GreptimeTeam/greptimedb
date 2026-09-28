@@ -4944,10 +4944,7 @@ mod tests {
 
         // An object store with a retry layer reports a temporary error that
         // outlasted its retries as persistent; the create is repeated too.
-        let error = object_store::Error::new(object_store::ErrorKind::Unexpected, "injected")
-            .set_temporary()
-            .set_persistent();
-        *io.fail_next_put.lock().unwrap() = Some(error);
+        io.fail_next_put_persistently();
         append(&store, region_id, "a2").await.unwrap();
         timeout(WAIT, store.wait_durable(&provider(region_id), id(2, 1)))
             .await
@@ -4960,7 +4957,7 @@ mod tests {
     async fn test_store_enqueued_permanent_failure_poisons() {
         // A conflict of any epoch poisons the store without reading the
         // existing object, since the acknowledged entries cannot move to
-        // another sequence. So does a storage error that is not temporary.
+        // another sequence. So does a permanent storage error.
         for foreign_epoch in [Some(0), Some(2), None] {
             let object_store = memory_store();
             let (io, reads) = RecordingIo::over(object_store.clone());
@@ -5053,15 +5050,16 @@ mod tests {
         );
 
         // A backlog that cannot be uploaded is reported by stop. A transient
-        // failure drops it; one that is not temporary also poisons the store.
-        for permanent in [false, true] {
+        // failure, temporary or persistent, drops it; a permanent one also
+        // poisons the store.
+        for failure in ["temporary", "persistent", "permanent"] {
             let (io, _) = RecordingIo::over(memory_store());
             let store = open_over(io.clone(), &enqueued(manual())).await;
             append(&store, region_id, "a1").await.unwrap();
-            if permanent {
-                io.fail_next_put_permanently();
-            } else {
-                store.fail_creates();
+            match failure {
+                "temporary" => store.fail_creates(),
+                "persistent" => io.fail_next_put_persistently(),
+                _ => io.fail_next_put_permanently(),
             }
             let error = store.stop().await.unwrap_err();
             assert!(
@@ -5070,7 +5068,7 @@ mod tests {
             );
             assert_eq!(vec![0], object_seqs(io.as_ref()).await);
             assert_eq!(
-                permanent,
+                failure == "permanent",
                 store.latest_entry_id(&provider(region_id)).is_err()
             );
             store.stop().await.unwrap();
@@ -5385,6 +5383,15 @@ mod tests {
                 object_store::ErrorKind::PermissionDenied,
                 "injected failure",
             );
+            *self.fail_next_put.lock().unwrap() = Some(error);
+        }
+
+        /// Fails the next create as a retry layer reports a temporary error
+        /// that outlasted its retries.
+        fn fail_next_put_persistently(&self) {
+            let error = object_store::Error::new(object_store::ErrorKind::Unexpected, "injected")
+                .set_temporary()
+                .set_persistent();
             *self.fail_next_put.lock().unwrap() = Some(error);
         }
     }
