@@ -2048,6 +2048,7 @@ dependencies = [
  "table",
  "tempfile",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
 ]

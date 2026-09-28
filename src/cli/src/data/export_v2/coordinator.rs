@@ -498,6 +498,158 @@ mod tests {
         }
     }
 
+    struct PausedClose {
+        inner: Option<object_store::layers::mock::oio::Writer>,
+        started: std::sync::Arc<tokio::sync::Notify>,
+        release: std::sync::Arc<tokio::sync::Notify>,
+    }
+
+    impl object_store::layers::mock::oio::Write for PausedClose {
+        async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+            self.inner.as_mut().unwrap().write(bytes).await
+        }
+
+        async fn close(&mut self) -> object_store::Result<object_store::layers::mock::Metadata> {
+            let mut inner = self.inner.take().unwrap();
+            let (started, release) = (self.started.clone(), self.release.clone());
+            // Model blocking storage I/O that survives dropping its caller.
+            let (inner, result) = tokio::spawn(async move {
+                started.notify_one();
+                release.notified().await;
+                let result = inner.close().await;
+                (inner, result)
+            })
+            .await
+            .unwrap();
+            self.inner = Some(inner);
+            result
+        }
+
+        async fn abort(&mut self) -> object_store::Result<()> {
+            self.inner.as_mut().unwrap().abort().await
+        }
+    }
+
+    #[tokio::test]
+    async fn packed_cancellation_drains_close_before_failing_chunk() {
+        use std::sync::Arc;
+
+        use common_datasource::packed_snapshot::PACK_INDEX_FILE;
+        use common_datasource::packed_writer::{PackedTableWriter, PackedWriter};
+        use common_datasource::parquet_writer::ParquetFileWriter;
+        use datatypes::arrow::datatypes::{DataType, Field, Schema};
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
+        use tokio_util::sync::CancellationToken;
+
+        use crate::data::snapshot_storage::OpenDalStorage;
+
+        for paused_path in ["pack-000000.bin", PACK_INDEX_FILE] {
+            let directory = tempfile::tempdir().unwrap();
+            let uri = url::Url::from_directory_path(directory.path()).unwrap();
+            let storage =
+                OpenDalStorage::from_uri(uri.as_str(), &ObjectStoreConfig::default()).unwrap();
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let factory: MockWriterFactory = Arc::new({
+                let (started, release) = (started.clone(), release.clone());
+                move |path, _, inner| {
+                    if path.trim_start_matches('/') == paused_path {
+                        Box::new(PausedClose {
+                            inner: Some(inner),
+                            started: started.clone(),
+                            release: release.clone(),
+                        })
+                    } else {
+                        inner
+                    }
+                }
+            });
+            let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+                .unwrap()
+                .build_operator()
+                .layer(
+                    MockLayerBuilder::default()
+                        .writer_factory(factory)
+                        .build()
+                        .unwrap(),
+                );
+            let packed = PackedWriter::new(store.clone()).unwrap();
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "value",
+                DataType::Int64,
+                true,
+            )]));
+            let mut table = ParquetFileWriter::open_packed(
+                schema,
+                store.clone(),
+                "unused",
+                None,
+                PackedTableWriter::new(packed.clone(), "empty".into(), 1, false),
+            )
+            .unwrap();
+            table.finish(None).await.unwrap();
+            let token = CancellationToken::new();
+            let mut manifest = pending_manifest(1);
+            manifest.version = 2;
+            manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+            let export = export_data_concurrent(
+                &storage,
+                &mut manifest,
+                2,
+                &crate::data::progress::NoopProgress,
+                |_, _| async {
+                    let mut packed = packed.lock().await;
+                    let result = packed.finish(&token).await;
+                    if result.is_err() {
+                        packed.abort().await.unwrap();
+                    }
+                    result.map_err(|error| {
+                        crate::data::export_v2::error::IoSnafu {
+                            operation: "exporting packed chunk",
+                            error: std::io::Error::other(error),
+                        }
+                        .build()
+                    })
+                },
+            );
+            tokio::pin!(export);
+            tokio::select! {
+                _ = started.notified() => {},
+                result = &mut export => panic!("completed while close paused: {result:?}"),
+            }
+            token.cancel();
+            assert!(futures::poll!(&mut export).is_pending());
+            assert_eq!(
+                storage.read_manifest().await.unwrap().chunks[0].status,
+                ChunkStatus::InProgress
+            );
+            release.notify_one();
+            assert!(export.await.unwrap_err().to_string().contains("cancelled"));
+            let persisted = storage.read_manifest().await.unwrap();
+            assert_eq!(persisted.chunks[0].status, ChunkStatus::Failed);
+            assert!(!persisted.is_complete());
+            assert!(persisted.chunks[0].files.is_empty());
+            assert!(
+                store
+                    .stat("pack-000000.bin")
+                    .await
+                    .unwrap()
+                    .content_length()
+                    > 0
+            );
+            assert_eq!(
+                store.exists(PACK_INDEX_FILE).await.unwrap(),
+                paused_path == PACK_INDEX_FILE
+            );
+            if paused_path == PACK_INDEX_FILE {
+                let index: common_datasource::packed_snapshot::PackIndex =
+                    serde_json::from_slice(&store.read(PACK_INDEX_FILE).await.unwrap().to_bytes())
+                        .unwrap();
+                index.validate_membership(["empty"]).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn test_next_eligible_chunk_scans_in_order() {
         let manifest = pending_manifest(3);

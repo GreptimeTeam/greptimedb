@@ -401,12 +401,17 @@ async fn native_histogram_parquet_roundtrip() {
 
 struct PausedFileWriter {
     inner: Option<object_store::layers::mock::oio::Writer>,
+    paused: bool,
     started: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
 impl object_store::layers::mock::oio::Write for PausedFileWriter {
     async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+        if self.paused {
+            return self.inner.as_mut().unwrap().write(bytes).await;
+        }
+        self.paused = true;
         let mut inner = self.inner.take().unwrap();
         let started = self.started.clone();
         let release = self.release.clone();
@@ -440,7 +445,7 @@ impl object_store::layers::mock::oio::Write for PausedFileWriter {
 
 #[tokio::test]
 async fn cancellation_drains_storage_and_preserves_committed_files() {
-    for large in [false, true] {
+    for (large, packed) in [(false, false), (true, false), (false, true)] {
         use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory};
         let directory = common_test_util::temp_dir::create_temp_dir("metric_export_pending_open");
         let access =
@@ -460,6 +465,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             move |_, _, inner| {
                 Box::new(PausedFileWriter {
                     inner: Some(inner),
+                    paused: false,
                     started: started.clone(),
                     release: release.clone(),
                 })
@@ -471,6 +477,16 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
                 .build()
                 .unwrap(),
         );
+        let store = store.layer(object_store::layers::CapabilityOverrideLayer::new(
+            move |mut capability| {
+                if packed {
+                    capability.write_multi_max_size = Some(256);
+                }
+                capability
+            },
+        ));
+        let packed = packed
+            .then(|| common_datasource::packed_writer::PackedWriter::new(store.clone()).unwrap());
         let cancellation = CancellationToken::new();
         let (unit, input) = if large {
             let field = Field::new("value", DataType::Utf8, true);
@@ -519,7 +535,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             limits,
             &cancellation,
             budget.clone(),
-            None,
+            packed.clone(),
         );
         tokio::pin!(export);
         tokio::select! {
@@ -530,6 +546,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             assert!(budget.available().1 < 64 * 1024 * 1024);
         }
         let held = budget.available();
+        assert_eq!(held.0, 0);
         cancellation.cancel();
         assert!(futures::poll!(&mut export).is_pending());
         assert_eq!(budget.available().0, held.0);
@@ -544,8 +561,16 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             result,
             Err(error::Error::LogicalTableExportCancelled { .. })
         ));
-        assert_eq!(store.exists("cpu.v1.parquet").await.unwrap(), !large);
-        if !large {
+        if let Some(packed) = &packed {
+            packed.lock().await.abort().await.unwrap();
+            assert!(!store.exists("pack-000000.bin").await.unwrap());
+            assert!(!store.exists("pack-index.json").await.unwrap());
+        }
+        assert_eq!(
+            store.exists("cpu.v1.parquet").await.unwrap(),
+            !large && packed.is_none()
+        );
+        if !large && packed.is_none() {
             let (_, batches) = read(&store, "cpu.v1.parquet").await;
             assert_eq!(batches.iter().map(RecordBatch::num_rows).sum::<usize>(), 1);
         }
