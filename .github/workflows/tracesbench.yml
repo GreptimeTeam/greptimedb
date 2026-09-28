@@ -11,7 +11,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f56e67fcbbdb@sha256:c6940cab6b1c6613687a23e843262a48cfc06bd91a4f2e503f608370e86115f6
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:a78cc4971f90@sha256:22ea2820521ae18b4742c72b89f9e89f95fa9166ce7783a4b37a35e3cee8c8af
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -55,14 +55,14 @@ on:
         default: 16g
         required: true
       runtime_cpus:
-        description: CPU limit per runtime container
+        description: CPU limit per runtime container (0 = unrestricted)
         type: string
-        default: '2'
+        default: '0'
         required: true
       runtime_memory:
-        description: Memory limit per runtime container (separate from DB memory)
+        description: Memory limit per runtime container (0 = unrestricted; separate from DB memory)
         type: string
-        default: 4g
+        default: '0'
         required: true
 permissions:
   contents: read
@@ -115,7 +115,10 @@ jobs:
         ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
         [[ "$DB_CPUS" =~ ^[1-9][0-9]*$ && "$DB_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
-        [[ "$RUNTIME_CPUS" =~ ^[1-9][0-9]*$ && "$RUNTIME_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
+        [[ "$RUNTIME_CPUS" =~ ^(0|[1-9][0-9]*)$ && "$RUNTIME_MEMORY" =~ ^(0|[1-9][0-9]*[mMgG])$ ]]
+        runtime_limits=()
+        [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
+        [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
         [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
         docker pull "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
@@ -123,11 +126,11 @@ jobs:
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         # Refuse runtimes without the trace runner and its validated dataset/report contract.
-        help=$(docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/run_tracesbench_docker.py --help)
+        help=$(docker run --rm "${runtime_limits[@]}" "$resolved" scripts/run_tracesbench_docker.py --help)
         grep -F -- '--dataset {sanity,preflight,main}' <<< "$help"
         grep -F -- '--runtime-cpus' <<< "$help"
         grep -F -- '--runtime-memory' <<< "$help"
-        docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/check_run_tracesbench_docker.py
+        docker run --rm "${runtime_limits[@]}" "$resolved" scripts/check_run_tracesbench_docker.py
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
   provision:
     needs: validate
