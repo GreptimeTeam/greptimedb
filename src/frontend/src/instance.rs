@@ -3367,7 +3367,7 @@ mod tests {
                 &instance,
                 ctx.clone(),
                 servers::http::jaeger::QueryTraceParams {
-                    service_name: "service".to_string(),
+                    service_name: Some("service".to_string()),
                     ..Default::default()
                 },
             )

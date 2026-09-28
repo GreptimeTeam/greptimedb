@@ -1534,6 +1534,26 @@ impl HttpServer {
                 "/api/traces/{trace_id}",
                 routing::get(jaeger::handle_get_trace),
             )
+            .route(
+                "/api/v3/services",
+                routing::get(jaeger::v3::handle_get_services),
+            )
+            .route(
+                "/api/v3/operations",
+                routing::get(jaeger::v3::handle_get_operations),
+            )
+            .route(
+                "/api/v3/traces",
+                routing::get(jaeger::v3::handle_find_traces),
+            )
+            .route(
+                "/api/v3/trace-summaries",
+                routing::get(jaeger::v3::handle_find_trace_summaries),
+            )
+            .route(
+                "/api/v3/traces/{trace_id}",
+                routing::get(jaeger::v3::handle_get_trace),
+            )
             .with_state(handler)
     }
 
