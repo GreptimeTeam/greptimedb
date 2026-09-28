@@ -510,8 +510,6 @@ max_running_procedures = 128
 # endpoint = "https://storage.googleapis.com"
 
 # Example of using HDFS as the storage with the native Rust client.
-# Requires the `hdfs-object-store` build feature, which is enabled by default.
-# When building with `--no-default-features`, add `--features hdfs-object-store`.
 # [storage]
 # type = "Hdfs"
 # root = "/greptimedb"
@@ -575,7 +573,7 @@ data_home = "./greptimedb_data"
 ## - `Gcs`: the data is stored in the Google Cloud Storage.
 ## - `Azblob`: the data is stored in the Azure Blob Storage.
 ## - `Oss`: the data is stored in the Aliyun OSS.
-## - `Hdfs`: the data is stored in the Hadoop Distributed File System. Requires the `hdfs-object-store` build feature, enabled by default. When building with `--no-default-features`, add `--features hdfs-object-store`.
+## - `Hdfs`: the data is stored in the Hadoop Distributed File System.
 type = "File"
 
 ## The S3 bucket name.
