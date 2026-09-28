@@ -23,7 +23,6 @@ use std::time::{Duration, Instant};
 
 use async_stream::try_stream;
 use bytes::Bytes;
-use common_error::ext::{ErrorExt, RetryHint};
 use common_telemetry::info;
 use common_wal::config::object_store::{AckMode, ObjectStoreWalConfig};
 use futures::future::BoxFuture;
@@ -1131,10 +1130,10 @@ impl Actor {
             // Nobody is left to retry in the `enqueued` mode, so the store
             // repeats a create that failed transiently under the same sequence
             // with the same bytes, which an identical retry accepts.
-            Err(error @ Error::WalObjectStore { .. })
+            Err(ref error)
                 if self.ack_mode == AckMode::Enqueued
                     && !self.is_stopped()
-                    && error.retry_hint() == RetryHint::Retryable =>
+                    && is_transient(error) =>
             {
                 self.sealed[index].state = CreateState::Pending;
             }
@@ -1145,7 +1144,7 @@ impl Actor {
             // drops the `enqueued` backlog.
             Err(error @ Error::WalObjectStore { .. })
                 if self.ack_mode == AckMode::Durable
-                    || (self.is_stopped() && error.retry_hint() == RetryHint::Retryable) =>
+                    || (self.is_stopped() && is_transient(&error)) =>
             {
                 self.roll_back(Arc::new(error))
             }
@@ -1510,6 +1509,13 @@ fn set_terminal(terminal_error: &TerminalError, error: Error) -> Arc<Error> {
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(|| Arc::new(error))
         .clone()
+}
+
+/// Returns true for a storage error that a later attempt may not meet: one
+/// the object store reports as temporary, or as persistent, which is how its
+/// retry layer reports a temporary error that outlasted its retries.
+fn is_transient(error: &Error) -> bool {
+    matches!(error, Error::WalObjectStore { error, .. } if !error.is_permanent())
 }
 
 /// Wraps an error that several callers receive.
@@ -4935,6 +4941,19 @@ mod tests {
             expected_entries(region_id, &[(id(1, 1), "a1")]),
             read_entries(&store, region_id, 1).await
         );
+
+        // An object store with a retry layer reports a temporary error that
+        // outlasted its retries as persistent; the create is repeated too.
+        let error = object_store::Error::new(object_store::ErrorKind::Unexpected, "injected")
+            .set_temporary()
+            .set_persistent();
+        *io.fail_next_put.lock().unwrap() = Some(error);
+        append(&store, region_id, "a2").await.unwrap();
+        timeout(WAIT, store.wait_durable(&provider(region_id), id(2, 1)))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(vec![0, 1, 2], object_seqs(io.as_ref()).await);
     }
 
     #[tokio::test]
@@ -4949,7 +4968,7 @@ mod tests {
             let region_id = region(1);
             match foreign_epoch {
                 Some(epoch) => put_foreign(&object_store, 1, epoch).await,
-                None => io.fail_next_put_permanently.store(true, Ordering::Relaxed),
+                None => io.fail_next_put_permanently(),
             }
             let assert_poisoned = |error: Error| {
                 let poisoned = match foreign_epoch {
@@ -5040,7 +5059,7 @@ mod tests {
             let store = open_over(io.clone(), &enqueued(manual())).await;
             append(&store, region_id, "a1").await.unwrap();
             if permanent {
-                io.fail_next_put_permanently.store(true, Ordering::Relaxed);
+                io.fail_next_put_permanently();
             } else {
                 store.fail_creates();
             }
@@ -5340,13 +5359,13 @@ mod tests {
 
     /// Object access that records every range read as (sequence, offset,
     /// length) and, on request, reports the next conditional create as failed
-    /// after it wrote the object, or fails it with an error that is not
-    /// temporary before it writes.
+    /// after it wrote the object, or fails it with a given error before it
+    /// writes.
     struct RecordingIo {
         inner: ObjectStoreIo,
         reads: RangeReads,
         fail_after_next_put: AtomicBool,
-        fail_next_put_permanently: AtomicBool,
+        fail_next_put: Mutex<Option<object_store::Error>>,
     }
 
     impl RecordingIo {
@@ -5356,23 +5375,24 @@ mod tests {
                 inner: ObjectStoreIo::new(object_store, PREFIX).unwrap(),
                 reads: reads.clone(),
                 fail_after_next_put: AtomicBool::new(false),
-                fail_next_put_permanently: AtomicBool::new(false),
+                fail_next_put: Mutex::new(None),
             };
             (Arc::new(io), reads)
+        }
+
+        fn fail_next_put_permanently(&self) {
+            let error = object_store::Error::new(
+                object_store::ErrorKind::PermissionDenied,
+                "injected failure",
+            );
+            *self.fail_next_put.lock().unwrap() = Some(error);
         }
     }
 
     #[async_trait::async_trait]
     impl WalObjectIo for RecordingIo {
         async fn put_if_absent(&self, object_seq: u64, content: Bytes) -> Result<PutResult> {
-            if self
-                .fail_next_put_permanently
-                .swap(false, Ordering::Relaxed)
-            {
-                let error = object_store::Error::new(
-                    object_store::ErrorKind::PermissionDenied,
-                    "injected failure",
-                );
+            if let Some(error) = self.fail_next_put.lock().unwrap().take() {
                 return Err(error).context(WalObjectStoreSnafu {
                     operation: "write",
                     path: self.object_path(object_seq),
