@@ -9,6 +9,7 @@ kind = "prom_remote_write_then_query"
 database = "public"
 metric = "opt06_bloom_empty_groups"
 physical_table = "opt06_bloom_empty_groups_physical"
+disable_index_result_cache = true
 series_count = 2048
 samples_per_series = 1024
 sample_chunk_size = 256
