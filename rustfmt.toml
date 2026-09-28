@@ -1,2 +1,3 @@
-group_imports = "StdExternalCrate"
-imports_granularity = "Module"
+# disable these features until they get stablized
+#group_imports = "StdExternalCrate"
+#imports_granularity = "Module"
