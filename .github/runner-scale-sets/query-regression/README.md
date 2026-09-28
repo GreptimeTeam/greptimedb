@@ -86,7 +86,15 @@ sweep.
 ### Building and updating the ECS image
 
 The runner `Dockerfile` in the parent directory stays the single source of the
-tool contract. Build a new ECS image from it:
+tool contract. The image is rebuilt **automatically** by
+`.github/workflows/rebuild-query-regression-runner-image.yaml` whenever
+`rust-toolchain.toml` or anything under this directory changes on main (or via
+manual dispatch): it runs the ops tool below, then bumps
+`RUNNER_IMAGE_EPOCH` in `query-regression.yml` and points the
+`QUERY_REGRESSION_ECS_IMAGE_ID` repo variable at the new image, so the next
+regression run picks up image and epoch together.
+
+The manual fallback (also what the workflow runs):
 
 ```bash
 ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \

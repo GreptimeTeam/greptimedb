@@ -92,8 +92,9 @@ APT_PACKAGES = [
 DOCKER_CE_PACKAGES = "docker-ce docker-ce-cli containerd.io docker-buildx-plugin"
 
 
-def render_user_data(dockerfile: str, start_runner: str, unit: str) -> str:
+def render_user_data(dockerfile: str, rust_toolchain_toml: str, start_runner: str, unit: str) -> str:
     dockerfile_b64 = base64.b64encode(dockerfile.encode()).decode()
+    rust_toolchain_b64 = base64.b64encode(rust_toolchain_toml.encode()).decode()
     start_runner_b64 = base64.b64encode(start_runner.encode()).decode()
     unit_b64 = base64.b64encode(unit.encode()).decode()
     packages = " ".join(APT_PACKAGES)
@@ -122,6 +123,11 @@ base64 -d > /tmp/Dockerfile <<'EOF'
 {dockerfile_b64}
 EOF
 mkdir -p /tmp/image-context
+# The Dockerfile COPYies rust-toolchain.toml (single source of truth for
+# the baked toolchain); stage it into the build context.
+base64 -d > /tmp/image-context/rust-toolchain.toml <<'EOF'
+{rust_toolchain_b64}
+EOF
 docker build --platform linux/amd64 -f /tmp/Dockerfile -t qreg-runner:local /tmp/image-context
 
 # Materialize the tool contract onto the host filesystem.
@@ -267,6 +273,7 @@ def main() -> int:
     user_data = base64.b64encode(
         render_user_data(
             (ASSETS_DIR.parent / "Dockerfile").read_text(),
+            (ASSETS_DIR.parent.parent / "rust-toolchain.toml").read_text(),
             (ASSETS_DIR / "start-runner.sh").read_text(),
             (ASSETS_DIR / "ephemeral-github-runner.service").read_text(),
         ).encode()
