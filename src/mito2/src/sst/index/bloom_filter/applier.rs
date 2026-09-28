@@ -266,6 +266,9 @@ impl BloomFilterIndexApplier {
                     .await
                     .context(ApplyBloomFilterIndexSnafu)?;
             }
+            if output.iter().all(|(_, ranges)| ranges.is_empty()) {
+                break;
+            }
         }
 
         // adjust ranges to be based on row group
@@ -649,6 +652,102 @@ mod tests {
                     .collect()
             })
         }
+    }
+
+    #[tokio::test]
+    async fn test_bloom_filter_applier_short_circuits_after_empty_ranges() {
+        let region_metadata = mock_region_metadata();
+        let (d, factory) =
+            PuffinManagerFactory::new_for_test_async("test_bloom_filter_applier_short_circuit_")
+                .await;
+        let object_store = mock_object_store();
+        let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
+        let file_id = RegionIndexId::new(
+            RegionFileId::new(region_metadata.region_id, FileId::random()),
+            0,
+        );
+        let table_dir = "table_dir".to_string();
+        let mut indexer =
+            BloomFilterIndexer::new(file_id.file_id(), &region_metadata, intm_mgr, Some(1024))
+                .unwrap()
+                .unwrap();
+        let mut batch = new_batch("tag1", 0..10);
+        indexer.update(&mut batch).await.unwrap();
+        let mut batch = new_batch("tag2", 10..20);
+        indexer.update(&mut batch).await.unwrap();
+        let manager = factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+        );
+        let mut writer = manager.writer(&file_id).await.unwrap();
+        indexer.finish(&mut writer).await.unwrap();
+        writer.finish().await.unwrap();
+
+        let applier = BloomFilterIndexApplierBuilder::new(
+            table_dir,
+            PathType::Bare,
+            object_store.clone(),
+            &region_metadata,
+            factory.clone(),
+        )
+        .build(&[
+            col("tag_str").eq(lit("missing")),
+            col("field_u64").eq(lit(1u64)),
+        ])
+        .unwrap()
+        .unwrap();
+        let predicates = applier
+            .compatible_predicate_for_sst(&region_metadata)
+            .unwrap();
+        let mut metrics = BloomFilterIndexApplyMetrics::default();
+        let result = applier
+            .apply(
+                file_id,
+                None,
+                &predicates,
+                [(5, true), (5, true), (5, true), (5, true)].into_iter(),
+                Some(&mut metrics),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result,
+            vec![(0, vec![]), (1, vec![]), (2, vec![]), (3, vec![])]
+        );
+        assert_eq!(metrics.blob_cache_miss, 1);
+        assert!(metrics.read_metrics.total_ranges > 0);
+
+        let positive_applier = BloomFilterIndexApplierBuilder::new(
+            "table_dir".to_string(),
+            PathType::Bare,
+            object_store,
+            &region_metadata,
+            factory,
+        )
+        .build(&[
+            col("tag_str").eq(lit("tag1")),
+            col("field_u64").eq(lit(1u64)),
+        ])
+        .unwrap()
+        .unwrap();
+        let predicates = positive_applier
+            .compatible_predicate_for_sst(&region_metadata)
+            .unwrap();
+        let mut metrics = BloomFilterIndexApplyMetrics::default();
+        let result = positive_applier
+            .apply(
+                file_id,
+                None,
+                &predicates,
+                [(5, true), (5, true), (5, true), (5, true)].into_iter(),
+                Some(&mut metrics),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result[0].0, 0);
+        assert!(!result[0].1.is_empty());
+        assert_eq!(metrics.blob_cache_miss, 2);
     }
 
     #[tokio::test]

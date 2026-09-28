@@ -804,6 +804,129 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_fulltext_coarse_short_circuits_empty_ranges() {
+        let prefix = "test_fulltext_coarse_short_circuit_";
+        let (d, factory) = PuffinManagerFactory::new_for_test_async(prefix).await;
+        let table_dir = "table0".to_string();
+        let object_store = mock_object_store();
+        let metadata = mock_region_metadata(FulltextBackend::Bloom);
+        let intm_mgr = new_intm_mgr(d.path().to_string_lossy()).await;
+        let file_id =
+            RegionIndexId::new(RegionFileId::new(metadata.region_id, FileId::random()), 0);
+        let mut indexer = FulltextIndexer::new(
+            &metadata.region_id,
+            &file_id.file_id(),
+            &intm_mgr,
+            &metadata,
+            true,
+            1024,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut batch = new_batch(&[
+            (Some("hello"), Some("hello"), None),
+            (Some("world"), Some("world"), None),
+        ]);
+        indexer.update(&mut batch).await.unwrap();
+
+        let manager = factory.build(
+            object_store.clone(),
+            RegionFilePathFactory::new(table_dir.clone(), PathType::Bare),
+        );
+        let mut writer = manager.writer(&file_id).await.unwrap();
+        indexer.finish(&mut writer).await.unwrap();
+        writer.finish().await.unwrap();
+
+        let terms = |first: &str| {
+            BTreeMap::from([
+                (
+                    1,
+                    FulltextRequest {
+                        terms: vec![FulltextTerm {
+                            col_lowered: false,
+                            term: first.to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                ),
+                (
+                    2,
+                    FulltextRequest {
+                        terms: vec![FulltextTerm {
+                            col_lowered: false,
+                            term: "hello".to_string(),
+                        }],
+                        ..Default::default()
+                    },
+                ),
+            ])
+        };
+        let applier = FulltextIndexApplier::new(
+            table_dir.clone(),
+            PathType::Bare,
+            object_store.clone(),
+            terms("absent"),
+            factory.clone(),
+        );
+        let mut metrics =
+            crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics::default();
+        let result = applier
+            .apply_coarse(
+                file_id,
+                None,
+                [(1, true), (1, true)].into_iter(),
+                Some(&mut metrics),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, Some(vec![(0, vec![]), (1, vec![])]));
+        assert_eq!(metrics.blob_cache_miss, 1);
+
+        let not_applied = FulltextIndexApplier::new(
+            table_dir.clone(),
+            PathType::Bare,
+            object_store.clone(),
+            BTreeMap::from([(
+                1,
+                FulltextRequest {
+                    terms: vec![FulltextTerm {
+                        col_lowered: true,
+                        term: "hello".to_string(),
+                    }],
+                    ..Default::default()
+                },
+            )]),
+            factory.clone(),
+        )
+        .apply_coarse(file_id, None, [(1, true)].into_iter(), None)
+        .await
+        .unwrap();
+        assert_eq!(not_applied, None);
+
+        let positive_applier = FulltextIndexApplier::new(
+            table_dir,
+            PathType::Bare,
+            object_store,
+            terms("hello"),
+            factory,
+        );
+        let mut positive_metrics =
+            crate::sst::index::fulltext_index::applier::FulltextIndexApplyMetrics::default();
+        let result = positive_applier
+            .apply_coarse(
+                file_id,
+                None,
+                [(1, true), (1, true)].into_iter(),
+                Some(&mut positive_metrics),
+            )
+            .await
+            .unwrap();
+        assert!(result.unwrap().iter().any(|(_, ranges)| !ranges.is_empty()));
+        assert_eq!(positive_metrics.blob_cache_miss, 2);
+    }
+
+    #[tokio::test]
     async fn test_fulltext_index_basic_case_sensitive_bloom() {
         let applier_factory = build_fulltext_applier_factory(
             "test_fulltext_index_basic_case_sensitive_bloom_",

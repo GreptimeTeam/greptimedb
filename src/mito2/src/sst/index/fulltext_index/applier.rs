@@ -381,7 +381,7 @@ impl FulltextIndexApplier {
                 continue;
             }
 
-            applied |= self
+            let column_applied = self
                 .apply_coarse_one_column(
                     file_id,
                     file_size_hint,
@@ -391,6 +391,10 @@ impl FulltextIndexApplier {
                     metrics.as_deref_mut(),
                 )
                 .await?;
+            applied |= column_applied;
+            if column_applied && output.iter().all(|(_, ranges)| ranges.is_empty()) {
+                break;
+            }
         }
 
         if !applied {
