@@ -294,13 +294,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to set VECTOR index option"))]
-    SetVectorIndexOption {
-        source: datatypes::error::Error,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display(
         "Invalid partition number: {}, should be in range [2, 65536]",
         partition_num
@@ -411,9 +404,7 @@ impl ErrorExt for Error {
             ConvertValue { .. } => StatusCode::Unsupported,
 
             PermissionDenied { .. } => StatusCode::PermissionDenied,
-            SetFulltextOption { .. }
-            | SetSkippingIndexOption { .. }
-            | SetVectorIndexOption { .. } => StatusCode::Unexpected,
+            SetFulltextOption { .. } | SetSkippingIndexOption { .. } => StatusCode::Unexpected,
         }
     }
 

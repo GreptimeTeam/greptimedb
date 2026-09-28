@@ -153,13 +153,17 @@ fn rewrite_expr(
     if is_fix {
         // then always fix the ordering field&distinct flag and more
         let order_by = aggregate_function.params.order_by.clone();
+        // DataFusion always makes ordering fields nullable when building the physical
+        // aggregate (`ordering_fields` in `datafusion-functions-aggregate-common`), and some
+        // accumulators (e.g. `array_agg`) nest these fields in their state type. Keep the
+        // declared state type in line with what the accumulator produces.
         let ordering_fields: Vec<_> = order_by
             .iter()
             .map(|sort_expr| {
                 sort_expr
                     .expr
                     .to_field(&aggregate_input.schema())
-                    .map(|(_, f)| f)
+                    .map(|(_, f)| Arc::new(f.as_ref().clone().with_nullable(true)))
             })
             .collect::<datafusion_common::Result<Vec<_>>>()?;
         let distinct = aggregate_function.params.distinct;

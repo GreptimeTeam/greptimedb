@@ -773,14 +773,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to apply vector index: {}", reason))]
-    ApplyVectorIndex {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         source: index::inverted_index::error::Error,
@@ -1197,22 +1189,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to build vector index: {}", reason))]
-    VectorIndexBuild {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to finish vector index: {}", reason))]
-    VectorIndexFinish {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
 
@@ -1571,8 +1547,6 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            #[cfg(feature = "vector_index")]
-            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1614,9 +1588,6 @@ impl ErrorExt for Error {
             PushBloomFilterValue { source, .. } | BloomFilterFinish { source, .. } => {
                 source.status_code()
             }
-
-            #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
 
             ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
                 StatusCode::Cancelled
