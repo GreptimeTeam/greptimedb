@@ -271,7 +271,6 @@ url = "2.3"
 # completion" panic (greptimedb#8265 / grpc-rust#2522). Remove once tonic ships a fix.
 tonic = { version = "0.14, <0.14.5", features = ["tls-aws-lc", "gzip", "zstd"] }
 tower = "0.5"
-tower-http = "0.6"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-opentelemetry = "0.33.0"

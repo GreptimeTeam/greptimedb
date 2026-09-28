@@ -165,7 +165,6 @@ permutation = "0.4"
 rand.workspace = true
 serde_json.workspace = true
 servers = { workspace = true, features = ["testing"] }
-session = { workspace = true, features = ["testing"] }
 simdutf8 = "0.1"
 table.workspace = true
 tempfile = "3.0.0"

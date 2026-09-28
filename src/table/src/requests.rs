@@ -49,7 +49,6 @@ use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 
 use crate::error::{ConflictingTableOptionsSnafu, ParseTableOptionSnafu, Result};
 use crate::metadata::{TableId, TableVersion};
-use crate::table_reference::TableReference;
 
 mod semantic;
 pub use semantic::*;
@@ -831,25 +830,6 @@ impl Default for CompactTableRequest {
             compact_options: compact_request::Options::Regular(Default::default()),
             parallelism: 1,
             time_range: None,
-        }
-    }
-}
-
-/// Truncate table request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TruncateTableRequest {
-    pub catalog_name: String,
-    pub schema_name: String,
-    pub table_name: String,
-    pub table_id: TableId,
-}
-
-impl TruncateTableRequest {
-    pub fn table_ref(&self) -> TableReference<'_> {
-        TableReference {
-            catalog: &self.catalog_name,
-            schema: &self.schema_name,
-            table: &self.table_name,
         }
     }
 }

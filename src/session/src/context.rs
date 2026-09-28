@@ -64,7 +64,6 @@ pub struct QueryContext {
     current_catalog: String,
     /// mapping of RegionId to SequenceNumber, for snapshot read, meaning that the read should only
     /// container data that was committed before(and include) the given sequence number
-    /// this field will only be filled if extensions contains a pair of "snapshot_read" and "true"
     snapshot_seqs: Arc<RwLock<HashMap<u64, u64>>>,
     /// Mappings of the RegionId to the minimal sequence of SST file to scan.
     sst_min_sequences: Arc<RwLock<HashMap<u64, u64>>>,
