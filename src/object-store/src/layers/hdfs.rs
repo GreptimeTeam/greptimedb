@@ -427,6 +427,7 @@ async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -
     deleter.close().await
 }
 
+// TODO(fengjiachun): Clean up temporary files left behind after a process crash.
 fn temporary_path(path: &str) -> String {
     let suffix = format!(".greptime-{}.tmp", Uuid::new_v4());
     match path.rsplit_once('/') {
