@@ -116,6 +116,8 @@ pub(super) struct PromRemoteWritePlan {
     pub(super) storage: Option<StorageConfig>,
     #[serde(default)]
     pub(super) read_bench: Option<ReadBenchConfig>,
+    #[serde(default)]
+    pub(super) disable_index_result_cache: bool,
 }
 
 pub(super) fn default_database() -> String {
@@ -462,6 +464,7 @@ metric = "metric"
         };
         assert!(scenario.remote_write.base_setup_sql.is_empty());
         assert!(scenario.remote_write.candidate_setup_sql.is_empty());
+        assert!(!scenario.remote_write.disable_index_result_cache);
     }
 
     #[test]
@@ -473,6 +476,7 @@ kind = "prom_remote_write_then_query"
 
 [scenario.remote_write]
 metric = "metric"
+disable_index_result_cache = true
 base_setup_sql = ["CREATE TABLE base_table"]
 candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_table SET 'x'='y'"]
 "#,
@@ -484,6 +488,7 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
         let Scenario::PromRemoteWriteThenQuery(scenario) = roundtrip.scenario else {
             panic!("expected prom_remote_write_then_query scenario");
         };
+        assert!(scenario.remote_write.disable_index_result_cache);
         assert_eq!(
             scenario.remote_write.base_setup_sql,
             ["CREATE TABLE base_table"]

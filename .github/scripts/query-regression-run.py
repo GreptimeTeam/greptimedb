@@ -130,6 +130,7 @@ class RunTarget:
     datanode_http_port: int
     datanode_data_dir: Path
     frontend_config: Path | None = None
+    datanode_config: Path | None = None
 
 
 def allocate_ports(n: int) -> list[int]:
@@ -151,6 +152,7 @@ def make_target(
     root: Path,
     ports: list[int],
     frontend_config: Path | None = None,
+    datanode_config: Path | None = None,
 ) -> RunTarget:
     work_dir = root / name
     return RunTarget(
@@ -167,6 +169,7 @@ def make_target(
         datanode_http_port=ports[3],
         datanode_data_dir=work_dir / "datanode-0" / "data",
         frontend_config=frontend_config,
+        datanode_config=datanode_config,
     )
 
 
@@ -200,7 +203,7 @@ def component_command(target: RunTarget, name: str) -> list[str]:
             "--log-dir", str(log_dir),
         ]
     if name == "datanode":
-        return [
+        command = [
             str(target.binary), "datanode", "start",
             "--grpc-bind-addr", f"127.0.0.1:{target.datanode_rpc_port}",
             "--grpc-server-addr", f"127.0.0.1:{target.datanode_rpc_port}",
@@ -208,6 +211,9 @@ def component_command(target: RunTarget, name: str) -> list[str]:
             "--data-home", str(target.datanode_data_dir), "--log-dir", str(log_dir),
             "--node-id", "0", "--metasrv-addrs", f"127.0.0.1:{target.metasrv_rpc_port}",
         ]
+        if target.datanode_config is not None:
+            command.extend(["--config-file", str(target.datanode_config)])
+        return command
     if name == "frontend":
         command = [str(target.binary), "frontend", "start"]
         if target.frontend_config is not None:
@@ -407,6 +413,7 @@ def run_remote_case(
             work_dir,
             ports[:8],
             work_dir / "base" / "frontend-prom-store.toml",
+            work_dir / "base" / "datanode-index-cache.toml",
         ),
         make_target(
             "candidate",
@@ -414,6 +421,7 @@ def run_remote_case(
             work_dir,
             ports[8:],
             work_dir / "candidate" / "frontend-prom-store.toml",
+            work_dir / "candidate" / "datanode-index-cache.toml",
         ),
     ]
     for target in targets:
@@ -428,6 +436,16 @@ def run_remote_case(
             "--output", str(target.frontend_config),
         ]
         render_status = subprocess.run(render, check=False).returncode
+        if render_status != 0:
+            return render_status
+        if target.datanode_config is None:
+            raise RuntimeError(f"remote target has no datanode config path: {target.name}")
+        render_datanode = [
+            str(runner), "render-remote-config", "--case", str(case_path),
+            "--fixture-generator", str(fixture_generator),
+            "--output", str(target.datanode_config), "--target", "datanode",
+        ]
+        render_status = subprocess.run(render_datanode, check=False).returncode
         if render_status != 0:
             return render_status
 

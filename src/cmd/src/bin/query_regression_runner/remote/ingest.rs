@@ -25,11 +25,21 @@ use crate::query_regression_runner::plan::normalized_remote_write;
 use crate::query_regression_runner::sql::{
     extract_count_value, http_post_sql, sql_ident, sql_string, value_f64, value_u64,
 };
-use crate::query_regression_runner::{PrepareRemoteArgs, RenderRemoteConfigArgs, Result};
+use crate::query_regression_runner::{
+    PrepareRemoteArgs, RemoteConfigTarget, RenderRemoteConfigArgs, Result,
+};
 
 pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Result<()> {
     let (_, remote) = normalized_remote_write(&args.fixture_generator, &args.case)?;
-    fs::write(args.output, frontend_prom_config(&remote.prom_store)?)?;
+    let config = match args.target {
+        RemoteConfigTarget::Frontend => frontend_prom_config(&remote.prom_store)?,
+        RemoteConfigTarget::Datanode if remote.disable_index_result_cache => {
+            "[[region_engine]]\n[region_engine.mito.index]\nresult_cache_size = \"0B\"\n"
+                .to_string()
+        }
+        RemoteConfigTarget::Datanode => String::new(),
+    };
+    fs::write(args.output, config)?;
     Ok(())
 }
 
@@ -580,6 +590,7 @@ mod tests {
             sample_chunk_size: Some(2),
             flush_every_sample_chunks: 2,
             visibility_timeout_seconds: 30,
+            disable_index_result_cache: false,
             base_setup_sql: Vec::new(),
             candidate_setup_sql: Vec::new(),
             prom_store: PromStore {
