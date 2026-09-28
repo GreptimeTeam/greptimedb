@@ -98,13 +98,18 @@ pub async fn create_postgres_pool(
 
 #[cfg(unix)]
 fn is_unix_socket_url(url: &str) -> bool {
-    tokio_postgres::Config::from_str(url)
-        .map(|cfg| {
-            cfg.get_hosts()
-                .iter()
-                .any(|host| matches!(host, Host::Unix(_)))
-        })
-        .unwrap_or(false)
+    let Ok(cfg) = tokio_postgres::Config::from_str(url) else {
+        return false;
+    };
+    // tokio-postgres dials `hostaddr` over TCP even when `host` is a socket path,
+    // so treat the config as a socket only when every host is a Unix socket and
+    // no `hostaddr` is set.
+    cfg.get_hostaddrs().is_empty()
+        && !cfg.get_hosts().is_empty()
+        && cfg
+            .get_hosts()
+            .iter()
+            .all(|host| matches!(host, Host::Unix(_)))
 }
 
 #[cfg(not(unix))]
@@ -202,6 +207,9 @@ mod tests {
             assert!(is_unix_socket_url(
                 "postgresql://user:pw@%2Fvar%2Frun%2Fpostgresql/mydb"
             ));
+            assert!(is_unix_socket_url(
+                "postgresql://user@%2Fvar%2Frun%2Fpostgresql/db"
+            ));
             // postgres URL with socket dir in query param
             assert!(is_unix_socket_url(
                 "postgresql:///mydb?host=%2Fvar%2Frun%2Fpostgresql"
@@ -218,6 +226,13 @@ mod tests {
             assert!(!is_unix_socket_url(
                 "host=127.0.0.1 port=5432 dbname=greptime user=greptime password=secret"
             ));
+            // mixed socket and TCP hosts must not be treated as a socket-only config:
+            // a Require/VerifyFull TLS config would otherwise end up in plaintext over TCP
+            assert!(!is_unix_socket_url(
+                "host=/var/run/postgresql,db.example.com"
+            ));
+            // tokio-postgres dials `hostaddr` over TCP even when `host` is a socket path
+            assert!(!is_unix_socket_url("host=/tmp hostaddr=10.0.0.5"));
         }
 
         #[cfg(not(unix))]
