@@ -93,6 +93,13 @@ impl IndexApplier for PredicatesIndexApplier {
             .map(|(fst, (fst_applier, meta))| (fst_applier.apply(&fst), meta))
             .collect::<Vec<_>>();
 
+        if value_and_meta_vec
+            .iter()
+            .any(|(values, _)| values.is_empty())
+        {
+            return Ok(output);
+        }
+
         let mut mapper = ParallelFstValuesMapper::new(reader);
         let bm_vec = mapper.map_values_vec(&value_and_meta_vec, metrics).await?;
 
@@ -327,6 +334,49 @@ mod tests {
             output.matched_segment_ids,
             Bitmap::from_lsb0_bytes(&[0b10001010], BitmapType::Roaring)
         );
+    }
+
+    #[tokio::test]
+    async fn test_empty_fst_values_skip_bitmap_reads() {
+        for empty_column in [0, 1] {
+            let applier = PredicatesIndexApplier {
+                fst_appliers: vec![
+                    (s("tag-0"), key_fst_applier("tag-0_value")),
+                    (s("tag-1"), key_fst_applier("tag-1_value")),
+                ],
+            };
+            let mut mock_reader = MockInvertedIndexReader::new();
+            mock_reader
+                .expect_metadata()
+                .returning(|_| Ok(mock_metas([("tag-0", 0), ("tag-1", 1)])));
+            mock_reader
+                .expect_fst_vec()
+                .returning(move |ranges, _metrics| {
+                    Ok(ranges
+                        .iter()
+                        .map(|range| {
+                            let column = range.start as usize;
+                            let key = if column == empty_column {
+                                b"other_value".as_slice()
+                            } else if column == 0 {
+                                b"tag-0_value".as_slice()
+                            } else {
+                                b"tag-1_value".as_slice()
+                            };
+                            FstMap::from_iter([(key, fst_value(2, 1))]).unwrap()
+                        })
+                        .collect())
+                });
+            mock_reader.expect_bitmap_deque().never();
+
+            let output = applier
+                .apply(SearchContext::default(), &mut mock_reader, None)
+                .await
+                .unwrap();
+            assert!(output.matched_segment_ids.is_empty());
+            assert_eq!(output.total_row_count, 8);
+            assert_eq!(output.segment_row_count, 1);
+        }
     }
 
     #[tokio::test]
