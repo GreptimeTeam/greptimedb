@@ -247,20 +247,20 @@ impl AccountedBody {
     }
 
     /// Acquires a permit for `bytes`; only one acquisition may be in flight.
+    ///
+    /// A parked acquisition always belongs to the currently buffered frame, so
+    /// it must be resolved *before* any new acquisition is tried: letting the
+    /// fast path succeed while a waiter is parked would leave the waiter alive,
+    /// and its late completion would then be credited with another frame's
+    /// byte count (under-reserving memory relative to what is marked charged).
     fn charge(&mut self, bytes: u64, cx: &mut Context<'_>) -> ChargeOutcome {
         debug_assert!(bytes > 0);
-        // Fast path: the permit is immediately available.
-        if let Some(guard) = self.limiter.try_acquire(bytes) {
-            self.accounting.hold(guard);
-            self.incrementally_charged += bytes;
-            return ChargeOutcome::Charged;
-        }
         if let Some(fut) = self.pending_acquire.as_mut() {
             return match fut.as_mut().poll(cx) {
                 Poll::Ready(Ok(guard)) => {
                     self.accounting.hold(guard);
-                    self.incrementally_charged += bytes;
                     self.pending_acquire = None;
+                    self.incrementally_charged += bytes;
                     ChargeOutcome::Charged
                 }
                 Poll::Ready(Err(_)) => {
@@ -269,6 +269,12 @@ impl AccountedBody {
                 }
                 Poll::Pending => ChargeOutcome::Pending,
             };
+        }
+        // Fast path: the permit is immediately available.
+        if let Some(guard) = self.limiter.try_acquire(bytes) {
+            self.accounting.hold(guard);
+            self.incrementally_charged += bytes;
+            return ChargeOutcome::Charged;
         }
         let limiter = self.limiter.clone();
         let mut fut = Box::pin(async move { limiter.acquire(bytes).await });
@@ -550,6 +556,64 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 1024).await.unwrap();
         assert_eq!(&body[..], b"1024", "the handler must see the decoded body");
         assert_eq!(0, limiter.used_bytes(), "guards must be released");
+    }
+
+    #[tokio::test]
+    async fn test_pending_acquisition_is_attributed_to_its_own_bytes() {
+        use std::time::Duration;
+
+        use tokio_stream::wrappers::ReceiverStream;
+
+        // Regression test: a parked acquisition must be resolved before any
+        // new acquisition is tried; otherwise a late waiter completion can be
+        // credited with a later frame's byte count.
+        //
+        // Scenario: quota 8 KiB fully held externally; frame A (4 KiB) parks
+        // its acquisition; the external guard is then released so A drains;
+        // frame B (8 KiB) arrives. Correct behavior: B waits for its own 8 KiB
+        // acquisition and is rejected when it times out (only 4 KiB are free).
+        // Buggy behavior: the stale waiter (4 KiB) completes and is credited
+        // with B's 8 KiB, so B is delivered although the quota cannot cover it.
+        let limiter = ServerMemoryLimiter::new(
+            8 * 1024,
+            OnExhaustedPolicy::Wait {
+                timeout: Duration::from_millis(500),
+            },
+        );
+        let app = counted_body_app(limiter.clone());
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(2);
+        let driver_limiter = limiter.clone();
+        let driver = tokio::spawn(async move {
+            // Hold the whole quota so frame A's acquisition parks.
+            let external = driver_limiter.acquire(8 * 1024).await.unwrap();
+            tx.send(Ok(Bytes::from(vec![b'a'; 4096]))).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            // Free the quota: frame A's waiter drains and A is delivered.
+            drop(external);
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tx.send(Ok(Bytes::from(vec![b'b'; 8192]))).await.unwrap();
+            // Keep the channel open; frame B's own acquisition must time out.
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        });
+
+        let res = app
+            .oneshot(
+                Request::builder()
+                    .uri("/echo")
+                    .method("POST")
+                    .body(Body::from_stream(ReceiverStream::new(rx)))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        driver.await.unwrap();
+
+        assert_eq!(
+            res.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "frame B must wait for its own 8 KiB and time out, not borrow A's reservation"
+        );
     }
 
     #[tokio::test]
