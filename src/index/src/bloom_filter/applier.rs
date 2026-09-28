@@ -402,7 +402,7 @@ mod tests {
         async fn metadata(
             &self,
             metrics: Option<&mut BloomFilterReadMetrics>,
-        ) -> Result<BloomFilterMeta> {
+        ) -> Result<Arc<BloomFilterMeta>> {
             self.inner.metadata(metrics).await
         }
     }
