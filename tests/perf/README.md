@@ -193,6 +193,8 @@ before trusting the query measurements. Use
 `--fixture-generator /path/to/query_perf_fixture` to provide the Rust helper to
 the outer driver.
 
+Remote-write cases can set `disable_index_result_cache = true` under `[scenario.remote_write]` to launch both base and candidate datanodes with Mito's index result cache set to `0B`; this keeps warmed query samples exercising the inverted/Bloom index applier rather than reusing cached index results. The default is false, so other cases are unchanged.
+
 Large manual remote-write cases can set `sample_chunk_size` to split ingestion by
 time. For each chunk, `prepare-remote` invokes `query_perf_fixture prom-remote-write` with the
 same series cardinality but a shorter `--samples-per-series` and an advanced

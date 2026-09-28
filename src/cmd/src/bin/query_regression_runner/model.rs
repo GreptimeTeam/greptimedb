@@ -124,6 +124,8 @@ pub(super) struct RemoteWrite {
     pub(super) value: RemoteValue,
     pub(super) storage: Option<StorageConfig>,
     pub(super) read_bench: Option<ReadBenchConfig>,
+    #[serde(default)]
+    pub(super) disable_index_result_cache: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
