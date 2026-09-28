@@ -158,7 +158,8 @@ overridable via `QUERY_REGRESSION_RUNNER_UID`/`QUERY_REGRESSION_RUNNER_GID`)
 and exact tool versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.40.4`,
 `Python 3.14.4`, `sccache 0.16.0`, `otelgen` commit
 `863a3f395d062c7322cc1de08a38774b7fdaa6c8`, root-owned `rustup 1.29.0`, and
-the image-baked `1.96.1` Rust toolchain. `mold` and `python3`
+the image-baked Rust toolchain matching the pin resolved from
+`rust-toolchain.toml` (asserted dynamically by the workflow). `mold` and `python3`
 come from apt at image-build time (not Ubuntu 24.04's default 3.12); bump
 the Verify pins together with `QUERY_REGRESSION_ECS_IMAGE_ID` when the
 image is rebuilt. Rustup, Cargo, and Rustc
