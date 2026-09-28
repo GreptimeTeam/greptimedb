@@ -563,7 +563,7 @@ async fn run_index_publication_compaction_race(phase: IndexPublicationPhase, gc_
         engine_for_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -705,7 +705,7 @@ async fn test_index_build_uses_physical_file_region_and_logical_manifest_region(
     engine
         .handle_request(
             target_region_id,
-            RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
         )
         .await
         .unwrap();
@@ -1391,7 +1391,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     // Trigger manual index build task and make sure index file is built without flush or compaction.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     listener.wait_finish(1).await;
     let scanner = engine
@@ -1403,7 +1403,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Test idempotency: Second manual index build request on the same file.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
     let scanner = engine
@@ -1416,7 +1416,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Test idempotency again: Third manual index build request to further verify.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
     let scanner = engine
@@ -1475,7 +1475,7 @@ async fn test_index_build_type_manual_consistency() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Check index build task for consistent file will be skipped.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     // Reopen the region to ensure the task wasn't skipped due to insufficient time.
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
@@ -1505,7 +1505,7 @@ async fn test_index_build_type_manual_consistency() {
     // SyncColumns won't trigger index build.
     assert_listener_counts(&listener, 1, 1);
 
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     listener.wait_finish(2).await; // previous 1 + new 1
     // Because the file is inconsistent, new index build task is triggered.
@@ -1581,7 +1581,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     // so we must spawn it in a separate task.
     let engine_clone = engine.clone();
     let first_handle = tokio::spawn(async move {
-        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
         engine_clone.handle_request(region_id, request).await
     });
 
@@ -1596,7 +1596,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     // Issue the second manual BuildIndex for the same region/file.
     // Since the file is already in building_files (from the first manual build),
     // schedule_build detects the duplicate and calls on_index_build_abort.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
 
     // The second request should have been aborted as duplicate.
@@ -1679,7 +1679,7 @@ async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
         engine_for_old_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -1707,7 +1707,7 @@ async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
         engine_for_new_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -1878,4 +1878,39 @@ async fn test_index_build_type_compact_abort_race() {
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
+async fn test_build_series_index_rejects_non_metric_region() {
+    let mut env = TestEnv::with_prefix("series-unsupported-schema").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+                    Default::default(),
+                )),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("sparse metric metadata"),
+        "{error}"
+    );
+    engine.stop().await.unwrap();
 }

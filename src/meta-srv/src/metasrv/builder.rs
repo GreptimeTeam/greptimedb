@@ -92,7 +92,7 @@ use crate::utils::database::DatabaseOperator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
-const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_days(1);
+const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_secs(86400);
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {

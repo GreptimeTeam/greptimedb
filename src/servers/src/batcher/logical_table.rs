@@ -21,6 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
+use std::collections::HashSet;
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -40,6 +41,7 @@ use meter_core::data::MeterRecord;
 use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use snafu::ResultExt;
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 
@@ -191,6 +193,57 @@ impl LogicalTablePendingRowsBatcher {
             .timestamp_column()
             .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
             .unwrap_or(TimeUnit::Millisecond)
+    }
+
+    /// Returns whether the bulk path can accept `batches`: every existing
+    /// destination table must be a metric logical table bound to the
+    /// physical table selected by its context. A destination bound to
+    /// another physical table would be flushed through the selected
+    /// physical's regions, silently misplacing its rows, so such requests
+    /// must stay on the ordinary insert path (which routes per destination).
+    /// New tables are always fine: they are created on the selected physical
+    /// table. Time index units need no check here — the bulk encode converts
+    /// each request to its destination's unit. Destinations are resolved
+    /// once per distinct (schema, table).
+    pub(crate) async fn accepts_bulk_destinations(
+        &self,
+        batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
+    ) -> bool {
+        let mut checked_tables = HashSet::new();
+        for (ctx, requests) in batches {
+            let physical_table = batch_key_from_ctx(ctx).physical_table;
+            for request in &requests.inserts {
+                if !checked_tables.insert((ctx.current_schema(), request.table_name.clone())) {
+                    continue;
+                }
+                let Ok(Some(table)) = self
+                    .catalog_manager
+                    .table(
+                        ctx.current_catalog(),
+                        &ctx.current_schema(),
+                        &request.table_name,
+                        None,
+                    )
+                    .await
+                else {
+                    // New table: created on the selected physical table.
+                    continue;
+                };
+                let info = table.table_info();
+                if info.meta.engine != METRIC_ENGINE_NAME
+                    || info
+                        .meta
+                        .options
+                        .extra_options
+                        .get(LOGICAL_TABLE_METADATA_KEY)
+                        .map(String::as_str)
+                        != Some(physical_table.as_str())
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Submits with request-level accounting after schema preparation and before

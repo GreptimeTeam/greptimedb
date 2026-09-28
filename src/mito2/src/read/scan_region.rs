@@ -85,15 +85,10 @@ use crate::sst::index::fulltext_index::applier::FulltextIndexApplierRef;
 use crate::sst::index::fulltext_index::applier::builder::FulltextIndexApplierBuilder;
 use crate::sst::index::inverted_index::applier::InvertedIndexApplierRef;
 use crate::sst::index::inverted_index::applier::builder::InvertedIndexApplierBuilder;
-#[cfg(feature = "vector_index")]
-use crate::sst::index::vector_index::applier::{VectorIndexApplier, VectorIndexApplierRef};
 use crate::sst::parquet::Json2RewriteTargets;
 use crate::sst::parquet::file_range::PreFilterMode;
 use crate::sst::parquet::reader::ReaderMetrics;
 use crate::sst::primary_key::PrimaryKeyRangeMapper;
-
-#[cfg(feature = "vector_index")]
-const VECTOR_INDEX_OVERFETCH_MULTIPLIER: usize = 2;
 
 /// A scanner scans a region and returns a [SendableRecordBatchStream].
 pub(crate) enum Scanner {
@@ -572,16 +567,6 @@ impl ScanRegion {
             self.build_fulltext_index_applier(&non_field_filters),
             self.build_fulltext_index_applier(&field_filters),
         ];
-        #[cfg(feature = "vector_index")]
-        let vector_index_applier = self.build_vector_index_applier();
-        #[cfg(feature = "vector_index")]
-        let vector_index_k = self.request.vector_search.as_ref().map(|search| {
-            if self.request.filters.is_empty() {
-                search.k
-            } else {
-                search.k.saturating_mul(VECTOR_INDEX_OVERFETCH_MULTIPLIER)
-            }
-        });
 
         let input = ScanInput::builder(self.access_layer, mapper)
             .with_series_index(self.series_index)
@@ -614,11 +599,6 @@ impl ScanRegion {
             )
             .with_sequence_range(sequence_range)
             .with_query_stat_counters(self.query_stat_counters);
-        #[cfg(feature = "vector_index")]
-        let input = input
-            .with_vector_index_applier(vector_index_applier)
-            .with_vector_index_k(vector_index_k);
-
         #[cfg(feature = "enterprise")]
         let input = if !self.request.skip_sst_files
             && let Some(provider) = self.extension_range_provider
@@ -906,31 +886,6 @@ impl ScanRegion {
         .flatten()
         .map(Arc::new)
     }
-
-    /// Build the vector index applier from vector search request.
-    #[cfg(feature = "vector_index")]
-    fn build_vector_index_applier(&self) -> Option<VectorIndexApplierRef> {
-        let vector_search = self.request.vector_search.as_ref()?;
-
-        let file_cache = self.cache_strategy.write_cache().map(|w| w.file_cache());
-        let puffin_metadata_cache = self.cache_strategy.puffin_metadata_cache().cloned();
-        let vector_index_cache = self.cache_strategy.vector_index_cache().cloned();
-
-        let applier = VectorIndexApplier::new(
-            self.access_layer.table_dir().to_string(),
-            self.access_layer.path_type(),
-            self.access_layer.object_store().clone(),
-            self.access_layer.puffin_manager_factory().clone(),
-            vector_search.column_id,
-            vector_search.query_vector.clone(),
-            vector_search.metric,
-        )
-        .with_file_cache(file_cache)
-        .with_puffin_metadata_cache(puffin_metadata_cache)
-        .with_vector_index_cache(vector_index_cache);
-
-        Some(Arc::new(applier))
-    }
 }
 
 /// Returns true if the time range of a SST `file` matches the `predicate`.
@@ -995,12 +950,6 @@ pub struct ScanInput {
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
-    /// Vector index applier for KNN search.
-    #[cfg(feature = "vector_index")]
-    pub(crate) vector_index_applier: Option<VectorIndexApplierRef>,
-    /// Over-fetched k for vector index scan.
-    #[cfg(feature = "vector_index")]
-    pub(crate) vector_index_k: Option<usize>,
     /// Start time of the query.
     pub(crate) query_start: Option<Instant>,
     /// The region is using append mode.
@@ -1079,10 +1028,6 @@ impl ScanInput {
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
-                #[cfg(feature = "vector_index")]
-                vector_index_applier: None,
-                #[cfg(feature = "vector_index")]
-                vector_index_k: None,
                 query_start: None,
                 append_mode: false,
                 filter_deleted: true,
@@ -1365,25 +1310,6 @@ impl ScanInputBuilder {
         self
     }
 
-    /// Sets vector index applier for KNN search.
-    #[cfg(feature = "vector_index")]
-    #[must_use]
-    pub(crate) fn with_vector_index_applier(
-        mut self,
-        applier: Option<VectorIndexApplierRef>,
-    ) -> Self {
-        self.input.vector_index_applier = applier;
-        self
-    }
-
-    /// Sets over-fetched k for vector index scan.
-    #[cfg(feature = "vector_index")]
-    #[must_use]
-    pub(crate) fn with_vector_index_k(mut self, k: Option<usize>) -> Self {
-        self.input.vector_index_k = k;
-        self
-    }
-
     /// Sets start time of the query.
     #[must_use]
     pub(crate) fn with_start_time(mut self, now: Option<Instant>) -> Self {
@@ -1632,13 +1558,6 @@ impl ScanInput {
         } else {
             reader
         };
-        #[cfg(feature = "vector_index")]
-        let reader = {
-            let mut reader = reader;
-            reader =
-                reader.vector_index_applier(self.vector_index_applier.clone(), self.vector_index_k);
-            reader
-        };
         let res = reader
             .expected_metadata(Some(self.mapper.metadata().clone()))
             .compaction(self.compaction)
@@ -1744,7 +1663,15 @@ impl ScanInput {
                     };
                     match maybe_batch {
                         Some(Ok(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
+                            // The receiver is gone when the query is cancelled or finishes early,
+                            // so stop reading the source.
+                            if let Err(e) = sender.send(Ok(batch)).await {
+                                debug!(
+                                    "Stop parallel scan task, receiver dropped, region_id: {}, error: {}",
+                                    region_id, e
+                                );
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
                             let _ = sender.send(Err(e)).await;
@@ -2196,10 +2123,6 @@ impl StreamContext {
                             .collect();
                         write!(f, ", \"dyn_filters\": {:?}", dyn_filters)?;
                     }
-                }
-                #[cfg(feature = "vector_index")]
-                if let Some(vector_index_k) = self.input.vector_index_k {
-                    write!(f, ", \"vector_index_k\": {}", vector_index_k)?;
                 }
                 if !self.input.files.is_empty() {
                     write!(f, ", \"files\": ")?;
@@ -3294,5 +3217,60 @@ mod tests {
             )
             .build();
         assert!(exact_sequence_range(&request, &version).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_flat_source_stops_after_receiver_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use datatypes::arrow::array::Int64Array;
+
+        const SOURCE_BATCHES: usize = 10_000;
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let env = SchedulerEnv::new().await;
+        let input = ScanInput::builder(env.access_layer.clone(), mapper).build();
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "v",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let mut released = Vec::new();
+        let sources = (0..2)
+            .map(|_| {
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                released.push(release_rx);
+                let batch = batch.clone();
+                let pulled = pulled.clone();
+                futures::stream::iter(0..SOURCE_BATCHES)
+                    .map(move |_| {
+                        // Dropped together with the source stream.
+                        let _ = &release_tx;
+                        pulled.fetch_add(1, Ordering::Relaxed);
+                        Ok(batch.clone())
+                    })
+                    .boxed()
+            })
+            .collect();
+
+        let streams = input
+            .create_parallel_flat_sources(sources, Arc::new(Semaphore::new(2)), 1)
+            .unwrap();
+        drop(streams);
+
+        for release_rx in released {
+            tokio::time::timeout(std::time::Duration::from_secs(10), release_rx)
+                .await
+                .unwrap()
+                .unwrap_err();
+        }
+        // Each task may have read a few batches ahead into its channel before the
+        // receiver went away, but must not drain the rest of its source.
+        assert!(pulled.load(Ordering::Relaxed) < 100);
     }
 }

@@ -158,8 +158,6 @@ pub(crate) struct ScanMetricsSet {
     rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     rg_bloom_filtered: usize,
-    /// Number of row groups filtered by vector index.
-    rg_vector_filtered: usize,
     /// Number of rows in row group before filtering.
     rows_before_filter: usize,
     /// Number of rows in row group filtered by fulltext index.
@@ -168,10 +166,6 @@ pub(crate) struct ScanMetricsSet {
     rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     rows_bloom_filtered: usize,
-    /// Number of rows filtered by vector index.
-    rows_vector_filtered: usize,
-    /// Number of rows selected by vector index.
-    rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     rows_precise_filtered: usize,
     /// Number of index result cache hits for fulltext index.
@@ -310,13 +304,10 @@ impl fmt::Debug for ScanMetricsSet {
             rg_inverted_filtered,
             rg_minmax_filtered,
             rg_bloom_filtered,
-            rg_vector_filtered,
             rows_before_filter,
             rows_fulltext_filtered,
             rows_inverted_filtered,
             rows_bloom_filtered,
-            rows_vector_filtered,
-            rows_vector_selected,
             rows_precise_filtered,
             fulltext_index_cache_hit,
             fulltext_index_cache_miss,
@@ -409,9 +400,6 @@ impl fmt::Debug for ScanMetricsSet {
         if *rg_bloom_filtered > 0 {
             write!(f, ", \"rg_bloom_filtered\":{rg_bloom_filtered}")?;
         }
-        if *rg_vector_filtered > 0 {
-            write!(f, ", \"rg_vector_filtered\":{rg_vector_filtered}")?;
-        }
         if *rows_fulltext_filtered > 0 {
             write!(f, ", \"rows_fulltext_filtered\":{rows_fulltext_filtered}")?;
         }
@@ -420,12 +408,6 @@ impl fmt::Debug for ScanMetricsSet {
         }
         if *rows_bloom_filtered > 0 {
             write!(f, ", \"rows_bloom_filtered\":{rows_bloom_filtered}")?;
-        }
-        if *rows_vector_filtered > 0 {
-            write!(f, ", \"rows_vector_filtered\":{rows_vector_filtered}")?;
-        }
-        if *rows_vector_selected > 0 {
-            write!(f, ", \"rows_vector_selected\":{rows_vector_selected}")?;
         }
         if *rows_precise_filtered > 0 {
             write!(f, ", \"rows_precise_filtered\":{rows_precise_filtered}")?;
@@ -677,13 +659,10 @@ impl ScanMetricsSet {
                     rg_inverted_filtered,
                     rg_minmax_filtered,
                     rg_bloom_filtered,
-                    rg_vector_filtered,
                     rows_total,
                     rows_fulltext_filtered,
                     rows_inverted_filtered,
                     rows_bloom_filtered,
-                    rows_vector_filtered,
-                    rows_vector_selected,
                     rows_precise_filtered,
                     fulltext_index_cache_hit,
                     fulltext_index_cache_miss,
@@ -721,14 +700,11 @@ impl ScanMetricsSet {
         self.rg_inverted_filtered += *rg_inverted_filtered;
         self.rg_minmax_filtered += *rg_minmax_filtered;
         self.rg_bloom_filtered += *rg_bloom_filtered;
-        self.rg_vector_filtered += *rg_vector_filtered;
 
         self.rows_before_filter += *rows_total;
         self.rows_fulltext_filtered += *rows_fulltext_filtered;
         self.rows_inverted_filtered += *rows_inverted_filtered;
         self.rows_bloom_filtered += *rows_bloom_filtered;
-        self.rows_vector_filtered += *rows_vector_filtered;
-        self.rows_vector_selected += *rows_vector_selected;
         self.rows_precise_filtered += *rows_precise_filtered;
 
         self.fulltext_index_cache_hit += *fulltext_index_cache_hit;
@@ -861,10 +837,6 @@ impl ScanMetricsSet {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
-        #[cfg(feature = "vector_index")]
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -881,10 +853,6 @@ impl ScanMetricsSet {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
-        #[cfg(feature = "vector_index")]
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rows_vector_filtered as u64);
     }
 }
 

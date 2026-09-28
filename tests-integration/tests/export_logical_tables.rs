@@ -228,7 +228,7 @@ fn database_export_request(directory: &std::path::Path) -> table::requests::Copy
     }
 }
 
-async fn database_export_roundtrip(instance: &Arc<Instance>) {
+async fn database_export_roundtrip(instance: &Arc<Instance>, parallelism: usize) {
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();
     let (first_logical_table_names, _, renamed_physical_table) =
         create_metric_export_source_tables(instance, "db_a", "dense").await;
@@ -253,7 +253,9 @@ async fn database_export_roundtrip(instance: &Arc<Instance>) {
     ];
     let mut names = selected.clone();
     names.extend([renamed_physical_table, "dashboard".into()]);
-    let req = database_export_request(&destination.path().join("data"));
+    let mut req = database_export_request(&destination.path().join("data"));
+    req.with
+        .insert("parallelism".into(), parallelism.to_string());
     let executor = instance.statement_executor();
     let captured = executor
         .capture_database_export_tables(&req, None, &QueryContext::arc())
@@ -448,7 +450,7 @@ async fn database_export_standalone_roundtrip() {
     let standalone = GreptimeDbStandaloneBuilder::new("database_export")
         .build()
         .await;
-    database_export_roundtrip(standalone.fe_instance()).await;
+    database_export_roundtrip(standalone.fe_instance(), 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -464,7 +466,7 @@ async fn database_export_distributed_roundtrip() {
         )
         .build(false)
         .await;
-    database_export_roundtrip(cluster.fe_instance()).await;
+    database_export_roundtrip(cluster.fe_instance(), 4).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

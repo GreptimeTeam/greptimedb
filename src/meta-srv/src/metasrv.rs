@@ -122,7 +122,7 @@ impl Default for StatsPersistenceOptions {
     fn default() -> Self {
         Self {
             ttl: Duration::ZERO,
-            interval: Duration::from_mins(10),
+            interval: Duration::from_secs(10 * 60),
         }
     }
 }

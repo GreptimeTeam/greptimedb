@@ -161,10 +161,10 @@ impl BloomFilterCreator {
 
             if let Some(elem) = elem {
                 let old_len = self.cur_seg_distinct_elems.len();
-                // A borrowed entry lookup avoids hashing new values twice and only
-                // allocates when the value is absent from the current segment.
-                self.cur_seg_distinct_elems
-                    .get_or_insert_with(elem, <[u8]>::to_vec);
+                // Only allocate when the value is absent from the current segment.
+                if !self.cur_seg_distinct_elems.contains(elem) {
+                    self.cur_seg_distinct_elems.insert(elem.to_vec());
+                }
                 if self.cur_seg_distinct_elems.len() != old_len {
                     self.cur_seg_distinct_elems_mem_usage += elem.len();
                     self.global_memory_usage

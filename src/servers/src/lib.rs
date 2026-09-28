@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(try_blocks)]
-#![feature(exclusive_wrapper)]
-
 use datafusion_expr::LogicalPlan;
 use sql::statements::statement::Statement;
 // Re-export for use in add_service! macro
