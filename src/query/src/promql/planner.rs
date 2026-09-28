@@ -1718,47 +1718,9 @@ impl PromPlanner {
                     DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
                 })
                 .collect::<Vec<_>>();
-            // `timestamp()` preserves the shifted selector timeline even though
-            // SeriesNormalize now retains raw native timestamp storage. Decimal
-            // arithmetic shifts before truncating to milliseconds.
-            let unit_factor = match col(&time_index_column)
-                .get_type(normalize.schema())
-                .context(DataFusionPlanningSnafu)?
-            {
-                ArrowDataType::Timestamp(ArrowTimeUnit::Second, _) => (1_000_i128, 4, 0),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, _) => (1, 1, 0),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Microsecond, _) => (1, 4, 3),
-                ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => (1, 7, 6),
-                _ => unreachable!("time index is a timestamp"),
-            };
-            let sample_time = col(&time_index_column)
-                .cast_to(&ArrowDataType::Int64, normalize.schema())
-                .context(DataFusionPlanningSnafu)?
-                .cast_to(&ArrowDataType::Decimal128(19, 0), normalize.schema())
-                .context(DataFusionPlanningSnafu)?;
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Multiply,
-                right: Box::new(lit(ScalarValue::Decimal128(
-                    Some(unit_factor.0),
-                    unit_factor.1,
-                    unit_factor.2,
-                ))),
-            });
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Plus,
-                right: Box::new(lit(ScalarValue::Decimal128(Some(offset_ms as i128), 19, 0))),
-            })
-            .cast_to(&ArrowDataType::Int64, normalize.schema())
-            .context(DataFusionPlanningSnafu)?
-            .cast_to(&ArrowDataType::Float64, normalize.schema())
-            .context(DataFusionPlanningSnafu)?;
-            let sample_time = DfExpr::BinaryExpr(BinaryExpr {
-                left: Box::new(sample_time),
-                op: Operator::Divide,
-                right: Box::new(lit(1000.0)),
-            });
+            // The time index still holds the raw sample timestamp here, which is what
+            // `timestamp()` reports regardless of `offset` and `@`.
+            let sample_time = Self::timestamp_seconds_expr(&time_index_column, normalize.schema())?;
             project_exprs.push(sample_time.alias(&timestamp_value_column));
             let normalize = LogicalPlanBuilder::from(normalize)
                 .project(project_exprs)
@@ -1812,40 +1774,48 @@ impl PromPlanner {
             }),
         };
         if let Some(timestamp_value_column) = timestamp_value_column {
-            self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
+            self.create_timestamp_func_plan(manipulate, col(timestamp_value_column))
         } else {
             Ok(manipulate)
         }
     }
 
-    /// Builds a projection plan for the PromQL `timestamp()` function.
-    /// Projects the time index column as the value column for each row.
+    /// Converts the timestamp column `column` into PromQL seconds, truncated to milliseconds.
+    fn timestamp_seconds_expr(column: &str, schema: &DFSchema) -> Result<DfExpr> {
+        let column = DfExpr::Column(Column::from_name(column));
+        let ArrowDataType::Timestamp(_, timezone) =
+            column.get_type(schema).context(DataFusionPlanningSnafu)?
+        else {
+            unreachable!("time index is a timestamp")
+        };
+        let millis = column
+            .cast_to(
+                &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, timezone),
+                schema,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Int64, schema)
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Float64, schema)
+            .context(DataFusionPlanningSnafu)?;
+        Ok(DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(millis),
+            op: Operator::Divide,
+            right: Box::new(lit(1000.0)),
+        }))
+    }
+
+    /// Builds a projection plan for the PromQL `timestamp()` function, which reports
+    /// `timestamp_value` as the value of each row, along with the original tag and time index
+    /// columns.
     ///
-    /// # Arguments
-    /// * `input` - Input [`LogicalPlan`] after instant-vector selection.
-    /// * `timestamp_value_column` - Private column containing each selected sample's timestamp.
-    ///
-    /// # Returns
-    /// Returns a [`Result<LogicalPlan>`] where the resulting logical plan projects the timestamp
-    /// column as the value column, along with the original tag and time index columns.
-    ///
-    /// # Timestamp vs. Time Function
-    ///
-    /// - **Timestamp Function (`timestamp()`)**: In PromQL, the `timestamp()` function returns the
-    ///   timestamp (time index) of each sample as the value column.
-    ///
-    /// - **Time Function (`time()`)**: The `time()` function returns the evaluation time of the query
-    ///   as a scalar value.
-    ///
-    /// # Side Effects
     /// Updates the planner context's field columns to the timestamp column name.
-    ///
     fn create_timestamp_func_plan(
         &mut self,
         input: LogicalPlan,
-        timestamp_value_column: &str,
+        timestamp_value: DfExpr,
     ) -> Result<LogicalPlan> {
-        let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
+        let time_expr = timestamp_value.alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
@@ -1995,9 +1965,31 @@ impl PromPlanner {
 
         // transform function arguments
         let args = self.create_function_args(&args.args)?;
+        // Only a vector selector keeps the timestamps of its samples. Any other expression
+        // produces samples at the evaluation time, which is what `timestamp()` reports for it.
+        let mut timestamp_arg = args.input.as_ref();
+        while let Some(PromExpr::Paren(ParenExpr { expr })) = timestamp_arg {
+            timestamp_arg = Some(expr);
+        }
+        let timestamp_of_selector =
+            func.name == "timestamp" && matches!(timestamp_arg, Some(PromExpr::VectorSelector(_)));
         let input = if let Some(prom_expr) = &args.input {
-            self.prom_expr_to_plan_inner(prom_expr, func.name == "timestamp", query_engine_state)
-                .await?
+            let input = self
+                .prom_expr_to_plan_inner(prom_expr, timestamp_of_selector, query_engine_state)
+                .await?;
+            if func.name == "timestamp" && !timestamp_of_selector {
+                let time_index_column =
+                    self.ctx
+                        .time_index_column
+                        .clone()
+                        .with_context(|| TimeIndexNotFoundSnafu {
+                            table: self.ctx.table_name.clone().unwrap_or_default(),
+                        })?;
+                let eval_time = Self::timestamp_seconds_expr(&time_index_column, input.schema())?;
+                self.create_timestamp_func_plan(input, eval_time)?
+            } else {
+                input
+            }
         } else {
             self.ctx.time_index_column = Some(SPECIAL_TIME_FUNCTION.to_string());
             self.ctx.reset_table_name_and_schema();
@@ -2023,6 +2015,7 @@ impl PromPlanner {
         // `create_function_expr`: the function that reads it (`predict_linear`) then depends on an
         // argument instead of on planner state written by the selector below it.
         let range_fold_offset = self.ctx.range_fold_offset.take();
+        let input_tag_columns = self.ctx.tag_columns.clone();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
@@ -2074,13 +2067,31 @@ impl PromPlanner {
             _ => builder,
         };
 
+        // Rewriting a label the input series already have can map several of them onto the same
+        // label set, which PromQL rejects. A new label keeps the series distinct.
+        let may_duplicate_label_sets =
+            func.name == "label_join" && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
+
         // Update context tags after building plan
         // We can't push them before planning, because they won't exist until projection.
         for tag in new_tags {
             self.ctx.tag_columns.push(tag);
         }
 
-        let plan = builder.build().context(DataFusionPlanningSnafu)?;
+        let mut plan = builder.build().context(DataFusionPlanningSnafu)?;
+        if may_duplicate_label_sets {
+            let labels = self.ctx.tag_columns.clone();
+            plan = Self::assert_unique_match_group(
+                plan,
+                labels
+                    .iter()
+                    .map(|label| DfExpr::Column(Column::from_name(label)))
+                    .collect(),
+                labels,
+                self.create_time_index_column_expr()?,
+                MatchGroupViolation::DuplicateLabelSet,
+            )?;
+        }
         common_telemetry::debug!("Created PromQL function plan: {plan:?} for {call_expr:?}");
 
         Ok(plan)

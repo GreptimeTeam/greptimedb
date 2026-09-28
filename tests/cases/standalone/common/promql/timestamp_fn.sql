@@ -43,6 +43,14 @@ tql eval timestamp(-demo_memory_usage_bytes);
 
 tql eval (0, 60, '30s') timestamp(timestamp_test) == 60;
 
+-- timestamp() reports the timestamp of the selected sample, not the evaluation time
+tql eval (60, 60, '1s') timestamp(timestamp_test offset 30s);
+
+tql eval (60, 60, '1s') timestamp((timestamp_test offset 30s));
+
+-- The result of a function is sampled at the evaluation time
+tql eval (90, 90, '1s') timestamp(abs(timestamp_test));
+
 -- Test timestamp() with multiple metrics
 create table timestamp_test2 (ts timestamp time index, val double);
 

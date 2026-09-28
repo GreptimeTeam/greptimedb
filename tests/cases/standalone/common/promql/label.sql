@@ -31,6 +31,9 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host"
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 
+-- Both hosts are joined to the same `host` at 0s, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_join(test, "host", "-", "idc");
+
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-", "idc", "host");
 
