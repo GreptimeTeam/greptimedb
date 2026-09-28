@@ -20,7 +20,7 @@ on:
         default: Aliyun
         required: true
       instance_type:
-        description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
+        description: 'Instance type; auto = Aliyun: ecs.g9i.2xlarge, AWS: m7i.2xlarge (both 8 vCPU / 32 GiB). Enter a specific type to override.'
         type: string
         default: auto
         required: true
@@ -45,14 +45,14 @@ on:
         default: 8
         required: true
       db_cpus:
-        description: CPU limit per DB container
+        description: CPU limit per DB container (default 8 vCPU)
         type: string
         default: '8'
         required: true
       db_memory:
-        description: Memory limit per DB container
+        description: Memory limit per DB container (default 32 GiB; shared host also runs the runtime and runner)
         type: string
-        default: 16g
+        default: 32g
         required: true
       runtime_cpus:
         description: CPU limit per runtime container (0 = unrestricted)
@@ -95,7 +95,16 @@ jobs:
         persist-credentials: false
     - name: Resolve CI runner
       id: runner
-      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
+      run: |
+        set -euo pipefail
+        instance_type="$REQUESTED_INSTANCE_TYPE"
+        if [[ "$instance_type" == auto ]]; then
+          case "$PROVIDER" in
+            Aliyun) instance_type=ecs.g9i.2xlarge ;;
+            AWS) instance_type=m7i.2xlarge ;;
+          esac
+        fi
+        python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$instance_type"
     - name: Validate budgets and shared runtime
       id: runtime
       run: |

@@ -78,6 +78,38 @@ class ProviderConfigTest(unittest.TestCase):
             with self.subTest(provider=provider, requested=requested):
                 self.assertEqual(config.resolve_instance_type(provider, requested), expected)
 
+    def test_traces_workflow_runner_defaults_and_overrides(self):
+        workflow = (SCRIPTS.parent / "workflows/tracesbench.yml").read_text()
+        step = workflow.split("    - name: Resolve CI runner\n", 1)[1].split("    - name:", 1)[0]
+        command = textwrap.dedent(step.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "greptimedb").symlink_to(SCRIPTS.parents[1], target_is_directory=True)
+            output = root / "output"
+            for provider, requested, expected in (
+                ("Aliyun", "auto", "ecs.g9i.2xlarge"),
+                ("AWS", "auto", "m7i.2xlarge"),
+                ("Aliyun", "ecs.c9i.4xlarge", "ecs.c9i.4xlarge"),
+                ("AWS", "c7i.4xlarge", "c7i.4xlarge"),
+                ("invalid", "auto", None),
+                ("AWS", "ecs.g9i.2xlarge", None),
+            ):
+                with self.subTest(provider=provider, requested=requested):
+                    output.write_text("")
+                    result = subprocess.run(
+                        ["bash", "-c", command], cwd=root, capture_output=True, text=True,
+                        env=dict(os.environ, PROVIDER=provider, REQUESTED_INSTANCE_TYPE=requested,
+                                 GITHUB_OUTPUT=str(output)), timeout=10,
+                    )
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertEqual(output.read_text(), "")
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(output.read_text(), f"instance_type={expected}\n")
+        self.assertRegex(workflow, r"(?s)db_cpus:.*?default: '8'")
+        self.assertRegex(workflow, r"(?s)db_memory:.*?default: 32g")
+
     def test_wrong_provider_and_shell_fragments_rejected(self):
         for provider, requested in (("ec2", "auto"), ("AWS", "ecs.c9i.2xlarge"),
                                     ("Aliyun", "c7i.2xlarge"), ("AWS", ""),
