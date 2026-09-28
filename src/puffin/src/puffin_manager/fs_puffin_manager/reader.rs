@@ -58,6 +58,10 @@ where
 
     /// The puffin file metadata cache.
     puffin_file_metadata_cache: Option<PuffinMetadataCacheRef>,
+
+    /// Metadata read by this reader, so that `metadata` followed by `blob` loads the
+    /// footer once even without `puffin_file_metadata_cache`.
+    metadata: tokio::sync::OnceCell<Arc<FileMetadata>>,
 }
 
 impl<S, F> FsPuffinReader<S, F>
@@ -77,6 +81,7 @@ where
             stager,
             puffin_file_accessor,
             puffin_file_metadata_cache,
+            metadata: tokio::sync::OnceCell::new(),
         }
     }
 }
@@ -166,18 +171,23 @@ where
         &self,
         reader: &mut PuffinFileReader<F::Reader>,
     ) -> Result<Arc<FileMetadata>> {
-        let id = self.handle.to_string();
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref()
-            && let Some(metadata) = cache.get_metadata(&id)
-        {
-            return Ok(metadata);
-        }
+        self.metadata
+            .get_or_try_init(|| async {
+                let id = self.handle.to_string();
+                if let Some(cache) = self.puffin_file_metadata_cache.as_ref()
+                    && let Some(metadata) = cache.get_metadata(&id)
+                {
+                    return Ok(metadata);
+                }
 
-        let metadata = Arc::new(reader.metadata().await?);
-        if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
-            cache.put_metadata(id, metadata.clone());
-        }
-        Ok(metadata)
+                let metadata = Arc::new(reader.metadata().await?);
+                if let Some(cache) = self.puffin_file_metadata_cache.as_ref() {
+                    cache.put_metadata(id, metadata.clone());
+                }
+                Ok(metadata)
+            })
+            .await
+            .cloned()
     }
 
     async fn get_blob_metadata(

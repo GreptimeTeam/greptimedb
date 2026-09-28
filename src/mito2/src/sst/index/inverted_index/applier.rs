@@ -29,7 +29,7 @@ use index::inverted_index::search::predicate::Predicate;
 use index::target::IndexTarget;
 use object_store::ObjectStore;
 use puffin::puffin_manager::cache::PuffinMetadataCacheRef;
-use puffin::puffin_manager::{PuffinManager, PuffinReader};
+use puffin::puffin_manager::{GuardWithMetadata, PuffinManager, PuffinReader};
 use snafu::ResultExt;
 use store_api::metadata::RegionMetadataRef;
 use store_api::region_request::PathType;
@@ -45,7 +45,7 @@ use crate::error::{
 };
 use crate::metrics::{INDEX_APPLY_ELAPSED, INDEX_APPLY_MEMORY_USAGE};
 use crate::sst::file::RegionIndexId;
-use crate::sst::index::inverted_index::INDEX_BLOB_TYPE;
+use crate::sst::index::inverted_index::{INDEX_BLOB_TYPE, INDEX_BLOB_TYPE_V2};
 use crate::sst::index::puffin_manager::{BlobReader, PuffinManagerFactory};
 use crate::sst::index::{TYPE_INVERTED_INDEX, trigger_index_background_download};
 
@@ -305,20 +305,23 @@ impl InvertedIndexApplier {
             return Ok(None);
         };
 
-        let puffin_manager = self.puffin_manager_factory.build(
-            file_cache.local_store(),
-            WriteCachePathProvider::new(file_cache.clone()),
-        );
+        // With the metadata cache, `index_blob` reads the puffin footer once.
+        let puffin_manager = self
+            .puffin_manager_factory
+            .build(
+                file_cache.local_store(),
+                WriteCachePathProvider::new(file_cache.clone()),
+            )
+            .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
         // Adds file size hint to the puffin reader to avoid extra metadata read.
         let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .blob(INDEX_BLOB_TYPE)
-            .await
-            .context(PuffinReadBlobSnafu)?
+            .with_file_size_hint(file_size_hint);
+        let reader = index_blob(&reader)
+            .await?
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)?;
@@ -347,14 +350,13 @@ impl InvertedIndexApplier {
             .build(self.store.clone(), path_factory)
             .with_puffin_metadata_cache(self.puffin_metadata_cache.clone());
 
-        puffin_manager
+        let reader = puffin_manager
             .reader(&file_id)
             .await
             .context(PuffinBuildReaderSnafu)?
-            .with_file_size_hint(file_size_hint)
-            .blob(INDEX_BLOB_TYPE)
-            .await
-            .context(PuffinReadBlobSnafu)?
+            .with_file_size_hint(file_size_hint);
+        index_blob(&reader)
+            .await?
             .reader()
             .await
             .context(PuffinBuildReaderSnafu)
@@ -409,6 +411,21 @@ impl InvertedIndexApplier {
             index_applier: Arc::new(index_applier),
         })
     }
+}
+
+/// Opens the SST's inverted index blob, whichever format the file holds.
+async fn index_blob<R: PuffinReader>(reader: &R) -> Result<GuardWithMetadata<R::Blob>> {
+    let metadata = reader.metadata().await.context(PuffinReadBlobSnafu)?;
+    let blob_type = if metadata
+        .blobs
+        .iter()
+        .any(|blob| blob.blob_type == INDEX_BLOB_TYPE_V2)
+    {
+        INDEX_BLOB_TYPE_V2
+    } else {
+        INDEX_BLOB_TYPE
+    };
+    reader.blob(blob_type).await.context(PuffinReadBlobSnafu)
 }
 
 impl Drop for InvertedIndexApplier {
