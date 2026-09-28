@@ -1373,7 +1373,8 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
     }
 }
 
-/// Whether the left-hand metric name survives a binary operation.
+/// Whether the metric name survives a binary operation; see
+/// [`binary_metric_name_side`] for the operand that supplies it.
 ///
 /// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
 /// and comparisons keep the name, while arithmetic operators drop it. A
@@ -1411,10 +1412,10 @@ fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> b
 /// The operand whose labels supply the result metric name of a binary
 /// operation.
 ///
-/// Prometheus builds the result from the "one" side of the match: `group_right`
-/// makes the right-hand operand that side, and a scalar left-hand operand (for
-/// example `0.5 < a`) leaves the vector on the right. Every other case takes the
-/// left-hand operand.
+/// Prometheus builds the result from the side whose labels it carries, i.e. the
+/// "many" side of the match: `group_right` makes the right-hand operand that
+/// side, and a scalar left-hand operand (for example `0.5 < a`) leaves the
+/// vector on the right. Every other case takes the left-hand operand.
 fn binary_metric_name_side<'a>(
     lhs: &'a PromqlExpr,
     rhs: &'a PromqlExpr,
@@ -1422,7 +1423,7 @@ fn binary_metric_name_side<'a>(
 ) -> &'a PromqlExpr {
     let group_right =
         modifier.is_some_and(|m| matches!(m.card, VectorMatchCardinality::OneToMany(_)));
-    if group_right || matches!(lhs.value_type(), ValueType::Scalar | ValueType::String) {
+    if group_right || matches!(lhs.value_type(), ValueType::Scalar) {
         rhs
     } else {
         lhs
@@ -3284,14 +3285,15 @@ mod tests {
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
-            // Comparisons keep the metric name from the "one" side of the
-            // match: normally the left operand, but `group_right` takes it from
-            // the right operand and a scalar left operand leaves the vector on
-            // the right. The name is dropped when the comparison returns a bool
-            // or is a one-to-one `on(...)` match that does not keep `__name__`;
-            // such a match keeps only the listed labels, so listing `__name__`
-            // preserves the name. A `group_left`/`group_right` modifier does not
-            // reduce the labels, so the name is kept.
+            // Comparisons keep the metric name from the side whose labels the
+            // result carries, i.e. the "many" side of the match: normally the
+            // left operand, but `group_right` takes it from the right operand and
+            // a scalar left operand leaves the vector on the right. The name is
+            // dropped when the comparison returns a bool or is a one-to-one
+            // `on(...)` match that does not keep `__name__`; such a match keeps
+            // only the listed labels, so listing `__name__` preserves the name. A
+            // `group_left`/`group_right` modifier does not reduce the labels, so
+            // the name is kept.
             TestCase {
                 name: "bool comparison between metrics",
                 promql: "a > bool b",
