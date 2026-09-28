@@ -596,6 +596,16 @@ mod tests {
             response.contains("access-control-allow-origin: *"),
             "{response}"
         );
+        assert!(
+            response.contains("access-control-allow-headers: *"),
+            "{response}"
+        );
+        // `allow_methods` describes the methods allowed for the actual call,
+        // not the preflight, which the CORS layer answers on its own.
+        assert!(
+            response.contains("access-control-allow-methods: post"),
+            "{response}"
+        );
     }
 
     #[tokio::test]
