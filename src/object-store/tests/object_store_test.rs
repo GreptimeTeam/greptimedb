@@ -290,6 +290,9 @@ async fn test_s3_backend() -> Result<()> {
             .secret_access_key(&env::var("GT_S3_ACCESS_KEY")?)
             .region(&env::var("GT_S3_REGION")?)
             .bucket(&bucket);
+        if let Ok(endpoint) = env::var("GT_S3_ENDPOINT_URL") {
+            builder = builder.endpoint(&endpoint);
+        }
 
         // Honors an S3-compatible endpoint (MinIO in CI) so the test does not
         // fall back to resolving the bucket against real AWS.
@@ -306,11 +309,80 @@ async fn test_s3_backend() -> Result<()> {
         test_object_crud(&store).await?;
         test_object_list(&store).await?;
         test_object_list_start_after(&store).await?;
+        test_conditional_creation(&store).await?;
         assert_opendal_metrics();
         guard.remove_all().await?;
     }
 
     Ok(())
+}
+
+async fn test_conditional_creation(store: &ObjectStore) -> Result<()> {
+    const PART: usize = 8 * 1024 * 1024;
+    for size in [32, 2 * PART + 17] {
+        let payload = Bytes::from(vec![42; size]);
+        for preexisting in [false, true] {
+            let path = format!("conditional-{size}-{preexisting}");
+            if preexisting {
+                store.write(&path, "original").await?;
+            }
+            let attempt = |value: Bytes| {
+                let path = &path;
+                async move {
+                    let mut writer = store
+                        .writer_with(path)
+                        .if_not_exists(true)
+                        .concurrent(1)
+                        .chunk(PART)
+                        .await
+                        .unwrap();
+                    let result = async {
+                        for offset in (0..value.len()).step_by(PART) {
+                            writer
+                                .write(value.slice(offset..(offset + PART).min(value.len())))
+                                .await?;
+                        }
+                        writer.close().await
+                    }
+                    .await;
+                    if result.is_err() {
+                        writer.abort().await.unwrap();
+                    }
+                    result
+                }
+            };
+            let (a, b) = tokio::join!(attempt(payload.clone()), attempt(payload.clone()));
+            assert_eq!(
+                usize::from(a.is_ok()) + usize::from(b.is_ok()),
+                usize::from(!preexisting)
+            );
+            for error in [a.err(), b.err()].into_iter().flatten() {
+                assert!(
+                    matches!(
+                        error.kind(),
+                        object_store::ErrorKind::ConditionNotMatch
+                            | object_store::ErrorKind::AlreadyExists
+                    ),
+                    "{error:?}"
+                );
+            }
+            let expected = if preexisting {
+                Bytes::from_static(b"original")
+            } else {
+                payload.clone()
+            };
+            assert_eq!(store.read(&path).await?.to_bytes(), expected);
+            store.delete(&path).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_secure_fs_conditional_creation() -> Result<()> {
+    let dir = TempDir::new()?;
+    let store = object_store::secure_fs::SecureFsRoot::open(dir.path())?.build_operator();
+    test_conditional_creation(&store).await
 }
 
 #[tokio::test]

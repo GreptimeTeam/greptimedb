@@ -27,6 +27,7 @@ use table::TableRef;
 use table::metadata::TableType;
 use table::requests::CopyDatabaseRequest;
 use table::table_reference::TableReference;
+use tokio::sync::Semaphore;
 use url::Url;
 
 use crate::error::{self, Result};
@@ -56,7 +57,7 @@ pub(crate) fn parse_parallelism_from_option_map(options: &HashMap<String, String
         .get("parallelism")
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or_else(get_total_cpu_cores)
-        .max(1)
+        .clamp(1, Semaphore::MAX_PERMITS)
 }
 
 /// Rejects import-only layouts before either database export path creates output.
@@ -321,5 +322,11 @@ mod tests {
 
         let options = HashMap::from([("parallelism".to_string(), "0".to_string())]);
         assert_eq!(parse_parallelism_from_option_map(&options), 1);
+
+        let options = HashMap::from([("parallelism".to_string(), usize::MAX.to_string())]);
+        assert_eq!(
+            parse_parallelism_from_option_map(&options),
+            Semaphore::MAX_PERMITS
+        );
     }
 }
