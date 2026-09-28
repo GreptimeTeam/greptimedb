@@ -2357,6 +2357,7 @@ dependencies = [
  "paste",
  "regex",
  "serde",
+ "serde_json",
  "snafu 0.8.6",
  "strum 0.27.1",
  "tokio",

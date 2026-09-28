@@ -296,6 +296,10 @@ pub struct ExportCreateCommand {
     #[clap(long)]
     experimental_metric_export: bool,
 
+    /// Store independent Metric Parquet streams in shared packed objects.
+    #[clap(long, value_parser = ["packed"], requires = "experimental_metric_export")]
+    metric_data_layout: Option<String>,
+
     /// Delete existing snapshot and recreate.
     #[clap(long)]
     force: bool,
@@ -425,6 +429,13 @@ impl ExportCreateCommand {
                     .map_err(BoxedError::new);
             }
         }
+        if self.metric_data_layout.is_some() && !self.schema_only {
+            database_client
+                .require_packed_export()
+                .await
+                .context(DatabaseSnafu)
+                .map_err(BoxedError::new)?;
+        }
         let storage = OpenDalStorage::from_uri(&self.to, &self.storage).map_err(BoxedError::new)?;
 
         Ok(Box::new(ExportCreate {
@@ -434,6 +445,7 @@ impl ExportCreateCommand {
                 schema_only: self.schema_only,
                 format: self.format,
                 experimental_metric_export: self.experimental_metric_export,
+                packed: self.metric_data_layout.is_some(),
                 force: self.force,
                 time_range,
                 chunk_time_window: self.chunk_time_window,
@@ -462,6 +474,7 @@ struct ExportConfig {
     schema_only: bool,
     format: DataFormat,
     experimental_metric_export: bool,
+    packed: bool,
     force: bool,
     time_range: TimeRange,
     chunk_time_window: Option<Duration>,
@@ -504,7 +517,7 @@ impl ExportCreate {
                 let mut manifest = self.storage.read_manifest().await?;
 
                 // Check version compatibility
-                if manifest.version != MANIFEST_VERSION || manifest.data_layout.is_some() {
+                if manifest.validate_layout().is_err() {
                     return ManifestVersionMismatchSnafu {
                         expected: MANIFEST_VERSION,
                         found: manifest.version,
@@ -513,6 +526,15 @@ impl ExportCreate {
                 }
 
                 validate_resume_config(&manifest, &self.config)?;
+                if manifest.is_packed() {
+                    self.database_client
+                        .require_packed_export()
+                        .await
+                        .context(DatabaseSnafu)?;
+                    if !self.config.experimental_metric_export {
+                        return crate::data::export_v2::error::MetricExportUnavailableSnafu.fail();
+                    }
+                }
 
                 info!(
                     "Resuming existing snapshot: {} (completed: {}/{} chunks)",
@@ -571,10 +593,14 @@ impl ExportCreate {
             self.config.chunk_time_window,
         )?;
 
+        if self.config.packed && !self.config.schema_only {
+            manifest.version = 2;
+            manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+        }
         if self.config.experimental_metric_export {
             for chunk in &manifest.chunks {
                 self.storage
-                    .prepare_export_chunk(&schema_names, chunk.id, false)
+                    .prepare_export_chunk(&schema_names, chunk.id, false, manifest.is_packed())
                     .await?;
             }
         }
@@ -796,6 +822,14 @@ fn build_schema_ddl(
 }
 
 fn validate_resume_config(manifest: &Manifest, config: &ExportConfig) -> Result<()> {
+    if config.packed && !manifest.schema_only && !manifest.is_packed() {
+        return ResumeConfigMismatchSnafu {
+            field: "metric_data_layout",
+            existing: "standalone".to_string(),
+            requested: "packed".to_string(),
+        }
+        .fail();
+    }
     if manifest.schema_only != config.schema_only {
         return SchemaOnlyModeMismatchSnafu {
             existing_schema_only: manifest.schema_only,
@@ -1801,6 +1835,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1820,7 +1855,7 @@ mod tests {
 
     #[test]
     fn test_validate_resume_config_accepts_schema_selection_with_different_case_and_order() {
-        let manifest = Manifest::new_for_export(
+        let mut manifest = Manifest::new_for_export(
             "greptime".to_string(),
             vec!["public".to_string(), "analytics".to_string()],
             false,
@@ -1829,7 +1864,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let config = ExportConfig {
+        let mut config = ExportConfig {
             catalog: "greptime".to_string(),
             schemas: Some(vec![
                 "ANALYTICS".to_string(),
@@ -1839,6 +1874,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1849,6 +1885,18 @@ mod tests {
             storage_config: ObjectStoreConfig::default(),
         };
 
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+        config.packed = true;
+        assert!(
+            validate_resume_config(&manifest, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("metric_data_layout")
+        );
+        manifest.version = 2;
+        manifest.data_layout = Some(common_datasource::packed_snapshot::PACKED_LAYOUT.into());
+        assert!(validate_resume_config(&manifest, &config).is_ok());
+        config.packed = false;
         assert!(validate_resume_config(&manifest, &config).is_ok());
     }
 
@@ -1872,6 +1920,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range,
             chunk_time_window: Some(Duration::from_secs(3600)),
@@ -1906,6 +1955,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Csv,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::unbounded(),
             chunk_time_window: None,
@@ -1942,6 +1992,7 @@ mod tests {
             schema_only: false,
             format: DataFormat::Parquet,
             experimental_metric_export: false,
+            packed: false,
             force: false,
             time_range: TimeRange::new(Some(start), Some(start)),
             chunk_time_window: None,

@@ -1381,7 +1381,9 @@ impl HttpServer {
             .route(
                 "/capabilities",
                 routing::get(|| async {
-                    axum::Json(serde_json::json!({"metric_packed_import": 1}))
+                    axum::Json(
+                        serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1}),
+                    )
                 }),
             )
             .route(
@@ -1897,7 +1899,7 @@ mod test {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
                 response.json::<serde_json::Value>().await,
-                serde_json::json!({"metric_packed_import": 1})
+                serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1})
             );
         }
     }

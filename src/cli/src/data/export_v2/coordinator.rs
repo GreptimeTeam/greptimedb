@@ -40,6 +40,7 @@ struct ExportContext<'a> {
     format: DataFormat,
     parallelism: usize,
     experimental_metric_export: bool,
+    packed: bool,
     resume: bool,
 }
 
@@ -71,6 +72,7 @@ pub async fn export_data(
         catalog: manifest.catalog.clone(),
         schemas: manifest.schemas.clone(),
         format: manifest.format,
+        packed: manifest.is_packed(),
         parallelism: options.parallelism,
         experimental_metric_export: options.experimental_metric_export,
         resume: options.resume,
@@ -279,7 +281,7 @@ async fn export_chunk(
     if context.experimental_metric_export {
         context
             .storage
-            .prepare_export_chunk(&context.schemas, chunk_id, context.resume)
+            .prepare_export_chunk(&context.schemas, chunk_id, context.resume, context.packed)
             .await?;
     }
     let scheme = StorageScheme::from_uri(context.snapshot_uri)?;
@@ -289,6 +291,7 @@ async fn export_chunk(
         time_range,
         parallelism: context.parallelism,
         experimental_metric_export: context.experimental_metric_export,
+        packed: context.packed,
     };
 
     for schema in &context.schemas {
@@ -314,6 +317,39 @@ async fn export_chunk(
     }
 
     let files = list_chunk_files(context.storage, &context.schemas, chunk_id).await?;
+    if context.packed {
+        use common_datasource::packed_snapshot::{PACK_INDEX_FILE, PackIndex};
+        let mut expected = Vec::new();
+        for schema in &context.schemas {
+            let prefix = data_dir_for_schema_chunk(schema, chunk_id);
+            let index_path = format!("{prefix}{PACK_INDEX_FILE}");
+            let text = context.storage.read_text(&index_path).await?;
+            let index: PackIndex = serde_json::from_str(&text).map_err(|e| {
+                crate::data::export_v2::error::InvalidUriSnafu {
+                    uri: context.snapshot_uri,
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
+            index.validate().map_err(|e| {
+                crate::data::export_v2::error::InvalidUriSnafu {
+                    uri: context.snapshot_uri,
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
+            expected.push(index_path);
+            expected.extend(index.objects.iter().map(|o| format!("{prefix}{}", o.path)));
+        }
+        expected.sort();
+        if files != expected {
+            return crate::data::export_v2::error::InvalidUriSnafu {
+                uri: context.snapshot_uri,
+                reason: "chunk inventory differs from packed indexes",
+            }
+            .fail();
+        }
+    }
     info!("Collected {} files for chunk {}", files.len(), chunk_id);
     Ok(files)
 }

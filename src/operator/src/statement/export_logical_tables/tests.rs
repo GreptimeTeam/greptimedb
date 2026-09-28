@@ -146,6 +146,7 @@ async fn routes_across_batches_and_writes_empty_files() {
         export_limits(),
         &CancellationToken::new(),
         budget.clone(),
+        None,
     )
     .await
     .unwrap();
@@ -518,6 +519,7 @@ async fn cancellation_drains_storage_and_preserves_committed_files() {
             limits,
             &cancellation,
             budget.clone(),
+            None,
         );
         tokio::pin!(export);
         tokio::select! {
@@ -829,7 +831,8 @@ async fn groups_and_ordinary_files_share_writer_admission_and_drain() {
                         &store,
                         export_limits(),
                         &token,
-                        budget.clone()
+                        budget.clone(),
+                        None,
                     ),
                     export_stream_managed(
                         &b,
@@ -837,7 +840,8 @@ async fn groups_and_ordinary_files_share_writer_admission_and_drain() {
                         &store,
                         export_limits(),
                         &token,
-                        budget.clone()
+                        budget.clone(),
+                        None,
                     ),
                     ordinary,
                 )
