@@ -27,11 +27,36 @@ pub const LIVE_ANALYZE_METRICS_EXTENSION_KEY: &str = "query.live_analyze_metrics
 pub const INSERT_SKIP_WAL_HINT: &str = "insert_skip_wal";
 
 pub const READ_PREFERENCE_HINT: &str = "read_preference";
-pub const RESERVED_EXTENSION_KEYS: [&str; 4] = [
+/// The extension key of the marker that a query is an execution stage of another query, instead of
+/// an independent query.
+///
+/// A datanode executes the `MergeScan` nodes of the plan it received by querying the regions of
+/// those nodes from the datanodes hosting them. Such an inner region query is a stage of the outer
+/// query: the outer query waits for it while holding its own concurrency permit, so the inner query
+/// must not acquire a permit of its own, otherwise the outer query waits for the inner stage while
+/// the inner stage waits for the permit held by the outer query. The marker travels to the peer
+/// datanode as an extension of the query context of the `RegionRequestHeader` of the request.
+///
+/// The key is reserved (see [`RESERVED_EXTENSION_KEYS`]), so the hint path (`x-greptime-hints`)
+/// can't set it: a SQL/PromQL client of the frontend can't make its own query bypass the
+/// concurrency limiter of a datanode. The marker is trusted on the region query port of a datanode,
+/// like the other extensions of the header and the plan itself.
+///
+/// Keep in sync with `common_query::request::QUERY_INTERNAL_STAGE_EXTENSION_KEY`
+/// (`session` can't depend on `common-query`).
+pub const QUERY_INTERNAL_STAGE_EXTENSION_KEY: &str = "query.internal_stage";
+/// The value of [`QUERY_INTERNAL_STAGE_EXTENSION_KEY`] that marks an execution stage of another
+/// query. Any other value, including an absent one, leaves the query subject to the concurrency
+/// limiter.
+///
+/// Keep in sync with `common_query::request::QUERY_INTERNAL_STAGE_EXTENSION_VALUE`.
+pub const QUERY_INTERNAL_STAGE_EXTENSION_VALUE: &str = "true";
+pub const RESERVED_EXTENSION_KEYS: [&str; 5] = [
     REMOTE_QUERY_ID_EXTENSION_KEY,
     INITIAL_REMOTE_DYN_FILTER_REGISTRATIONS_EXTENSION_KEY,
     SUPPORT_FLIGHT_METRICS_BEFORE_BATCH_EXTENSION_KEY,
     LIVE_ANALYZE_METRICS_EXTENSION_KEY,
+    QUERY_INTERNAL_STAGE_EXTENSION_KEY,
 ];
 
 /// Deprecated, use `HINTS_KEY` instead.
@@ -64,6 +89,9 @@ mod tests {
         ));
         assert!(is_reserved_extension_key(
             LIVE_ANALYZE_METRICS_EXTENSION_KEY
+        ));
+        assert!(is_reserved_extension_key(
+            QUERY_INTERNAL_STAGE_EXTENSION_KEY
         ));
         assert!(!is_reserved_extension_key(READ_PREFERENCE_HINT));
     }
