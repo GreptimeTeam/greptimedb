@@ -336,6 +336,9 @@ pub mod mock {
                     }),
                 )
                 .unwrap();
+            // The mock transport is a single in-memory duplex connection, so both lanes
+            // must resolve through this one pre-wired manager.
+            #[allow(deprecated)]
             Client::with_manager_and_urls(channel_manager, vec![datanode.addr.clone()])
         }
     }

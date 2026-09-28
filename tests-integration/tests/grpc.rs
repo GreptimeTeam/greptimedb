@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Retain coverage of the legacy constructors, including TLS configuration.
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 use api::v1::alter_table_expr::Kind;
