@@ -120,11 +120,22 @@ jobs:
     # Ordinary PRs also run the same tests from checks.yml.
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    outputs:
+      # The Rust toolchain pin, resolved from rust-toolchain.toml so the
+      # benchmark always runs the workspace toolchain without a second
+      # hard-coded copy in this workflow.
+      rust_toolchain: ${{ steps.rust-toolchain.outputs.pin }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+
+      - name: Resolve Rust toolchain pin
+        id: rust-toolchain
+        run: |
+          pin="$(grep -E '^channel' rust-toolchain.toml | cut -d'"' -f2)"
+          echo "pin=${pin}" >> "$GITHUB_OUTPUT"
 
       - name: Test query regression tooling
         run: |
@@ -190,7 +201,7 @@ jobs:
       CARGO_HOME: /home/runner/.cargo
       UV_CACHE_DIR: /home/runner/.cargo/uv-cache
       RUSTUP_HOME: /opt/rustup
-      RUSTUP_TOOLCHAIN: nightly-2026-03-21
+      RUSTUP_TOOLCHAIN: ${{ needs.test-tooling.outputs.rust_toolchain }}
       RUSTUP_AUTO_INSTALL: "0"
       CARGO_TARGET_DIR: /home/runner/query-regression-target
       QUERY_REGRESSION_CACHE_META: /home/runner/query-regression-cache-meta
@@ -504,14 +515,16 @@ jobs:
           require_eq cargo_path "$(command -v cargo || true)" "/opt/cargo/bin/cargo"
           require_eq rustc_path "$(command -v rustc || true)" "/opt/cargo/bin/rustc"
           require_match rustup "$(capture rustup --version)" '^rustup[[:space:]]1\.29\.0([[:space:]]|$)'
+          # The toolchain pin flows from rust-toolchain.toml (resolved in the
+          # test-tooling job); escape it for the regex assertions below.
+          pin_regex="${RUSTUP_TOOLCHAIN//./\\.}"
           require_match cargo "$(capture cargo --version)" \
-            '^cargo[[:space:]]1\.96\.0-nightly[[:space:]]\(cbb9bb8bd[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+            "^cargo[[:space:]]${pin_regex}[[:space:]]\([0-9a-f]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$"
           require_match rustc "$(capture rustc --version)" \
-            '^rustc[[:space:]]1\.96\.0-nightly[[:space:]]\(ac7f9ec7d[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$'
+            "^rustc[[:space:]]${pin_regex}[[:space:]]\([0-9a-f]+[[:space:]][0-9]{4}-[0-9]{2}-[0-9]{2}\)$"
           require_match active_toolchain "$(capture rustup show active-toolchain)" \
-            '^nightly-2026-03-21-x86_64-unknown-linux-gnu([[:space:]]|$)'
+            "^${pin_regex}-x86_64-unknown-linux-gnu([[:space:]]|$)"
           require_eq RUSTUP_HOME "${RUSTUP_HOME}" "/opt/rustup"
-          require_eq RUSTUP_TOOLCHAIN "${RUSTUP_TOOLCHAIN}" "nightly-2026-03-21"
           require_eq RUSTUP_AUTO_INSTALL "${RUSTUP_AUTO_INSTALL}" "0"
           require "readable /opt/rustup" test -r /opt/rustup
           require "executable /opt/rustup" test -x /opt/rustup

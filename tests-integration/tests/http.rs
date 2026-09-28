@@ -3833,8 +3833,9 @@ pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_t
     };
 
     // Create the logical table on the microsecond physical table. The bulk
-    // guard rejects the microsecond selected physical table, so this write
-    // takes the ordinary insert path.
+    // path handles the microsecond selected physical table: the new table
+    // is created on it and the samples are widened to its unit during
+    // batch alignment.
     let res = client
         .post("/v1/prometheus/write?physical_table=phy_us")
         .header("Content-Encoding", "snappy")
@@ -3844,10 +3845,11 @@ pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_t
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
 
     // Write the same existing table again while selecting the default
-    // (millisecond) physical table: the guard must reject the existing
-    // microsecond destination and fall back to the ordinary insert path —
-    // without the destination check the bulk path would build millisecond
-    // arrays against the microsecond schema and fail the write.
+    // (millisecond) physical table: the destination is bound to another
+    // physical table, so the bulk eligibility check must reject it and fall
+    // back to the ordinary insert path — without the destination binding
+    // check the bulk flush would write the rows through the selected
+    // physical's regions, silently misplacing them.
     let res = client
         .post("/v1/prometheus/write")
         .header("Content-Encoding", "snappy")
