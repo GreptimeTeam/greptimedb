@@ -1,3 +1,3 @@
-# disable these features until they get stablized
+# disable these features until they become stable
 #group_imports = "StdExternalCrate"
 #imports_granularity = "Module"
