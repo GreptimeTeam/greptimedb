@@ -344,11 +344,11 @@ jobs:
     #
     # Required repository configuration (same names the provisioning job
     # uses): vars ALIYUN_ECS_REGION_ID, ALIYUN_ECS_VSWITCH_ID,
-    # ALIYUN_ECS_SECURITY_GROUP_ID, ALIYUN_ECS_BASE_IMAGE_ID (Ubuntu 24.04
-    # public image id in the region; specific to this rebuild), optionally
-    # ALIYUN_ECS_RESOURCE_GROUP_ID; secrets ALICLOUD_ECS_ACCESS_KEY_ID,
-    # ALICLOUD_ECS_ACCESS_KEY_SECRET, GH_PERSONAL_ACCESS_TOKEN (repo push +
-    # actions-variable write).
+    # ALIYUN_ECS_SECURITY_GROUP_ID, optionally ALIYUN_ECS_RESOURCE_GROUP_ID
+    # and ALIYUN_ECS_BASE_IMAGE_ID (deterministic base-image pin; otherwise
+    # the rebuild auto-resolves the latest public Ubuntu 24.04 image).
+    # Secrets: ALICLOUD_ECS_ACCESS_KEY_ID, ALICLOUD_ECS_ACCESS_KEY_SECRET,
+    # GH_PERSONAL_ACCESS_TOKEN (repo push + actions-variable write).
     name: Rebuild query-regression runner image
     needs: [changes]
     if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'push' && needs.changes.outputs.query-regression-runner == 'true') || inputs.release_query_regression_runner_image) }}

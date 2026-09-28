@@ -101,8 +101,14 @@ The manual fallback (also what the workflow runs):
 ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
 uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
   --region-id <region> --vswitch-id <vsw-...> --security-group-id <sg-...> \
-  --base-image-id <ubuntu-24.04-image-id>
+  [--base-image-id <ubuntu-24.04-image-id>]
 ```
+
+`--base-image-id` is optional: the script defaults to the latest public
+Ubuntu 24.04 image in the region (the Dockerfile pins every tool version
+itself, so base drift is low-risk); pass it — or set the
+`ALIYUN_ECS_BASE_IMAGE_ID` repo variable consumed by the automated job —
+to pin a specific base image.
 
 The script boots a temporary builder instance, `docker build`s the runner
 image, materializes `/opt/rustup`, `/opt/cargo`, `/usr/local/bin` tools, and

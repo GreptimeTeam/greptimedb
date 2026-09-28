@@ -235,6 +235,48 @@ def call_api_with_retry(fn, description: str, attempts: int = 5):
     raise RuntimeError("unreachable: retry loop exited without returning")
 
 
+def resolve_base_image_id(client, region_id: str) -> str:
+    """Resolve the latest public Ubuntu 24.04 x86_64 system image.
+
+    Used as the default for --base-image-id: the runner Dockerfile pins
+    every tool version itself, so a current stock Ubuntu 24.04 base is all
+    the builder needs. Pass --base-image-id (or ALIYUN_ECS_BASE_IMAGE_ID)
+    to pin a specific base image deterministically.
+    """
+    from alibabacloud_ecs20140526 import models as ecs_models
+
+    response = call_api_with_retry(
+        lambda: client.describe_images(
+            ecs_models.DescribeImagesRequest(
+                region_id=region_id,
+                image_owner_alias="system",
+                os_type="linux",
+            )
+        ),
+        "DescribeImages(system base)",
+    )
+    candidates = [
+        image
+        for image in (response.body.images.image or [])
+        if (image.architecture or "") == "x86_64"
+        and "Ubuntu" in (image.os_name or "")
+        and "24.04" in (image.os_name or "")
+    ]
+    if not candidates:
+        raise SystemExit(
+            "No public Ubuntu 24.04 x86_64 system image found in region "
+            f"{region_id}; pass --base-image-id explicitly"
+        )
+    candidates.sort(key=lambda image: image.creation_time or "", reverse=True)
+    picked = candidates[0]
+    print(
+        f"Resolved base image: {picked.image_id} ({picked.os_name}, "
+        f"created {picked.creation_time}) from {len(candidates)} candidates",
+        flush=True,
+    )
+    return picked.image_id
+
+
 def read_console_output(client, region_id: str, instance_id: str) -> str:
     """Fetch the instance's serial console output; no in-guest agent needed."""
     from alibabacloud_ecs20140526 import models as ecs_models
@@ -259,13 +301,19 @@ def main() -> int:
     parser.add_argument("--image-name", default=None, help="Defaults to a timestamped name.")
     args = parser.parse_args()
 
-    for name in ("region_id", "vswitch_id", "security_group_id", "base_image_id"):
+    for name in ("region_id", "vswitch_id", "security_group_id"):
         if not getattr(args, name):
             raise SystemExit(f"Missing required configuration: --{name.replace('_', '-')}")
 
     from alibabacloud_ecs20140526 import models as ecs_models
 
     client = make_ecs_client(args.region_id)
+    # --base-image-id is optional: default to the latest public Ubuntu 24.04
+    # image in the region (the Dockerfile pins every tool version itself, so
+    # base drift is low-risk; pass --base-image-id or set
+    # ALIYUN_ECS_BASE_IMAGE_ID to pin deterministically).
+    if not args.base_image_id:
+        args.base_image_id = resolve_base_image_id(client, args.region_id)
     image_name = args.image_name or time.strftime(
         "greptimedb-query-regression-runner-%Y%m%d%H%M%S", time.gmtime()
     )
