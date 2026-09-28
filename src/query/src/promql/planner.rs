@@ -6500,16 +6500,15 @@ impl PromPlanner {
             )
         };
 
-        // push time index column if it exists
+        // Keep the existing sorted join-key order after adding the time index.
         if let (Some(left_time_index_column), Some(right_time_index_column)) = (
             left_time_index_column.clone(),
             right_time_index_column.clone(),
         ) {
-            left_join_keys.insert(0, (left_time_index_column.clone(), left_time_index_column));
-            right_join_keys.insert(
-                0,
-                (right_time_index_column.clone(), right_time_index_column),
-            );
+            left_join_keys.push((left_time_index_column.clone(), left_time_index_column));
+            right_join_keys.push((right_time_index_column.clone(), right_time_index_column));
+            left_join_keys.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            right_join_keys.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
         }
 
         let right = LogicalPlanBuilder::from(right)
