@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::fmt::Debug;
-use std::sync::Exclusive;
 
 use ::auth::{
     BEARER_TOKEN_USER, Identity, Password, PgAuthInfo, PgScramSha256Verifier, UserInfoRef,
@@ -252,7 +251,7 @@ impl StartupHandler for PostgresServerHandlerInner {
                 auth::save_startup_parameters_to_metadata(client, startup);
 
                 // check if db is valid
-                match resolve_db_info(Exclusive::new(client), self.query_handler.clone()).await? {
+                match resolve_db_info(client, self.query_handler.clone()).await? {
                     DbResolution::Resolved(catalog, schema) => {
                         let metadata = client.metadata_mut();
                         let _ = metadata.insert(super::METADATA_CATALOG.to_owned(), catalog);
@@ -595,13 +594,13 @@ enum DbResolution {
 
 /// A function extracted to resolve lifetime and readability issues:
 async fn resolve_db_info<C>(
-    client: Exclusive<&mut C>,
+    client: &mut C,
     query_handler: ServerSqlQueryHandlerRef,
 ) -> PgWireResult<DbResolution>
 where
     C: ClientInfo + Unpin + Send,
 {
-    let db_ref = client.into_inner().metadata().get(super::METADATA_DATABASE);
+    let db_ref = client.metadata().get(super::METADATA_DATABASE);
     if let Some(db) = db_ref {
         let (catalog, schema) = parse_catalog_and_schema_from_db_string(db);
         if query_handler

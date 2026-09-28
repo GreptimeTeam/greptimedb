@@ -475,7 +475,11 @@ where
     for item in items {
         let (start, _) = item.range();
 
-        while let Some(run) = runs_sort_by_end.pop_if(|x| x.run.end.unwrap() <= start) {
+        while runs_sort_by_end
+            .peek()
+            .is_some_and(|x| x.run.end.unwrap() <= start)
+        {
+            let run = runs_sort_by_end.pop().unwrap();
             runs_sort_by_index.push(Wrapper(run));
         }
 

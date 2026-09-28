@@ -30,7 +30,7 @@ use datatypes::prelude::VectorRef;
 use datatypes::schema::{
     ColumnDefaultConstraint, ColumnSchema, FulltextOptions, Schema, SkippingIndexOptions,
 };
-use greptime_proto::v1::region::compact_request;
+use greptime_proto::v1::region::{build_index_request, compact_request};
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use store_api::metric_engine_consts::{
@@ -805,6 +805,8 @@ pub struct FlushTableRequest {
 
 #[derive(Debug, Clone, Default)]
 pub struct BuildIndexTableRequest {
+    /// The index build mode. Absent options select SST indexes.
+    pub options: Option<build_index_request::Options>,
     pub catalog_name: String,
     pub schema_name: String,
     pub table_name: String,

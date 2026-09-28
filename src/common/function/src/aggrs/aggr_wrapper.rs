@@ -25,7 +25,7 @@
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, BooleanArray, StructArray};
+use arrow::array::{ArrayData, ArrayRef, BooleanArray, StructArray, make_array};
 use arrow_schema::{FieldRef, Fields};
 use common_telemetry::debug;
 use datafusion::functions_aggregate::all_default_aggregate_functions;
@@ -81,6 +81,19 @@ pub fn is_all_aggr_exprs_steppable(aggr_exprs: &[Expr]) -> bool {
             if aggr_func.params.distinct {
                 // Distinct aggregate functions are not steppable(yet).
                 // TODO(discord9): support distinct aggregate functions.
+                return false;
+            }
+
+            // DataFusion only sorts the input of an aggregate with a hard ordering requirement
+            // when the requirement is already satisfied or the aggregate has a reverse
+            // expression (apache/datafusion#25676). The state wrapper has none, so e.g.
+            // `nth_value(.. ORDER BY ..)` would read unsorted input on datanodes. Ordered-set
+            // aggregates like `approx_percentile_cont(..) WITHIN GROUP (ORDER BY ..)` are
+            // exempt: their ORDER BY names the value, and they don't need sorted input.
+            if !aggr_func.params.order_by.is_empty()
+                && aggr_func.func.order_sensitivity().hard_requires()
+                && !aggr_func.func.supports_within_group_clause()
+            {
                 return false;
             }
 
@@ -526,43 +539,7 @@ impl StateGroupsAccum {
     }
 
     fn wrap_state_arrays(&self, arrays: Vec<ArrayRef>) -> datafusion_common::Result<ArrayRef> {
-        let array_type = arrays
-            .iter()
-            .map(|array| array.data_type().clone())
-            .collect::<Vec<_>>();
-        let expected_type = self
-            .state_fields
-            .iter()
-            .map(|field| field.data_type().clone())
-            .collect::<Vec<_>>();
-        if array_type != expected_type {
-            debug!(
-                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
-                self.state_fields.len(),
-                arrays.len(),
-                self.state_fields,
-                array_type,
-            );
-            let guess_schema = arrays
-                .iter()
-                .enumerate()
-                .map(|(index, array)| {
-                    Field::new(
-                        format!("col_{index}[mismatch_state]").as_str(),
-                        array.data_type().clone(),
-                        true,
-                    )
-                })
-                .collect::<Fields>();
-            let array = StructArray::try_new(guess_schema, arrays, None)?;
-            return Ok(Arc::new(array));
-        }
-
-        Ok(Arc::new(StructArray::try_new(
-            self.state_fields.clone(),
-            arrays,
-            None,
-        )?))
+        Ok(Arc::new(state_struct_array(&self.state_fields, arrays)?))
     }
 }
 
@@ -610,6 +587,81 @@ impl GroupsAccumulator for StateGroupsAccum {
     }
 }
 
+/// Wraps the state arrays of an accumulator into a struct of the declared state fields.
+///
+/// The declared state type is derived from logical expressions, while the accumulator names
+/// nested fields after physical expressions. For example, `array_agg(v ORDER BY ts)` declares
+/// its orderings as `List(Struct("ts": ..))` but produces `List(Struct("ts@0": ..))`. Arrays that
+/// differ only in nested field names are cast to the declared type; any other difference is an
+/// error.
+fn state_struct_array(
+    state_fields: &Fields,
+    arrays: Vec<ArrayRef>,
+) -> datafusion_common::Result<StructArray> {
+    if arrays.len() != state_fields.len() {
+        return Err(datafusion_common::DataFusionError::Internal(format!(
+            "Expected {} state arrays for fields {:?}, got {}",
+            state_fields.len(),
+            state_fields,
+            arrays.len()
+        )));
+    }
+    let arrays = arrays
+        .into_iter()
+        .zip(state_fields.iter())
+        .map(|(array, field)| {
+            let expected = field.data_type();
+            if array.data_type() == expected {
+                Ok(array)
+            } else if array.data_type().equals_datatype(expected) {
+                Ok(make_array(relabel_nested_fields(
+                    array.to_data(),
+                    expected,
+                )?))
+            } else {
+                Err(datafusion_common::DataFusionError::Internal(format!(
+                    "State field `{}` expects type {expected}, but the accumulator produced {}",
+                    field.name(),
+                    array.data_type()
+                )))
+            }
+        })
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
+    Ok(StructArray::try_new(state_fields.clone(), arrays, None)?)
+}
+
+/// Rebuilds `data` with the type `target`, which must match it position by position apart
+/// from nested field names and metadata. Unlike a cast, children are never matched by name.
+fn relabel_nested_fields(
+    data: ArrayData,
+    target: &DataType,
+) -> datafusion_common::Result<ArrayData> {
+    let child_types = match target {
+        DataType::List(field)
+        | DataType::LargeList(field)
+        | DataType::FixedSizeList(field, _)
+        | DataType::Map(field, _) => vec![field.data_type()],
+        DataType::Struct(fields) => fields.iter().map(|f| f.data_type()).collect(),
+        _ if data.child_data().is_empty() => vec![],
+        _ => {
+            return Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "Relabeling nested fields of {target}"
+            )));
+        }
+    };
+    let children = data
+        .child_data()
+        .iter()
+        .zip(child_types)
+        .map(|(child, child_type)| relabel_nested_fields(child.clone(), child_type))
+        .collect::<datafusion_common::Result<Vec<_>>>()?;
+    Ok(data
+        .into_builder()
+        .data_type(target.clone())
+        .child_data(children)
+        .build()?)
+}
+
 impl StateAccum {
     pub fn new(
         inner: Box<dyn Accumulator>,
@@ -636,40 +688,7 @@ impl Accumulator for StateAccum {
             .iter()
             .map(|s| s.to_array())
             .collect::<Result<Vec<_>, _>>()?;
-        let array_type = array
-            .iter()
-            .map(|a| a.data_type().clone())
-            .collect::<Vec<_>>();
-        let expected_type: Vec<_> = self
-            .state_fields
-            .iter()
-            .map(|f| f.data_type().clone())
-            .collect();
-        if array_type != expected_type {
-            debug!(
-                "State mismatch, expected: {}, got: {} for expected fields: {:?} and given array types: {:?}",
-                self.state_fields.len(),
-                array.len(),
-                self.state_fields,
-                array_type,
-            );
-            let guess_schema = array
-                .iter()
-                .enumerate()
-                .map(|(index, array)| {
-                    Field::new(
-                        format!("col_{index}[mismatch_state]").as_str(),
-                        array.data_type().clone(),
-                        true,
-                    )
-                })
-                .collect::<Fields>();
-            let arr = StructArray::try_new(guess_schema, array, None)?;
-
-            return Ok(ScalarValue::Struct(Arc::new(arr)));
-        }
-
-        let struct_array = StructArray::try_new(self.state_fields.clone(), array, None)?;
+        let struct_array = state_struct_array(&self.state_fields, array)?;
         Ok(ScalarValue::Struct(Arc::new(struct_array)))
     }
 
