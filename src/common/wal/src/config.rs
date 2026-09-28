@@ -329,6 +329,15 @@ mod tests {
             datanode_wal_config,
             DatanodeWalConfig::ObjectStore(expected)
         );
+        let serialized = toml::to_string(&datanode_wal_config).unwrap();
+        let table: toml::Table = toml::from_str(&serialized).unwrap();
+        assert_eq!(table["ack_mode"].as_str(), Some("enqueued"));
+        assert_eq!(table["max_unpersisted_bytes"].as_str(), Some("32MiB"));
+        assert_eq!(table["max_unpersisted_age"].as_str(), Some("4s"));
+        assert_eq!(
+            datanode_wal_config,
+            toml::from_str::<DatanodeWalConfig>(&serialized).unwrap()
+        );
 
         // The persisted tag is not accepted as a config provider.
         let toml_str = r#"

@@ -107,13 +107,15 @@ pub trait LogStore: Send + Sync + 'static + std::fmt::Debug {
     fn latest_entry_id(&self, provider: &Provider) -> Result<EntryId, Self::Error>;
 
     /// Waits until every entry of the provider's region with an id at or below
-    /// `entry_id` is durable, so that a caller can persist `entry_id` as a
+    /// `entry_id` has the persistence this log store guarantees for an
+    /// acknowledged append, so that a caller can persist `entry_id` as a
     /// replay watermark.
     ///
-    /// Only a log store that acknowledges an append before its entries are
-    /// durable has anything to wait for; every other log store keeps this
-    /// default, which returns at once because an entry id a caller holds is
-    /// durable already.
+    /// The default returns at once and keeps each log store's own
+    /// acknowledgement guarantee, whatever it is: Raft Engine with
+    /// `sync_write = false`, for example, acknowledges an append before its
+    /// periodic sync. A log store that acknowledges an append before its
+    /// entries have that persistence overrides this method.
     async fn wait_durable(
         &self,
         _provider: &Provider,

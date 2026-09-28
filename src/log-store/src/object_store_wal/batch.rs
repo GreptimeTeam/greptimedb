@@ -145,7 +145,6 @@ impl OpenBatch {
         self.entries.is_empty()
     }
 
-    /// Returns true when the batch holds an entry of `region_id`.
     pub(crate) fn holds_region(&self, region_id: RegionId) -> bool {
         self.positions.contains_key(&region_id)
     }
