@@ -86,8 +86,9 @@ sweep.
 ### Building and updating the ECS image
 
 The runner `Dockerfile` in the parent directory stays the single source of the
-tool contract. The image is rebuilt **automatically** by
-`.github/workflows/rebuild-query-regression-runner-image.yaml` whenever
+tool contract. The image is rebuilt **automatically** by the
+`rebuild-query-regression-runner-image` job in
+`.github/workflows/release-dev-builder-images.yaml` whenever
 `rust-toolchain.toml` or anything under this directory changes on main (or via
 manual dispatch): it runs the ops tool below, then bumps
 `RUNNER_IMAGE_EPOCH` in `query-regression.yml` and points the
