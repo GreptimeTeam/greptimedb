@@ -22,6 +22,7 @@ required-features = ["dev-tools"]
 [features]
 default = [
     "ai_functions",
+    "hdfs-object-store",
     "servers/pprof",
     "servers/mem-prof",
     "meta-srv/pg_kvbackend",
