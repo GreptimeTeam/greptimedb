@@ -132,6 +132,7 @@ impl SortIndexCreator {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
 
     use common_base::BitVec;
     use futures::{StreamExt, stream};
@@ -257,6 +258,51 @@ mod tests {
             .finish(&mut mock_writer, BitmapType::Roaring)
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sort_index_creator_spills_requested_sorters() {
+        let spilled = Arc::new(Mutex::new(Vec::new()));
+        let factory: SorterFactory = {
+            let spilled = spilled.clone();
+            Box::new(move |index_name, _| {
+                Box::new(SpillRecordingSorter {
+                    index_name,
+                    spilled: spilled.clone(),
+                })
+            })
+        };
+        let mut creator = SortIndexCreator::new(factory, NonZeroUsize::new(1).unwrap());
+
+        assert!(creator.push_with_name("a", Some(b"1")));
+        assert!(!creator.push_with_name("b", Some(b"1")));
+        creator.spill().await.unwrap();
+        assert_eq!(*spilled.lock().unwrap(), vec!["a"]);
+
+        creator.spill().await.unwrap();
+        assert_eq!(*spilled.lock().unwrap(), vec!["a"]);
+    }
+
+    /// Requests a spill on every push to index `a` and records the spills it receives.
+    struct SpillRecordingSorter {
+        index_name: String,
+        spilled: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Sorter for SpillRecordingSorter {
+        fn push_n(&mut self, _value: Option<BytesRef<'_>>, _n: usize) -> bool {
+            self.index_name == "a"
+        }
+
+        async fn spill(&mut self) -> Result<()> {
+            self.spilled.lock().unwrap().push(self.index_name.clone());
+            Ok(())
+        }
+
+        async fn output(&mut self) -> Result<SortOutput> {
+            unreachable!()
+        }
     }
 
     fn set_bit(bit_vec: &mut BitVec, index: usize) {

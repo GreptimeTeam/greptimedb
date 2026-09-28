@@ -141,13 +141,18 @@ impl Analyzer {
         }
     }
 
-    /// Analyzes the given text and appends the bloom filter hash of each token to `hashes`.
+    /// Returns the bloom filter hash of each token in the given text.
     ///
     /// Equivalent to hashing every token returned by [`Analyzer::analyze_text`] with
-    /// [`element_hash`], without allocating per token.
-    pub fn analyze_text_hashes(&self, text: &str, buf: &mut Vec<u8>, hashes: &mut Vec<u64>) {
-        for token in self.tokenizer.tokenize(text) {
-            let hash = if self.case_sensitive {
+    /// [`element_hash`], without allocating per token. `buf` holds lowercased ASCII tokens.
+    pub fn analyze_text_hashes<'a>(
+        &self,
+        text: &'a str,
+        buf: &'a mut Vec<u8>,
+    ) -> impl Iterator<Item = u64> + use<'a> {
+        let case_sensitive = self.case_sensitive;
+        self.tokenizer.tokenize(text).into_iter().map(move |token| {
+            if case_sensitive {
                 element_hash(token.as_bytes())
             } else if token.is_ascii() {
                 buf.clear();
@@ -155,9 +160,8 @@ impl Analyzer {
                 element_hash(buf)
             } else {
                 element_hash(token.to_lowercase().as_bytes())
-            };
-            hashes.push(hash);
-        }
+            }
+        })
     }
 
     /// Analyzes the given text into a list of tokens.
@@ -197,8 +201,9 @@ mod tests {
                 .iter()
                 .map(|t| element_hash(t))
                 .collect::<Vec<_>>();
-            let mut hashes = Vec::new();
-            analyzer.analyze_text_hashes(text, &mut Vec::new(), &mut hashes);
+            let hashes = analyzer
+                .analyze_text_hashes(text, &mut Vec::new())
+                .collect::<Vec<_>>();
             assert_eq!(expected, hashes);
         }
     }

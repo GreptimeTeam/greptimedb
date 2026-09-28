@@ -39,9 +39,6 @@ pub struct BloomFilterFulltextIndexCreator {
     inner: Option<BloomFilterCreator>,
     analyzer: Analyzer,
     config: Config,
-    /// Reused per-row buffers for token hashing.
-    token_buf: Vec<u8>,
-    hashes: Vec<u64>,
 }
 
 impl BloomFilterFulltextIndexCreator {
@@ -70,8 +67,6 @@ impl BloomFilterFulltextIndexCreator {
             inner: Some(inner),
             analyzer,
             config,
-            token_buf: Vec::new(),
-            hashes: Vec::new(),
         }
     }
 }
@@ -79,13 +74,12 @@ impl BloomFilterFulltextIndexCreator {
 #[async_trait]
 impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
     async fn push_text(&mut self, text: &str) -> Result<()> {
-        self.hashes.clear();
-        self.analyzer
-            .analyze_text_hashes(text, &mut self.token_buf, &mut self.hashes);
+        let mut token_buf = Vec::new();
+        let hashes = self.analyzer.analyze_text_hashes(text, &mut token_buf);
         self.inner
             .as_mut()
             .context(AbortedSnafu)?
-            .push_row_hashes(self.hashes.iter().copied())
+            .push_row_hashes(hashes)
             .await
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
