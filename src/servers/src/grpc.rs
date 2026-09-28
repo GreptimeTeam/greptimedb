@@ -391,7 +391,7 @@ impl Server for GrpcServer {
         let cors_layer = if self.config.enable_cors {
             Some(
                 CorsLayer::new()
-                    .allow_methods([Method::POST, Method::OPTIONS])
+                    .allow_methods([Method::POST])
                     .allow_origin(if self.config.cors_allowed_origins.is_empty() {
                         AllowOrigin::any()
                     } else {
