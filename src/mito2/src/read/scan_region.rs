@@ -1663,7 +1663,15 @@ impl ScanInput {
                     };
                     match maybe_batch {
                         Some(Ok(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
+                            // The receiver is gone when the query is cancelled or finishes early,
+                            // so stop reading the source.
+                            if let Err(e) = sender.send(Ok(batch)).await {
+                                debug!(
+                                    "Stop parallel scan task, receiver dropped, region_id: {}, error: {}",
+                                    region_id, e
+                                );
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
                             let _ = sender.send(Err(e)).await;
@@ -3209,5 +3217,60 @@ mod tests {
             )
             .build();
         assert!(exact_sequence_range(&request, &version).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_parallel_flat_source_stops_after_receiver_dropped() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use datatypes::arrow::array::Int64Array;
+
+        const SOURCE_BATCHES: usize = 10_000;
+
+        let metadata = Arc::new(metadata_with_primary_key(vec![0, 1], false));
+        let mapper = FlatProjectionMapper::new(&metadata, [0, 2, 3]).unwrap();
+        let env = SchedulerEnv::new().await;
+        let input = ScanInput::builder(env.access_layer.clone(), mapper).build();
+
+        let schema = Arc::new(ArrowSchema::new(vec![Field::new(
+            "v",
+            ArrowDataType::Int64,
+            false,
+        )]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1]))]).unwrap();
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let mut released = Vec::new();
+        let sources = (0..2)
+            .map(|_| {
+                let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+                released.push(release_rx);
+                let batch = batch.clone();
+                let pulled = pulled.clone();
+                futures::stream::iter(0..SOURCE_BATCHES)
+                    .map(move |_| {
+                        // Dropped together with the source stream.
+                        let _ = &release_tx;
+                        pulled.fetch_add(1, Ordering::Relaxed);
+                        Ok(batch.clone())
+                    })
+                    .boxed()
+            })
+            .collect();
+
+        let streams = input
+            .create_parallel_flat_sources(sources, Arc::new(Semaphore::new(2)), 1)
+            .unwrap();
+        drop(streams);
+
+        for release_rx in released {
+            tokio::time::timeout(std::time::Duration::from_secs(10), release_rx)
+                .await
+                .unwrap()
+                .unwrap_err();
+        }
+        // Each task may have read a few batches ahead into its channel before the
+        // receiver went away, but must not drain the rest of its source.
+        assert!(pulled.load(Ordering::Relaxed) < 100);
     }
 }
