@@ -3591,19 +3591,6 @@
             "uid": "${metrics}"
           },
           "editorMode": "code",
-          "expr": "sum by (code) (rate(greptime_flow_errors[$__rate_interval]))",
-          "hide": false,
-          "instant": false,
-          "legendFormat": "flow-{{code}}",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "editorMode": "code",
           "expr": "sum(rate(greptime_trigger_evaluate_failure_count[$__rate_interval]))",
           "hide": false,
           "instant": false,
@@ -16627,127 +16614,6 @@
             "type": "prometheus",
             "uid": "${metrics}"
           },
-          "description": "Flow Ingest Latency.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "points",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 8,
-            "y": 170
-          },
-          "id": 521,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.95, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p95",
-              "range": true,
-              "refId": "A"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "histogram_quantile(0.99, sum(rate(greptime_flow_insert_elapsed_bucket[$__rate_interval])) by (le, instance, pod))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-p99",
-              "range": true,
-              "refId": "B"
-            },
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "sum by(instance, pod) (rate(greptime_flow_insert_elapsed_sum[$__rate_interval])) / sum by(instance, pod) (rate(greptime_flow_insert_elapsed_count[$__rate_interval]))",
-              "hide": false,
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-avg",
-              "range": true,
-              "refId": "C"
-            }
-          ],
-          "title": "Flow Ingest Latency",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
           "description": "Flow Operation Latency.",
           "fieldConfig": {
             "defaults": {
@@ -16805,7 +16671,7 @@
           "gridPos": {
             "h": 8,
             "w": 8,
-            "x": 16,
+            "x": 8,
             "y": 170
           },
           "id": 522,
@@ -16849,196 +16715,6 @@
             }
           ],
           "title": "Flow Operation Latency",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "description": "Flow Buffer Size per Instance.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 0,
-            "y": 178
-          },
-          "id": 523,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "greptime_flow_input_buf_size",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Flow Buffer Size per Instance",
-          "type": "timeseries"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${metrics}"
-          },
-          "description": "Flow Processing Error per Instance.",
-          "fieldConfig": {
-            "defaults": {
-              "color": {
-                "mode": "palette-classic"
-              },
-              "custom": {
-                "axisBorderShow": false,
-                "axisCenteredZero": false,
-                "axisColorMode": "text",
-                "axisLabel": "",
-                "axisPlacement": "auto",
-                "barAlignment": 0,
-                "drawStyle": "line",
-                "fillOpacity": 0,
-                "gradientMode": "none",
-                "hideFrom": {
-                  "legend": false,
-                  "tooltip": false,
-                  "viz": false
-                },
-                "insertNulls": false,
-                "lineInterpolation": "linear",
-                "lineWidth": 1,
-                "pointSize": 5,
-                "scaleDistribution": {
-                  "type": "linear"
-                },
-                "showPoints": "auto",
-                "spanNulls": false,
-                "stacking": {
-                  "group": "A",
-                  "mode": "none"
-                },
-                "thresholdsStyle": {
-                  "mode": "off"
-                }
-              },
-              "mappings": [],
-              "thresholds": {
-                "mode": "absolute",
-                "steps": [
-                  {
-                    "color": "green"
-                  },
-                  {
-                    "color": "red",
-                    "value": 80
-                  }
-                ]
-              }
-            },
-            "overrides": []
-          },
-          "gridPos": {
-            "h": 8,
-            "w": 8,
-            "x": 8,
-            "y": 178
-          },
-          "id": 524,
-          "options": {
-            "legend": {
-              "calcs": [],
-              "displayMode": "list",
-              "placement": "bottom",
-              "showLegend": true
-            },
-            "tooltip": {
-              "mode": "multi",
-              "sort": "desc"
-            }
-          },
-          "targets": [
-            {
-              "datasource": {
-                "type": "prometheus",
-                "uid": "${metrics}"
-              },
-              "editorMode": "code",
-              "expr": "sum by(instance,pod,code) (rate(greptime_flow_errors[$__rate_interval]))",
-              "instant": false,
-              "legendFormat": "[{{instance}}]-[{{pod}}]-[{{code}}]",
-              "range": true,
-              "refId": "A"
-            }
-          ],
-          "title": "Flow Processing Error per Instance",
           "type": "timeseries"
         },
         {
@@ -17105,7 +16781,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 178
+            "y": 170
           },
           "id": 558,
           "options": {
@@ -17229,7 +16905,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 186
+            "y": 178
           },
           "id": 559,
           "options": {
@@ -17353,7 +17029,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 186
+            "y": 178
           },
           "id": 560,
           "options": {
@@ -17464,7 +17140,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 186
+            "y": 178
           },
           "id": 561,
           "options": {
@@ -17575,7 +17251,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 194
+            "y": 186
           },
           "id": 562,
           "options": {
@@ -17673,7 +17349,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 194
+            "y": 186
           },
           "id": 563,
           "options": {
@@ -17771,7 +17447,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 194
+            "y": 186
           },
           "id": 564,
           "options": {
