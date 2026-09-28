@@ -23,10 +23,12 @@ use api::helper::ColumnDataTypeWrapper;
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Rows, SemanticType};
 use arrow::array::{
-    ArrayRef, Float64Builder, StringBuilder, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, new_null_array,
+    ArrayRef, ArrowPrimitiveType, Float64Builder, PrimitiveBuilder, StringBuilder, new_null_array,
 };
-use arrow::datatypes::{DataType as ArrowDataType, Schema as ArrowSchema};
+use arrow::datatypes::{
+    DataType as ArrowDataType, Schema as ArrowSchema, TimestampMicrosecondType,
+    TimestampMillisecondType, TimestampNanosecondType, TimestampSecondType,
+};
 use arrow::record_batch::RecordBatch;
 use arrow_schema::TimeUnit;
 use common_query::prelude::{greptime_timestamp, greptime_value};
@@ -204,6 +206,55 @@ pub(crate) fn identify_missing_columns_from_proto(
     Ok(missing)
 }
 
+/// Builds a timestamp array of `T`'s unit from a proto column, appending
+/// each value directly into the builder. Values already in the target unit
+/// are appended without conversion (the unchanged-unit fast path); others
+/// are converted via `Timestamp::convert_to`, flooring on narrowing.
+fn build_timestamp_array<T: ArrowPrimitiveType<Native = i64>>(
+    rows: &Rows,
+    col_idx: usize,
+    column_name: &str,
+    row_count: usize,
+    target_unit: CommonTimeUnit,
+) -> Result<ArrayRef> {
+    let mut builder = PrimitiveBuilder::<T>::with_capacity(row_count);
+    for row in &rows.rows {
+        let Some(value) = row.values[col_idx].value_data.as_ref() else {
+            builder.append_null();
+            continue;
+        };
+        let (source_unit, raw) = match value {
+            ValueData::TimestampSecondValue(v) => (CommonTimeUnit::Second, *v),
+            ValueData::TimestampMillisecondValue(v) => (CommonTimeUnit::Millisecond, *v),
+            ValueData::DatetimeValue(v) | ValueData::TimestampMicrosecondValue(v) => {
+                (CommonTimeUnit::Microsecond, *v)
+            }
+            ValueData::TimestampNanosecondValue(v) => (CommonTimeUnit::Nanosecond, *v),
+            v => {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!("Unexpected value: {:?}", v),
+                }
+                .fail();
+            }
+        };
+        if source_unit == target_unit {
+            builder.append_value(raw);
+        } else {
+            let timestamp = Timestamp::new(raw, source_unit);
+            let Some(converted) = timestamp.convert_to(target_unit) else {
+                return error::InvalidPromRemoteRequestSnafu {
+                    msg: format!(
+                        "Timestamp value in column '{column_name}' overflows when converting to unit {target_unit:?}"
+                    ),
+                }
+                .fail();
+            };
+            builder.append_value(converted.value());
+        }
+    }
+    Ok(Arc::new(builder.finish()) as ArrayRef)
+}
+
 /// Converts an arrow time unit to the common time unit.
 fn arrow_time_unit(unit: TimeUnit) -> CommonTimeUnit {
     match unit {
@@ -293,60 +344,42 @@ fn build_arrow_array(
             ValueData::StringValue(v) => v
         ),
         arrow::datatypes::DataType::Timestamp(u, _) => {
-            // Accept any timestamp encoding and convert to the column's unit,
-            // flooring on narrowing (same semantics as `Timestamp::convert_to`
-            // on the ordinary insert path). The column type is the target
-            // region schema's, which may differ from the request's encoding
-            // unit (e.g. a millisecond remote-write request into a
-            // microsecond physical metric table).
-            let mut values = Vec::with_capacity(row_count);
-            for row in &rows.rows {
-                let value = row.values[col_idx].value_data.as_ref();
-                let converted = match value {
-                    Some(ValueData::TimestampSecondValue(v)) => {
-                        Some(Timestamp::new_second(*v).convert_to(arrow_time_unit(u)))
-                    }
-                    Some(ValueData::TimestampMillisecondValue(v)) => {
-                        Some(Timestamp::new_millisecond(*v).convert_to(arrow_time_unit(u)))
-                    }
-                    Some(ValueData::DatetimeValue(v) | ValueData::TimestampMicrosecondValue(v)) => {
-                        Some(Timestamp::new_microsecond(*v).convert_to(arrow_time_unit(u)))
-                    }
-                    Some(ValueData::TimestampNanosecondValue(v)) => {
-                        Some(Timestamp::new_nanosecond(*v).convert_to(arrow_time_unit(u)))
-                    }
-                    Some(v) => {
-                        return error::InvalidPromRemoteRequestSnafu {
-                            msg: format!("Unexpected value: {:?}", v),
-                        }
-                        .fail();
-                    }
-                    None => None,
-                };
-                values.push(match converted {
-                    Some(Some(timestamp)) => Some(timestamp.value()),
-                    Some(None) => {
-                        return error::InvalidPromRemoteRequestSnafu {
-                            msg: format!(
-                                "Timestamp value in column '{column_name}' overflows when converting to unit {u:?}"
-                            ),
-                        }
-                        .fail();
-                    }
-                    None => None,
-                });
-            }
+            // Accept any timestamp encoding and append directly into the
+            // target-unit builder — no intermediate column allocation.
+            // Values already in the target unit (the common unchanged
+            // millisecond case) are appended as-is; others are converted
+            // first, flooring on narrowing (same semantics as
+            // `Timestamp::convert_to` on the ordinary insert path).
+            let target_unit = arrow_time_unit(u);
             match u {
-                TimeUnit::Second => Arc::new(TimestampSecondArray::from(values)) as ArrayRef,
-                TimeUnit::Millisecond => {
-                    Arc::new(TimestampMillisecondArray::from(values)) as ArrayRef
-                }
-                TimeUnit::Microsecond => {
-                    Arc::new(TimestampMicrosecondArray::from(values)) as ArrayRef
-                }
-                TimeUnit::Nanosecond => {
-                    Arc::new(TimestampNanosecondArray::from(values)) as ArrayRef
-                }
+                TimeUnit::Second => build_timestamp_array::<TimestampSecondType>(
+                    rows,
+                    col_idx,
+                    column_name,
+                    row_count,
+                    target_unit,
+                )?,
+                TimeUnit::Millisecond => build_timestamp_array::<TimestampMillisecondType>(
+                    rows,
+                    col_idx,
+                    column_name,
+                    row_count,
+                    target_unit,
+                )?,
+                TimeUnit::Microsecond => build_timestamp_array::<TimestampMicrosecondType>(
+                    rows,
+                    col_idx,
+                    column_name,
+                    row_count,
+                    target_unit,
+                )?,
+                TimeUnit::Nanosecond => build_timestamp_array::<TimestampNanosecondType>(
+                    rows,
+                    col_idx,
+                    column_name,
+                    row_count,
+                    target_unit,
+                )?,
             }
         }
         ty => {

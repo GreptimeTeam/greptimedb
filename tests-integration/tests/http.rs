@@ -176,6 +176,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_batched_interceptor_time_index_units,
                 test_prometheus_remote_write_v2_batched_interceptor_time_index_units,
                 test_prometheus_remote_write_batched_microsecond_physical_table,
+                test_prometheus_remote_write_batched_conflicting_physical_selections,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -4108,6 +4109,13 @@ pub async fn test_prometheus_remote_write_batched_microsecond_physical_table(
     let compressed_request =
         prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
 
+    // submit_build_and_align counts every batcher submission in both
+    // acknowledgement modes, so the stored-value assertions below cannot be
+    // satisfied by a silent fallback to ordinary insertion.
+    let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+        .with_label_values(&["submit_build_and_align"]);
+    let before = submissions.get_sample_count();
+
     let res = client
         .post("/v1/prometheus/write")
         .header("Content-Encoding", "snappy")
@@ -4115,6 +4123,11 @@ pub async fn test_prometheus_remote_write_batched_microsecond_physical_table(
         .send()
         .await;
     assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        1,
+        "non-millisecond physical tables must use the logical batcher"
+    );
 
     // metric1 samples are 1.0@1000ms and 2.0@2000ms; on the microsecond
     // physical table they must be stored as 1_000_000us and 2_000_000us.
@@ -4122,6 +4135,156 @@ pub async fn test_prometheus_remote_write_batched_microsecond_physical_table(
         &client,
         "select greptime_timestamp, greptime_value from metric1 order by greptime_timestamp",
         "[[1000000,1.0],[2000000,2.0]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// Regression test for the per-series physical-table selection conflict:
+/// one remote-write request containing the same metric under two different
+/// physical-table selections must fall back to the ordinary insert path —
+/// both when the destination table already exists (bound to one of the two
+/// physicals) and when it is missing (conflicting creations). A consistent
+/// selection must still use the batcher.
+pub async fn test_prometheus_remote_write_batched_conflicting_physical_selections(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) = setup_test_prom_app_with_frontend_batched(
+        store_type,
+        "prom_rw_batched_conflicting_physicals",
+    )
+    .await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE p1              (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL,              TIME INDEX (greptime_timestamp))              ENGINE = metric WITH ('physical_metric_table' = 'true')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    // An existing logical table bound to p1.
+    let res = client
+        .get(
+            "/v1/sql?db=public&sql=CREATE TABLE conflict_existing              (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL,              \"job\" STRING NULL, TIME INDEX (greptime_timestamp), PRIMARY KEY (\"job\"))              ENGINE = metric WITH ('on_physical_table' = 'p1')",
+        )
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write = |metric: &str, job: &str, physical: Option<&str>, value: f64| {
+        let mut labels = vec![
+            Label {
+                name: prom_store::METRIC_NAME_LABEL.to_string(),
+                value: metric.to_string(),
+            },
+            Label {
+                name: "job".to_string(),
+                value: job.to_string(),
+            },
+        ];
+        if let Some(physical) = physical {
+            labels.push(Label {
+                name: "x_greptime_physical_table".to_string(),
+                value: physical.to_string(),
+            });
+        }
+        TimeSeries {
+            labels,
+            samples: vec![Sample {
+                value,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }
+    };
+    let send = |timeseries: Vec<TimeSeries>| {
+        let write_request = WriteRequest {
+            timeseries,
+            ..Default::default()
+        };
+        prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap()
+    };
+
+    let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+        .with_label_values(&["submit_build_and_align"]);
+
+    // Existing destination under two different selections: the batch must
+    // fall back (the batch for the unbound selection would otherwise write
+    // through the default physical's regions), and both series land on the
+    // bound physical.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("conflict_existing", "a", Some("p1"), 1.0),
+            write("conflict_existing", "b", None, 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        0,
+        "conflicting selections for an existing table must fall back"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from conflict_existing",
+        "[[2,3.0]]",
+    )
+    .await;
+
+    // Missing destination under two different selections: conflicting
+    // creations must also fall back, and both series must be visible
+    // through the created table.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("conflict_fresh", "a", Some("p1"), 1.0),
+            write("conflict_fresh", "b", None, 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        0,
+        "conflicting selections for a missing table must fall back"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from conflict_fresh",
+        "[[2,3.0]]",
+    )
+    .await;
+
+    // A consistent selection still uses the batcher.
+    let before = submissions.get_sample_count();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(send(vec![
+            write("consistent_fresh", "a", Some("p1"), 1.0),
+            write("consistent_fresh", "b", Some("p1"), 2.0),
+        ]))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        submissions.get_sample_count() - before,
+        1,
+        "a consistent selection must use the logical batcher"
+    );
+    wait_for_data(
+        &client,
+        "select count(*), sum(greptime_value) from consistent_fresh",
+        "[[2,3.0]]",
     )
     .await;
 

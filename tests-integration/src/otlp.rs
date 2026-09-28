@@ -545,7 +545,7 @@ WITH(
         use frontend::server::Services;
         use frontend::service_config::pending_rows_batcher::BatcherOptions;
         use prost::Message;
-        use servers::batcher::{BatchingProtocol, pending_rows_batch_sync_enabled};
+        use servers::batcher::BatchingProtocol;
         use servers::http::test_helpers::TestClient;
         use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
@@ -594,8 +594,11 @@ WITH(
             .await;
         assert!(output.remove(0).is_ok());
 
+        // submit_build_and_align counts every batcher submission in both
+        // acknowledgement modes, so the assertion detects a regression that
+        // disables non-millisecond batching.
         let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-            .with_label_values(&["submit_wait_flush_result"]);
+            .with_label_values(&["submit_build_and_align"]);
         let before = submissions.get_sample_count();
         for (ts, value) in [(60, 10), (120, 20)] {
             let request = build_sum_request(
@@ -613,11 +616,7 @@ WITH(
         }
         assert_eq!(
             submissions.get_sample_count() - before,
-            if pending_rows_batch_sync_enabled() {
-                2
-            } else {
-                0
-            },
+            2,
             "non-millisecond physical tables must use the logical batcher"
         );
 
@@ -728,7 +727,7 @@ WITH(
         }
 
         let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
-            .with_label_values(&["submit_wait_flush_result"]);
+            .with_label_values(&["submit_build_and_align"]);
         let before = submissions.get_sample_count();
         let request = build_sum_request(
             "cross.alignment",

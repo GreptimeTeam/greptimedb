@@ -21,7 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -209,24 +209,43 @@ impl LogicalTablePendingRowsBatcher {
         &self,
         batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
     ) -> bool {
-        let mut checked_tables = HashSet::new();
+        // One request can select different physical tables per batch (e.g.
+        // per-series physical-table labels), so the dedupe key includes the
+        // selected physical table: every distinct (schema, table, physical)
+        // triple is validated against the table's actual binding.
+        let mut checked = HashSet::new();
+        // For missing tables, one request must not select two different
+        // physical tables: the batcher would create the table through one
+        // selection and flush its rows through the other's regions.
+        let mut missing_selections: HashMap<(String, String), String> = HashMap::new();
         for (ctx, requests) in batches {
             let physical_table = batch_key_from_ctx(ctx).physical_table;
+            let schema = ctx.current_schema();
             for request in &requests.inserts {
-                if !checked_tables.insert((ctx.current_schema(), request.table_name.clone())) {
+                if !checked.insert((
+                    schema.clone(),
+                    request.table_name.clone(),
+                    physical_table.clone(),
+                )) {
                     continue;
                 }
                 let Ok(Some(table)) = self
                     .catalog_manager
-                    .table(
-                        ctx.current_catalog(),
-                        &ctx.current_schema(),
-                        &request.table_name,
-                        None,
-                    )
+                    .table(ctx.current_catalog(), &schema, &request.table_name, None)
                     .await
                 else {
-                    // New table: created on the selected physical table.
+                    // New table: created on the selected physical table, but
+                    // a conflicting selection within the same request cannot
+                    // be batched.
+                    if missing_selections
+                        .insert(
+                            (schema.clone(), request.table_name.clone()),
+                            physical_table.clone(),
+                        )
+                        .is_some_and(|previous| previous != physical_table)
+                    {
+                        return false;
+                    }
                     continue;
                 };
                 let info = table.table_info();
