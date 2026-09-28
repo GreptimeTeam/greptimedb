@@ -209,34 +209,10 @@ fn make_test_app_with_write_capture(
     make_test_app_with_write_failure(read_tx, write_tx, None)
 }
 
-fn make_test_app_with_native_histogram_write_capture(
-    read_tx: mpsc::Sender<(String, Vec<u8>)>,
-    write_tx: mpsc::Sender<RemoteWriteCapture>,
-) -> Router {
-    make_test_app_with_write_failure_inner(read_tx, write_tx, None, true)
-}
-
 fn make_test_app_with_write_failure(
     read_tx: mpsc::Sender<(String, Vec<u8>)>,
     write_tx: mpsc::Sender<RemoteWriteCapture>,
     fail_write_call: Option<usize>,
-) -> Router {
-    make_test_app_with_write_failure_inner(read_tx, write_tx, fail_write_call, false)
-}
-
-fn make_test_app_with_native_histogram_write_failure(
-    read_tx: mpsc::Sender<(String, Vec<u8>)>,
-    write_tx: mpsc::Sender<RemoteWriteCapture>,
-    fail_write_call: Option<usize>,
-) -> Router {
-    make_test_app_with_write_failure_inner(read_tx, write_tx, fail_write_call, true)
-}
-
-fn make_test_app_with_write_failure_inner(
-    read_tx: mpsc::Sender<(String, Vec<u8>)>,
-    write_tx: mpsc::Sender<RemoteWriteCapture>,
-    fail_write_call: Option<usize>,
-    experimental_enable_prometheus_native_histogram: bool,
 ) -> Router {
     let http_opts = HttpOptions {
         addr: format!("127.0.0.1:{}", ports::get_port()),
@@ -262,14 +238,7 @@ fn make_test_app_with_write_failure_inner(
             BatchingProtocol::HttpSql,
         ])
         .with_sql_handler(instance.clone())
-        .with_prom_handler(
-            instance,
-            None,
-            true,
-            PromValidationMode::Unchecked,
-            experimental_enable_prometheus_native_histogram,
-            None,
-        )
+        .with_prom_handler(instance, None, true, PromValidationMode::Unchecked, None)
         .build();
     server.build(server.make_app()).unwrap()
 }
@@ -418,7 +387,7 @@ async fn test_prometheus_remote_write_v2_histogram_write_error_has_partial_writt
     let (read_tx, _read_rx) = mpsc::channel(100);
     let (write_tx, mut write_rx) = mpsc::channel(100);
 
-    let app = make_test_app_with_native_histogram_write_failure(read_tx, write_tx, Some(2));
+    let app = make_test_app_with_write_failure(read_tx, write_tx, Some(2));
     let client = TestClient::new(app).await;
 
     let mut write_request = remote_write_v2::request_with_labels_and_samples(
@@ -671,7 +640,7 @@ async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
     let (read_tx, _read_rx) = mpsc::channel(100);
     let (write_tx, mut write_rx) = mpsc::channel(100);
 
-    let app = make_test_app_with_native_histogram_write_capture(read_tx, write_tx);
+    let app = make_test_app_with_write_capture(read_tx, write_tx);
     let client = TestClient::new(app).await;
 
     let write_request = remote_write_v2::request_with_labels_and_histograms(
@@ -704,36 +673,6 @@ async fn test_prometheus_remote_write_v2_writes_histogram_only_series() {
             .iter()
             .any(|column| column.column_name == greptime_native_histogram()
                 && column.datatype == ColumnDataType::Struct as i32)
-    );
-    assert!(write_rx.try_recv().is_err());
-}
-
-#[tokio::test]
-async fn test_prometheus_remote_write_v2_rejects_native_histogram_when_disabled() {
-    common_telemetry::init_default_ut_logging();
-    let (read_tx, _read_rx) = mpsc::channel(100);
-    let (write_tx, mut write_rx) = mpsc::channel(100);
-
-    let app = make_test_app_with_write_capture(read_tx, write_tx);
-    let client = TestClient::new(app).await;
-
-    let write_request = remote_write_v2::request_with_labels_and_histograms(
-        vec![(
-            prom_store::METRIC_NAME_LABEL,
-            "http_request_duration_seconds",
-        )],
-        vec![remote_write_v2::histogram(1000)],
-    );
-
-    let result = post_remote_write_v2(&client, &write_request).await;
-
-    assert_eq!(result.status(), 400);
-    assert_remote_write_v2_written_headers_with_histograms(&result.headers(), "0", "0");
-    assert!(
-        result
-            .text()
-            .await
-            .contains("prom_store.experimental_enable_prometheus_native_histogram")
     );
     assert!(write_rx.try_recv().is_err());
 }
@@ -873,7 +812,6 @@ async fn test_prom_batching_depends_on_protocol_and_metric_engine() {
                     None,
                     with_metric_engine,
                     PromValidationMode::Unchecked,
-                    false,
                     None,
                 )
                 .build();

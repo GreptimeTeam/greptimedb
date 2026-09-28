@@ -418,6 +418,7 @@ pub fn check_response_header(header: &Option<ResponseHeader>) -> Result<()> {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod test {
     use api::v1::Status as PbStatus;
     use api::v1::region::region_server::{Region, RegionServer};

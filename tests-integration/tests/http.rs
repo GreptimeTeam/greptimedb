@@ -15,18 +15,20 @@
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
 use api::greptime_proto::io::prometheus::write::v2::metadata::MetricType as RemoteWriteV2MetricType;
 use api::greptime_proto::io::prometheus::write::v2::{
-    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Sample as RemoteWriteV2Sample,
-    TimeSeries as RemoteWriteV2TimeSeries,
+    BucketSpan, Histogram, Metadata as RemoteWriteV2Metadata, Request as RemoteWriteV2Request,
+    Sample as RemoteWriteV2Sample, TimeSeries as RemoteWriteV2TimeSeries,
 };
 use api::prom_store::remote::label_matcher::Type as MatcherType;
 use api::prom_store::remote::{
     Label, LabelMatcher, Query, ReadRequest, ReadResponse, Sample, TimeSeries, WriteRequest,
 };
+use api::v1::RowInsertRequests;
 use auth::{UserProviderRef, user_provider_from_option};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
@@ -69,7 +71,9 @@ use servers::http::header::constants::{
 };
 use servers::http::header::{GREPTIME_DB_HEADER_NAME, GREPTIME_TIMEZONE_HEADER_NAME};
 use servers::http::otlp::GoogleRpcStatus;
-use servers::http::prometheus::{Column, PrometheusJsonResponse, PrometheusResponse};
+use servers::http::prometheus::{
+    Column, PromQueryResult, PrometheusJsonResponse, PrometheusResponse,
+};
 use servers::http::result::error_result::ErrorResponse;
 use servers::http::result::greptime_result_v1::GreptimedbV1Response;
 use servers::http::result::influxdb_result_v1::{InfluxdbOutput, InfluxdbV1Response};
@@ -79,13 +83,15 @@ use servers::prom_remote_write::v2::test_util as remote_write_v2;
 use servers::prom_remote_write::validation::PromValidationMode;
 use servers::prom_store::{self, mock_timeseries_new_label};
 use servers::request_memory_limiter::ServerMemoryLimiter;
+use session::context::QueryContextRef;
 use standalone::options::StandaloneOptions;
 use table::table_name::TableName;
 use tests_integration::test_util::{
-    MockInstanceImpl, StorageType, assert_wal_delta, build_test_prom_server, setup_test_http_app,
-    setup_test_http_app_with_frontend, setup_test_http_app_with_frontend_and_slow_query_threshold,
+    MockInstanceImpl, StorageType, TestGuard, assert_wal_delta, build_test_prom_server,
+    setup_test_http_app, setup_test_http_app_with_frontend,
+    setup_test_http_app_with_frontend_and_slow_query_threshold,
     setup_test_http_app_with_frontend_and_user_provider, setup_test_prom_app_with_frontend,
-    setup_test_prom_app_with_frontend_batched, setup_test_prom_app_with_frontend_native_histogram,
+    setup_test_prom_app_with_frontend_batched,
 };
 use urlencoding::encode;
 use yaml_rust::YamlLoader;
@@ -157,6 +163,7 @@ macro_rules! http_tests {
                 test_http_analyze_stream_tql,
                 test_http_sql_slow_query,
                 test_prometheus_promql_api,
+                test_promql_over_non_millisecond_physical_tables,
                 test_prometheus_label_replace_response,
                 test_prom_http_api,
                 test_config_api,
@@ -165,6 +172,9 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_v2,
                 test_prometheus_remote_write_v2_native_histogram,
                 test_prometheus_remote_write_batched,
+                test_prometheus_remote_write_batched_mixed_time_index_units,
+                test_prometheus_remote_write_batched_interceptor_time_index_units,
+                test_prometheus_remote_write_v2_batched_interceptor_time_index_units,
                 test_prometheus_remote_special_labels,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
@@ -1713,6 +1723,197 @@ pub async fn test_prom_http_api(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+/// PromQL must behave identically regardless of the physical metric table's
+/// time index unit: the same samples are remote-written into physical tables
+/// pre-created with second/micro/nano time indexes (plus a millisecond
+/// baseline), and every PromQL response must match the baseline exactly.
+/// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>.
+pub async fn test_promql_over_non_millisecond_physical_tables(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "promql_non_ms_units").await;
+    let client = TestClient::new(app).await;
+
+    let units = [
+        ("ms", "timestamp(3)"),
+        ("second", "timestamp(0)"),
+        ("micro", "timestamp(6)"),
+        ("nano", "timestamp(9)"),
+    ];
+
+    for (suffix, ts_type) in units {
+        let db = format!("promql_units_{suffix}");
+        let res = client
+            .get(&format!("/v1/sql?db=public&sql=create database {db}"))
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "create database {db}");
+
+        let res = client
+            .get(&format!(
+                "/v1/sql?db={db}&sql=CREATE TABLE greptime_physical_table \
+                 (greptime_timestamp {ts_type} NOT NULL, greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+            ))
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "create physical table with {ts_type} in {db}"
+        );
+
+        // unit_gauge{job="demo"} = 1.0 @ 1000ms, 2.0 @ 2000ms
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "unit_gauge".to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![
+                    Sample {
+                        value: 1.0,
+                        timestamp: 1000,
+                    },
+                    Sample {
+                        value: 2.0,
+                        timestamp: 2000,
+                    },
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+        let write_url = format!("/v1/prometheus/write?db={db}");
+        let res = client
+            .post(write_url.as_str())
+            .header("Content-Encoding", "snappy")
+            .body(compressed)
+            .send()
+            .await;
+        assert_eq!(
+            res.status(),
+            StatusCode::NO_CONTENT,
+            "remote write into {db}"
+        );
+    }
+
+    let query_paths = [
+        "query?query=unit_gauge&time=2",
+        "query_range?query=unit_gauge&start=0&end=5&step=1",
+        "query?query=avg_over_time(unit_gauge[1m])&time=2",
+        "query?query=rate(unit_gauge[1m])&time=2",
+    ];
+    for path in query_paths {
+        let mut baseline: Option<(String, PrometheusResponse)> = None;
+        for (suffix, _) in units {
+            let db = format!("promql_units_{suffix}");
+            let res = client
+                .get(&format!("/v1/prometheus/api/v1/{path}&db={db}"))
+                .send()
+                .await;
+            assert_eq!(res.status(), StatusCode::OK, "promql `{path}` on {db}");
+            let body = res.json::<PrometheusJsonResponse>().await;
+            assert_eq!(body.status, "success", "promql `{path}` on {db}");
+            match &baseline {
+                None => baseline = Some((suffix.to_string(), body.data)),
+                Some((baseline_suffix, baseline_data)) => {
+                    assert_eq!(
+                        &body.data, baseline_data,
+                        "promql `{path}` on {db} differs from the {baseline_suffix} baseline"
+                    );
+                }
+            }
+        }
+    }
+
+    // Pin the baseline responses so the cross-unit equality above cannot pass
+    // vacuously on wrong data: the samples are 1.0@1s and 2.0@2s, and
+    // `rate(unit_gauge[1m])@2s` follows Prometheus's extrapolated rate:
+    // Δv=1 over a 1s sampled interval extrapolated to 1.5s, divided by the
+    // 60s window -> 1.5/60 = 0.025 per second.
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=unit_gauge&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "2.0"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query_range?db=promql_units_ms&query=unit_gauge&start=0&end=5&step=1")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "matrix",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "values": [
+                    [1.0, "1.0"], [2.0, "2.0"], [3.0, "2.0"], [4.0, "2.0"], [5.0, "2.0"]
+                ]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=avg_over_time(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {"__name__": "unit_gauge", "job": "demo"},
+                "value": [2.0, "1.5"]
+            }]
+        }))
+        .unwrap()
+    );
+
+    let res = client
+        .get("/v1/prometheus/api/v1/query?db=promql_units_ms&query=rate(unit_gauge[1m])&time=2")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    let rate = match body.data {
+        PrometheusResponse::PromData(data) => match data.result {
+            PromQueryResult::Vector(v) => v[0].value.as_ref().unwrap().1.clone(),
+            other => panic!("expected vector, got {other:?}"),
+        },
+        other => panic!("expected prom data, got {other:?}"),
+    };
+    assert_eq!(rate, "0.025");
+
+    guard.remove_all().await;
+}
+
 pub async fn test_metrics_api(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) = setup_test_http_app(store_type, "metrics_api").await;
@@ -2394,19 +2595,6 @@ providers = []"#,
         )
     };
 
-    let vector_index_config = if cfg!(feature = "vector_index") {
-        r#"
-[region_engine.mito.vector_index]
-create_on_flush = "auto"
-create_on_compaction = "auto"
-apply_on_query = "auto"
-mem_threshold_on_create = "auto"
-
-"#
-    } else {
-        "\n"
-    };
-
     let expected_toml_str = format!(
         r#"
 enable_telemetry = true
@@ -2492,7 +2680,6 @@ enable = true
 
 [otlp]
 enable = true
-experimental_enable_exponential_histogram = false
 trace_ingest_chunk_size = 512
 experimental_enable_resource_info = true
 
@@ -2500,7 +2687,6 @@ experimental_enable_resource_info = true
 enable = true
 with_metric_engine = true
 prom_validation_mode = "strict"
-experimental_enable_prometheus_native_histogram = false
 pending_rows_flush_interval = "0s"
 max_batch_rows = 100000
 max_concurrent_flushes = 256
@@ -2563,6 +2749,7 @@ experimental_manifest_keep_removed_file_count = 256
 experimental_manifest_keep_removed_file_ttl = "1h"
 compress_manifest = false
 experimental_enable_series_index = false
+experimental_series_index_max_size = "5GiB"
 experimental_enable_range_index = false
 experimental_series_index_maintenance_interval = "5m"
 experimental_series_index_bucket_width = "5days"
@@ -2612,7 +2799,8 @@ create_on_flush = "auto"
 create_on_compaction = "auto"
 apply_on_query = "auto"
 mem_threshold_on_create = "auto"
-{vector_index_config}[region_engine.mito.gc]
+
+[region_engine.mito.gc]
 enable = false
 lingering_time = "1h"
 unknown_file_lingering_time = "1day"
@@ -3152,7 +3340,7 @@ pub async fn test_prometheus_remote_write_v2(store_type: StorageType) {
 
 pub async fn test_prometheus_remote_write_v2_native_histogram(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
-    let (app, mut guard) = setup_test_prom_app_with_frontend_native_histogram(
+    let (app, mut guard) = setup_test_prom_app_with_frontend(
         store_type,
         "prometheus_remote_write_v2_native_histogram",
     )
@@ -3532,7 +3720,7 @@ async fn check_prometheus_remote_write_batched_skip_wal(distributed: bool, v2: b
     common_telemetry::init_default_ut_logging();
     let mut instance =
         MockInstanceImpl::new(&format!("prom_bulk_skip_wal_v2_{v2}"), distributed).await;
-    let server = build_test_prom_server(instance.frontend(), true, false).build();
+    let server = build_test_prom_server(instance.frontend(), true).build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
 
     write_prometheus_skip_wal_sample(&client, v2, 1000, None).await;
@@ -3604,6 +3792,277 @@ async fn write_prometheus_skip_wal_sample(
         request = request.header("x-greptime-insert-skip-wal", hint);
     }
     assert_eq!(request.send().await.status(), StatusCode::NO_CONTENT);
+}
+
+/// Batched remote write against a logical table bound to a non-millisecond
+/// physical table: the bulk guard must reject the destination (the bulk
+/// encode only produces millisecond batches) and fall back to the ordinary
+/// insert path, which converts the requests to the table's unit.
+pub async fn test_prometheus_remote_write_batched_mixed_time_index_units(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend_batched(store_type, "prom_rw_batched_mixed_units").await;
+    let client = TestClient::new(app).await;
+
+    let res = client
+        .get("/v1/sql?db=public&sql=CREATE TABLE phy_us (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, TIME INDEX (greptime_timestamp)) ENGINE = metric WITH ('physical_metric_table' = 'true')")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    let write = |metric: &str, value: f64, timestamp: i64| {
+        let write_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    Label {
+                        name: prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: metric.to_string(),
+                    },
+                    Label {
+                        name: "job".to_string(),
+                        value: "demo".to_string(),
+                    },
+                ],
+                samples: vec![Sample { value, timestamp }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap()
+    };
+
+    // Create the logical table on the microsecond physical table. The bulk
+    // guard rejects the microsecond selected physical table, so this write
+    // takes the ordinary insert path.
+    let res = client
+        .post("/v1/prometheus/write?physical_table=phy_us")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 2.5, 1500))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Write the same existing table again while selecting the default
+    // (millisecond) physical table: the guard must reject the existing
+    // microsecond destination and fall back to the ordinary insert path —
+    // without the destination check the bulk path would build millisecond
+    // arrays against the microsecond schema and fail the write.
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(write("us_metric", 3.5, 2000))
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // Both samples are stored on the microsecond time index.
+    validate_data(
+        "prom_rw_batched_mixed_units",
+        &client,
+        "SELECT COUNT(*), MAX(greptime_value) FROM us_metric",
+        "[[2,3.5]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// A Prometheus write interceptor that redirects every remote write to the
+/// `tenant_redirect` schema, like a per-tenant redirection: the incoming
+/// context targets `public` while the destination tables live elsewhere.
+struct PromSchemaRedirectInterceptor;
+
+impl servers::interceptor::PromStoreProtocolInterceptor for PromSchemaRedirectInterceptor {
+    type Error = servers::error::Error;
+
+    fn pre_write(
+        &self,
+        _write_req: &RowInsertRequests,
+        ctx: QueryContextRef,
+    ) -> servers::error::Result<()> {
+        ctx.set_current_schema("tenant_redirect");
+        Ok(())
+    }
+}
+
+async fn setup_redirecting_batched_prom_app(
+    store_type: StorageType,
+    name: &str,
+) -> (TestClient, TestGuard) {
+    let plugins = Plugins::default();
+    plugins.insert::<servers::interceptor::PromStoreProtocolInterceptorRef<servers::error::Error>>(
+        Arc::new(PromSchemaRedirectInterceptor),
+    );
+    let standalone = tests_integration::standalone::GreptimeDbStandaloneBuilder::new(name)
+        .with_default_store_type(store_type)
+        .with_plugin(plugins)
+        .build()
+        .await;
+    let server = build_test_prom_server(standalone.fe_instance().clone(), true)
+        .with_greptime_config_options(standalone.opts.datanode_options().to_toml().unwrap())
+        .build();
+    let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+    (client, standalone.guard)
+}
+
+async fn create_redirect_schema_with_microsecond_table(client: &TestClient, table: &str) {
+    for sql in [
+        "create database if not exists tenant_redirect",
+        "CREATE TABLE tenant_redirect.phy_us \
+         (ts timestamp(6) time index, val double, host string primary key) \
+         engine=metric with ('physical_metric_table' = 'true')",
+        &format!(
+            "CREATE TABLE tenant_redirect.{table} \
+             (ts timestamp(6) time index, val double, host string primary key) \
+             engine=metric with ('on_physical_table' = 'phy_us')"
+        ),
+    ] {
+        let res = client
+            .get(format!("/v1/sql?sql={sql}").as_str())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "setup: {sql}");
+    }
+}
+
+/// Regression test: with batching enabled and a pre_write interceptor that
+/// redirects the context to a schema holding same-named non-millisecond
+/// tables, the bulk eligibility must be evaluated against the redirected
+/// destinations (after preflight) and fall back to the ordinary insert path
+/// instead of failing in the bulk encode.
+pub async fn test_prometheus_remote_write_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_batched_interceptor_units").await;
+    create_redirect_schema_with_microsecond_table(&client, "intercept_metric").await;
+
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "intercept_metric".to_string(),
+                },
+                Label {
+                    name: "job".to_string(),
+                    value: "demo".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.intercept_metric",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
+}
+
+/// The v2 variant of the interceptor regression test: a mixed samples-plus-
+/// histograms request whose existing sample destination lives in the
+/// redirected schema with a microsecond time index must fall back to the
+/// ordinary insert path (both series land), not fail in the bulk encode.
+pub async fn test_prometheus_remote_write_v2_batched_interceptor_time_index_units(
+    store_type: StorageType,
+) {
+    common_telemetry::init_default_ut_logging();
+    let (client, mut guard) =
+        setup_redirecting_batched_prom_app(store_type, "prom_rw_v2_batched_interceptor_units")
+            .await;
+    create_redirect_schema_with_microsecond_table(&client, "v2_mixed_sample").await;
+
+    // One sample series targeting the existing microsecond table, plus one
+    // histogram series for a new (millisecond) table.
+    let mut symbols = vec![String::new()];
+    let mut symbol = |value: &str| {
+        symbols.push(value.to_string());
+        (symbols.len() - 1) as u32
+    };
+    let name_ref = symbol("__name__");
+    let sample_ref = symbol("v2_mixed_sample");
+    let job_ref = symbol("job");
+    let demo_ref = symbol("demo");
+    let name_ref2 = symbol("__name__");
+    let histo_ref = symbol("v2_mixed_histo");
+    let request = RemoteWriteV2Request {
+        symbols,
+        timeseries: vec![
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref, sample_ref, job_ref, demo_ref],
+                samples: vec![RemoteWriteV2Sample {
+                    value: 1.0,
+                    timestamp: 1000,
+                    start_timestamp: 0,
+                }],
+                ..Default::default()
+            },
+            RemoteWriteV2TimeSeries {
+                labels_refs: vec![name_ref2, histo_ref, job_ref, demo_ref],
+                histograms: vec![Histogram {
+                    count: Some(Count::CountInt(1)),
+                    sum: 1.0,
+                    positive_spans: vec![BucketSpan {
+                        offset: 0,
+                        length: 1,
+                    }],
+                    positive_deltas: vec![1],
+                    timestamp: 1000,
+                    start_timestamp: 1000,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        ],
+    };
+    let compressed = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+    let res = client
+        .post("/v1/prometheus/write")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .header("Content-Encoding", "snappy")
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_sample",
+        "[[1]]",
+    )
+    .await;
+    validate_data(
+        "prom_rw_v2_batched_interceptor_units",
+        &client,
+        "SELECT COUNT(*) FROM tenant_redirect.v2_mixed_histo",
+        "[[1]]",
+    )
+    .await;
+
+    guard.remove_all().await;
 }
 
 /// Covers the batched (pending-rows-batcher) Prometheus remote write path, which
@@ -7464,7 +7923,6 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         AggregationTemporality, ExponentialHistogram, ExponentialHistogramDataPoint, Metric,
         ResourceMetrics, ScopeMetrics, exponential_histogram_data_point, metric,
     };
-    use tests_integration::test_util::setup_test_http_app_with_otlp_exponential_histogram;
 
     common_telemetry::init_default_ut_logging();
     let req = ExportMetricsServiceRequest {
@@ -7511,44 +7969,8 @@ pub async fn test_otlp_exponential_histogram(store_type: StorageType) {
         )]
     };
 
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_disabled",
-        false,
-    )
-    .await;
-    let client = TestClient::new(app).await;
-    let res = send_req(
-        &client,
-        headers(),
-        "/v1/otlp/v1/metrics",
-        body.clone(),
-        false,
-    )
-    .await;
-    assert_eq!(StatusCode::BAD_REQUEST, res.status());
-    let status = GoogleRpcStatus::decode(res.bytes().await.as_ref()).unwrap();
-    assert_eq!(3, status.code);
-    assert!(
-        status
-            .message
-            .contains("otlp.experimental_enable_exponential_histogram")
-    );
-    validate_data(
-        "otlp_exponential_histogram_disabled_no_table",
-        &client,
-        "select count(*) from information_schema.tables where table_name = 'otlp_exponential_latency';",
-        "[[0]]",
-    )
-    .await;
-    guard.remove_all().await;
-
-    let (app, mut guard) = setup_test_http_app_with_otlp_exponential_histogram(
-        store_type,
-        "test_otlp_exponential_histogram_enabled",
-        true,
-    )
-    .await;
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_otlp_exponential_histogram").await;
     let client = TestClient::new(app).await;
     let res = send_req(&client, headers(), "/v1/otlp/v1/metrics", body, false).await;
     assert_eq!(StatusCode::OK, res.status());
@@ -12041,16 +12463,9 @@ async fn check_http_skip_wal(name: &str, cases: &[HttpWalCase], distributed: boo
         .with_influxdb_handler(fe.clone())
         .with_opentsdb_handler(fe.clone())
         .with_log_ingest_handler(fe.clone(), None, None)
-        .with_otlp_handler(fe.clone(), true, false)
+        .with_otlp_handler(fe.clone(), true)
         // The pending batcher uses BulkInsert, deliberately outside this PR.
-        .with_prom_handler(
-            fe.clone(),
-            Some(fe),
-            true,
-            PromValidationMode::Strict,
-            false,
-            None,
-        )
+        .with_prom_handler(fe.clone(), Some(fe), true, PromValidationMode::Strict, None)
         .build();
     let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
     for case in cases {
@@ -12395,7 +12810,6 @@ pub async fn test_http_memory_limit(store_type: StorageType) {
         None,
         Some(http_opts),
         Some(memory_limiter),
-        false,
     )
     .await;
 

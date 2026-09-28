@@ -16,17 +16,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use common_function::aggrs::aggr_wrapper::{StateMergeHelper, is_all_aggr_exprs_steppable};
-#[cfg(feature = "vector_index")]
-use common_function::scalars::vector::distance::{
-    VEC_COS_DISTANCE, VEC_DOT_PRODUCT, VEC_L2SQ_DISTANCE,
-};
 use common_telemetry::debug;
 use datafusion::error::Result as DfResult;
-#[cfg(feature = "vector_index")]
-use datafusion_common::DataFusionError;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-#[cfg(feature = "vector_index")]
-use datafusion_expr::Sort;
 use datafusion_expr::{Expr, LogicalPlan, UserDefinedLogicalNode};
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, RangeManipulate, SeriesDivide, SeriesNormalize,
@@ -36,37 +28,6 @@ use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::dist_plan::analyzer::AliasMapping;
 use crate::dist_plan::merge_sort::{MergeSortLogicalPlan, merge_sort_transformer};
-
-#[cfg(feature = "vector_index")]
-fn is_vector_sort(sort: &Sort) -> bool {
-    if sort.expr.len() != 1 {
-        return false;
-    }
-    let sort_expr = &sort.expr[0].expr;
-    let Expr::ScalarFunction(func) = sort_expr else {
-        return false;
-    };
-    matches!(
-        func.name().to_lowercase().as_str(),
-        VEC_L2SQ_DISTANCE | VEC_COS_DISTANCE | VEC_DOT_PRODUCT
-    )
-}
-
-#[cfg(feature = "vector_index")]
-fn vector_sort_transformer(plan: &LogicalPlan) -> DfResult<TransformerAction> {
-    let LogicalPlan::Sort(sort) = plan else {
-        return Err(DataFusionError::Internal(format!(
-            "vector_sort_transformer expects Sort, got {plan}"
-        )));
-    };
-    Ok(TransformerAction {
-        extra_parent_plans: vec![
-            MergeSortLogicalPlan::new(sort.input.clone(), sort.expr.clone(), sort.fetch)
-                .into_logical_plan(),
-        ],
-        new_child_plan: Some(LogicalPlan::Sort(sort.clone())),
-    })
-}
 
 pub struct StepTransformAction {
     extra_parent_plans: Vec<LogicalPlan>,
@@ -156,7 +117,14 @@ impl Categorizer {
             LogicalPlan::Filter(filter) => Self::check_expr(&filter.predicate),
             LogicalPlan::Window(_) => Commutativity::Unimplemented,
             LogicalPlan::Aggregate(aggr) => {
-                let is_all_steppable = is_all_aggr_exprs_steppable(&aggr.aggr_expr);
+                // The state/merge split maps each group expression to one output column,
+                // which doesn't hold for grouping sets.
+                let has_grouping_set = aggr
+                    .group_expr
+                    .iter()
+                    .any(|expr| matches!(expr, Expr::GroupingSet(_)));
+                let is_all_steppable =
+                    !has_grouping_set && is_all_aggr_exprs_steppable(&aggr.aggr_expr);
                 let matches_partition = Self::check_partition(&aggr.group_expr, &partition_cols);
                 if !matches_partition && is_all_steppable {
                     debug!("Plan is steppable: {plan}");
@@ -196,12 +164,6 @@ impl Categorizer {
 
                 // sort plan needs to consider column priority
                 // Change Sort to MergeSort which assumes the input streams are already sorted hence can be more efficient.
-                #[cfg(feature = "vector_index")]
-                if is_vector_sort(_sort) {
-                    return Ok(Commutativity::TransformedCommutative {
-                        transformer: Some(Arc::new(vector_sort_transformer)),
-                    });
-                }
                 Commutativity::ConditionalCommutative(Some(Arc::new(merge_sort_transformer)))
             }
             LogicalPlan::Join(_) => Commutativity::NonCommutative,
@@ -348,26 +310,34 @@ impl Categorizer {
     /// Return true if the given expr and partition cols satisfied the rule.
     /// In this case the plan can be treated as fully commutative.
     ///
-    /// So only if all partition columns show up in `exprs`, return true.
+    /// So only if every partition column is itself one of `exprs`, return true.
     /// Otherwise return false.
     ///
+    /// An expression that only references a partition column, like `substr(host, 3, 1)`
+    /// or `k % 2`, doesn't count: it can put rows from different partitions into the same
+    /// group.
     fn check_partition(exprs: &[Expr], partition_cols: &AliasMapping) -> bool {
-        let mut ref_cols = HashSet::new();
-        for expr in exprs {
-            expr.add_column_refs(&mut ref_cols);
-        }
-        let ref_cols = ref_cols
-            .into_iter()
-            .map(|c| c.name.clone())
+        let group_cols = exprs
+            .iter()
+            .filter_map(|expr| {
+                let mut expr = expr;
+                while let Expr::Alias(alias) = expr {
+                    expr = &alias.expr;
+                }
+                match expr {
+                    Expr::Column(column) => Some(column.name.clone()),
+                    _ => None,
+                }
+            })
             .collect::<HashSet<_>>();
         for all_alias in partition_cols.values() {
             let all_alias = all_alias
                 .iter()
                 .map(|c| c.name.clone())
                 .collect::<HashSet<_>>();
-            // check if ref columns intersect with all alias of partition columns
+            // check if group columns intersect with all alias of partition columns
             // is empty, if it's empty, not all partition columns show up in `exprs`
-            if ref_cols.intersection(&all_alias).count() == 0 {
+            if group_cols.intersection(&all_alias).count() == 0 {
                 return false;
             }
         }

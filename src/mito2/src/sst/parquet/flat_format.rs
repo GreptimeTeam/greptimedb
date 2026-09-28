@@ -37,7 +37,7 @@ use datatypes::arrow::array::{
     Array, ArrayRef, BinaryArray, DictionaryArray, UInt32Array, UInt64Array,
 };
 use datatypes::arrow::compute::kernels::take::take;
-use datatypes::arrow::datatypes::{Schema, SchemaRef};
+use datatypes::arrow::datatypes::{DataType as ArrowDataType, Schema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::prelude::{ConcreteDataType, DataType};
 use datatypes::value::ValueRef;
@@ -407,10 +407,41 @@ impl FlatReadFormat {
         };
 
         // First, apply flat format conversion.
-        let batch = match &self.parquet_adapter {
+        let mut batch = match &self.parquet_adapter {
             ParquetAdapter::Flat(_) => record_batch,
             ParquetAdapter::PrimaryKeyToFlat(p) => p.convert_batch(record_batch)?,
         };
+
+        // Normalize nested field names and metadata to the SST's region metadata
+        // before schema compatibility and merging with memtables. This removes
+        // Parquet-added field IDs; equals_datatype also permits nested name differences.
+        for index in 0..batch.num_columns() {
+            let array = batch.column(index);
+            if !matches!(array.data_type(), ArrowDataType::Struct(_)) {
+                continue;
+            }
+            let field = batch.schema_ref().field(index);
+            let Some(column) = self.metadata().column_by_name(field.name()) else {
+                continue;
+            };
+            let target = column.column_schema.data_type.as_arrow_type();
+            if array.data_type() != &target && array.data_type().equals_datatype(&target) {
+                let array =
+                    datatypes::arrow::compute::cast(array, &target).context(ComputeArrowSnafu)?;
+                let mut fields = batch.schema().fields().to_vec();
+                fields[index] = Arc::new(field.clone().with_data_type(target));
+                let mut columns = batch.columns().to_vec();
+                columns[index] = array;
+                batch = RecordBatch::try_new(
+                    Arc::new(Schema::new_with_metadata(
+                        fields,
+                        batch.schema().metadata().clone(),
+                    )),
+                    columns,
+                )
+                .context(NewRecordBatchSnafu)?;
+            }
+        }
 
         // Then apply sequence override if provided
         let Some(override_array) = override_sequence_array else {

@@ -74,7 +74,6 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
-    pub experimental_enable_prometheus_native_histogram: bool,
     pub pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
 }
 
@@ -146,7 +145,6 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
-        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
     } = state;
 
@@ -228,7 +226,6 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
-        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
     } = state;
 
@@ -243,11 +240,7 @@ async fn remote_write_v2(
     let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let req = match decode_remote_write_v2(
-        is_zstd,
-        body,
-        experimental_enable_prometheus_native_histogram,
-    ) {
+    let req = match decode_remote_write_v2(is_zstd, body) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
@@ -404,27 +397,45 @@ async fn write_prometheus_rows_with_progress(
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
     if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
+        // Preflight before the bulk eligibility decision: pre_write hooks
+        // may redirect the contexts (e.g. to a per-tenant schema), so
+        // eligibility must be evaluated against the prepared batches —
+        // and the fallback below reuses them without re-running hooks or
+        // admission.
         preflight_prometheus_rows(&prom_store_handler, &mut batches)
             .await
             .map_err(|error| PromWriteError {
                 error,
                 rows_written: 0,
             })?;
-        let mut rows_written = 0;
-        for (temp_ctx, reqs) in batches {
-            let rows = batcher
-                .submit(reqs, temp_ctx)
-                .await
-                .map_err(|error| PromWriteError {
-                    error,
-                    rows_written,
-                })?;
-            rows_written += rows;
+        // The bulk encode produces millisecond batches only; write targets
+        // and existing destination tables with another time index unit stay
+        // on the ordinary insert path, which converts the requests to each
+        // destination table's unit.
+        if batcher.accepts_bulk_time_indexes(batches.iter()).await {
+            let mut rows_written = 0;
+            for (temp_ctx, reqs) in batches {
+                let rows =
+                    batcher
+                        .submit(reqs, temp_ctx)
+                        .await
+                        .map_err(|error| PromWriteError {
+                            error,
+                            rows_written,
+                        })?;
+                rows_written += rows;
+            }
+            return Ok(PromWriteOutcome {
+                write_cost: 0,
+                rows_written,
+            });
         }
-        return Ok(PromWriteOutcome {
-            write_cost: 0,
-            rows_written,
-        });
+        return write_prepared_prometheus_rows_with_progress(
+            prom_store_handler,
+            batches,
+            prom_store_with_metric_engine,
+        )
+        .await;
     }
 
     let row_counts = batches
@@ -463,6 +474,33 @@ async fn write_prometheus_rows_with_progress(
     })
 }
 
+/// Writes already-preflighted batches through the ordinary (prepared) write
+/// path; the pre_write hooks and admission have already run.
+async fn write_prepared_prometheus_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    batches: Vec<PromWriteBatch>,
+    prom_store_with_metric_engine: bool,
+) -> std::result::Result<PromWriteOutcome, PromWriteError> {
+    let mut write_cost = 0;
+    let mut rows_written = 0;
+    for (ctx, request) in batches {
+        let rows = prom_write_row_count(&request);
+        let output = prom_store_handler
+            .write_prepared(request, ctx, prom_store_with_metric_engine)
+            .await
+            .map_err(|error| PromWriteError {
+                error,
+                rows_written,
+            })?;
+        write_cost += output.meta.cost;
+        rows_written += rows;
+    }
+    Ok(PromWriteOutcome {
+        write_cost,
+        rows_written,
+    })
+}
+
 async fn write_prometheus_v2_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
     pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
@@ -490,20 +528,44 @@ async fn write_prometheus_v2_rows_with_progress(
         });
     }
 
+    let sample_batch_count = sample_batches.len();
+    let mut batches = sample_batches;
+    batches.extend(histogram_batches);
+
     if prom_store_with_metric_engine && let Some(batcher) = pending_rows_batcher {
-        return write_batched_prometheus_v2_rows_with_progress(
+        // Same ordering as the v1 path: preflight (which may redirect the
+        // contexts) before the bulk eligibility decision, and the fallback
+        // reuses the prepared batches without re-running hooks or admission.
+        preflight_prometheus_rows(&prom_store_handler, &mut batches)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written: 0,
+                histograms_written: 0,
+            })?;
+        // The bulk encode produces millisecond batches only; write targets
+        // and existing destination tables with another time index unit stay
+        // on the ordinary insert path, which converts the requests to each
+        // destination table's unit.
+        if batcher.accepts_bulk_time_indexes(batches.iter()).await {
+            return write_batched_prometheus_v2_rows_with_progress(
+                prom_store_handler,
+                batcher.as_ref(),
+                prom_store_with_metric_engine,
+                sample_batch_count,
+                batches,
+            )
+            .await;
+        }
+        return write_prepared_prometheus_v2_rows_with_progress(
             prom_store_handler,
-            batcher.as_ref(),
+            batches,
+            sample_batch_count,
             prom_store_with_metric_engine,
-            sample_batches,
-            histogram_batches,
         )
         .await;
     }
 
-    let sample_batch_count = sample_batches.len();
-    let mut batches = sample_batches;
-    batches.extend(histogram_batches);
     let row_counts = batches
         .iter()
         .map(|(_, request)| prom_write_row_count(request))
@@ -551,24 +613,49 @@ async fn write_prometheus_v2_rows_with_progress(
     })
 }
 
+/// Writes already-preflighted batches through the ordinary (prepared) write
+/// path with v2 partial-progress accounting; the pre_write hooks and
+/// admission have already run.
+async fn write_prepared_prometheus_v2_rows_with_progress(
+    prom_store_handler: PromStoreProtocolHandlerRef,
+    batches: Vec<PromWriteBatch>,
+    sample_batch_count: usize,
+    prom_store_with_metric_engine: bool,
+) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
+    let mut write_cost = 0;
+    let mut samples_written = 0;
+    let mut histograms_written = 0;
+    for (index, (ctx, request)) in batches.into_iter().enumerate() {
+        let rows = prom_write_row_count(&request);
+        let output = prom_store_handler
+            .write_prepared(request, ctx, prom_store_with_metric_engine)
+            .await
+            .map_err(|error| PromWriteV2Error {
+                error,
+                samples_written,
+                histograms_written,
+            })?;
+        write_cost += output.meta.cost;
+        if index < sample_batch_count {
+            samples_written += rows;
+        } else {
+            histograms_written += rows;
+        }
+    }
+    Ok(PromWriteV2Outcome {
+        write_cost,
+        samples_written,
+        histograms_written,
+    })
+}
+
 async fn write_batched_prometheus_v2_rows_with_progress<B: PromWriteBatcher + ?Sized>(
     prom_store_handler: PromStoreProtocolHandlerRef,
     batcher: &B,
     prom_store_with_metric_engine: bool,
-    sample_batches: Vec<PromWriteBatch>,
-    histogram_batches: Vec<PromWriteBatch>,
+    sample_batch_count: usize,
+    batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteV2Outcome, PromWriteV2Error> {
-    let sample_batch_count = sample_batches.len();
-    let mut batches = sample_batches;
-    batches.extend(histogram_batches);
-    preflight_prometheus_rows(&prom_store_handler, &mut batches)
-        .await
-        .map_err(|error| PromWriteV2Error {
-            error,
-            samples_written: 0,
-            histograms_written: 0,
-        })?;
-
     let mut samples_written = 0;
     let mut histograms_written = 0;
     let mut write_cost = 0;
@@ -869,14 +956,18 @@ mod tests {
             events: events.clone(),
         };
 
-        let Ok(outcome) = write_batched_prometheus_v2_rows_with_progress(
-            handler,
-            &batcher,
-            true,
-            vec![test_prom_write_batch("sample")],
-            vec![test_prom_write_batch("histogram")],
-        )
-        .await
+        let mut batches = vec![
+            test_prom_write_batch("sample"),
+            test_prom_write_batch("histogram"),
+        ];
+        // The caller preflights before choosing the bulk path; the batched
+        // writer consumes the prepared batches.
+        preflight_prometheus_rows(&handler, &mut batches)
+            .await
+            .unwrap();
+        let Ok(outcome) =
+            write_batched_prometheus_v2_rows_with_progress(handler, &batcher, true, 1, batches)
+                .await
         else {
             panic!("mixed remote write should succeed")
         };
@@ -1017,7 +1108,6 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
         }
     }

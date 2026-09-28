@@ -92,6 +92,10 @@ pub struct MitoConfig {
     /// Under development; do not enable. Whether to enable series indexes (default false).
     /// Indexes are stored on the local filesystem under `{data_home}/series_index`.
     pub experimental_enable_series_index: bool,
+    /// Approximate series and range index size limit in open regions (default: 5 GiB).
+    /// Workers share a periodically refreshed estimate and skip maintenance when full.
+    /// In-flight reconciliation can exceed the limit; closed-region files are not counted.
+    pub experimental_series_index_max_size: ReadableSize,
     /// Whether to build and query range indexes when series indexes are enabled (default false).
     /// Obsolete range-index metadata and files are still cleaned up when disabled.
     pub experimental_enable_range_index: bool,
@@ -188,9 +192,6 @@ pub struct MitoConfig {
     pub fulltext_index: FulltextIndexConfig,
     /// Bloom filter index configs.
     pub bloom_filter_index: BloomFilterConfig,
-    /// Vector index configs (HNSW).
-    #[cfg(feature = "vector_index")]
-    pub vector_index: VectorIndexConfig,
 
     /// Minimum time interval between two compactions.
     /// To align with the old behavior, the default value is 0 (no restrictions).
@@ -221,6 +222,7 @@ impl Default for MitoConfig {
             compress_manifest: false,
             max_background_index_builds: divide_num_cpus(8),
             experimental_enable_series_index: false,
+            experimental_series_index_max_size: ReadableSize::gb(5),
             experimental_enable_range_index: false,
             experimental_series_index_maintenance_interval:
                 DEFAULT_SERIES_INDEX_MAINTENANCE_INTERVAL,
@@ -257,8 +259,6 @@ impl Default for MitoConfig {
             inverted_index: InvertedIndexConfig::default(),
             fulltext_index: FulltextIndexConfig::default(),
             bloom_filter_index: BloomFilterConfig::default(),
-            #[cfg(feature = "vector_index")]
-            vector_index: VectorIndexConfig::default(),
             min_compaction_interval: Duration::from_secs(0),
             schedule_compaction_after_edit: true,
             default_flat_format: true,
@@ -280,6 +280,14 @@ impl MitoConfig {
     ///
     /// Returns an error if there is a configuration that unable to sanitize.
     pub fn sanitize(&mut self, data_home: &str) -> Result<()> {
+        if self.experimental_enable_series_index {
+            snafu::ensure!(
+                self.experimental_series_index_max_size.as_bytes() >= 1024,
+                crate::error::InvalidConfigSnafu {
+                    reason: "experimental_series_index_max_size must be at least 1KiB"
+                }
+            );
+        }
         // Use default value if `num_workers` is 0.
         if self.num_workers == 0 {
             self.num_workers = divide_num_cpus(2);
@@ -442,12 +450,17 @@ mod tests {
         let mut config: MitoConfig = toml::from_str(
             "experimental_enable_series_index = true
              experimental_enable_range_index = false
+             experimental_series_index_max_size = '64MiB'
              experimental_series_index_maintenance_interval = '30s'
              experimental_series_index_bucket_width = '2days'",
         )
         .unwrap();
         config.sanitize("/data").unwrap();
         assert!(config.experimental_enable_series_index);
+        assert_eq!(
+            ReadableSize::mb(64),
+            config.experimental_series_index_max_size
+        );
         assert!(!config.experimental_enable_range_index);
         assert_eq!(
             config.experimental_series_index_maintenance_interval,
@@ -459,6 +472,10 @@ mod tests {
         );
         let restored: MitoConfig = toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
         assert_eq!(config, restored);
+        config.experimental_series_index_max_size = ReadableSize(1023);
+        assert!(config.sanitize("/data").is_err());
+        config.experimental_series_index_max_size = ReadableSize(1024);
+        config.sanitize("/data").unwrap();
 
         let mut config: MitoConfig =
             toml::from_str("experimental_series_index_maintenance_interval = '0s'").unwrap();
@@ -768,51 +785,6 @@ impl Default for BloomFilterConfig {
 }
 
 impl BloomFilterConfig {
-    pub fn mem_threshold_on_create(&self) -> Option<usize> {
-        match self.mem_threshold_on_create {
-            MemoryThreshold::Auto => {
-                if let Some(sys_memory) = get_total_memory_readable() {
-                    Some((sys_memory / INDEX_CREATE_MEM_THRESHOLD_FACTOR).as_bytes() as usize)
-                } else {
-                    Some(ReadableSize::mb(64).as_bytes() as usize)
-                }
-            }
-            MemoryThreshold::Unlimited => None,
-            MemoryThreshold::Size(size) => Some(size.as_bytes() as usize),
-        }
-    }
-}
-
-/// Configuration options for the vector index (HNSW).
-#[cfg(feature = "vector_index")]
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[serde(default)]
-pub struct VectorIndexConfig {
-    /// Whether to create the index on flush: automatically or never.
-    pub create_on_flush: Mode,
-    /// Whether to create the index on compaction: automatically or never.
-    pub create_on_compaction: Mode,
-    /// Whether to apply the index on query: automatically or never.
-    pub apply_on_query: Mode,
-    /// Memory threshold for creating the index.
-    pub mem_threshold_on_create: MemoryThreshold,
-}
-
-#[cfg(feature = "vector_index")]
-impl Default for VectorIndexConfig {
-    fn default() -> Self {
-        Self {
-            create_on_flush: Mode::Auto,
-            create_on_compaction: Mode::Auto,
-            apply_on_query: Mode::Auto,
-            mem_threshold_on_create: MemoryThreshold::Auto,
-        }
-    }
-}
-
-#[cfg(feature = "vector_index")]
-impl VectorIndexConfig {
     pub fn mem_threshold_on_create(&self) -> Option<usize> {
         match self.mem_threshold_on_create {
             MemoryThreshold::Auto => {

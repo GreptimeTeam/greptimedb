@@ -146,19 +146,14 @@ where
                     Some(self.instance.clone()),
                     opts.prom_store.with_metric_engine,
                     opts.prom_store.prom_validation_mode,
-                    opts.prom_store
-                        .experimental_enable_prometheus_native_histogram,
                     pending_rows_batcher,
                 )
                 .with_prometheus_handler(self.instance.clone());
         }
 
         if opts.otlp.enable {
-            builder = builder.with_otlp_handler(
-                self.instance.clone(),
-                opts.prom_store.with_metric_engine,
-                opts.otlp.experimental_enable_exponential_histogram,
-            );
+            builder = builder
+                .with_otlp_handler(self.instance.clone(), opts.prom_store.with_metric_engine);
         }
 
         if opts.jaeger.enable {
@@ -525,6 +520,7 @@ mod tests {
     use async_trait::async_trait;
     use auth::{UserProviderRef, static_user_provider_from_option};
     use client::{Client, Database};
+    use common_grpc::channel_manager::ChannelManager;
     use meta_client::client::MetaClientBuilder;
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
@@ -623,8 +619,6 @@ mod tests {
             opts.prom_store.pending_rows_flush_interval = Duration::from_secs(2);
             opts.prom_store.with_metric_engine = metric_engine;
             opts.prom_store.enable = prom_enabled;
-            opts.prom_store
-                .experimental_enable_prometheus_native_histogram = true;
             let shared = &mut opts.pending_rows_batcher.table;
             shared.protocols = vec![if selected {
                 BatchingProtocol::Prom
@@ -945,12 +939,20 @@ mod tests {
         let public_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([public_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [public_addr.to_string()],
+            ),
         );
         let internal_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([internal_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [internal_addr.to_string()],
+            ),
         );
 
         let internal_result = internal_database.sql("SELECT 1").await;

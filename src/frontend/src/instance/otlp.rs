@@ -124,7 +124,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.resource_info = self.otlp_resource_info;
 
         let otlp::metrics::MetricsConversion {
-            requests,
+            mut requests,
             rows,
             semantic_index,
             resource_info,
@@ -173,15 +173,30 @@ impl OpenTelemetryProtocolHandler for Instance {
         let batcher = self.logical_batcher().filter(|_| {
             ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
         });
-        let batcher = if batcher.is_some()
-            && self
+        let batcher = if batcher.is_some() {
+            // Align the requests' time index unit with the physical table's
+            // before the bulk eligibility check: the OTLP encoder keeps
+            // nanosecond precision on the metric engine path, while the bulk
+            // path assumes the physical table's unit (today millisecond).
+            // Without this, nanosecond requests would silently skip the
+            // batcher, and a non-millisecond physical table must not enter
+            // the bulk path either (the eligibility check rejects its unit).
+            self.inserter
+                .align_metric_row_inserts_time_unit(&ctx, &physical_table, &mut requests)
+                .await
+                .map_err(BoxedError::new)
+                .context(error::ExecuteGrpcQuerySnafu)?;
+            if self
                 .inserter
                 .can_batch_metric_rows(&requests, &ctx, &physical_table)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?
-        {
-            batcher
+            {
+                batcher
+            } else {
+                None
+            }
         } else {
             None
         };

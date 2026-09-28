@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use api::helper::{ColumnDataTypeWrapper, to_grpc_value};
 use api::v1::bulk_wal_entry::Body;
-use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType};
+use api::v1::{ArrowIpc, BulkWalEntry, Mutation, OpType, SemanticType};
 use bytes::Bytes;
 use common_grpc::flight::{FlightDecoder, FlightEncoder, FlightMessage};
 use common_recordbatch::DfRecordBatch as RecordBatch;
@@ -218,6 +218,12 @@ impl BulkPart {
         // Finds columns that need to be filled
         let mut columns_to_fill = Vec::new();
         for column_meta in &region_metadata.column_metadatas {
+            // Sparse bulk batches already carry tags in the encoded primary key.
+            if region_metadata.primary_key_encoding == PrimaryKeyEncoding::Sparse
+                && column_meta.semantic_type == SemanticType::Tag
+            {
+                continue;
+            }
             // TODO(yingwen): Returns error if it is impure default after we support filling
             // bulk insert request in the frontend
             if !batch_columns.contains(column_meta.column_schema.name.as_str()) {

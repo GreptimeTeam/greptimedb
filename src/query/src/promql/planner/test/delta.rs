@@ -475,7 +475,7 @@ async fn delta_mixed_ranges_drop_and_float_ranges_sum() {
             );
             let state = build_query_engine_state();
             let (mut exprs, _) = planner
-                .create_function_expr(&call.func, vec![], input.schema(), &state)
+                .create_function_expr(&call.func, vec![], input.schema(), &state, None)
                 .unwrap();
             exprs.insert(0, planner.create_time_index_column_expr().unwrap());
             let plan = LogicalPlanBuilder::from(input)

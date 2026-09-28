@@ -334,6 +334,7 @@ impl SeriesBucket {
             .filter_map(|file| file.meta_ref().sequence.map(|sequence| sequence.get()))
             .min()?;
         Some(SeriesIndexEntry {
+            file_size: 0,
             index_uuid: FileId::random(),
             bucket_start: self.start,
             bucket_end: self.end,

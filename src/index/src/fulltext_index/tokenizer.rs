@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::Bytes;
+use crate::bloom_filter::element_hash;
 use crate::fulltext_index::error::Result;
 
 lazy_static::lazy_static! {
@@ -140,6 +141,30 @@ impl Analyzer {
         }
     }
 
+    /// Returns the bloom filter hash of each token in the given text.
+    ///
+    /// Equivalent to hashing every token returned by [`Analyzer::analyze_text`] with
+    /// [`element_hash`]. Only case-insensitive non-ASCII tokens allocate, in `to_lowercase`;
+    /// case-insensitive ASCII tokens are lowercased in `buf`.
+    pub fn analyze_text_hashes<'a>(
+        &self,
+        text: &'a str,
+        buf: &'a mut Vec<u8>,
+    ) -> impl Iterator<Item = u64> + use<'a> {
+        let case_sensitive = self.case_sensitive;
+        self.tokenizer.tokenize(text).into_iter().map(move |token| {
+            if case_sensitive {
+                element_hash(token.as_bytes())
+            } else if token.is_ascii() {
+                buf.clear();
+                buf.extend(token.bytes().map(|b| b.to_ascii_lowercase()));
+                element_hash(buf)
+            } else {
+                element_hash(token.to_lowercase().as_bytes())
+            }
+        })
+    }
+
     /// Analyzes the given text into a list of tokens.
     pub fn analyze_text(&self, text: &str) -> Result<Vec<Bytes>> {
         let res = self
@@ -161,6 +186,28 @@ impl Analyzer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_analyze_text_hashes_matches_analyze_text() {
+        let text = "Hello, WORLD ship_Ship 清洁表面 ÄÖÜ straße İstanbul x";
+        for (tokenizer, case_sensitive) in [
+            (Box::new(EnglishTokenizer) as Box<dyn Tokenizer>, false),
+            (Box::new(EnglishTokenizer), true),
+            (Box::new(ChineseTokenizer), false),
+        ] {
+            let analyzer = Analyzer::new(tokenizer, case_sensitive);
+            let expected = analyzer
+                .analyze_text(text)
+                .unwrap()
+                .iter()
+                .map(|t| element_hash(t))
+                .collect::<Vec<_>>();
+            let hashes = analyzer
+                .analyze_text_hashes(text, &mut Vec::new())
+                .collect::<Vec<_>>();
+            assert_eq!(expected, hashes);
+        }
+    }
 
     #[test]
     fn test_english_tokenizer() {
