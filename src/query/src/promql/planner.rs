@@ -12,10 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod at_modifier;
 mod function_plans;
-
 mod island;
-
 mod matching_filters;
 
 mod set_operator;
@@ -165,6 +164,12 @@ struct PromPlannerContext {
     end: Millisecond,
     interval: Millisecond,
     lookback_delta: Millisecond,
+    /// Evaluation range of the whole statement, which `@ start()` and `@ end()` refer to.
+    ///
+    /// Unlike [`Self::start`] and [`Self::end`], these are never rewritten while planning, so a
+    /// selector inside a subquery still resolves `@ start()` / `@ end()` against the statement.
+    stmt_start: Millisecond,
+    stmt_end: Millisecond,
 
     // planner states
     table_name: Option<String>,
@@ -193,6 +198,16 @@ struct PromPlannerContext {
     schema_name: Option<String>,
     /// The range in millisecond of range selector. None if there is no range selector.
     range: Option<Millisecond>,
+    /// The offset in milliseconds the window of the last planned range selector is folded with,
+    /// or `None` when no range selector has been planned since the last read.
+    ///
+    /// [`Self::start`] and the sample timestamps are compared on the shifted timeline: a range
+    /// payload carries `sample_timestamp + offset`, while the time index column of a folded row
+    /// stays the evaluation timestamp of its step. A function that reads it right after its input
+    /// plan is built, like `predict_linear`, consumes it instead of reading the state, so the
+    /// offset cannot leak from one input to another; see
+    /// [`PromPlanner::create_function_expr`].
+    range_fold_offset: Option<Millisecond>,
 }
 
 /// Result labels a vector-vector binary operation derives from its matching modifier, projected
@@ -226,11 +241,15 @@ impl BinaryResultLabels {
 
 impl PromPlannerContext {
     fn from_eval_stmt(stmt: &EvalStmt) -> Self {
+        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
+        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
         Self {
-            start: stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
-            end: stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as _,
+            start,
+            end,
             interval: stmt.interval.as_millis() as _,
             lookback_delta: stmt.lookback_delta.as_millis() as _,
+            stmt_start: start,
+            stmt_end: end,
             ..Default::default()
         }
     }
@@ -246,6 +265,7 @@ impl PromPlannerContext {
         self.selector_matcher.clear();
         self.schema_name = None;
         self.range = None;
+        self.range_fold_offset = None;
     }
 
     /// Reset table name and schema to empty
@@ -325,6 +345,16 @@ impl PromPlanner {
         timestamp_fn: bool,
         query_engine_state: &QueryEngineState,
     ) -> Result<LogicalPlan> {
+        // An anchored range call is step-invariant: evaluate it once, at the start of the
+        // evaluation, and report its result at every step; see
+        // [`Self::promote_anchored_range_call`].
+        if let Some(plan) = self
+            .promote_anchored_range_call(prom_expr, timestamp_fn, query_engine_state)
+            .await?
+        {
+            return Ok(plan);
+        }
+
         let res = match prom_expr {
             PromExpr::Aggregate(expr) => {
                 self.prom_aggr_expr_to_plan(query_engine_state, expr)
@@ -458,6 +488,9 @@ impl PromPlanner {
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
+        // A subquery always folds with offset 0, so its payload timestamps are already on the
+        // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(0);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
@@ -1579,6 +1612,44 @@ impl PromPlanner {
         Ok(plan)
     }
 
+    /// The offset of a selector in milliseconds. A positive offset selects samples from an earlier
+    /// time and moves them forward into the evaluation timeline.
+    fn offset_millis(offset: &Option<Offset>) -> Millisecond {
+        match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        }
+    }
+
+    /// The columns that identify one series, which is the series key expected by the PromQL plan
+    /// nodes that hold exactly one series per input batch.
+    fn series_key_columns(&self) -> Vec<String> {
+        if self.ctx.use_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx.tag_columns.clone()
+        }
+    }
+
+    /// Keep replay and series division on the same effective keys when a call rewrites labels.
+    fn series_key_columns_for_schema(&self, schema: &DFSchemaRef) -> Vec<String> {
+        let has_tsid = schema.fields().iter().any(|field| {
+            field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
+                && field.data_type() == &ArrowDataType::UInt64
+        });
+        if has_tsid {
+            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
+        } else {
+            self.ctx
+                .tag_columns
+                .iter()
+                .filter(|name| schema.has_column_with_unqualified_name(name))
+                .cloned()
+                .collect()
+        }
+    }
+
     async fn prom_vector_selector_to_plan(
         &mut self,
         vector_selector: &VectorSelector,
@@ -1588,20 +1659,37 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            at: _,
+            at,
         } = vector_selector;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         if let Some(empty_plan) = self.setup_context().await? {
             return Ok(empty_plan);
         }
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
+        let offset_ms = Self::offset_millis(offset);
+        // `@` anchors the sample window at a fixed timestamp: the selector selects its samples
+        // around the anchor once, instead of following the outer evaluation grid. See
+        // [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
+        let normalize = match at_offset {
+            Some(at_offset) => {
+                // Select the anchored samples at the start of the evaluation, with the offset that
+                // re-anchors the selector.
+                // The planner is single-use (one `EvalStmt` produces one plan), so an error
+                // below aborts the whole planning and `ctx.end` needs no restore-on-error.
+                self.ctx.end = grid_start;
+                let plan = self
+                    .selector_to_series_normalize_plan(at_offset, matchers, false)
+                    .await?;
+                self.ctx.end = grid_end;
+                plan
+            }
+            None => {
+                self.selector_to_series_normalize_plan(offset_ms, matchers, false)
+                    .await?
+            }
         };
-        let normalize = self
-            .selector_to_series_normalize_plan(offset, matchers, false)
-            .await?;
         let time_index_column =
             self.ctx
                 .time_index_column
@@ -1683,24 +1771,46 @@ impl PromPlanner {
         };
 
         let field_column = self.ctx.field_columns.first().cloned();
-        let manipulate = InstantManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.lookback_delta,
-            self.ctx.interval,
-            offset_ms,
-            time_index_column,
-            if self.ctx.use_tsid {
-                vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
-            } else {
-                self.ctx.tag_columns.clone()
-            },
-            field_column,
-            normalize,
-        );
-        let manipulate = LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        });
+        let series_key_columns = self.series_key_columns();
+        let manipulate = match at_offset {
+            Some(at_offset) => {
+                // Select the anchored sample once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let anchored = InstantManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    at_offset,
+                    time_index_column.clone(),
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                );
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )
+            }
+            None => LogicalPlan::Extension(Extension {
+                node: Arc::new(InstantManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.lookback_delta,
+                    self.ctx.interval,
+                    offset_ms,
+                    time_index_column,
+                    series_key_columns,
+                    field_column,
+                    normalize,
+                )),
+            }),
+        };
         if let Some(timestamp_value_column) = timestamp_value_column {
             self.create_timestamp_func_plan(manipulate, &timestamp_value_column)
         } else {
@@ -1758,46 +1868,108 @@ impl PromPlanner {
             name,
             offset,
             matchers,
-            ..
+            at,
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
-        let offset_ms = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
+        let offset_ms = Self::offset_millis(offset);
+
+        // `@` anchors the range selector's window at a fixed timestamp, so the same window is fed
+        // to the enclosing function at every evaluation step. See [`Self::at_modifier_offset`].
+        let at_offset = self.at_modifier_offset(at, offset)?;
+        let grid_start = self.ctx.start;
+        let grid_end = self.ctx.end;
 
         // Some functions like rate may require special fields in the RangeManipulate plan
         // so we can't skip RangeManipulate.
-        let normalize = match self.setup_context().await? {
-            Some(empty_plan) => empty_plan,
+        let (normalize, at_offset) = match self.setup_context().await? {
+            // An empty metric does not contain any sample, so anchoring cannot change the result.
+            // The manipulate below folds the empty input with `offset_ms`, and the recorded fold
+            // offset agrees with it instead of with the anchor the window cannot use.
+            Some(empty_plan) => {
+                self.ctx.range_fold_offset = Some(offset_ms);
+                (empty_plan, None)
+            }
             None => {
-                self.selector_to_series_normalize_plan(offset, matchers, true)
-                    .await?
+                let normalize = match at_offset {
+                    Some(at_offset) => {
+                        // Fold the anchored window once, at the start of the evaluation.
+                        // Single-use planner: an error below aborts planning, so `ctx.end`
+                        // needs no restore-on-error.
+                        self.ctx.end = grid_start;
+                        let plan = self
+                            .selector_to_series_normalize_plan(at_offset, matchers, true)
+                            .await?;
+                        self.ctx.end = grid_end;
+                        plan
+                    }
+                    None => {
+                        self.selector_to_series_normalize_plan(offset_ms, matchers, true)
+                            .await?
+                    }
+                };
+                // Samples are shifted onto the evaluation timeline with the very same offset while
+                // the window is folded. Record it so that the function above the selector can
+                // recover the evaluation instant of the folded window; see
+                // [`Self::create_range_eval_ts_expr`].
+                self.ctx.range_fold_offset = Some(at_offset.unwrap_or(offset_ms));
+                (normalize, at_offset)
             }
         };
-        let manipulate = RangeManipulate::new(
-            self.ctx.start,
-            self.ctx.end,
-            self.ctx.interval,
-            offset_ms,
-            // TODO(ruihang): convert via Timestamp datatypes to support different time units
-            range_ms,
-            self.ctx
-                .time_index_column
-                .clone()
-                .expect("time index should be set in `setup_context`"),
-            self.ctx.field_columns.clone(),
-            normalize,
-        )
-        .context(DataFusionPlanningSnafu)?;
+        let time_index_column = self
+            .ctx
+            .time_index_column
+            .clone()
+            .expect("time index should be set in `setup_context`");
+        let manipulate = match at_offset {
+            Some(at_offset) => {
+                // Fold the anchored window once, then report it at every step of the outer
+                // grid. The samples keep their native anchor-time timestamps, so the manipulate
+                // must shift them onto the evaluation timeline with the rewritten offset.
+                let anchored = RangeManipulate::new(
+                    grid_start,
+                    grid_start,
+                    self.ctx.interval,
+                    at_offset,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column.clone(),
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
+                self.replay_over_grid(
+                    LogicalPlan::Extension(Extension {
+                        node: Arc::new(anchored),
+                    }),
+                    grid_start,
+                    grid_end,
+                    time_index_column,
+                )
+            }
+            None => {
+                let manipulate = RangeManipulate::new(
+                    grid_start,
+                    grid_end,
+                    self.ctx.interval,
+                    offset_ms,
+                    // TODO(ruihang): convert via Timestamp datatypes to support different time units
+                    range_ms,
+                    time_index_column,
+                    self.ctx.field_columns.clone(),
+                    normalize,
+                )
+                .context(DataFusionPlanningSnafu)?;
 
-        Ok(LogicalPlan::Extension(Extension {
-            node: Arc::new(manipulate),
-        }))
+                LogicalPlan::Extension(Extension {
+                    node: Arc::new(manipulate),
+                })
+            }
+        };
+
+        Ok(manipulate)
     }
 
     async fn prom_call_expr_to_plan(
@@ -1846,11 +2018,17 @@ impl PromPlanner {
                 ),
             })
         };
+        // The input plan records the fold offset of the range selector it is built from. Take it
+        // here, so that the offset of one input cannot leak into another call, and pass it to
+        // `create_function_expr`: the function that reads it (`predict_linear`) then depends on an
+        // argument instead of on planner state written by the selector below it.
+        let range_fold_offset = self.ctx.range_fold_offset.take();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
             args.literals.clone(),
             input.schema(),
             query_engine_state,
+            range_fold_offset,
         )?;
         func_exprs.insert(0, self.create_time_index_column_expr()?);
         func_exprs.extend_from_slice(&self.create_tag_column_exprs()?);
@@ -2034,7 +2212,7 @@ impl PromPlanner {
 
     async fn selector_to_series_normalize_plan(
         &mut self,
-        offset: &Option<Offset>,
+        offset_duration: Millisecond,
         label_matchers: Matchers,
         is_range_selector: bool,
     ) -> Result<LogicalPlan> {
@@ -2044,11 +2222,6 @@ impl PromPlanner {
         let table_schema = table_scan.schema();
 
         // make filter exprs
-        let offset_duration = match offset {
-            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
-            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
-            None => 0,
-        };
         let mut scan_filters = Self::matchers_to_expr(label_matchers.clone(), table_schema)?;
         if let Some(time_index_filter) =
             self.build_time_index_filter(offset_duration, table_schema)?
@@ -2147,11 +2320,7 @@ impl PromPlanner {
         }
 
         // make sort plan
-        let series_key_columns = if self.ctx.use_tsid {
-            vec![DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]
-        } else {
-            self.ctx.tag_columns.clone()
-        };
+        let series_key_columns = self.series_key_columns();
 
         let sort_exprs = if self.ctx.use_tsid {
             vec![
@@ -2948,6 +3117,7 @@ impl PromPlanner {
         float_field: &str,
         histogram_field: &str,
         input_schema: &DFSchemaRef,
+        range_fold_offset: Option<Millisecond>,
     ) -> Result<Option<Vec<DfExpr>>> {
         let returns_histogram = matches!(
             func.name,
@@ -2987,6 +3157,14 @@ impl PromPlanner {
                 Box::new(other_input_exprs[0].clone()),
                 ArrowDataType::Int64,
             ));
+            // Same evaluation instant as in the non-mixed path; it follows the other inputs so the
+            // float UDF below is called as `predict_linear(ts_range, value_range, t, eval_ts)`.
+            // The regression is only defined for a folded window, so a missing fold offset is an
+            // error instead of a default.
+            other_input_exprs.push_back(self.create_range_eval_ts_expr(
+                range_fold_offset.context(ExpectRangeSelectorSnafu)?,
+                input_schema,
+            )?);
         }
 
         let timestamp_range = DfExpr::Column(Column::from_name(
@@ -3045,7 +3223,13 @@ impl PromPlanner {
                 .alias(histogram_field),
             ]
         } else {
-            let display_name = float_expr.schema_name().to_string();
+            let display_name = if func.name == "predict_linear" {
+                // The evaluation instant is the private last argument of the mixed float UDF
+                // call; keep it out of the output column name like on the non-mixed path.
+                Self::name_without_last_arg(&float_expr)
+            } else {
+                float_expr.schema_name().to_string()
+            };
             self.ctx.field_columns = vec![display_name.clone()];
             vec![float_expr.alias(display_name)]
         };
@@ -3063,6 +3247,7 @@ impl PromPlanner {
         other_input_exprs: Vec<DfExpr>,
         input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
+        range_fold_offset: Option<Millisecond>,
     ) -> Result<(Vec<DfExpr>, Vec<String>)> {
         // TODO(ruihang): check function args list
         let mut other_input_exprs: VecDeque<DfExpr> = other_input_exprs.into();
@@ -3075,6 +3260,7 @@ impl PromPlanner {
                 &float_field,
                 &histogram_field,
                 input_schema,
+                range_fold_offset,
             )?
         {
             return Ok((exprs, vec![]));
@@ -3276,6 +3462,16 @@ impl PromPlanner {
                         Box::new(other_input_exprs[0].clone()),
                         ArrowDataType::Int64,
                     ));
+                    // The prediction starts at the evaluation instant of the step, which the
+                    // window's fold offset recovers from the row's time index; see
+                    // [`Self::create_range_eval_ts_expr`]. It is appended last, so the UDF is
+                    // called as `predict_linear(ts_range, value_range, t, eval_ts)`. The
+                    // regression is only defined for a folded window, so a missing fold offset
+                    // is an error instead of a default.
+                    other_input_exprs.push_back(self.create_range_eval_ts_expr(
+                        range_fold_offset.context(ExpectRangeSelectorSnafu)?,
+                        input_schema,
+                    )?);
                     ScalarFunc::Udf(Arc::new(PredictLinear::scalar_udf()))
                 }
             }
@@ -3648,7 +3844,17 @@ impl PromPlanner {
             exprs = exprs
                 .into_iter()
                 .map(|expr| {
-                    let display_name = expr.schema_name().to_string();
+                    // `predict_linear` appends its private evaluation instant as the last argument
+                    // of the UDF call; the output column is named after the call without it, so
+                    // the injected expression stays out of the user-visible schema. The
+                    // native-histogram drop UDF takes no such argument.
+                    let display_name = if func.name == "predict_linear"
+                        && !all_field_columns_are_native_histogram_ranges
+                    {
+                        Self::name_without_last_arg(&expr)
+                    } else {
+                        expr.schema_name().to_string()
+                    };
                     new_field_columns.push(display_name.clone());
                     Ok(expr.alias(display_name))
                 })
@@ -3915,6 +4121,66 @@ impl PromPlanner {
                 .clone()
                 .with_context(|| TimeIndexNotFoundSnafu { table: "unknown" })?,
         )))
+    }
+
+    /// Builds the evaluation instant the window of the last planned range selector is folded for,
+    /// as a `Timestamp(Millisecond)` expression.
+    ///
+    /// The timestamp payload of a folded window is shifted onto the evaluation timeline by the
+    /// offset the window is folded with (`fold_offset`), while the time index column of a folded
+    /// row keeps the evaluation timestamp of its step. Adding the offset back yields the
+    /// evaluation instant on the payload timeline, which is where the regression of
+    /// `predict_linear` is centered: neither a plain window (which may end before the step, and
+    /// is additionally shifted by `offset` on the payload timeline) nor an `@`-anchored one
+    /// (whose end is the anchor, while the payload is shifted by `at_offset`) ends at the step it
+    /// is evaluated at.
+    ///
+    /// The sum is computed on the millisecond representation and cast back, so that the result
+    /// keeps the `Timestamp(Millisecond)` type the range functions declare for it.
+    fn create_range_eval_ts_expr(
+        &self,
+        fold_offset: Millisecond,
+        input_schema: &DFSchemaRef,
+    ) -> Result<DfExpr> {
+        let eval_ts = self
+            .create_time_index_column_expr()?
+            .cast_to(
+                &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                input_schema,
+            )
+            .context(DataFusionPlanningSnafu)?
+            .cast_to(&ArrowDataType::Int64, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        DfExpr::BinaryExpr(BinaryExpr {
+            left: Box::new(eval_ts),
+            op: Operator::Plus,
+            right: Box::new(lit(fold_offset)),
+        })
+        .cast_to(
+            &ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+            input_schema,
+        )
+        .context(DataFusionPlanningSnafu)
+    }
+
+    /// The name of `expr` without its last argument.
+    ///
+    /// A `predict_linear` call appends the evaluation instant of its window as a private last
+    /// argument ([`Self::create_range_eval_ts_expr`]). Naming the output column after the call
+    /// the user wrote, without that argument, keeps the injected expression out of the
+    /// user-visible schema; the expression itself keeps every argument it needs.
+    fn name_without_last_arg(expr: &DfExpr) -> String {
+        if let DfExpr::ScalarFunction(ScalarFunction { func, args }) = expr
+            && let Some((_, visible_args)) = args.split_last()
+        {
+            let visible = ScalarFunction {
+                func: func.clone(),
+                args: visible_args.to_vec(),
+            };
+            return DfExpr::ScalarFunction(visible).schema_name().to_string();
+        }
+
+        expr.schema_name().to_string()
     }
 
     fn create_tag_column_exprs(&self) -> Result<Vec<DfExpr>> {
