@@ -1261,7 +1261,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,
@@ -1298,7 +1302,11 @@ mod tests {
         let database = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls([addr.as_str()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [addr.as_str()],
+            ),
         );
         let db = DatabaseWithPeer::new(
             database,
