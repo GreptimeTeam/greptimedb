@@ -113,12 +113,9 @@ TQL EVAL (100, 400, '100s') at_modifier_gauge @ end();
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') rate(at_modifier_counter_total[5m] @ 300);
 
--- Consistency: every step of the query above must equal the anchored value of its own series, as a
--- separate instant query. The instant query below folds the same left-open `(0s, 300s]` window and
--- reports the anchored values (1.0 per second for 'a', 0.5 for 'b'), so the comparison after it
--- must stay empty for the matching series: a `rate` that followed the outer evaluation timestamp
--- instead of the anchor would report values other than 1.0 at some steps and show up there, and a
--- series that lost its anchor (or was read from the wrong one) shows up there as well.
+-- Consistency: the instant query below shows the anchored values over the same left-open
+-- `(0s, 300s]` window (1.0 per second for 'a', 0.5 for 'b'). The `!= 1.0` comparison filters
+-- host 'a', but host 'b' remains at every step with its rate of 0.5 per second.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (300, 300, '1s') rate(at_modifier_counter_total[5m]);
 

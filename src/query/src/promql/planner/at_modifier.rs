@@ -61,7 +61,7 @@ impl PromPlanner {
     /// result outside the representable millisecond range is rejected like an unrepresentable
     /// anchor ([`Self::system_time_to_millis`]) instead of clamping it, so the same class of
     /// input always gets the same answer.
-    pub(super) fn anchor_sub(lhs: Millisecond, rhs: Millisecond) -> Result<Millisecond> {
+    pub(crate) fn anchor_sub(lhs: Millisecond, rhs: Millisecond) -> Result<Millisecond> {
         lhs.checked_sub(rhs)
             .with_context(|| AtModifierTimestampOutOfRangeSnafu {
                 timestamp: format!("{}ms - {}ms", lhs, rhs),
@@ -73,10 +73,10 @@ impl PromPlanner {
     /// Prometheus anchors such a selector by rewriting its offset to `eval_time - anchor`
     /// (`setOffsetForAtModifier`), so that the selector always selects its samples around `anchor`
     /// regardless of the step being evaluated. `eval_time` is the start of the evaluation the
-    /// selector belongs to, which is [`Self::start`].
+    /// selector belongs to, which is `ctx.start`.
     ///
     /// Returns `None` when the selector has no `@` modifier.
-    pub(super) fn at_modifier_offset(
+    pub(crate) fn at_modifier_offset(
         &self,
         at: &Option<AtModifier>,
         offset: &Option<Offset>,
@@ -174,7 +174,7 @@ impl PromPlanner {
     /// [`Self::at_modifier_offset`]), and planning it with `ctx.end == ctx.start` folds its window
     /// once for that single instant instead of expanding it over the grid, which the replay of the
     /// call result above already does.
-    pub(super) async fn promote_anchored_range_call(
+    pub(crate) async fn promote_anchored_range_call(
         &mut self,
         prom_expr: &PromExpr,
         timestamp_fn: bool,
@@ -251,7 +251,7 @@ impl PromPlanner {
     /// of its selector directly. A promoted call is guaranteed that layout by
     /// [`Self::series_divide_plan`], which is why [`Self::promote_anchored_range_call`] splits
     /// its result before calling this method.
-    pub(super) fn replay_over_grid(
+    pub(crate) fn replay_over_grid(
         &self,
         anchored: LogicalPlan,
         grid_start: Millisecond,
