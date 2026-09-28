@@ -39,10 +39,10 @@ use common_wal::config::kafka::DatanodeKafkaConfig;
 use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::config::raft_engine::RaftEngineConfig;
 use file_engine::engine::FileRegionEngine;
+use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
 use log_store::kafka::{GlobalIndexCollector, default_index_file};
 use log_store::noop::log_store::NoopLogStore;
-use log_store::object_store_wal::ObjectStoreLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use meta_client::MetaClientRef;
 use metric_engine::engine::MetricEngine;
@@ -805,7 +805,7 @@ impl DatanodeBuilder {
 }
 
 /// Keeps the first shutdown error and logs the later ones.
-fn record_shutdown_error(first_error: &mut Option<error::Error>, result: Result<()>) {
+pub(crate) fn record_shutdown_error(first_error: &mut Option<error::Error>, result: Result<()>) {
     if let Err(err) = result {
         if first_error.is_none() {
             *first_error = Some(err);
@@ -1050,6 +1050,7 @@ mod tests {
     use std::io::Write;
     use std::path::Path;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use cache::build_datanode_cache_registry;
@@ -1066,8 +1067,8 @@ mod tests {
     use common_test_util::temp_dir::{create_named_temp_file, create_temp_dir};
     use common_wal::config::DatanodeWalConfig;
     use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
+    use log_store::ObjectStoreLogStore;
     use log_store::error::Error as LogStoreError;
-    use log_store::object_store_wal::ObjectStoreLogStore;
     use meta_client::client::MetaClientBuilder;
     use mito2::engine::MITO_ENGINE_NAME;
     use object_store::ObjectStore;
@@ -1193,7 +1194,7 @@ mod tests {
         std::fs::read_dir(dir).unwrap().next().is_none()
     }
 
-    /// The store rejects every operation once it is stopped, an empty append included.
+    /// Returns true if the store rejects even an empty append, which it does only once stopped.
     async fn is_stopped(log_store: &ObjectStoreLogStore) -> bool {
         matches!(
             log_store.append_batch(vec![]).await,
@@ -1490,7 +1491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_shutdown_stops_object_store_log_store_after_region_server_failure() {
+    async fn test_shutdown_stops_every_engine_and_the_log_store_after_engine_failures() {
         common_telemetry::init_default_ut_logging();
         let data_home = create_temp_dir("object-store-wal-shutdown-failure");
         let builder = object_store_wal_builder(
@@ -1499,20 +1500,26 @@ mod tests {
         );
         let mut datanode = builder.build().await.unwrap();
         let log_store = datanode.object_store_log_store.clone().unwrap();
-        // Stopping the region server fails on this engine.
-        let (engine, _) = MockRegionEngine::with_custom_apply_fn("failing", |engine| {
-            engine.handle_stop_mock_fn = Some(Box::new(|| {
-                error::UnexpectedSnafu {
-                    violated: "stop failed",
-                }
-                .fail()
-            }));
-        });
-        datanode.region_server().register_engine(engine);
+        // Both engines fail to stop, so whichever the region server stops first fails.
+        let stop_calls = Arc::new(AtomicUsize::new(0));
+        for name in ["failing-a", "failing-b"] {
+            let stop_calls = stop_calls.clone();
+            let (engine, _) = MockRegionEngine::with_custom_apply_fn(name, move |engine| {
+                engine.handle_stop_mock_fn = Some(Box::new(move || {
+                    stop_calls.fetch_add(1, Ordering::Relaxed);
+                    error::UnexpectedSnafu {
+                        violated: "stop failed",
+                    }
+                    .fail()
+                }));
+            });
+            datanode.region_server().register_engine(engine);
+        }
 
         let err = datanode.shutdown().await.unwrap_err();
 
         assert_matches!(err, Error::StopRegionEngine { .. });
+        assert_eq!(2, stop_calls.load(Ordering::Relaxed));
         assert!(is_stopped(&log_store).await);
     }
 

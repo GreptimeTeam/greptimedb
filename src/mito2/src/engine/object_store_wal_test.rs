@@ -25,7 +25,7 @@ use common_recordbatch::RecordBatches;
 use common_wal::config::object_store::{ObjectStoreWalConfig, STANDALONE_GENERATION};
 use common_wal::options::{ObjectStoreWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use futures::TryStreamExt;
-use log_store::object_store_wal::ObjectStoreLogStore;
+use log_store::ObjectStoreLogStore;
 use store_api::logstore::LogStore;
 use store_api::logstore::provider::Provider;
 use store_api::region_engine::RegionEngine;

@@ -325,7 +325,6 @@ pub enum Error {
         location: Location,
     },
 
-
     #[snafu(display("Unsupported output type, expected: {}", expected))]
     UnsupportedOutput {
         expected: String,

@@ -48,8 +48,8 @@ use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array
 use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
+use log_store::ObjectStoreLogStore;
 use log_store::kafka::log_store::KafkaLogStore;
-use log_store::object_store_wal::ObjectStoreLogStore;
 use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
