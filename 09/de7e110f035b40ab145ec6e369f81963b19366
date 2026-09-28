@@ -1,0 +1,19 @@
+.github/runner-scale-sets/query-regression/Dockerfile
+  s_2514ccee93ab53::t_64fe993a5a947a 16
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "09de7e110f035b40ab145ec6e369f81963b19366",
+  "prompts": {},
+  "sessions": {
+    "s_2514ccee93ab53": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0e6ac-9021-7962-80ea-3f72c804a469",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
