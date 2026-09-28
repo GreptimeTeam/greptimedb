@@ -208,9 +208,11 @@ impl DfLogicalPlanner {
         );
 
         // TODO(LFC): Remove this when Datafusion supports **both** the syntax and implementation of "explain with format".
-        if let datafusion::sql::parser::Statement::Statement(
-            box datafusion::sql::sqlparser::ast::Statement::Explain { .. },
-        ) = &mut df_stmt
+        if let datafusion::sql::parser::Statement::Statement(stmt) = &mut df_stmt
+            && matches!(
+                stmt.as_ref(),
+                datafusion::sql::sqlparser::ast::Statement::Explain { .. }
+            )
         {
             UnimplementedSnafu {
                 operation: "EXPLAIN with FORMAT using raw datafusion planner",

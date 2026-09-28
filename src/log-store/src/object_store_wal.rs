@@ -23,7 +23,8 @@
 //! ```
 //!
 //! The header carries the magic `GTWALOBJ`, the format version, the object
-//! sequence and the instance that wrote the object. Each segment holds the
+//! sequence, the epoch of the instance that wrote the object, the link to the
+//! object it extends, and a CRC32 of the header. Each segment holds the
 //! entries of exactly one region, ordered by entry id, and segments are ordered
 //! by region id. The footer indexes every segment with its region id, entry id
 //! range, byte range and CRC32. The fixed-size trailer points at the footer and
@@ -31,13 +32,25 @@
 //! the footer by reading the fixed-length trailer at the end of the object.
 //!
 //! Object sequences increase monotonically within one prefix and may leave
-//! gaps, so recovery continues after the largest sequence it indexed. An object
-//! is created conditionally: rewriting a sequence with the content it already
+//! gaps, so recovery continues after the largest sequence present. An object is
+//! created conditionally: rewriting a sequence with the content it already
 //! holds is a no-op at the object store, while different content under a taken
-//! sequence is a conflict. Recovery lists the objects, reads and verifies only
-//! the header, trailer and footer of each, and indexes the footers in sequence
-//! order to rebuild the object catalog, which rejects a sequence it already
-//! holds. Segments are read and checksummed only when a read decodes them.
+//! sequence is a conflict. A create can fail with an unknown outcome and its
+//! object can still appear, so objects form a chain: every object links to the
+//! object it extends by sequence and epoch, and recovery replays only the chain
+//! that ends at the complete object with the largest epoch and sequence. An
+//! object is complete when every link on its chain names a present object of
+//! the recorded epoch, back to an object that starts the chain. Objects off the
+//! chain are orphans, which are never replayed but keep their sequences. Each
+//! open writes an object without segments above every present object before
+//! it accepts writes, and its epoch is one above the sequence of that object,
+//! so no two instances share an epoch and a late object of an earlier
+//! instance never ends the chain.
+//!
+//! Recovery lists the objects, reads and verifies only the header, trailer and
+//! footer of each, and indexes the footers of the chain in sequence order to
+//! rebuild the object catalog, which rejects a sequence it already holds.
+//! Segments are read and checksummed only when a read decodes them.
 //!
 //! Entry ids are object-sequence-major, see [`entry_id`]: the high bits of an
 //! id name the object that holds the entry, the low bits its position among

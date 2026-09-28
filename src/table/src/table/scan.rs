@@ -144,8 +144,8 @@ impl RegionScanExec {
                 ))
             })
             .collect::<Vec<_>>();
-        let ts_col: Option<PhysicalSortExpr> = try {
-            PhysicalSortExpr::new(
+        let ts_col: Option<PhysicalSortExpr> = (|| {
+            Some(PhysicalSortExpr::new(
                 Arc::new(
                     Column::new_with_schema(
                         &metadata.time_index_column().column_schema.name,
@@ -157,8 +157,8 @@ impl RegionScanExec {
                     descending: false,
                     nulls_first: true,
                 },
-            )
-        };
+            ))
+        })();
 
         let eq_props = match request.distribution {
             Some(TimeSeriesDistribution::PerSeries) => {

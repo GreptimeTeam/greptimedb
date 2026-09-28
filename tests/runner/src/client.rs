@@ -64,7 +64,11 @@ impl MultiProtocolClient {
         let grpc_client = Database::new(
             DEFAULT_CATALOG_NAME,
             DEFAULT_SCHEMA_NAME,
-            Client::with_urls(vec![grpc_server_addr]),
+            Client::with_query_and_control_managers(
+                Default::default(),
+                Default::default(),
+                vec![grpc_server_addr],
+            ),
         );
         let pg_client = create_postgres_client(pg_server_addr).await;
         let mysql_client = create_mysql_client(mysql_server_addr).await;

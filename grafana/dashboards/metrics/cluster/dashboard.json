@@ -11583,7 +11583,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (type) (rate(greptime_mito_cache_hit{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+              "expr": "sum by (type) (rate(greptime_mito_cache_hit{type=~\"index.*|index_result\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "hit-{{type}}",
@@ -11596,7 +11596,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (type) (rate(greptime_mito_cache_miss{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+              "expr": "sum by (type) (rate(greptime_mito_cache_miss{type=~\"index.*|index_result\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "miss-{{type}}",
@@ -11609,7 +11609,7 @@
                 "uid": "${metrics}"
               },
               "editorMode": "code",
-              "expr": "sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~\"index.*|vector_index|index_result\"}[$__rate_interval]))",
+              "expr": "sum by (type, cause) (rate(greptime_mito_cache_eviction{type=~\"index.*|index_result\"}[$__rate_interval]))",
               "hide": false,
               "instant": false,
               "legendFormat": "evict-{{type}}-{{cause}}",
