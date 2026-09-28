@@ -137,14 +137,10 @@ impl FileWatcherBuilder {
         let mut skipped = Vec::new();
         for dir in &targets.dirs {
             match watcher.watch(dir, RecursiveMode::NonRecursive) {
-                Ok(()) => {}
-                // Only the directories holding the files are required, as
-                // before symlink chains were followed. A directory holding a
-                // symlink may be traversable but unreadable (e.g. mode 0711),
-                // so it is skipped and retried on the next relevant event.
-                // Until then, replacing the symlink inside it goes unnoticed
-                // until the next event on the final file or on another
-                // watched symlink.
+                Ok(()) => warn_if_root(dir),
+                // Only the directories holding the files are required. A
+                // directory holding a symlink may be unreadable (e.g. mode
+                // 0711); it is skipped and retried by `rearm_watches`.
                 Err(err) if !targets.file_dirs.contains(dir) => {
                     warn!("Failed to watch {:?}, skipping: {}", dir, err);
                     skipped.push(dir.clone());
@@ -343,7 +339,10 @@ fn rearm_watches(
     let mut failed = Vec::new();
     for dir in new.dirs.difference(&old.dirs) {
         match watcher.watch(dir, RecursiveMode::NonRecursive) {
-            Ok(()) => info!("File watcher now watching {:?}", dir),
+            Ok(()) => {
+                info!("File watcher now watching {:?}", dir);
+                warn_if_root(dir);
+            }
             Err(err) => {
                 warn!("Failed to watch {:?}: {}", dir, err);
                 failed.push(dir.clone());
@@ -354,6 +353,20 @@ fn rearm_watches(
         new.dirs.remove(&dir);
     }
     new
+}
+
+/// Warns when the root directory is watched, which happens when a path goes
+/// through a symlink directly under it (e.g. `/tmp`, `/var` or `/etc` on
+/// macOS). On macOS the FSEvents backend then receives every event on the
+/// volume and filters them in user space.
+fn warn_if_root(dir: &Path) {
+    if dir.parent().is_none() {
+        warn!(
+            "File watcher is watching the root directory {:?} because a watched path goes \
+             through a symlink in it; on macOS this receives every event on the volume",
+            dir
+        );
+    }
 }
 
 /// Check if an event kind is relevant based on the configuration.
