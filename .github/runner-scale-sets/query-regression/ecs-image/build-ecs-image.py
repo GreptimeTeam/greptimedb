@@ -52,6 +52,8 @@ import time
 from pathlib import Path
 
 ASSETS_DIR = Path(__file__).resolve().parent
+# Repo root: ecs-image -> query-regression -> runner-scale-sets -> .github -> root.
+REPO_ROOT = ASSETS_DIR.parents[3]
 DONE_MARKER = "QREG_IMAGE_BUILD_DONE"
 FAILED_MARKER = "QREG_IMAGE_BUILD_FAILED"
 POLL_INTERVAL_SECONDS = 15
@@ -335,7 +337,7 @@ def main() -> int:
     user_data = base64.b64encode(
         render_user_data(
             (ASSETS_DIR.parent / "Dockerfile").read_text(),
-            (ASSETS_DIR.parent.parent / "rust-toolchain.toml").read_text(),
+            (REPO_ROOT / "rust-toolchain.toml").read_text(),
             (ASSETS_DIR / "start-runner.sh").read_text(),
             (ASSETS_DIR / "ephemeral-github-runner.service").read_text(),
         ).encode()
