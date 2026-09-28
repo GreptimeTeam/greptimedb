@@ -144,8 +144,8 @@ impl Analyzer {
     /// Returns the bloom filter hash of each token in the given text.
     ///
     /// Equivalent to hashing every token returned by [`Analyzer::analyze_text`] with
-    /// [`element_hash`]. ASCII tokens are hashed without a per-token allocation, lowercased
-    /// in `buf` when case-insensitive; non-ASCII tokens still allocate for `to_lowercase`.
+    /// [`element_hash`]. Only case-insensitive non-ASCII tokens allocate, in `to_lowercase`;
+    /// case-insensitive ASCII tokens are lowercased in `buf`.
     pub fn analyze_text_hashes<'a>(
         &self,
         text: &'a str,
