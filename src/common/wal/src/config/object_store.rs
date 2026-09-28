@@ -24,6 +24,18 @@ use serde::{Deserialize, Serialize};
 /// node id and the generation from the metasrv.
 pub const STANDALONE_GENERATION: u64 = 0;
 
+/// When an append to the object store WAL returns.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AckMode {
+    /// An append returns after the object holding its entries is durable.
+    #[default]
+    Durable,
+    /// An append returns once its entries are admitted and their ids are
+    /// assigned; the object is created in the background.
+    Enqueued,
+}
+
 /// What a read does with a segment that still does not decode after a
 /// second fetch, because its checksum does not match or its content
 /// disagrees with its footer entry.
@@ -56,6 +68,15 @@ pub struct ObjectStoreWalConfig {
     pub flush_interval: Duration,
     /// The max size of a single batch object, defaults to 8MiB.
     pub max_batch_bytes: ReadableSize,
+    /// When an append returns, defaults to `durable`.
+    pub ack_mode: AckMode,
+    /// Size of the unpersisted backlog at which appends stall until an
+    /// upload completes in `enqueued` mode, defaults to 64MiB.
+    pub max_unpersisted_bytes: ReadableSize,
+    /// Age of the oldest unpersisted entry at which appends stall until an
+    /// upload completes in `enqueued` mode, defaults to 8s.
+    #[serde(with = "humantime_serde")]
+    pub max_unpersisted_age: Duration,
     /// What a read does with a segment that still does not decode after a
     /// second fetch, because its checksum does not match or its content
     /// disagrees with its footer entry, defaults to `skip`.
@@ -69,6 +90,9 @@ impl Default for ObjectStoreWalConfig {
             prefix: "wal".to_string(),
             flush_interval: Duration::from_millis(100),
             max_batch_bytes: ReadableSize::mb(8),
+            ack_mode: AckMode::Durable,
+            max_unpersisted_bytes: ReadableSize::mb(64),
+            max_unpersisted_age: Duration::from_secs(8),
             on_corrupted_segment: CorruptedSegmentAction::Skip,
         }
     }

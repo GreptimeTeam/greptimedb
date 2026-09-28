@@ -414,9 +414,24 @@ overwrite_entry_start_id = false
 
 ## The interval of flushing buffered entries to the object store, at least `10ms`, defaults to `100ms`.
 ## Each non-empty timer-triggered flush creates one object, and a batch that reaches `max_batch_bytes` is flushed immediately, so under sustained load the batch seals on size and the interval no longer matters.
-## When writes are sparse, a shorter interval lowers the acknowledgement latency of appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node.
+## When writes are sparse, a shorter interval lowers the acknowledgement latency of `durable` appends and raises the number of object requests: timer-triggered sealing creates at most one object per interval per node, and in `enqueued` mode the backlog thresholds can seal earlier. An `enqueued` append does not wait for its batch to seal once it is admitted, but the backlog thresholds can delay admission.
 ## **It's only used when the provider is `experimental_object_store`**.
 #+ flush_interval = "100ms"
+
+## When an append to the object store WAL returns.
+## - `durable`: an append returns after the object holding its entries is durable (the default).
+## - `enqueued`: an append returns once its entries are admitted and their ids are assigned, and the object is created in the background. A crash loses the unpersisted backlog.
+## **It's only used when the provider is `experimental_object_store`**.
+#+ ack_mode = "durable"
+
+## The size of the unpersisted backlog at which new appends stall until an upload completes, in `enqueued` mode.
+## Nothing is dropped and nothing is rejected; the threshold does not bound what a crash during an outage can lose.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_bytes = "64MB"
+
+## The age of the oldest unpersisted entry at which new appends stall until an upload completes, in `enqueued` mode.
+## **It's only used when the provider is `experimental_object_store` and `ack_mode` is `enqueued`**.
+#+ max_unpersisted_age = "8s"
 
 ## What a read does with a segment that still does not decode after a second fetch, because its checksum does not match or its content disagrees with its footer entry.
 ## - `skip`: the segment is skipped and recorded as a WAL hole of its region, a metric is incremented and a warning is logged; the other regions of the object are unaffected (the default).
