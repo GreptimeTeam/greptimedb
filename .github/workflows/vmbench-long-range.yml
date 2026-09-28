@@ -21,7 +21,7 @@ on:
         default: 1w
         required: true
       greptimedb_tag:
-        description: Docker Hub greptime/greptimedb tag
+        description: Docker Hub greptime/greptimedb-dev tag
         type: string
         default: latest
         required: true
@@ -149,7 +149,7 @@ jobs:
         # Tags become target-spec fields; reject separators before passing them to the planner.
         for target in greptimedb victoriametrics; do
           case "$target" in
-            greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
+            greptimedb) enabled=$RUN_GREPTIMEDB; tag=$GREPTIMEDB_TAG; repo=greptime/greptimedb-dev; url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range ;;
             victoriametrics) enabled=$RUN_VICTORIAMETRICS; tag=$VICTORIAMETRICS_TAG; repo=victoriametrics/victoria-metrics; url=http://127.0.0.1:18428/api/v1/query_range ;;
           esac
           [[ "$enabled" == true ]] || continue
@@ -162,6 +162,7 @@ jobs:
         docker run --rm "$resolved" scripts/o11ybench_plan.py "${args[@]}" \
           --run-id "long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
           --output-root "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-warm" \
+          --data-home "$BENCHMARK_ROOT/o11ybench/o11ybench-long-range-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-data" \
           --cache-policy warm > "$RUNNER_TEMP/vmbench-plans/warm.json"
     - uses: actions/upload-artifact@v4
       with:
@@ -285,6 +286,29 @@ jobs:
           jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"
           mv "$plan.tmp" "$plan"
         done < <(jq -r '.targets[] | [.name, .image] | @tsv' "$plan")
+    - name: Install fixed over-time experiment queries
+      run: |
+        set -euo pipefail
+        data_home=$(jq -er '.data.data_home' "$METADATA_ROOT/warm.json")
+        output_root=$(jq -er '.output_root' "$METADATA_ROOT/warm.json")
+        [[ "$data_home" != "$output_root" && "$data_home" != "$output_root/"* ]]
+        query_file="$data_home/over-time-queries.promql"
+        mkdir -p "$data_home"
+        cat > "$query_file" <<'QUERIES'
+        sum_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[1m])
+        sum_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[5m])
+        avg_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[1m])
+        avg_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[5m])
+        stdvar_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[1m])
+        stdvar_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[5m])
+        stddev_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[1m])
+        stddev_over_time(node_cpu_seconds_total{mode="user", region="us-west-2"}[5m])
+        node_cpu_seconds_total{mode="user", region="us-west-2"}
+        QUERIES
+        jq --arg query_file "$query_file" \
+          '.query.query_file = $query_file | .workload.query_file = $query_file' \
+          "$METADATA_ROOT/warm.json" > "$METADATA_ROOT/warm.json.tmp"
+        mv "$METADATA_ROOT/warm.json.tmp" "$METADATA_ROOT/warm.json"
     - name: Review execution plan
       run: |
         set -euo pipefail
