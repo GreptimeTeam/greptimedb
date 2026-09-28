@@ -71,6 +71,13 @@ warmup = 0
 iterations = 1
 
 [[scenario.queries]]
+name = "single_absent_host_count"
+kind = "sql"
+query = "SELECT count(*) FROM opt06_bloom_empty_groups WHERE host = 'host9999'"
+warmup = 3
+iterations = 18
+
+[[scenario.queries]]
 name = "count_all_rows"
 kind = "sql"
 query = "SELECT count(*) FROM opt06_bloom_empty_groups"

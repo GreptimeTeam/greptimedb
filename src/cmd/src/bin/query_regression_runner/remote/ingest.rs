@@ -34,7 +34,7 @@ pub(super) async fn run_render_remote_config(args: RenderRemoteConfigArgs) -> Re
     let config = match args.target {
         RemoteConfigTarget::Frontend => frontend_prom_config(&remote.prom_store)?,
         RemoteConfigTarget::Datanode if remote.disable_index_result_cache => {
-            "[[region_engine]]\n[region_engine.mito.index]\nresult_cache_size = \"0B\"\n"
+            "[[region_engine]]\n[region_engine.mito]\nrange_result_cache_size = \"0B\"\n[region_engine.mito.index]\nresult_cache_size = \"0B\"\n"
                 .to_string()
         }
         RemoteConfigTarget::Datanode => String::new(),
