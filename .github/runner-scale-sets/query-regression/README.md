@@ -177,9 +177,13 @@ the image-baked Rust toolchain matching `rust-toolchain.toml` (the image
 parses the pin from the toml at build time, and the workflow asserts it
 dynamically at run time — there is no separately pinned toolchain version).
 `mold` and `python3`
-come from apt at image-build time (not Ubuntu 24.04's default 3.12); bump
-the Verify pins together with `QUERY_REGRESSION_ECS_IMAGE_ID` when the
-image is rebuilt. Rustup, Cargo, and Rustc
+come from apt at image-build time (not Ubuntu 24.04's default 3.12); if the
+Ubuntu archive ships a newer package revision between rebuilds, the Verify
+step fails with the observed version — bump those pins in `query-regression.yml`
+when that happens. Everything else (toolchain, uv, sccache, otelgen, rustup,
+the runner base) is pinned by digest/sha/commit in the Dockerfile, and the
+image id + `RUNNER_IMAGE_EPOCH` updates are automated by the rebuild job, so
+a routine rebuild needs no manual file updates. Rustup, Cargo, and Rustc
 must resolve from `/opt/cargo/bin`; the runner cannot write `/opt/rustup` or
 `/opt/cargo/bin`. Protobuf well-known includes, including
 `google/protobuf/any.proto` and `google/protobuf/empty.proto`, are an image
