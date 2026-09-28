@@ -408,11 +408,11 @@ async fn write_prometheus_rows_with_progress(
                 error,
                 rows_written: 0,
             })?;
-        // The bulk encode produces millisecond batches only; write targets
-        // and existing destination tables with another time index unit stay
-        // on the ordinary insert path, which converts the requests to each
-        // destination table's unit.
-        if batcher.accepts_bulk_time_indexes(batches.iter()).await {
+        // Destinations bound to another physical table must stay on the
+        // ordinary insert path, which routes per destination; time index
+        // units need no check — the bulk encode converts each request to
+        // its destination's unit.
+        if batcher.accepts_bulk_destinations(batches.iter()).await {
             let mut rows_written = 0;
             for (temp_ctx, reqs) in batches {
                 let rows =
@@ -543,11 +543,11 @@ async fn write_prometheus_v2_rows_with_progress(
                 samples_written: 0,
                 histograms_written: 0,
             })?;
-        // The bulk encode produces millisecond batches only; write targets
-        // and existing destination tables with another time index unit stay
-        // on the ordinary insert path, which converts the requests to each
-        // destination table's unit.
-        if batcher.accepts_bulk_time_indexes(batches.iter()).await {
+        // Destinations bound to another physical table must stay on the
+        // ordinary insert path, which routes per destination; time index
+        // units need no check — the bulk encode converts each request to
+        // its destination's unit.
+        if batcher.accepts_bulk_destinations(batches.iter()).await {
             return write_batched_prometheus_v2_rows_with_progress(
                 prom_store_handler,
                 batcher.as_ref(),
