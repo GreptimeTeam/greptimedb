@@ -1601,6 +1601,41 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
             assert!(!path.exists());
         }
     }
+    if packed && !s3 {
+        for window in [None, Some("3ms")] {
+            let path = destination.path().join("empty-range");
+            let uri = url::Url::from_directory_path(&path).unwrap();
+            let mut args = vec![
+                "export-v2",
+                "create",
+                "--addr",
+                &addr,
+                "--to",
+                uri.as_str(),
+                "--schemas",
+                "public",
+                "--experimental-metric-export",
+                "--metric-data-layout",
+                "packed",
+                "--no-proxy",
+                "--start-time",
+                "1970-01-01T00:00:00Z",
+                "--end-time",
+                "1970-01-01T00:00:00Z",
+            ];
+            if let Some(window) = window {
+                args.extend(["--chunk-time-window", window]);
+            }
+            let error = run_data_cli(&args).await.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Packed export requires --start-time to be earlier than --end-time"),
+                "{error}"
+            );
+            assert!(!path.exists());
+        }
+    }
     let (uri, store, storage_args) = if s3 {
         let endpoint = std::env::var("GT_S3_ENDPOINT_URL").unwrap();
         let bucket = std::env::var("GT_S3_BUCKET").unwrap();

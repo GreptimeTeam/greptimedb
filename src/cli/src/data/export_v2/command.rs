@@ -349,6 +349,16 @@ impl ExportCreateCommand {
 
         let time_range = TimeRange::parse(self.start_time.as_deref(), self.end_time.as_deref())
             .map_err(BoxedError::new)?;
+        if self.metric_data_layout.is_some()
+            && time_range.is_bounded()
+            && time_range.start == time_range.end
+        {
+            return crate::error::InvalidArgumentsSnafu {
+                msg: "Packed export requires --start-time to be earlier than --end-time",
+            }
+            .fail()
+            .map_err(BoxedError::new);
+        }
         if self.chunk_time_window.is_some() && !time_range.is_bounded() {
             return ChunkTimeWindowRequiresBoundsSnafu
                 .fail()
