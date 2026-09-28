@@ -25,7 +25,8 @@ SELECT s1.tbl.i FROM s1.tbl ORDER BY i;
 -- Test schema mismatch error - should fail
 SELECT s2.tbl.i FROM s1.tbl;
 
-Error: 3000(PlanQuery), Failed to plan SQL: No field named s2.tbl.i. Valid fields are s1.tbl.i, s1.tbl.ts.
+Error: 3000(PlanQuery), Failed to plan SQL: No field named s2.tbl.i. Did you mean 's1.tbl.i'?
+Valid fields are s1.tbl.i, s1.tbl.ts.
 
 -- Clean up
 DROP TABLE s1.tbl;

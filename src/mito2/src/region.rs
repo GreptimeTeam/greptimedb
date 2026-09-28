@@ -29,6 +29,7 @@ use common_base::hash::partition_expr_version;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_telemetry::{error, info, warn};
 use crossbeam_utils::atomic::AtomicCell;
+use object_store::ObjectStore;
 use partition::expr::PartitionExpr;
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::ManifestVersion;
@@ -58,6 +59,7 @@ use crate::manifest::action::{
 use crate::manifest::manager::RegionManifestManager;
 use crate::region::version::{VersionControlRef, VersionRef};
 use crate::request::{OnFailure, OptionOutputTx};
+use crate::series_index::{SeriesIndexVersion, SeriesIndexVersionControl};
 use crate::sst::file::FileMeta;
 use crate::sst::file_purger::FilePurgerRef;
 use crate::sst::location::{index_file_path, sst_file_path};
@@ -150,6 +152,10 @@ pub struct MitoRegion {
     ///
     /// We MUST update the version control inside the write lock of the region manifest manager.
     pub(crate) version_control: VersionControlRef,
+    /// Snapshot controller for range and series indexes.
+    pub(crate) series_index_version_control: SeriesIndexVersionControl,
+    /// Store containing the region's series indexes.
+    pub(crate) series_index_store: Option<ObjectStore>,
     /// SSTs accessor for this region.
     pub(crate) access_layer: AccessLayerRef,
     /// Context to maintain manifest for this region.
@@ -238,6 +244,11 @@ impl StagingPartitionInfo {
 }
 
 impl MitoRegion {
+    /// Returns the current immutable series-index snapshot.
+    pub(crate) fn series_index_version(&self) -> Arc<SeriesIndexVersion> {
+        self.series_index_version_control.current()
+    }
+
     fn remove_region_metrics(&self) {
         let region_id = self.region_id.as_u64().to_string();
         let labels = &[region_id.as_str()];
@@ -276,6 +287,11 @@ impl MitoRegion {
     pub(crate) fn version(&self) -> VersionRef {
         let version_data = self.version_control.current();
         version_data.version
+    }
+
+    /// Returns whether writes to this region should skip WAL.
+    pub(crate) fn skip_wal(&self) -> bool {
+        self.provider == Provider::Noop || self.version().options.skip_wal
     }
 
     /// Returns last flush timestamp in millis.
@@ -478,6 +494,7 @@ impl MitoRegion {
         let mut manager: RwLockWriteGuard<'_, RegionManifestManager> =
             self.manifest_ctx.manifest_manager.write().await;
         let current_state = self.state();
+        let mut wait_for_checkpoint = false;
 
         let hook_payload: Option<PendingManifestHook> = match state {
             SettableRegionRoleState::Leader => {
@@ -540,10 +557,12 @@ impl MitoRegion {
                         );
                         self.exit_staging()?;
                         self.set_role(RegionRole::Follower);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(_) => {
                         info!("Demoting region {} from leader to follower", self.region_id);
                         self.set_role(RegionRole::Follower);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Follower => {
                         // Already in desired state - no-op
@@ -563,14 +582,17 @@ impl MitoRegion {
                         );
                         self.exit_staging()?;
                         self.set_role(RegionRole::DowngradingLeader);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Writable) => {
                         info!("Starting downgrade for region {}", self.region_id);
                         self.set_role(RegionRole::DowngradingLeader);
+                        wait_for_checkpoint = true;
                     }
                     RegionRoleState::Leader(RegionLeaderState::Downgrading) => {
                         // Already in desired state - no-op
                         info!("Region {} already in downgrading mode", self.region_id);
+                        wait_for_checkpoint = true;
                     }
                     _ => {
                         warn!(
@@ -582,6 +604,13 @@ impl MitoRegion {
                 None
             }
         };
+
+        // The state is changed before waiting, so no new writable-leader work
+        // can race with the barrier. Keep the manager lock while joining to
+        // serialize the barrier with checkpoint scheduling.
+        if wait_for_checkpoint {
+            manager.wait_for_pending_checkpoint().await;
+        }
 
         // Hack(zhongzc): If we have just become leader (writable), persist any backfilled metadata.
         let mut backfill_hook_payload: Option<PendingManifestHook> = None;
@@ -672,6 +701,13 @@ impl MitoRegion {
         let manifest_version = self.stats.manifest_version();
         let file_removed_cnt = self.stats.file_removed_cnt();
 
+        let time_range = match (version.ssts.time_range(), version.memtables.time_range()) {
+            (Some((sst_min, sst_max)), Some((mem_min, mem_max))) => {
+                Some((sst_min.min(mem_min), sst_max.max(mem_max)))
+            }
+            (range, None) | (None, range) => range,
+        };
+
         let topic_latest_entry_id = self.topic_latest_entry_id.load(Ordering::Relaxed);
         let written_bytes = self.region_stats.written_bytes.load(Ordering::Relaxed);
         let query_cpu_time = self.region_stats.query_cpu_time.load(Ordering::Relaxed);
@@ -698,6 +734,8 @@ impl MitoRegion {
             written_bytes,
             query_cpu_time,
             query_scanned_bytes,
+            min_timestamp: time_range.map(|(min, _)| min),
+            max_timestamp: time_range.map(|(_, max)| max),
         }
     }
 
@@ -821,6 +859,7 @@ impl MitoRegion {
                     level: meta.level,
                     file_path: sst_file_path(table_dir, meta.file_id(), path_type),
                     file_size: meta.file_size,
+                    max_row_group_uncompressed_size: meta.max_row_group_uncompressed_size,
                     index_file_path,
                     index_file_size,
                     num_rows: meta.num_rows,
@@ -829,6 +868,7 @@ impl MitoRegion {
                     min_ts: meta.time_range.0,
                     max_ts: meta.time_range.1,
                     sequence: meta.sequence.map(|s| s.get()),
+                    partition_expr: meta.partition_expr.as_ref().map(ToString::to_string),
                     origin_region_id,
                     node_id: None,
                     visible,
@@ -1366,10 +1406,14 @@ impl ManifestContext {
         // Clone before `action_list` is moved into `update` so the hook still
         // sees what was written.
         let action_list_for_hook = self.hook.as_ref().map(|_| action_list.clone());
-        let version = manager
-            .update(action_list, is_staging)
-            .await
-            .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
+        let version = if !is_staging
+            && self.state.load() == RegionRoleState::Leader(RegionLeaderState::Downgrading)
+        {
+            manager.update_normal_without_checkpoint(action_list).await
+        } else {
+            manager.update(action_list, is_staging).await
+        }
+        .inspect_err(|e| error!(e; "Failed to update manifest, region_id: {}", region_id))?;
 
         Ok(PendingManifestHook::new(
             region_id,
@@ -2016,6 +2060,8 @@ mod tests {
         MitoRegion {
             region_id: metadata.region_id,
             version_control,
+            series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer: env.access_layer.clone(),
             manifest_ctx,
             file_purger: crate::test_util::new_noop_file_purger(),
@@ -2475,7 +2521,7 @@ mod tests {
         let temp_dir = create_temp_dir("");
         let path_str = temp_dir.path().display().to_string();
         let fs_builder = Fs::default().root(&path_str);
-        let object_store = ObjectStore::new(fs_builder).unwrap().finish();
+        let object_store = ObjectStore::new(fs_builder).unwrap();
 
         let index_aux_path = temp_dir.path().join("index_aux");
         let puffin_mgr = PuffinManagerFactory::new(&index_aux_path, 4096, None, None)
@@ -2519,6 +2565,8 @@ mod tests {
         let region = MitoRegion {
             region_id: metadata.region_id,
             version_control,
+            series_index_version_control: Default::default(),
+            series_index_store: None,
             access_layer,
             manifest_ctx: manifest_ctx.clone(),
             file_purger: crate::test_util::new_noop_file_purger(),

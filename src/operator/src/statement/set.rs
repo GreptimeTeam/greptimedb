@@ -38,6 +38,35 @@ lazy_static! {
     static ref PG_TIME_INPUT_REGEX: Regex = Regex::new(r"^(\d+)(ms|s|min|h|d)$").unwrap();
 }
 
+/// Sets the session WAL policy for ordinary inserts without changing table options.
+pub fn set_skip_wal(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let [Expr::Value(value)] = exprs.as_slice() else {
+        return NotSupportedSnafu {
+            feat: "SET skip_wal requires exactly one boolean value",
+        }
+        .fail();
+    };
+    let skip_wal = match &value.value {
+        Value::Boolean(value) => *value,
+        Value::SingleQuotedString(value) | Value::DoubleQuotedString(value) => {
+            value.parse::<bool>().map_err(|_| {
+                NotSupportedSnafu {
+                    feat: format!("Invalid skip_wal value {value:?}: expected true or false"),
+                }
+                .build()
+            })?
+        }
+        _ => {
+            return NotSupportedSnafu {
+                feat: "SET skip_wal requires true or false",
+            }
+            .fail();
+        }
+    };
+    ctx.set_skip_wal(skip_wal);
+    Ok(())
+}
+
 pub fn set_read_preference(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let read_preference_expr = exprs.first().context(NotSupportedSnafu {
         feat: "No read preference find in set variable statement",
@@ -381,7 +410,57 @@ fn parse_pg_query_timeout_input(input: &str) -> Result<u64> {
 
 #[cfg(test)]
 mod test {
+    use session::Session;
+    use session::context::{Channel, QueryContext};
+    use sql::ast::{Expr, Value};
+
+    use super::set_skip_wal;
     use crate::statement::set::parse_pg_query_timeout_input;
+
+    #[test]
+    fn test_set_skip_wal() {
+        let ctx = QueryContext::arc();
+        for value in [true, false] {
+            set_skip_wal(vec![Expr::Value(Value::Boolean(value).into())], ctx.clone()).unwrap();
+            assert_eq!(ctx.skip_wal(), value);
+            set_skip_wal(
+                vec![Expr::Value(
+                    Value::SingleQuotedString(value.to_string()).into(),
+                )],
+                ctx.clone(),
+            )
+            .unwrap();
+            assert_eq!(ctx.skip_wal(), value);
+        }
+        ctx.set_skip_wal(true);
+        for values in [
+            vec![],
+            vec![Expr::Value(Value::Number("1".to_string(), false).into())],
+            vec![Expr::Value(
+                Value::SingleQuotedString("invalid".to_string()).into(),
+            )],
+            vec![Expr::Value(Value::Boolean(false).into()); 2],
+        ] {
+            assert!(set_skip_wal(values, ctx.clone()).is_err());
+            assert!(ctx.skip_wal());
+        }
+    }
+
+    #[test]
+    fn test_set_skip_wal_session_isolation() {
+        for channel in [Channel::Mysql, Channel::Postgres] {
+            let session = Session::new(None, channel, Default::default(), 0);
+            let other = Session::new(None, channel, Default::default(), 1);
+            assert!(!session.new_query_context().skip_wal());
+            set_skip_wal(
+                vec![Expr::Value(Value::Boolean(true).into())],
+                session.new_query_context(),
+            )
+            .unwrap();
+            assert!(session.new_query_context().skip_wal());
+            assert!(!other.new_query_context().skip_wal());
+        }
+    }
 
     #[test]
     fn test_parse_pg_query_timeout_input() {

@@ -12,10 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod event;
+mod layer;
+
 use std::sync::Arc;
 
 use common_function::function::FunctionContext;
 use common_function::function_registry::{FUNCTION_REGISTRY, get_admin_function};
+use common_function::state::FunctionState;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_sql::convert::sql_value_to_value;
@@ -28,6 +32,10 @@ use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use datatypes::value::Value;
 use datatypes::vectors::VectorRef;
+pub use layer::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer,
+};
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::{Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Value as SqlValue};
@@ -38,70 +46,163 @@ use crate::statement::StatementExecutor;
 
 const DUMMY_COLUMN: &str = "<dummy>";
 
-impl StatementExecutor {
-    /// Execute the [`Admin`] statement and returns the output.
-    #[tracing::instrument(skip_all)]
-    pub(super) async fn execute_admin_command(
-        &self,
-        stmt: Admin,
-        query_ctx: QueryContextRef,
-    ) -> Result<Output> {
-        let Admin::Func(func) = &stmt;
-        // the function name should be in lower case.
-        let func_name = func.name.to_string().to_lowercase();
-        let factory = get_admin_function(&func_name)
-            .or_else(|| FUNCTION_REGISTRY.get_function(&func_name))
-            .context(error::AdminFunctionNotFoundSnafu {
-                name: func_name.clone(),
-            })?;
+/// A request to execute one ADMIN function statement.
+#[derive(Clone)]
+pub struct AdminFunctionRequest {
+    /// The parsed ADMIN statement to execute.
+    pub statement: Admin,
+    /// The query context of the request.
+    pub query_ctx: QueryContextRef,
+}
 
-        let func_ctx = FunctionContext {
-            query_ctx: query_ctx.clone(),
-            state: self.query_engine.engine_state().function_state(),
-        };
+/// The client output and immediate typed result of one ADMIN function execution.
+pub struct AdminFunctionResponse {
+    /// The output returned to the client.
+    pub output: Output,
+    /// The typed immediate result exposed to outer layers.
+    pub immediate_result: Option<Value>,
+}
 
-        let admin_udf = factory.provide(func_ctx);
-        let admin_async_fn = admin_udf
-            .as_async()
-            .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
+/// Executes an ADMIN function request.
+#[async_trait::async_trait]
+pub trait AdminFunctionService: Send + Sync {
+    /// Executes an ADMIN function request.
+    async fn call(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse>;
+}
 
-        let fn_name = admin_udf.name();
-        let signature = admin_udf.signature();
+/// A shared ADMIN function service.
+pub type AdminFunctionServiceRef = Arc<dyn AdminFunctionService>;
 
-        // Parse function arguments
-        let FunctionArguments::List(args) = &func.args else {
-            return error::BuildAdminFunctionArgsSnafu {
-                msg: format!("unsupported function args {} for {}", func.args, fn_name),
-            }
-            .fail();
-        };
-        let arg_values = args
-            .args
-            .iter()
-            .map(|arg| {
-                let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
-                    return error::BuildAdminFunctionArgsSnafu {
-                        msg: format!("unsupported function arg {arg} for {}", fn_name),
-                    }
-                    .fail();
-                };
-                Ok(&value.value)
-            })
-            .collect::<Result<Vec<_>>>()?;
+#[derive(Clone)]
+struct CoreAdminFunctionService {
+    query_engine: query::QueryEngineRef,
+}
 
-        let args = args_to_vector(&signature.type_signature, &arg_values, &query_ctx)?;
-        let arg_types = args
-            .iter()
-            .map(|arg| arg.data_type().as_arrow_type())
-            .collect::<Vec<_>>();
-        let ret_type = admin_udf.return_type(&arg_types).map_err(|e| {
-            error::Error::BuildAdminFunctionArgs {
+/// Parts of an `ADMIN` call needed both for execution and schema derivation.
+struct ResolvedAdminFunction {
+    admin_udf: datafusion_expr::ScalarUDF,
+    fn_name: String,
+    args: Vec<VectorRef>,
+    arg_types: Vec<ArrowDataType>,
+    ret_type: ArrowDataType,
+}
+
+/// Resolves the function, parses its literal arguments and derives its
+/// return type, without executing it.
+fn resolve_admin_function(
+    stmt: &Admin,
+    query_ctx: &QueryContextRef,
+    state: Arc<FunctionState>,
+) -> Result<ResolvedAdminFunction> {
+    let Admin::Func(func) = stmt;
+    // the function name should be in lower case.
+    let func_name = func.name.to_string().to_lowercase();
+    let factory = get_admin_function(&func_name)
+        .or_else(|| FUNCTION_REGISTRY.get_function(&func_name))
+        .context(error::AdminFunctionNotFoundSnafu {
+            name: func_name.clone(),
+        })?;
+
+    let func_ctx = FunctionContext {
+        query_ctx: query_ctx.clone(),
+        state,
+    };
+
+    let admin_udf = factory.provide(func_ctx);
+    admin_udf
+        .as_async()
+        .context(error::AdminFunctionNotFoundSnafu { name: func_name })?;
+
+    let fn_name = admin_udf.name().to_string();
+    let signature = admin_udf.signature();
+
+    // Parse function arguments
+    let FunctionArguments::List(args) = &func.args else {
+        return error::BuildAdminFunctionArgsSnafu {
+            msg: format!("unsupported function args {} for {}", func.args, fn_name),
+        }
+        .fail();
+    };
+    let arg_values = args
+        .args
+        .iter()
+        .map(|arg| {
+            let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = arg else {
+                return error::BuildAdminFunctionArgsSnafu {
+                    msg: format!("unsupported function arg {arg} for {}", fn_name),
+                }
+                .fail();
+            };
+            Ok(&value.value)
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let args = args_to_vector(&signature.type_signature, &arg_values, query_ctx)?;
+    let arg_types = args
+        .iter()
+        .map(|arg| arg.data_type().as_arrow_type())
+        .collect::<Vec<_>>();
+    let ret_type =
+        admin_udf
+            .return_type(&arg_types)
+            .map_err(|e| error::Error::BuildAdminFunctionArgs {
                 msg: format!(
                     "Failed to get return type of admin function {}: {}",
                     fn_name, e
                 ),
-            }
-        })?;
+            })?;
+
+    Ok(ResolvedAdminFunction {
+        admin_udf,
+        fn_name,
+        args,
+        arg_types,
+        ret_type,
+    })
+}
+
+/// Output schema of an `ADMIN` statement, mirroring what
+/// [`CoreAdminFunctionService::execute`] produces. `None` if the function
+/// or arguments are unresolvable; execution will then surface the error.
+pub fn admin_output_schema(stmt: &Admin, query_ctx: &QueryContextRef) -> Option<Schema> {
+    let resolved =
+        resolve_admin_function(stmt, query_ctx, Arc::new(FunctionState::default())).ok()?;
+    Some(Schema::new(vec![ColumnSchema::new(
+        // Use statement as the result column name
+        stmt.to_string(),
+        ConcreteDataType::from_arrow_type(&resolved.ret_type),
+        false,
+    )]))
+}
+
+impl CoreAdminFunctionService {
+    fn new(query_engine: query::QueryEngineRef) -> Self {
+        Self { query_engine }
+    }
+
+    async fn execute(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse> {
+        let AdminFunctionRequest {
+            statement: stmt,
+            query_ctx,
+        } = request;
+
+        let resolved = resolve_admin_function(
+            &stmt,
+            &query_ctx,
+            self.query_engine.engine_state().function_state(),
+        )?;
+        let ResolvedAdminFunction {
+            admin_udf,
+            fn_name,
+            args,
+            arg_types,
+            ret_type,
+        } = resolved;
+        let admin_async_fn = admin_udf
+            .as_async()
+            .context(error::AdminFunctionNotFoundSnafu {
+                name: fn_name.clone(),
+            })?;
 
         // Convert arguments to DataFusion ColumnarValue format
         let columnar_args: Vec<datafusion_expr::ColumnarValue> = args
@@ -132,15 +233,14 @@ impl StatementExecutor {
         let result_columnar = admin_async_fn
             .invoke_async_with_args(func_args)
             .await
-            .with_context(|_| ExecuteAdminFunctionSnafu {
-                msg: fn_name.to_string(),
-            })?;
+            .with_context(|_| ExecuteAdminFunctionSnafu { msg: fn_name })?;
 
         // Convert result back to VectorRef
         let result_columnar: common_query::prelude::ColumnarValue =
             (&result_columnar).try_into().context(CastSnafu)?;
 
         let result_vector: VectorRef = result_columnar.try_into_vector(1).context(CastSnafu)?;
+        let immediate_result = immediate_result(&result_vector);
 
         let column_schemas = vec![ColumnSchema::new(
             // Use statement as the result column name
@@ -154,7 +254,46 @@ impl StatementExecutor {
         let batches =
             RecordBatches::try_new(schema, vec![batch]).context(error::BuildRecordBatchSnafu)?;
 
-        Ok(Output::new_with_record_batches(batches))
+        Ok(AdminFunctionResponse {
+            output: Output::new_with_record_batches(batches),
+            immediate_result,
+        })
+    }
+}
+
+fn immediate_result(result_vector: &VectorRef) -> Option<Value> {
+    (!result_vector.is_empty()).then(|| result_vector.get(0))
+}
+
+#[async_trait::async_trait]
+impl AdminFunctionService for CoreAdminFunctionService {
+    async fn call(&self, request: AdminFunctionRequest) -> Result<AdminFunctionResponse> {
+        self.execute(request).await
+    }
+}
+
+/// Creates the core ADMIN function service.
+pub(crate) fn new_admin_function_service(
+    query_engine: query::QueryEngineRef,
+) -> AdminFunctionServiceRef {
+    Arc::new(CoreAdminFunctionService::new(query_engine))
+}
+
+impl StatementExecutor {
+    /// Executes the [`Admin`] statement and returns the output.
+    #[tracing::instrument(skip_all)]
+    pub(crate) async fn execute_admin_command(
+        &self,
+        stmt: Admin,
+        query_ctx: QueryContextRef,
+    ) -> Result<Output> {
+        self.admin_function_service
+            .call(AdminFunctionRequest {
+                statement: stmt,
+                query_ctx,
+            })
+            .await
+            .map(|response| response.output)
     }
 }
 
@@ -304,5 +443,21 @@ fn try_get_data_type_for_sql_value(value: &SqlValue) -> Result<ArrowDataType> {
             msg: format!("unsupported sql value: {value}"),
         }
         .fail(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use datatypes::vectors::{Int32Vector, VectorRef};
+
+    use crate::statement::admin::immediate_result;
+
+    #[test]
+    fn empty_admin_function_result_has_no_immediate_value() {
+        let result_vector: VectorRef = Arc::new(Int32Vector::from(vec![]));
+
+        assert_eq!(immediate_result(&result_vector), None);
     }
 }

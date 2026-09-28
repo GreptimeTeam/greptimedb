@@ -15,58 +15,50 @@
 //! Implementation of [`changes`](https://prometheus.io/docs/prometheus/latest/querying/functions/#changes) in PromQL. Refer to the [original
 //! implementation](https://github.com/prometheus/prometheus/blob/main/promql/functions.go#L1023-L1040).
 
-use std::sync::Arc;
+use datafusion::logical_expr::ScalarUDF;
 
-use common_macro::range_fn;
-use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
-use datafusion::common::DataFusionError;
-use datafusion::logical_expr::{ScalarUDF, Volatility};
-use datafusion::physical_plan::ColumnarValue;
-use datatypes::arrow::array::Array;
-use datatypes::arrow::datatypes::DataType;
-
-use crate::functions::extract_array;
-use crate::range_array::RangeArray;
+use crate::functions::edge_count::{self, EdgeKind};
 
 /// used to count the number of value changes that occur within a specific time range
-#[range_fn(name = Changes, ret = Float64Array, display_name = prom_changes)]
-pub fn changes(_: &TimestampMillisecondArray, values: &Float64Array) -> Option<f64> {
-    if values.is_empty() {
-        None
-    } else {
-        let (first, rest) = values.values().split_first().unwrap();
-        let mut num_changes = 0;
-        let mut prev_element = first;
-        for cur_element in rest {
-            if cur_element != prev_element && !(cur_element.is_nan() && prev_element.is_nan()) {
-                num_changes += 1;
-            }
-            prev_element = cur_element;
-        }
-        Some(num_changes as f64)
+#[derive(Debug)]
+pub struct Changes {}
+
+impl Changes {
+    pub const fn name() -> &'static str {
+        "prom_changes"
+    }
+
+    pub fn scalar_udf() -> ScalarUDF {
+        edge_count::scalar_udf(Self::name(), EdgeKind::Changes)
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
+    use datafusion::arrow::array::{Float64Array, TimestampMillisecondArray};
+    use datafusion::arrow::buffer::NullBuffer;
+    use datatypes::arrow::array::Array;
+
     use super::*;
-    use crate::functions::test_util::simple_range_udf_runner;
+    use crate::functions::test_util::{
+        self, STALE_NAN, assert_execution_error, build_test_range_arrays, invoke_range_udf,
+        simple_range_udf_runner,
+    };
+    use crate::range_array::RangeArray;
 
-    // build timestamp range and value range arrays for test
-    fn build_test_range_arrays(
-        timestamps: Vec<i64>,
-        values: Vec<f64>,
-        ranges: Vec<(u32, u32)>,
-    ) -> (RangeArray, RangeArray) {
-        let ts_array = Arc::new(TimestampMillisecondArray::from_iter(
-            timestamps.into_iter().map(Some),
-        ));
-        let values_array = Arc::new(Float64Array::from_iter(values));
-
-        let ts_range_array = RangeArray::from_ranges(ts_array, ranges.clone()).unwrap();
-        let value_range_array = RangeArray::from_ranges(values_array, ranges).unwrap();
-
-        (ts_range_array, value_range_array)
+    fn changes_oracle(values: &[f64]) -> Option<f64> {
+        let (first, rest) = values.split_first()?;
+        let mut changes = 0;
+        let mut previous = first;
+        for current in rest {
+            if current != previous && !(current.is_nan() && previous.is_nan()) {
+                changes += 1;
+            }
+            previous = current;
+        }
+        Some(changes as f64)
     }
 
     #[test]
@@ -115,6 +107,155 @@ mod test {
             value_array_3,
             vec![],
             vec![Some(0.0), Some(0.0), Some(1.0), Some(1.0), None],
+        );
+    }
+
+    #[test]
+    fn changes_range_array_oracle_edge_cases() {
+        let values = vec![
+            Some(-0.0),
+            Some(0.0),
+            Some(f64::INFINITY),
+            Some(f64::INFINITY),
+            Some(f64::NEG_INFINITY),
+            Some(f64::NAN),
+            Some(STALE_NAN),
+            Some(f64::NAN),
+            Some(3.0),
+            Some(1.0),
+            Some(2.0),
+            Some(3.0),
+            Some(1.0),
+            Some(3.0),
+            Some(0.0),
+        ];
+        let raw_values = values.iter().map(|value| value.unwrap()).collect();
+        let expected = test_util::run_oracle_ranges(
+            values,
+            raw_values,
+            vec![(5, 0), (2, 1), (7, 5), (0, 5), (11, 5), (16, 4)],
+            vec![(0, 0), (0, 1), (4, 5), (0, 5), (8, 5), (1, 4)],
+            changes_oracle,
+            Changes::scalar_udf(),
+        );
+        assert_eq!(
+            expected,
+            vec![None, Some(0.0), Some(2.0), Some(2.0), Some(4.0), Some(2.0)]
+        );
+
+        let expected = test_util::run_oracle_ranges(
+            vec![Some(2.0), None, Some(2.0)],
+            vec![2.0, 0.0, 2.0],
+            vec![(9, 3), (1, 1)],
+            vec![(0, 3), (1, 1)],
+            changes_oracle,
+            Changes::scalar_udf(),
+        );
+        assert_eq!(expected, vec![Some(0.0), None]);
+    }
+
+    #[test]
+    fn changes_range_array_seeded_differential() {
+        test_util::run_seeded_differential(changes_oracle, Changes::scalar_udf(), false);
+    }
+
+    #[test]
+    fn changes_range_array_seeded_differential_with_nulls() {
+        test_util::run_seeded_differential(changes_oracle, Changes::scalar_udf(), true);
+    }
+
+    #[test]
+    fn changes_range_array_mismatch_errors() {
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter([
+            Some(0),
+            Some(1),
+            Some(2),
+        ]));
+        let values = Arc::new(Float64Array::from_iter([1.0, 2.0, 3.0]));
+        let error = invoke_range_udf(
+            Changes::scalar_udf(),
+            RangeArray::from_ranges(timestamps.clone(), [(0, 1), (1, 1)]).unwrap(),
+            RangeArray::from_ranges(values.clone(), [(0, 1)]).unwrap(),
+        )
+        .unwrap_err();
+        assert_execution_error(
+            error,
+            "RangeArray have different lengths in PromQL function prom_changes: array1=2, array2=1",
+        );
+
+        let error = invoke_range_udf(
+            Changes::scalar_udf(),
+            RangeArray::from_ranges(timestamps, [(0, 1), (1, 2)]).unwrap(),
+            RangeArray::from_ranges(values, [(0, 1), (1, 1)]).unwrap(),
+        )
+        .unwrap_err();
+        assert_execution_error(
+            error,
+            "RangeArray's element 1 have different lengths in PromQL function prom_changes: array1=2, array2=1",
+        );
+    }
+
+    #[test]
+    fn changes_range_array_boundaries_and_raw_nulls() {
+        // The 0.0 -> 1.0 edge enters the range; both identical windows contain no changes.
+        let (timestamps, values) = build_test_range_arrays(
+            vec![0, 1, 2, 3],
+            vec![0.0, 1.0, 1.0, 1.0],
+            vec![(1, 3), (1, 3)],
+        );
+        simple_range_udf_runner(
+            Changes::scalar_udf(),
+            timestamps,
+            values,
+            vec![],
+            vec![Some(0.0), Some(0.0)],
+        );
+
+        let (timestamps, values) = build_test_range_arrays(
+            vec![0, 1, 2, 3],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![(0, 0), (2, 0), (4, 0)],
+        );
+        simple_range_udf_runner(
+            Changes::scalar_udf(),
+            timestamps,
+            values,
+            vec![],
+            vec![None, None, None],
+        );
+
+        let (timestamps, values) = build_test_range_arrays(
+            vec![0, 1, 2, 3],
+            vec![1.0, 2.0, 3.0, 4.0],
+            vec![(0, 1), (2, 1), (3, 1)],
+        );
+        simple_range_udf_runner(
+            Changes::scalar_udf(),
+            timestamps,
+            values,
+            vec![],
+            vec![Some(0.0), Some(0.0), Some(0.0)],
+        );
+
+        // The raw payload under the null slot would look like two changes; the sample sequence
+        // is 10 -> 10, which is none. The last window holds no sample at all.
+        let values = Arc::new(Float64Array::new(
+            vec![10.0, 7.0, 10.0].into(),
+            Some(NullBuffer::from(vec![true, false, true])),
+        ));
+        assert!(!values.is_valid(1));
+        assert_eq!(values.value(1), 7.0);
+        let timestamps = Arc::new(TimestampMillisecondArray::from_iter([
+            Some(0),
+            Some(1),
+            Some(2),
+        ]));
+        simple_range_udf_runner(
+            Changes::scalar_udf(),
+            RangeArray::from_ranges(timestamps, [(0, 3), (1, 1)]).unwrap(),
+            RangeArray::from_ranges(values, [(0, 3), (1, 1)]).unwrap(),
+            vec![],
+            vec![Some(0.0), None],
         );
     }
 }

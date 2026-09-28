@@ -2,7 +2,9 @@ name: Release
 
 # There are two kinds of formal release:
 # 1. The tag('v*.*.*') push release: the release workflow will be triggered by the tag push event.
-# 2. The scheduled release(the version will be '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD'): the release workflow will be triggered by the schedule event.
+# 2. The scheduled release(the version will be '<base-version>-nightly-YYYYMMDD', any pre-release
+#    extension in the next release version like '-alpha.1' is stripped, so 'nightly' is the extension):
+#    the release workflow will be triggered by the schedule event.
 # A failed tag push release can be manually dispatched on the same tag to recover it without changing the formal release version.
 on:
   push:
@@ -52,7 +54,7 @@ on:
         default: true
       build_linux_artifacts:
         type: boolean
-        description: Build linux artifacts (both amd64 and arm64)
+        description: Build linux artifacts (amd64, arm64, and riscv64)
         required: false
         default: false
       build_macos_artifacts:
@@ -94,7 +96,8 @@ env:
   # Controls whether to run tests, include unit-test, integration-test and sqlness.
   DISABLE_RUN_TESTS: ${{ inputs.skip_test || vars.DEFAULT_SKIP_TEST }}
 
-  # The scheduled version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-YYYYMMDD', like v0.2.0-nightly-20230313;
+  # The scheduled version is '<base-version>-nightly-YYYYMMDD', like v0.2.0-nightly-20230313;
+  # the pre-release extension of the next release version is stripped, e.g. v0.2.0-alpha.1 -> v0.2.0-nightly-20230313.
   NIGHTLY_RELEASE_PREFIX: nightly
 
 jobs:
@@ -134,7 +137,7 @@ jobs:
 
       # The create-version will create a global variable named 'version' in the global workflows.
       # - If it's a tag push release or manual dispatch on a tag with REUSE_EXISTING_RELEASE_TAG=true, the version is the tag name(${{ github.ref_name }});
-      # - If it's a scheduled release, the version is '${{ env.NEXT_RELEASE_VERSION }}-nightly-$buildTime', like v0.2.0-nightly-20230313;
+      # - If it's a scheduled release, the version is '<base-version>-nightly-$buildTime', like v0.2.0-nightly-20230313 (pre-release extensions like '-alpha.1' are stripped);
       # - If it's a manual non-tag release, the version is '${{ env.NEXT_RELEASE_VERSION }}-<short-git-sha>-YYYYMMDDSS', like v0.2.0-e5b243c-2023071245;
       - name: Create version
         id: create-version
@@ -201,6 +204,10 @@ jobs:
           disable-run-tests: ${{ env.DISABLE_RUN_TESTS }}
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
@@ -224,6 +231,56 @@ jobs:
           image-registry: ${{ vars.ECR_IMAGE_REGISTRY }}
           image-namespace: ${{ vars.ECR_IMAGE_NAMESPACE }}
           large-page-size: true
+          aws-ci-test-bucket: ${{ vars.AWS_CI_TEST_BUCKET }}
+          aws-region: ${{ vars.AWS_CI_TEST_BUCKET_REGION }}
+          aws-access-key-id: ${{ secrets.AWS_CI_TEST_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_CI_TEST_SECRET_ACCESS_KEY }}
+
+  build-linux-riscv64-artifacts:
+    name: Build linux-riscv64 artifacts
+    if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    needs: [
+      allocate-runners,
+    ]
+    runs-on: ${{ needs.allocate-runners.outputs.linux-amd64-runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare riscv64 dev-builder image
+        shell: bash
+        env:
+          IMAGE_REGISTRY: ${{ vars.ECR_IMAGE_REGISTRY }}
+          IMAGE_NAMESPACE: ${{ vars.ECR_IMAGE_NAMESPACE }}
+        run: |
+          builder_tag=$(grep '^DEV_BUILDER_IMAGE_TAG ?=' Makefile | awk '{print $3}')
+          builder_image="${IMAGE_REGISTRY}/${IMAGE_NAMESPACE}/dev-builder-riscv64:${builder_tag}"
+          if ! docker pull "${builder_image}"; then
+            make dev-builder-riscv64 \
+              IMAGE_REGISTRY="${IMAGE_REGISTRY}" \
+              IMAGE_NAMESPACE="${IMAGE_NAMESPACE}"
+          fi
+
+      # Cross-compile greptime for riscv64gc-unknown-linux-gnu on the amd64 runner
+      # with the riscv64 cross dev-builder image. Integration tests are skipped
+      # because the cross-compiled binary cannot run on the amd64 host.
+      - name: Build greptime riscv64 binary
+        shell: bash
+        run: |
+          make build-riscv64-bin \
+            CARGO_PROFILE=${{ env.CARGO_PROFILE }} \
+            FEATURES=servers/dashboard \
+            IMAGE_REGISTRY=${{ vars.ECR_IMAGE_REGISTRY }} \
+            IMAGE_NAMESPACE=${{ vars.ECR_IMAGE_NAMESPACE }}
+
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-artifacts
+        with:
+          artifacts-dir: greptime-linux-riscv64-${{ needs.allocate-runners.outputs.version }}
+          target-files: ./target/riscv64gc-unknown-linux-gnu/${{ env.CARGO_PROFILE }}/greptime
+          version: ${{ needs.allocate-runners.outputs.version }}
 
   build-macos-artifacts:
     name: Build macOS artifacts
@@ -464,7 +521,7 @@ jobs:
       base_ref: ${{ needs.prepare-release-validation.outputs.previous-release-tag }}
       candidate_ref: ${{ needs.prepare-release-validation.outputs.candidate-ref }}
       cargo_profile: nightly
-      runner: perf-regression-8-cores
+      runner: aliyun-ecs
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
@@ -520,6 +577,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
       build-macos-artifacts,
+      build-linux-riscv64-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
     ]
@@ -568,6 +626,7 @@ jobs:
        (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped')) &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
+      needs.build-linux-riscv64-artifacts.result == 'success' &&
       (needs.build-macos-artifacts.result == 'success' || needs.build-macos-artifacts.result == 'skipped') &&
       (needs.build-windows-artifacts.result == 'success' || needs.build-windows-artifacts.result == 'skipped') &&
       (needs.release-images-to-dockerhub.result == 'success' ||
@@ -581,6 +640,7 @@ jobs:
       build-linux-amd64-artifacts,
       build-linux-arm64-artifacts,
       build-macos-artifacts,
+      build-linux-riscv64-artifacts,
       build-windows-artifacts,
       release-images-to-dockerhub,
       prepare-release-validation,
@@ -599,6 +659,15 @@ jobs:
         with:
           version: ${{ needs.allocate-runners.outputs.version }}
 
+  update-compat-versions:
+    name: Update compatibility versions
+    needs: [allocate-runners, publish-github-release]
+    if: ${{ needs.publish-github-release.result == 'success' }}
+    uses: ./.github/workflows/update-compat-versions.yml
+    with:
+      release_tag: ${{ needs.allocate-runners.outputs.version }}
+    secrets: inherit
+
   ### Stop runners ###
   # It's very necessary to split the job of releasing runners into 'stop-linux-amd64-runner' and 'stop-linux-arm64-runner'.
   # Because we can terminate the specified EC2 instance immediately after the job is finished without unnecessary waiting.
@@ -610,6 +679,7 @@ jobs:
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
+      build-linux-riscv64-artifacts,
     ]
     steps:
       - name: Checkout
@@ -656,7 +726,7 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && needs.allocate-runners.outputs.is-current-version-stable == 'true') }}
+    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
@@ -682,7 +752,7 @@ jobs:
 
   bump-helm-charts-version:
     name: Bump helm charts version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:
@@ -703,7 +773,7 @@ jobs:
 
   bump-homebrew-greptime-version:
     name: Bump homebrew greptime version
-    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true' }}
+    if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'nightly') && github.event_name != 'schedule' && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     permissions:

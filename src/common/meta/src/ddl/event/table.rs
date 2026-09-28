@@ -40,7 +40,9 @@ pub(crate) enum TableDdlEventType {
     AlterTable,
     AlterLogicalTables,
     DropTable,
+    #[cfg(feature = "enterprise")]
     UndropTable,
+    #[cfg(feature = "enterprise")]
     PurgeDroppedTable,
     TruncateTable,
 }
@@ -54,7 +56,9 @@ impl TableDdlEventType {
             Self::AlterTable => "alter_table",
             Self::AlterLogicalTables => "alter_logical_tables",
             Self::DropTable => "drop_table",
+            #[cfg(feature = "enterprise")]
             Self::UndropTable => "undrop_table",
+            #[cfg(feature = "enterprise")]
             Self::PurgeDroppedTable => "purge_dropped_table",
             Self::TruncateTable => "truncate_table",
         }
@@ -96,6 +100,7 @@ impl TableDdlLocator {
     }
 
     /// Creates a locator containing only a table ID.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn from_table_id(table_id: TableId) -> Self {
         Self {
             table_id: Some(table_id),
@@ -124,7 +129,9 @@ enum TableDdlPayload {
     AlterTable(AlterTablePayload),
     AlterLogicalTables(AlterLogicalTablesPayload),
     DropTable(DropTablePayload),
+    #[cfg(feature = "enterprise")]
     UndropTable(UndropTablePayload),
+    #[cfg(feature = "enterprise")]
     PurgeDroppedTable(PurgeDroppedTablePayload),
     TruncateTable(TruncateTablePayload),
 }
@@ -161,11 +168,13 @@ struct DropTablePayload {
     drop_if_exists: bool,
 }
 
+#[cfg(feature = "enterprise")]
 #[derive(Debug, Serialize)]
 struct UndropTablePayload {
     version: u8,
 }
 
+#[cfg(feature = "enterprise")]
 #[derive(Debug, Serialize)]
 struct PurgeDroppedTablePayload {
     version: u8,
@@ -184,6 +193,7 @@ pub(crate) fn alter_table_kind_name(kind: &AlterTableKind) -> Option<&'static st
         AlterTableKind::DropColumns(_) => Some("drop_columns"),
         AlterTableKind::RenameTable(_) => Some("rename_table"),
         AlterTableKind::ModifyColumnTypes(_) => Some("modify_column_types"),
+        AlterTableKind::SetJsonSettings(_) => Some("set_json_settings"),
         AlterTableKind::SetTableOptions(_) => Some("set_table_options"),
         AlterTableKind::UnsetTableOptions(_) => Some("unset_table_options"),
         AlterTableKind::SetIndex(_) => Some("set_index"),
@@ -288,6 +298,7 @@ impl TableDdlEvent {
     }
 
     /// Builds the bounded event emitted when restoring a dropped table is submitted.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn undrop_table_submitted(locator: TableDdlLocator) -> Self {
         Self::submitted(
             TableDdlEventType::UndropTable,
@@ -299,6 +310,7 @@ impl TableDdlEvent {
     }
 
     /// Builds the bounded event emitted when purging a dropped table is submitted.
+    #[cfg(feature = "enterprise")]
     pub(crate) fn purge_dropped_table_submitted(locator: TableDdlLocator) -> Self {
         Self::submitted(
             TableDdlEventType::PurgeDroppedTable,
@@ -324,33 +336,31 @@ impl TableDdlEvent {
         )
     }
 
-    /// Builds a lightweight lifecycle event with null domain columns and payload.
-    pub(crate) fn lifecycle(event_type: TableDdlEventType) -> Self {
+    /// Builds a lifecycle event with stable object locators and no intent payload.
+    pub(crate) fn lifecycle(
+        event_type: TableDdlEventType,
+        locators: impl IntoIterator<Item = TableDdlLocator>,
+    ) -> Self {
         Self {
             event_type,
-            locators: vec![TableDdlLocator::default()],
+            locators: locators.into_iter().collect(),
             payload: None,
         }
     }
 
-    /// Builds a Create Table success event containing only the allocated table ID.
-    pub(crate) fn create_table_succeeded(table_id: TableId) -> Self {
-        Self {
-            event_type: TableDdlEventType::CreateTable,
-            locators: vec![TableDdlLocator::from_table_id(table_id)],
-            payload: None,
-        }
+    /// Builds a Create Table success event containing the submitted locator and allocated ID.
+    pub(crate) fn create_table_succeeded(locator: TableDdlLocator, table_id: TableId) -> Self {
+        Self::lifecycle(
+            TableDdlEventType::CreateTable,
+            [locator.with_table_id(table_id)],
+        )
     }
 
     /// Builds Create Logical Tables success rows from their allocated locators.
     pub(crate) fn create_logical_tables_succeeded(
         locators: impl IntoIterator<Item = TableDdlLocator>,
     ) -> Self {
-        Self {
-            event_type: TableDdlEventType::CreateLogicalTables,
-            locators: locators.into_iter().collect(),
-            payload: None,
-        }
+        Self::lifecycle(TableDdlEventType::CreateLogicalTables, locators)
     }
 
     fn submitted(

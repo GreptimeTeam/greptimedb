@@ -65,7 +65,7 @@ use datatypes::vectors::{
 };
 use futures::TryStreamExt;
 use futures::stream::BoxStream;
-use mito_codec::row_converter::{CompositeValues, PrimaryKeyCodec};
+use mito_codec::row_converter::{CompositeValues, DensePrimaryKeyCodec, PrimaryKeyCodec};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::storage::{ColumnId, SequenceNumber, SequenceRange};
 
@@ -119,6 +119,8 @@ pub struct Batch {
     primary_key: Vec<u8>,
     /// Possibly decoded `primary_key` values. Some places would decode it in advance.
     pk_values: Option<CompositeValues>,
+    /// Lazily decoded Dense columns, shared by consumers such as index creators.
+    dense_pk_cache: Option<Box<DensePkCache>>,
     /// Timestamps of rows, should be sorted and not null.
     timestamps: VectorRef,
     /// Sequences of rows
@@ -133,6 +135,13 @@ pub struct Batch {
     fields: Vec<BatchColumn>,
     /// Cache for field index lookup.
     fields_idx: Option<HashMap<ColumnId, usize>>,
+}
+
+/// Only used when no fully decoded primary key was supplied by the reader.
+#[derive(Debug, PartialEq, Clone)]
+struct DensePkCache {
+    offsets: Vec<usize>,
+    values: Vec<Option<Value>>,
 }
 
 impl Batch {
@@ -173,12 +182,14 @@ impl Batch {
     /// Sets possibly decoded primary-key values.
     pub fn set_pk_values(&mut self, pk_values: CompositeValues) {
         self.pk_values = Some(pk_values);
+        self.dense_pk_cache = None;
     }
 
     /// Removes possibly decoded primary-key values. For testing only.
     #[cfg(any(test, feature = "test"))]
     pub fn remove_pk_values(&mut self) {
         self.pk_values = None;
+        self.dense_pk_cache = None;
     }
 
     /// Returns fields in the batch.
@@ -214,6 +225,7 @@ impl Batch {
         Self {
             primary_key: vec![],
             pk_values: None,
+            dense_pk_cache: None,
             timestamps: Arc::new(TimestampMillisecondVectorBuilder::with_capacity(0).finish()),
             sequences: Arc::new(UInt64VectorBuilder::with_capacity(0).finish()),
             op_types: Arc::new(UInt8VectorBuilder::with_capacity(0).finish()),
@@ -269,6 +281,7 @@ impl Batch {
     /// Be sure to update that field as well.
     pub fn set_primary_key(&mut self, primary_key: Vec<u8>) {
         self.primary_key = primary_key;
+        self.dense_pk_cache = None;
     }
 
     /// Slice the batch, returning a new batch.
@@ -290,6 +303,7 @@ impl Batch {
             // this becomes a bottleneck.
             primary_key: self.primary_key.clone(),
             pk_values: self.pk_values.clone(),
+            dense_pk_cache: self.dense_pk_cache.clone(),
             timestamps: self.timestamps.slice(offset, length),
             sequences: Arc::new(self.sequences.get_slice(offset, length)),
             op_types: Arc::new(self.op_types.get_slice(offset, length)),
@@ -772,9 +786,26 @@ impl Batch {
         ))
     }
 
+    /// Prepares a shared full-key cache when all Dense PK columns are needed.
+    /// Explicitly supplied decoded/defaulted values take precedence.
+    pub(crate) fn ensure_dense_pk_decoded(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
+        if self.pk_values.is_none() {
+            // A fallible iterator has no nonzero lower size hint. Reserve the
+            // known field count instead of growing its collected Vec per key.
+            let mut values = Vec::with_capacity(codec.num_fields());
+            for value in codec.decode_dense_iter(&self.primary_key) {
+                values.push(value.context(DecodeSnafu)?);
+            }
+            self.set_pk_values(CompositeValues::Dense(values));
+        }
+        Ok(())
+    }
+
     /// Returns the value of the column in the primary key.
     ///
-    /// Lazily decodes the primary key and caches the result.
+    /// Reuses predecoded values when available. Otherwise Dense keys decode only
+    /// the requested column, sharing offsets and values across callers; Sparse
+    /// keys cache the full decode.
     pub fn pk_col_value(
         &mut self,
         codec: &dyn PrimaryKeyCodec,
@@ -782,6 +813,24 @@ impl Batch {
         column_id: ColumnId,
     ) -> Result<Option<&Value>> {
         if self.pk_values.is_none() {
+            if let Some(codec) = codec.as_dense() {
+                if col_idx_in_pk >= codec.num_fields() {
+                    return Ok(None);
+                }
+                let cache = self.dense_pk_cache.get_or_insert_with(|| {
+                    Box::new(DensePkCache {
+                        offsets: Vec::new(),
+                        values: vec![None; codec.num_fields()],
+                    })
+                });
+                if cache.values[col_idx_in_pk].is_none() {
+                    let value = codec
+                        .decode_value_at(&self.primary_key, col_idx_in_pk, &mut cache.offsets)
+                        .context(DecodeSnafu)?;
+                    cache.values[col_idx_in_pk] = Some(value);
+                }
+                return Ok(cache.values[col_idx_in_pk].as_ref());
+            }
             self.pk_values = Some(codec.decode(&self.primary_key).context(DecodeSnafu)?);
         }
 
@@ -1098,6 +1147,7 @@ impl BatchBuilder {
         Ok(Batch {
             primary_key: self.primary_key,
             pk_values: None,
+            dense_pk_cache: None,
             timestamps,
             sequences,
             op_types,
@@ -1253,6 +1303,79 @@ mod tests {
     use super::*;
     use crate::error::Error;
     use crate::test_util::new_batch_builder;
+
+    #[test]
+    fn dense_pk_columns_are_lazy_and_reset_with_the_key() {
+        use mito_codec::row_converter::{DensePrimaryKeyCodec, PrimaryKeyCodecExt, SortField};
+
+        let codec = DensePrimaryKeyCodec::with_fields(vec![
+            (7, SortField::new(ConcreteDataType::string_datatype())),
+            (3, SortField::new(ConcreteDataType::int64_datatype())),
+            (9, SortField::new(ConcreteDataType::string_datatype())),
+        ]);
+        let values = [
+            Value::from("中文\0abcdefgh"),
+            Value::Int64(-42),
+            Value::Null,
+        ];
+        let key = codec
+            .encode(values.iter().map(Value::as_value_ref))
+            .unwrap();
+        let mut batch = new_batch_without_fields(&[1, 2], &[1, 1], &[OpType::Put, OpType::Put]);
+        batch.set_primary_key(key);
+        for pos in [2, 0, 1, 2] {
+            assert_eq!(
+                batch.pk_col_value(&codec, pos, [7, 3, 9][pos]).unwrap(),
+                Some(&values[pos])
+            );
+        }
+        assert!(batch.pk_col_value(&codec, 3, 99).unwrap().is_none());
+        let mut sliced = batch.slice(1, 1);
+        assert_eq!(sliced.pk_col_value(&codec, 0, 7).unwrap(), Some(&values[0]));
+
+        // A corrupt unrequested suffix must not force whole-key decoding.
+        batch.set_primary_key(vec![0, 1]);
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::Null)
+        );
+        assert!(batch.pk_col_value(&codec, 1, 3).is_err());
+        batch.set_primary_key(
+            codec
+                .encode(
+                    [
+                        ValueRef::String(""),
+                        ValueRef::Int64(8),
+                        ValueRef::String("new"),
+                    ]
+                    .into_iter(),
+                )
+                .unwrap(),
+        );
+        assert_eq!(
+            batch.pk_col_value(&codec, 2, 9).unwrap(),
+            Some(&Value::from("new"))
+        );
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::from(""))
+        );
+
+        // Schema compatibility may supply already decoded/defaulted values.
+        batch.set_pk_values(CompositeValues::Dense(vec![(7, Value::from("default"))]));
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
+        assert_eq!(
+            batch.pk_col_value(&codec, 0, 7).unwrap(),
+            Some(&Value::from("default"))
+        );
+        assert!(batch.pk_col_value(&codec, 1, 3).unwrap().is_none());
+        batch.remove_pk_values();
+        batch.ensure_dense_pk_decoded(&codec).unwrap();
+        assert_eq!(
+            batch.pk_col_value(&codec, 1, 3).unwrap(),
+            Some(&Value::Int64(8))
+        );
+    }
 
     fn new_batch(
         timestamps: &[i64],

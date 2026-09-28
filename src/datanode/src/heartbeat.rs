@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use api::v1::meta::heartbeat_request::NodeWorkloads;
+use api::v1::meta::mailbox_message::Payload;
 use api::v1::meta::{DatanodeWorkloads, HeartbeatRequest, NodeInfo, Peer, RegionRole, RegionStat};
 use common_base::Plugins;
 use common_meta::cache_invalidator::CacheInvalidatorRef;
@@ -146,7 +147,15 @@ impl HeartbeatTask {
                 None
             }) {
                 if let Some(msg) = res.mailbox_message.as_ref() {
-                    info!("Received mailbox message: {msg:?}, meta_client id: {client_id:?}");
+                    let payload_len = msg
+                        .payload
+                        .as_ref()
+                        .map(|Payload::Json(payload)| payload.len())
+                        .unwrap_or_default();
+                    info!(
+                        message_id = msg.id,
+                        payload_len, client_id, "Received mailbox message"
+                    );
                 }
                 if let Some(lease) = res.region_lease.as_ref() {
                     metrics::LAST_RECEIVED_HEARTBEAT_ELAPSED
@@ -193,7 +202,8 @@ impl HeartbeatTask {
         ctx: HeartbeatResponseHandlerContext,
         handler_executor: HeartbeatResponseHandlerExecutorRef,
     ) -> Result<()> {
-        trace!("Heartbeat response: {:?}", ctx.response);
+        let mailbox_message_id = ctx.response.mailbox_message.as_ref().map(|msg| msg.id);
+        trace!(?mailbox_message_id, "Handling heartbeat response");
         handler_executor
             .handle(ctx)
             .await
@@ -379,7 +389,8 @@ impl HeartbeatTask {
                         .set(last_sent.elapsed().as_millis() as i64);
                     // Resets the timer.
                     last_sent = Instant::now();
-                    debug!("Sending heartbeat request: {:?}", req);
+                    let mailbox_message_id = req.mailbox_message.as_ref().map(|msg| msg.id);
+                    debug!(?mailbox_message_id, "Sending heartbeat request");
                     if let Err(e) = tx.send(req).await {
                         error!(e; "Failed to send heartbeat to metasrv");
                         match Self::create_streams(

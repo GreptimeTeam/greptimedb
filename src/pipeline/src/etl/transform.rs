@@ -17,9 +17,11 @@ pub mod transformer;
 
 use std::collections::HashMap;
 
+use api::helper::ColumnDataTypeWrapper;
 use api::v1::ColumnDataType;
 use api::v1::value::ValueData;
 use chrono::Utc;
+use datatypes::json::{JsonSettings, JsonTypeHint};
 use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::parsers::utils::{
@@ -27,7 +29,8 @@ use sql::parsers::utils::{
 };
 
 use crate::error::{
-    Error, FieldMustBeTypeSnafu, KeyMustBeStringSnafu, Result, TransformElementMustBeMapSnafu,
+    Error, FieldMustBeTypeSnafu, InvalidJson2TypeHintSnafu, KeyMustBeStringSnafu,
+    ParseJson2TypeHintPathSnafu, Result, TransformElementMustBeMapSnafu,
     TransformFieldMustBeSetSnafu, TransformIndexOptionMustBeScalarSnafu, TransformIndexOptionSnafu,
     TransformIndexOptionUnsupportedSnafu, TransformIndexOptionsUnsupportedSnafu,
     TransformIndexTypeMismatchSnafu, TransformIndexTypeMustBeSetSnafu,
@@ -49,6 +52,9 @@ const TRANSFORM_INDEX_OPTIONS_FIELD: &str = "index.options";
 const TRANSFORM_TAG: &str = "tag";
 const TRANSFORM_DEFAULT: &str = "default";
 const TRANSFORM_ON_FAILURE: &str = "on_failure";
+const JSON2_TYPE: &str = "json2";
+const JSON2_TYPE_HINT: &str = "type.json2[]";
+const JSON2_TYPE_HINT_PATH: &str = "path";
 
 pub use transformer::greptime::GreptimeTransformer;
 
@@ -141,6 +147,7 @@ impl TryFrom<&Vec<yaml_rust::Yaml>> for Transforms {
 pub struct Transform {
     pub fields: Fields,
     pub type_: ColumnDataType,
+    pub(crate) json_settings: Option<JsonSettings>,
     pub default: Option<ValueData>,
     pub index: Option<Index>,
     pub index_options: Option<TransformIndexOptions>,
@@ -196,7 +203,8 @@ impl TransformIndexOptions {
 // ColumnDataType::TimestampMicrosecond
 // ColumnDataType::TimestampMillisecond
 // ColumnDataType::TimestampSecond
-// ColumnDataType::Binary
+// ColumnDataType::Binary (JSONB)
+// ColumnDataType::Json (JSON2)
 
 impl Transform {
     pub(crate) fn get_default(&self) -> Option<&ValueData> {
@@ -260,6 +268,7 @@ fn get_default_for_type(ty: &ColumnDataType) -> Result<ValueData> {
         ColumnDataType::Float32 => ValueData::F32Value(0.0),
         ColumnDataType::Float64 => ValueData::F64Value(0.0),
         ColumnDataType::Binary => ValueData::BinaryValue(jsonb::Value::Null.to_vec()),
+        ColumnDataType::Json => ValueData::JsonValue(Default::default()),
         ColumnDataType::String => ValueData::StringValue(String::new()),
 
         ColumnDataType::TimestampSecond => ValueData::TimestampSecondValue(0),
@@ -419,6 +428,119 @@ fn lower_transform_index_options(
         }
     }
 }
+
+fn parse_transform_type(value: &yaml_rust::Yaml) -> Result<(ColumnDataType, Option<JsonSettings>)> {
+    if let Some(type_name) = value.as_str() {
+        return Ok((parse_str_type(type_name)?, None));
+    }
+
+    let config = value.as_hash().context(FieldMustBeTypeSnafu {
+        field: TRANSFORM_TYPE,
+        ty: "string or map",
+    })?;
+    ensure!(
+        config.len() == 1,
+        InvalidJson2TypeHintSnafu {
+            reason: "transform type map must contain exactly one `json2` field".to_string()
+        }
+    );
+    let (type_name, hints) = config.iter().next().context(InvalidJson2TypeHintSnafu {
+        reason: "transform type map must contain a `json2` field".to_string(),
+    })?;
+    let type_name = type_name.as_str().with_context(|| KeyMustBeStringSnafu {
+        k: type_name.clone(),
+    })?;
+    ensure!(
+        type_name.eq_ignore_ascii_case(JSON2_TYPE),
+        InvalidJson2TypeHintSnafu {
+            reason: format!("unsupported transform type map `{type_name}`")
+        }
+    );
+
+    let hints = hints.as_vec().context(FieldMustBeTypeSnafu {
+        field: JSON2_TYPE,
+        ty: "list",
+    })?;
+    let hints = hints
+        .iter()
+        .map(parse_json2_type_hint)
+        .collect::<Result<Vec<_>>>()?;
+    Ok((
+        ColumnDataType::Json,
+        Some(JsonSettings::try_new(hints, None)?),
+    ))
+}
+
+fn parse_json2_type_hint(value: &yaml_rust::Yaml) -> Result<JsonTypeHint> {
+    let config = value.as_hash().context(FieldMustBeTypeSnafu {
+        field: JSON2_TYPE_HINT,
+        ty: "map",
+    })?;
+    let mut path = None;
+    let mut type_name = None;
+    let mut index = None;
+
+    for (key, value) in config {
+        let key = key
+            .as_str()
+            .with_context(|| KeyMustBeStringSnafu { k: key.clone() })?;
+        match key {
+            JSON2_TYPE_HINT_PATH => path = Some(yaml_string(value, JSON2_TYPE_HINT_PATH)?),
+            TRANSFORM_TYPE => type_name = Some(yaml_string(value, TRANSFORM_TYPE)?),
+            TRANSFORM_INDEX => index = Some(value),
+            _ => {
+                return InvalidJson2TypeHintSnafu {
+                    reason: format!("unsupported field `{key}`"),
+                }
+                .fail();
+            }
+        }
+    }
+
+    let path = path.context(InvalidJson2TypeHintSnafu {
+        reason: "`path` must be set".to_string(),
+    })?;
+    let path = sql::parse_json2_type_hint_path(&path)
+        .with_context(|_| ParseJson2TypeHintPathSnafu { path: path.clone() })?;
+    let type_name = type_name.context(InvalidJson2TypeHintSnafu {
+        reason: "`type` must be set".to_string(),
+    })?;
+    let type_ = parse_str_type(&type_name)?;
+    ensure!(
+        matches!(
+            type_,
+            ColumnDataType::String
+                | ColumnDataType::Int64
+                | ColumnDataType::Uint64
+                | ColumnDataType::Float64
+                | ColumnDataType::Boolean
+        ),
+        InvalidJson2TypeHintSnafu {
+            reason: format!("unsupported type `{type_name}`")
+        }
+    );
+    let data_type = ColumnDataTypeWrapper::new(type_, None).into();
+    let inverted_index = if let Some(value) = index {
+        let (index, options) = parse_transform_index(value)?;
+        ensure!(
+            index == Index::Inverted,
+            InvalidJson2TypeHintSnafu {
+                reason: format!("unsupported index `{index}`")
+            }
+        );
+        lower_transform_index_options(index, &ColumnDataType::Json, options)?;
+        true
+    } else {
+        false
+    };
+
+    Ok(JsonTypeHint {
+        path,
+        data_type,
+        inverted_index,
+    })
+}
+
 impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
     type Error = Error;
 
@@ -430,6 +552,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         let mut on_failure = None;
 
         let mut type_ = None;
+        let mut json_settings = None;
 
         for (k, v) in hash {
             let key = k
@@ -445,8 +568,9 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
                 }
 
                 TRANSFORM_TYPE => {
-                    let t = yaml_string(v, TRANSFORM_TYPE)?;
-                    type_ = Some(parse_str_type(&t)?);
+                    let (parsed_type, parsed_json_settings) = parse_transform_type(v)?;
+                    type_ = Some(parsed_type);
+                    json_settings = parsed_json_settings;
                 }
 
                 TRANSFORM_INDEX => {
@@ -507,6 +631,7 @@ impl TryFrom<&yaml_rust::yaml::Hash> for Transform {
         let builder = Transform {
             fields,
             type_,
+            json_settings,
             default: final_default,
             index,
             index_options,
@@ -527,6 +652,54 @@ mod tests {
     fn parse_transform(yaml: &str) -> Result<Transform> {
         let docs = YamlLoader::load_from_str(yaml).unwrap();
         docs[0].as_hash().unwrap().try_into()
+    }
+
+    #[test]
+    fn test_transform_parses_json2_type_hints() {
+        let transform = parse_transform(
+            r#"
+field: payload
+type:
+  json2:
+    - path: "user.id"
+      type: int64
+      index:
+        type: inverted
+    - path: 'attrs."http.status_code"'
+      type: string
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(transform.type_, ColumnDataType::Json);
+        let hints = transform.json_settings.as_ref().unwrap().type_hints();
+        assert_eq!(hints.len(), 2);
+        assert_eq!(hints[0].path, ["user", "id"]);
+        assert_eq!(
+            hints[0].data_type,
+            datatypes::prelude::ConcreteDataType::int64_datatype()
+        );
+        assert!(hints[0].inverted_index);
+        assert_eq!(hints[1].path, ["attrs", "http.status_code"]);
+    }
+
+    #[test]
+    fn test_transform_rejects_json2_nullable_and_default() {
+        for option in ["nullable: false", "default: 7"] {
+            let err = parse_transform(&format!(
+                r#"
+field: payload
+type:
+  json2:
+    - path: score
+      type: float64
+      {option}
+"#,
+            ))
+            .unwrap_err();
+
+            assert!(err.to_string().contains("unsupported field"), "{err}");
+        }
     }
 
     #[test]

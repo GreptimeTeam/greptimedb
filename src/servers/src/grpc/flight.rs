@@ -30,8 +30,7 @@ use bytes::{self, Bytes};
 use common_error::ext::ErrorExt;
 use common_grpc::flight::do_put::{DoPutMetadata, DoPutResponse};
 use common_grpc::flight::{
-    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightEncoder, FlightMessage,
-    SNAPSHOT_SEQS_METADATA_KEY,
+    FLOW_EXTENSIONS_METADATA_KEY, FlightDecoder, FlightMessage, SNAPSHOT_SEQS_METADATA_KEY,
 };
 use common_memory_manager::MemoryGuard;
 use common_query::{Output, OutputData};
@@ -46,14 +45,16 @@ use prost::Message;
 use query::metrics::terminal_recordbatch_metrics_from_plan_if_requested;
 use query::options::FlowQueryExtensions;
 use session::context::{Channel, QueryContextRef};
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use table::table_name::TableName;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 
-use crate::error::{InvalidParameterSnafu, Result, ToJsonSnafu};
-pub use crate::grpc::flight::stream::FlightRecordBatchStream;
+use crate::error::{InvalidParameterSnafu, InvalidQuerySnafu, Result, ToJsonSnafu};
+pub use crate::grpc::flight::stream::{
+    FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
+};
 use crate::grpc::greptime_handler::{
     GreptimeRequestHandler, create_query_context, get_request_type,
 };
@@ -198,12 +199,17 @@ impl FlightCraft for GreptimeRequestHandler {
         let mut hints = hint_headers::extract_hints(request.metadata());
         hints.extend(extract_flow_extensions(request.metadata())?);
         let snapshot_seqs = extract_snapshot_seqs(request.metadata())?;
+        let channel = request
+            .extensions()
+            .get::<Channel>()
+            .copied()
+            .unwrap_or(Channel::Grpc);
 
         let ticket = request.into_inner().ticket;
         let request =
             GreptimeRequest::decode(ticket.as_ref()).context(error::InvalidFlightTicketSnafu)?;
         let query_ctx =
-            create_query_context(Channel::Grpc, request.header.as_ref(), hints, snapshot_seqs)?;
+            create_query_context(channel, request.header.as_ref(), hints, snapshot_seqs)?;
         // Validate flow hint syntax at the transport boundary before dispatching the request.
         // This does not authorize or execute anything; `handle_request()` below still performs
         // the normal frontend handling and auth checks before query execution.
@@ -221,9 +227,12 @@ impl FlightCraft for GreptimeRequestHandler {
         );
         let flight_compression = self.flight_compression;
         async {
-            let output = self
-                .handle_request_with_query_ctx(request, query_ctx.clone())
+            let query = request.request.context(InvalidQuerySnafu {
+                reason: "Expecting non-empty GreptimeRequest.",
+            })?;
+            self.authenticate_request_with_query_ctx(request.header.as_ref(), &query_ctx)
                 .await?;
+            let output = self.handle_request_with_query_ctx(query, query_ctx.clone());
             let stream = to_flight_data_stream(
                 output,
                 TracingContext::from_current_span(),
@@ -245,7 +254,8 @@ impl FlightCraft for GreptimeRequestHandler {
 
         let limiter = extensions.get::<ServerMemoryLimiter>().cloned();
 
-        let query_ctx = context_auth::create_query_context_from_grpc_metadata(&headers)?;
+        let query_ctx =
+            context_auth::create_query_context_from_grpc_metadata(&headers, &extensions)?;
         context_auth::check_auth(self.user_provider.clone(), &headers, query_ctx.clone()).await?;
 
         const MAX_PENDING_RESPONSES: usize = 32;
@@ -573,32 +583,36 @@ fn extract_json_metadata<T: serde::de::DeserializeOwned>(
     Ok(Some(parsed))
 }
 
-fn to_flight_data_stream(
-    output: Output,
+fn to_flight_data_stream<F>(
+    output: F,
     tracing_context: TracingContext,
     flight_compression: FlightCompression,
     query_ctx: QueryContextRef,
     should_emit_terminal_metrics: bool,
-) -> TonicStream<FlightData> {
+) -> TonicStream<FlightData>
+where
+    F: std::future::Future<Output = Result<Output>> + Send + 'static,
+{
+    let initializer = async move {
+        let output = output.await.map_err(Status::from)?;
+        output_to_flight_record_batch_source(output, should_emit_terminal_metrics)
+    };
+    let stream = FlightRecordBatchStream::new(
+        FlightRecordBatchStreamInput::initializer(initializer),
+        tracing_context,
+        flight_compression,
+        query_ctx,
+    );
+    Box::pin(stream) as _
+}
+
+fn output_to_flight_record_batch_source(
+    output: Output,
+    should_emit_terminal_metrics: bool,
+) -> TonicResult<FlightRecordBatchSource> {
     match output.data {
-        OutputData::Stream(stream) => {
-            let stream = FlightRecordBatchStream::new(
-                stream,
-                tracing_context,
-                flight_compression,
-                query_ctx,
-            );
-            Box::pin(stream) as _
-        }
-        OutputData::RecordBatches(x) => {
-            let stream = FlightRecordBatchStream::new(
-                x.as_stream(),
-                tracing_context,
-                flight_compression,
-                query_ctx,
-            );
-            Box::pin(stream) as _
-        }
+        OutputData::Stream(stream) => Ok(FlightRecordBatchSource::RecordBatches(stream)),
+        OutputData::RecordBatches(x) => Ok(FlightRecordBatchSource::RecordBatches(x.as_stream())),
         OutputData::AffectedRows(rows) => {
             let terminal_metrics = match terminal_recordbatch_metrics_from_plan_if_requested(
                 output.meta.plan,
@@ -607,27 +621,27 @@ fn to_flight_data_stream(
                 Some(metrics) => match serde_json::to_string(&metrics) {
                     Ok(metrics) => Some(metrics),
                     Err(e) => {
-                        let stream = tokio_stream::once(Err(Status::internal(format!(
+                        return Err(Status::internal(format!(
                             "Failed to serialize terminal metrics: {e}"
-                        ))));
-                        return Box::pin(stream) as _;
+                        )));
                     }
                 },
                 None => None,
             };
-            let affected_rows = FlightEncoder::default().encode(FlightMessage::AffectedRows {
+            Ok(FlightRecordBatchSource::AffectedRows {
                 rows,
                 metrics: terminal_metrics,
-            });
-            let stream = tokio_stream::iter(affected_rows.into_iter().map(Ok));
-            Box::pin(stream) as _
+            })
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use query::options::FLOW_SCHEDULED_TIME_MILLIS;
+    use query::options::{
+        FLOW_INCREMENTAL_AFTER_SEQS, FLOW_INCREMENTAL_MODE, FLOW_RETURN_REGION_SEQ,
+        FLOW_SCHEDULED_TIME_MILLIS, FLOW_SINK_TABLE_ID, FlowIncrementalMode,
+    };
     use tonic::metadata::{AsciiMetadataValue, MetadataMap};
 
     use super::*;
@@ -673,6 +687,47 @@ mod tests {
             query_ctx.extension(FLOW_SCHEDULED_TIME_MILLIS),
             Some("1700000000000")
         );
+    }
+
+    #[test]
+    fn test_flow_extensions_forward_sequence_range_to_query_context() {
+        let mut metadata = MetadataMap::new();
+        metadata.insert(
+            FLOW_EXTENSIONS_METADATA_KEY,
+            AsciiMetadataValue::try_from(
+                r#"[["flow.return_region_seq","true"],["flow.incremental_mode","sequence_range"],["flow.incremental_after_seqs","{\"1\":10,\"2\":20}"],["flow.sink_table_id","42"]]"#,
+            )
+            .unwrap(),
+        );
+
+        let flow_extensions = extract_flow_extensions(&metadata).unwrap();
+        let query_ctx =
+            create_query_context(Channel::Grpc, None, flow_extensions, HashMap::new()).unwrap();
+        let parsed =
+            query::options::FlowQueryExtensions::parse_flow_extensions(&query_ctx.extensions())
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            parsed.incremental_mode,
+            Some(FlowIncrementalMode::SequenceRange)
+        );
+        assert_eq!(
+            parsed.incremental_after_seqs,
+            Some(HashMap::from([(1, 10), (2, 20)]))
+        );
+        assert!(parsed.return_region_seq);
+        assert_eq!(parsed.sink_table_id, Some(42));
+        assert_eq!(
+            query_ctx.extension(FLOW_INCREMENTAL_MODE),
+            Some("sequence_range")
+        );
+        assert_eq!(
+            query_ctx.extension(FLOW_INCREMENTAL_AFTER_SEQS),
+            Some(r#"{"1":10,"2":20}"#)
+        );
+        assert_eq!(query_ctx.extension(FLOW_RETURN_REGION_SEQ), Some("true"));
+        assert_eq!(query_ctx.extension(FLOW_SINK_TABLE_ID), Some("42"));
     }
 
     #[test]

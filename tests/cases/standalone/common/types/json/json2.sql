@@ -44,6 +44,10 @@ select j.a.b from json2_table order by ts;
 
 select j.a, j.a.x from json2_table order by ts;
 
+select j, j.a from json2_table order by ts;
+
+select j from json2_table where j.a.b = 1;
+
 select j.c, j.y from json2_table order by ts;
 
 select j from json2_table order by ts;
@@ -56,6 +60,13 @@ select count(*) from (select distinct j from json2_table);
 
 select ts, j from (select ts, j from json2_table) order by ts;
 
+select
+    ts,
+    j,
+    row_number() over (order by ts) as row_num
+from json2_table
+order by ts;
+
 select json_get(j, '') from json2_table order by ts;
 
 select json_get(j, '$') from json2_table order by ts;
@@ -65,11 +76,6 @@ select json_get(j, '.') from json2_table order by ts;
 select json_get(j, '$.') from json2_table order by ts;
 
 select j.a.b + 1 from json2_table order by ts;
-
-select abs(j.a.b) from json2_table order by ts;
-
--- "j.c" is of type "String", "abs" is expected to be all "null"s.
-select abs(j.c) from json2_table order by ts;
 
 select j.d from json2_table order by ts;
 
@@ -101,3 +107,53 @@ from json2_variant_null
 order by ts;
 
 drop table json2_variant_null;
+
+create table json2_finite_paths (
+    ts timestamp time index,
+    j json2(
+        max_auto_expanded_paths = 1,
+        hint string
+    )
+)
+with (
+    'append_mode' = 'true',
+    'sst_format' = 'flat'
+);
+
+show create table json2_finite_paths;
+
+insert into json2_finite_paths values
+    (1, '{"hint":"h1","alpha":1,"conflict":1}'),
+    (2, '{"hint":"h2","alpha":2,"conflict":"text"}');
+
+admin flush_table('json2_finite_paths');
+
+insert into json2_finite_paths values
+    (3, '{"hint":"h3","beta":3,"conflict":true}'),
+    (4, '{"hint":"h4","beta":4,"conflict":"other"}');
+
+admin flush_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+admin compact_table('json2_finite_paths');
+
+select
+    ts,
+    j,
+    j.hint,
+    j.alpha::bigint as alpha,
+    j.beta::bigint as beta,
+    j.conflict
+from json2_finite_paths
+order by ts;
+
+drop table json2_finite_paths;

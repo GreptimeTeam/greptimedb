@@ -98,6 +98,8 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use common_error::ext::{BoxedError, RetryHint};
+    use common_error::status_code::StatusCode;
     use common_meta::RegionIdent;
     use common_meta::heartbeat::handler::{HandleControl, HeartbeatResponseHandler};
     use common_meta::heartbeat::mailbox::MessageMeta;
@@ -105,14 +107,21 @@ mod tests {
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use mito2::config::MitoConfig;
     use mito2::engine::MITO_ENGINE_NAME;
+    use mito2::error::ManifestDeltaNotFoundSnafu;
     use mito2::test_util::{CreateRequestBuilder, TestEnv};
+    use object_store::{Error as ObjectStoreError, ErrorKind};
+    use snafu::IntoError;
     use store_api::path_utils::table_dir;
     use store_api::region_request::{RegionCloseRequest, RegionRequest, RegionRequirements};
     use store_api::storage::RegionId;
 
-    use crate::heartbeat::handler::RegionHeartbeatResponseHandler;
+    use super::OpenRegionsHandler;
+    use crate::error::{self, HandleRegionRequestSnafu};
     use crate::heartbeat::handler::tests::HeartbeatResponseTestEnv;
-    use crate::tests::mock_region_server;
+    use crate::heartbeat::handler::{
+        HandlerContext, InstructionHandler, RegionHeartbeatResponseHandler,
+    };
+    use crate::tests::{MockRegionEngine, mock_region_server};
 
     fn open_regions_instruction(
         region_ids: impl IntoIterator<Item = RegionId>,
@@ -197,5 +206,53 @@ mod tests {
 
         assert!(engine.is_region_exists(region_id));
         assert!(engine.is_region_exists(region_id1));
+    }
+
+    #[tokio::test]
+    async fn test_open_regions_preserves_manifest_delta_not_found_retry_hint() {
+        let retryable_region = RegionId::new(1024, 1);
+        let non_retryable_region = RegionId::new(1024, 2);
+        let (engine, _) = MockRegionEngine::with_mock_fn(
+            MITO_ENGINE_NAME,
+            Box::new(move |region_id, _request| {
+                if region_id == retryable_region {
+                    let manifest_error = ManifestDeltaNotFoundSnafu {
+                        version: 1_u64,
+                        path: "manifest/00000000000000000001.json",
+                    }
+                    .into_error(ObjectStoreError::new(
+                        ErrorKind::NotFound,
+                        "mock listed manifest delta not found",
+                    ));
+                    return Err(HandleRegionRequestSnafu { region_id }
+                        .into_error(BoxedError::new(manifest_error)));
+                }
+
+                error::RegionNotFoundSnafu { region_id }.fail()
+            }),
+        );
+        let mut region_server = mock_region_server();
+        region_server.register_engine(engine);
+        let ctx = HandlerContext::new_for_test(region_server, Arc::new(MemoryKvBackend::new()));
+        let Instruction::OpenRegions(open_regions) =
+            open_regions_instruction([retryable_region, non_retryable_region], "test")
+        else {
+            unreachable!()
+        };
+
+        // Serial execution makes the first error selection deterministic.
+        let reply = OpenRegionsHandler {
+            open_region_parallelism: 1,
+        }
+        .handle(&ctx, open_regions)
+        .await
+        .unwrap()
+        .expect_open_regions_reply();
+
+        assert!(!reply.result);
+        let error = reply.error.unwrap();
+        assert_eq!(StatusCode::StorageUnavailable, error.code);
+        assert_eq!(RetryHint::Retryable, error.retry_hint);
+        assert!(error.message.contains("00000000000000000001.json"));
     }
 }

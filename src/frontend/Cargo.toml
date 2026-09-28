@@ -6,14 +6,19 @@ license.workspace = true
 
 [features]
 testing = []
-enterprise = ["common-meta/enterprise", "operator/enterprise", "sql/enterprise"]
+enterprise = [
+    "common-meta/enterprise",
+    "operator/enterprise",
+    "sql/enterprise",
+    "catalog/enterprise",
+    "common-function/enterprise",
+]
 
 [lints]
 workspace = true
 
 [dependencies]
 api.workspace = true
-arc-swap = "1.0"
 async-stream.workspace = true
 async-trait.workspace = true
 auth.workspace = true
@@ -23,6 +28,7 @@ cache.workspace = true
 catalog.workspace = true
 client.workspace = true
 common-base.workspace = true
+common-batcher.workspace = true
 common-catalog.workspace = true
 common-config.workspace = true
 common-datasource.workspace = true
@@ -35,7 +41,6 @@ common-macro.workspace = true
 common-memory-manager.workspace = true
 common-meta.workspace = true
 common-options.workspace = true
-common-procedure.workspace = true
 common-query.workspace = true
 common-recordbatch.workspace = true
 common-runtime.workspace = true
@@ -46,16 +51,13 @@ common-version.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true
 datafusion-expr.workspace = true
-datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 hostname.workspace = true
-humantime.workspace = true
 humantime-serde.workspace = true
 lazy_static.workspace = true
 log-query.workspace = true
 meta-client.workspace = true
-num_cpus.workspace = true
 opentelemetry-proto.workspace = true
 opentelemetry-semantic-conventions = { version = "0.31", features = ["semconv_experimental"] }
 operator.workspace = true
@@ -66,7 +68,6 @@ prometheus.workspace = true
 promql-parser.workspace = true
 prost.workspace = true
 query.workspace = true
-rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 servers.workspace = true
@@ -83,15 +84,14 @@ tonic.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+arrow-flight.workspace = true
 catalog = { workspace = true, features = ["testing"] }
 common-test-util.workspace = true
-datanode.workspace = true
 datatypes.workspace = true
 futures.workspace = true
 hyper-util = { workspace = true, features = ["tokio"] }
-meta-srv.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 strfmt = "0.2"
+temp-env.workspace = true
 tower.workspace = true
-uuid.workspace = true

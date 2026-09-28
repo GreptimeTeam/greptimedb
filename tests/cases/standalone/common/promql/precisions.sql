@@ -68,10 +68,8 @@ TQL EVAL (0, 15, '5s') avg_over_time(host_sec{host="host1"}[5s]) + avg_over_time
 
 -- Verify that PromQL time predicates on non-millisecond time indexes are
 -- pushed into the scan as native timestamp range filters.
--- Original instant selector filter is built on the millisecond alias:
---   host = "host1" AND ts_ms >= -299999ms AND ts_ms <= 10000ms
--- After pushing through `CAST(raw_ts AS Timestamp(ms)) AS ts` and applying
--- DataFusion cast preimage, it becomes a native half-open range on raw_ts.
+-- Instant selection compares raw timestamps before millisecond output conversion:
+--   host = "host1" AND ts_us > -300000000us AND ts_us <= 10000000us.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -80,8 +78,8 @@ TQL EVAL (0, 15, '5s') avg_over_time(host_sec{host="host1"}[5s]) + avg_over_time
 -- SQLNESS REPLACE host_nano.__table_id\s*=\s*UInt32\(\d+\) host_nano.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') host_micro{host="host1"};
 
--- The same instant-selector cast-preimage path should work for nanosecond indexes.
--- Expected native bounds: ts_ns >= -299999999999ns AND ts_ns < 10001000000ns.
+-- The same exclusive-lower, inclusive-upper window applies to nanosecond indexes.
+-- Expected native bounds: ts_ns > -300000000000ns AND ts_ns <= 10000000000ns.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -90,8 +88,8 @@ TQL EXPLAIN (0, 10, '5s') host_micro{host="host1"};
 TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 
 -- Range selectors use their range window instead of the default lookback.
--- Original range selector filter for [5s]:
---   host = "host1" AND ts_ms >= -4999ms AND ts_ms <= 10000ms
+-- Native range selector filter for [5s]:
+--   host = "host1" AND ts_us > -5000000us AND ts_us <= 10000000us
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
@@ -99,8 +97,8 @@ TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 -- SQLNESS REPLACE host_micro.__table_id\s*=\s*UInt32\(\d+\) host_micro.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') avg_over_time(host_micro{host="host1"}[5s]);
 
--- The same range-selector cast-preimage path should work for nanosecond indexes.
--- Expected native bounds: ts_ns >= -4999999999ns AND ts_ns < 10001000000ns.
+-- Range membership also retains nanosecond precision.
+-- Expected native bounds: ts_ns > -5000000000ns AND ts_ns <= 10000000000ns.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED

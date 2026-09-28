@@ -16,8 +16,9 @@ reads go to the query engine (`query` crate), writes go to the inserter/deleter
 Boundary with `servers`: the `servers` crate implements the wire protocols and
 network I/O; `frontend` provides the business logic by implementing handler
 traits (`SqlQueryHandler`, `GrpcQueryHandler`, `InfluxdbLineProtocolHandler`,
-...). In standalone mode the frontend embeds a datanode `RegionServer`; in
-distributed mode it talks to remote datanodes via `operator`/`client`.
+...). In standalone mode the `standalone` crate bridges the frontend to an
+embedded datanode `RegionServer`; in distributed mode the frontend talks to
+remote datanodes via `operator`/`client`.
 
 ## Module map
 
@@ -26,7 +27,6 @@ distributed mode it talks to remote datanodes via `operator`/`client`.
 | `instance` | `src/frontend/src/instance.rs` | `Instance`: the core handler; implements `SqlQueryHandler`, `PrometheusHandler`, etc. |
 | `instance/builder` | `src/frontend/src/instance/builder.rs` | `FrontendBuilder` assembles `Instance` from its dependencies |
 | `instance/grpc` | `src/frontend/src/instance/grpc.rs` | `GrpcQueryHandler`: insert/delete/query/promql over gRPC |
-| `instance/standalone` | `src/frontend/src/instance/standalone.rs` | Calls the local `RegionServer` instead of RPC |
 | `instance/region_query` | `src/frontend/src/instance/region_query.rs` | Routes distributed region reads to datanodes |
 | `instance/*` | `src/frontend/src/instance/` | Per-protocol handlers (`influxdb.rs`, `promql.rs`, `otlp/`, `jaeger.rs`, `logs.rs`, `prom_store.rs`, ...) |
 | `frontend` | `src/frontend/src/frontend.rs` | `Frontend` lifecycle wrapper (`FrontendOptions`, start/shutdown) |
@@ -36,16 +36,31 @@ distributed mode it talks to remote datanodes via `operator`/`client`.
 
 ## Request lifecycles
 
-- **SQL query** (`instance.rs`): `do_query` → `pre_parsing` interceptor → parse →
-  `post_parsing` interceptor → then per statement: `check_permission` →
-  `statement_executor.plan` (logical plan) → `query_engine.execute` → for
-  distributed reads, `region_query.rs` fetches from datanodes → cancellable
-  `RecordBatch` stream. Interceptors run around parsing, before the per-statement
-  permission check — preserve that ordering.
+- **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
+  permission checks, timeout/cancellation, and delegates planning/execution to
+  `StatementExecutor`. Distributed scans enter through `region_query.rs`.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
-  auto-create, partition routing) → local `RegionServer` (standalone) or RPC to
-  datanodes (distributed).
+  auto-create, partition routing, meter admission) → local `RegionServer`
+  (standalone) or RPC to datanodes (distributed). Arrow bulk inserts pass the
+  request channel to `Inserter` and check meter admission for each nonempty batch.
+- Finite ingestion requests split internally admit their total rows per database
+  before dispatch (`operator::insert::admit_write` / `admit_row_insert_batches`).
+  The returned context covers chunks and derived writes while preserving WCU
+  accounting and the original protocol channel.
+- Internal gRPC listeners mark requests with `Channel::Internal` in middleware
+  (`server.rs`), including requests handled by Enterprise Flight wrappers.
+
+- **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
+  one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
+  writes. OTLP checks operator eligibility and falls back for incompatible tables.
+  The schema adapter holds a weak instance reference to avoid an ownership cycle.
+
+- **Table batching** (`instance/builder.rs`): protocol entry points opt in through
+  `QueryContext`. The primary inserter prepares eligible ordinary-table writes
+  for `servers::batcher::table::TablePendingRowsBatcher`. A separate execution-only
+  inserter, with no batcher attached, sends the prepared bulk writes to datanodes,
+  avoiding recursive batching. The batcher handles successful-write Flow notifications.
 
 ## Public surface
 
@@ -73,9 +88,9 @@ cargo nextest run -p frontend
 
 - Keep the frontend/servers split straight: wire format and network live in
   `servers`; permissions, planning, and routing live here.
-- Standalone vs distributed diverge in datanode access (local `RegionServer` vs
-  `NodeClients` RPC), MetaClient usage, and whether heartbeat matters. In
-  standalone, the cache invalidator is a no-op.
+- Standalone vs distributed diverge in datanode access (the `standalone` crate's
+  local `RegionServer` adapter vs `NodeClients` RPC), MetaClient usage, and
+  whether heartbeat matters. In standalone, the cache invalidator is a no-op.
 
 ## Maintenance contract
 

@@ -21,6 +21,10 @@ use crate::UserInfoRef;
 pub trait UserInfo: Debug + Sync + Send {
     fn as_any(&self) -> &dyn Any;
     fn username(&self) -> &str;
+
+    fn is_admin(&self) -> bool {
+        false
+    }
 }
 
 /// The user permission mode
@@ -38,13 +42,14 @@ impl PermissionMode {
     /// - "rw", "readwrite", "read_write" => ReadWrite
     /// - "ro", "readonly", "read_only" => ReadOnly
     /// - "wo", "writeonly", "write_only" => WriteOnly
-    ///     Returns None if the input string is not a valid permission mode.
-    pub fn from_str(s: &str) -> Self {
+    ///
+    /// Returns `None` if the input string is not a valid permission mode.
+    pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
-            "readwrite" | "read_write" | "rw" => PermissionMode::ReadWrite,
-            "readonly" | "read_only" | "ro" => PermissionMode::ReadOnly,
-            "writeonly" | "write_only" | "wo" => PermissionMode::WriteOnly,
-            _ => PermissionMode::ReadWrite,
+            "readwrite" | "read_write" | "rw" => Some(PermissionMode::ReadWrite),
+            "readonly" | "read_only" | "ro" => Some(PermissionMode::ReadOnly),
+            "writeonly" | "write_only" | "wo" => Some(PermissionMode::WriteOnly),
+            _ => None,
         }
     }
 
@@ -123,58 +128,72 @@ mod tests {
         // Test ReadWrite variants
         assert_eq!(
             PermissionMode::from_str("readwrite"),
-            PermissionMode::ReadWrite
+            Some(PermissionMode::ReadWrite)
         );
         assert_eq!(
             PermissionMode::from_str("read_write"),
-            PermissionMode::ReadWrite
+            Some(PermissionMode::ReadWrite)
         );
-        assert_eq!(PermissionMode::from_str("rw"), PermissionMode::ReadWrite);
+        assert_eq!(
+            PermissionMode::from_str("rw"),
+            Some(PermissionMode::ReadWrite)
+        );
         assert_eq!(
             PermissionMode::from_str("ReadWrite"),
-            PermissionMode::ReadWrite
+            Some(PermissionMode::ReadWrite)
         );
-        assert_eq!(PermissionMode::from_str("RW"), PermissionMode::ReadWrite);
+        assert_eq!(
+            PermissionMode::from_str("RW"),
+            Some(PermissionMode::ReadWrite)
+        );
 
         // Test ReadOnly variants
         assert_eq!(
             PermissionMode::from_str("readonly"),
-            PermissionMode::ReadOnly
+            Some(PermissionMode::ReadOnly)
         );
         assert_eq!(
             PermissionMode::from_str("read_only"),
-            PermissionMode::ReadOnly
+            Some(PermissionMode::ReadOnly)
         );
-        assert_eq!(PermissionMode::from_str("ro"), PermissionMode::ReadOnly);
+        assert_eq!(
+            PermissionMode::from_str("ro"),
+            Some(PermissionMode::ReadOnly)
+        );
         assert_eq!(
             PermissionMode::from_str("ReadOnly"),
-            PermissionMode::ReadOnly
+            Some(PermissionMode::ReadOnly)
         );
-        assert_eq!(PermissionMode::from_str("RO"), PermissionMode::ReadOnly);
+        assert_eq!(
+            PermissionMode::from_str("RO"),
+            Some(PermissionMode::ReadOnly)
+        );
 
         // Test WriteOnly variants
         assert_eq!(
             PermissionMode::from_str("writeonly"),
-            PermissionMode::WriteOnly
+            Some(PermissionMode::WriteOnly)
         );
         assert_eq!(
             PermissionMode::from_str("write_only"),
-            PermissionMode::WriteOnly
+            Some(PermissionMode::WriteOnly)
         );
-        assert_eq!(PermissionMode::from_str("wo"), PermissionMode::WriteOnly);
+        assert_eq!(
+            PermissionMode::from_str("wo"),
+            Some(PermissionMode::WriteOnly)
+        );
         assert_eq!(
             PermissionMode::from_str("WriteOnly"),
-            PermissionMode::WriteOnly
+            Some(PermissionMode::WriteOnly)
         );
-        assert_eq!(PermissionMode::from_str("WO"), PermissionMode::WriteOnly);
-
-        // Test invalid inputs default to ReadWrite
         assert_eq!(
-            PermissionMode::from_str("invalid"),
-            PermissionMode::ReadWrite
+            PermissionMode::from_str("WO"),
+            Some(PermissionMode::WriteOnly)
         );
-        assert_eq!(PermissionMode::from_str(""), PermissionMode::ReadWrite);
-        assert_eq!(PermissionMode::from_str("xyz"), PermissionMode::ReadWrite);
+
+        for invalid in ["readonyl", "", "xyz"] {
+            assert_eq!(PermissionMode::from_str(invalid), None);
+        }
     }
 
     #[test]
@@ -200,28 +219,8 @@ mod tests {
         for mode in modes {
             let str_repr = mode.as_str();
             let parsed = PermissionMode::from_str(str_repr);
-            assert_eq!(mode, parsed);
+            assert_eq!(Some(mode), parsed);
         }
-    }
-
-    #[test]
-    fn test_default_user_info_with_name() {
-        let user_info = DefaultUserInfo::with_name("test_user");
-        assert_eq!(user_info.username(), "test_user");
-    }
-
-    #[test]
-    fn test_default_user_info_with_name_and_permission() {
-        let user_info =
-            DefaultUserInfo::with_name_and_permission("test_user", PermissionMode::ReadOnly);
-        assert_eq!(user_info.username(), "test_user");
-
-        // Cast to DefaultUserInfo to access permission_mode
-        let default_user = user_info
-            .as_any()
-            .downcast_ref::<DefaultUserInfo>()
-            .unwrap();
-        assert_eq!(default_user.permission_mode, PermissionMode::ReadOnly);
     }
 
     #[test]

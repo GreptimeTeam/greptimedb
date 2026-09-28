@@ -22,6 +22,7 @@ use common_options::datanode::DatanodeClientOptions;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use meta_client::MetaClientOptions;
+use pipeline::PipelineOptions;
 use query::options::QueryOptions;
 use serde::{Deserialize, Serialize};
 use servers::grpc::GrpcOptions;
@@ -34,8 +35,8 @@ use crate::error::Result;
 use crate::heartbeat::HeartbeatTask;
 use crate::instance::Instance;
 use crate::service_config::{
-    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions, PostgresOptions,
-    PromStoreOptions,
+    InfluxdbOptions, JaegerOptions, MysqlOptions, OpentsdbOptions, OtlpOptions,
+    PendingRowsBatcherOptions, PostgresOptions, PromStoreOptions,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -49,6 +50,8 @@ pub struct FrontendOptions {
     /// even if a request sets the `auto_create_table` hint to `true`. When `true`
     /// (default), the per-request hint still applies. Default: `true`.
     pub auto_create_table: bool,
+    /// Enables experimental Parquet database exports using shared Metric scans.
+    pub experimental_metric_export: bool,
     /// Maximum total memory for all concurrent write request bodies and messages (HTTP, gRPC, Flight).
     /// Set to 0 to disable the limit. Default: "0" (unlimited)
     pub max_in_flight_write_bytes: ReadableSize,
@@ -64,6 +67,8 @@ pub struct FrontendOptions {
     pub postgres: PostgresOptions,
     pub opentsdb: OpentsdbOptions,
     pub influxdb: InfluxdbOptions,
+    /// Ordinary-table batching with independent logical-table controls.
+    pub pending_rows_batcher: PendingRowsBatcherOptions,
     pub prom_store: PromStoreOptions,
     pub jaeger: JaegerOptions,
     pub otlp: OtlpOptions,
@@ -75,6 +80,8 @@ pub struct FrontendOptions {
     pub query: QueryOptions,
     pub slow_query: SlowQueryOptions,
     pub memory: MemoryOptions,
+    /// The pipeline options.
+    pub pipeline: PipelineOptions,
     /// The event recorder options.
     pub event_recorder: EventRecorderOptions,
     /// Environment variable keys to read and report in heartbeat messages.
@@ -88,6 +95,7 @@ impl Default for FrontendOptions {
             default_timezone: None,
             default_column_prefix: None,
             auto_create_table: true,
+            experimental_metric_export: false,
             max_in_flight_write_bytes: ReadableSize(0),
             write_bytes_exhausted_policy: OnExhaustedPolicy::default(),
             http: HttpOptions::default(),
@@ -97,6 +105,7 @@ impl Default for FrontendOptions {
             postgres: PostgresOptions::default(),
             opentsdb: OpentsdbOptions::default(),
             influxdb: InfluxdbOptions::default(),
+            pending_rows_batcher: PendingRowsBatcherOptions::default(),
             jaeger: JaegerOptions::default(),
             prom_store: PromStoreOptions::default(),
             otlp: OtlpOptions::default(),
@@ -108,6 +117,7 @@ impl Default for FrontendOptions {
             query: QueryOptions::default(),
             slow_query: SlowQueryOptions::default(),
             memory: MemoryOptions::default(),
+            pipeline: PipelineOptions::default(),
             event_recorder: EventRecorderOptions::default(),
             heartbeat_env_vars: vec![],
         }
@@ -116,7 +126,13 @@ impl Default for FrontendOptions {
 
 impl Configurable for FrontendOptions {
     fn env_list_keys() -> Option<&'static [&'static str]> {
-        Some(&["heartbeat_env_vars", "meta_client.metasrv_addrs"])
+        Some(&[
+            "heartbeat_env_vars",
+            "meta_client.metasrv_addrs",
+            "event_recorder.event_types",
+            "pending_rows_batcher.protocols",
+            "pending_rows_batcher.logical_table.protocols",
+        ])
     }
 }
 
@@ -130,17 +146,26 @@ pub struct Frontend {
 
 impl Frontend {
     pub async fn start(&mut self) -> Result<()> {
-        if let Some(t) = &self.heartbeat_task {
-            t.start().await?;
+        if let Some(t) = &self.heartbeat_task
+            && let Err(error) = t.start().await
+        {
+            t.shutdown().await;
+            return Err(error);
         }
 
-        self.servers
-            .start_all()
-            .await
-            .context(error::StartServerSnafu)
+        if let Err(source) = self.servers.start_all().await {
+            if let Some(t) = &self.heartbeat_task {
+                t.shutdown().await;
+            }
+            return Err(source).context(error::StartServerSnafu);
+        }
+        Ok(())
     }
 
     pub async fn shutdown(&mut self) -> Result<()> {
+        if let Some(t) = &self.heartbeat_task {
+            t.shutdown().await;
+        }
         self.servers
             .shutdown_all()
             .await
@@ -154,7 +179,10 @@ impl Frontend {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::any::Any;
+    use std::net::SocketAddr;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
 
     use api::v1::meta::heartbeat_server::HeartbeatServer;
@@ -175,27 +203,121 @@ mod tests {
     use common_meta::heartbeat::handler::suspend::SuspendHandler;
     use common_meta::instruction::Instruction;
     use common_stat::ResourceStatImpl;
+    use futures::Stream;
     use meta_client::MetaClientRef;
     use meta_client::client::MetaClientBuilder;
-    use meta_srv::service::GrpcStream;
+    use servers::batcher::BatchingProtocol;
     use servers::grpc::{FlightCompression, GRPC_SERVER};
     use servers::http::HTTP_SERVER;
     use servers::http::result::greptime_result_v1::GreptimedbV1Response;
+    use servers::server::Server;
     use tokio::sync::mpsc;
     use tonic::codec::CompressionEncoding;
     use tonic::codegen::tokio_stream::StreamExt;
     use tonic::codegen::tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status, Streaming};
 
-    use super::*;
+    use crate::frontend::*;
+    use crate::heartbeat::{
+        FrontendHeartbeatExtension, FrontendHeartbeatExtensionResult, FrontendHeartbeatExtensions,
+    };
     use crate::instance::builder::FrontendBuilder;
     use crate::server::Services;
+
+    type GrpcStream<T> =
+        Pin<Box<dyn Stream<Item = std::result::Result<T, Status>> + Send + Sync + 'static>>;
+
+    #[test]
+    fn test_logical_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                    Some("otlp,influxdb"),
+                ),
+                (
+                    "FRONTEND_LOGICAL_TEST__PENDING_ROWS_BATCHER__LOGICAL_TABLE__PROTOCOLS",
+                    Some("prom,otlp"),
+                ),
+            ],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_LOGICAL_TEST").unwrap();
+                assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+                assert_eq!(
+                    options
+                        .pending_rows_batcher
+                        .logical_table
+                        .unwrap()
+                        .protocols,
+                    vec![BatchingProtocol::Prom, BatchingProtocol::Otlp]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_batcher_protocols_from_env() {
+        temp_env::with_vars(
+            [(
+                "FRONTEND_BATCHER_TEST__PENDING_ROWS_BATCHER__PROTOCOLS",
+                Some("influxdb,http_sql"),
+            )],
+            || {
+                let options =
+                    FrontendOptions::load_layered_options(None, "FRONTEND_BATCHER_TEST").unwrap();
+                assert_eq!(
+                    options.pending_rows_batcher.table.protocols,
+                    vec![BatchingProtocol::Influxdb, BatchingProtocol::HttpSql]
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn test_protocol_pending_rows_batcher_config() {
+        let defaults: FrontendOptions = toml::from_str("").unwrap();
+        assert!(
+            !defaults
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let options: FrontendOptions = toml::from_str(
+            r#"
+[pending_rows_batcher]
+protocols = ["influxdb", "http_sql"]
+pending_rows_flush_interval = "5ms"
+max_batch_rows = 25
+"#,
+        )
+        .unwrap();
+        assert_eq!(options.pending_rows_batcher.table.max_batch_rows, 25);
+        assert_eq!(options.pending_rows_batcher.table.protocols.len(), 2);
+        assert!(
+            options
+                .pending_rows_batcher
+                .table
+                .pending_rows_batching_enabled()
+        );
+        let serialized = toml::to_string(&options).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&serialized).unwrap();
+        assert_eq!(options.influxdb, parsed.influxdb);
+        assert_eq!(options.opentsdb, parsed.opentsdb);
+        assert_eq!(options.pending_rows_batcher, parsed.pending_rows_batcher);
+    }
 
     #[test]
     fn test_toml() {
         let opts = FrontendOptions::default();
+        assert!(!opts.experimental_metric_export);
+        let enabled: FrontendOptions = toml::from_str("experimental_metric_export = true").unwrap();
+        assert!(enabled.experimental_metric_export);
         let toml_string = toml::to_string(&opts).unwrap();
-        let _parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        let parsed: FrontendOptions = toml::from_str(&toml_string).unwrap();
+        assert_eq!(parsed.otlp, opts.otlp);
+        assert_eq!(parsed.influxdb, opts.influxdb);
+        assert_eq!(parsed.opentsdb, opts.opentsdb);
     }
 
     #[test]
@@ -209,6 +331,46 @@ mod tests {
 
     struct SuspendableHeartbeatServer {
         suspend: Arc<AtomicBool>,
+        fail_heartbeat: bool,
+    }
+
+    struct FailingServer;
+
+    struct ShutdownTrackingExtension {
+        shutdown_calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl FrontendHeartbeatExtension for ShutdownTrackingExtension {
+        fn name(&self) -> &str {
+            "shutdown-tracking"
+        }
+
+        async fn shutdown(&self) -> FrontendHeartbeatExtensionResult<()> {
+            self.shutdown_calls.fetch_add(1, Ordering::AcqRel);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl Server for FailingServer {
+        async fn shutdown(&self) -> servers::error::Result<()> {
+            Ok(())
+        }
+
+        async fn start(&mut self, _listening: SocketAddr) -> servers::error::Result<()> {
+            Err(servers::error::Error::Internal {
+                err_msg: "mock server start failure".to_string(),
+            })
+        }
+
+        fn name(&self) -> &str {
+            "FAILING_SERVER"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
     }
 
     #[async_trait]
@@ -219,6 +381,10 @@ mod tests {
             &self,
             request: Request<Streaming<HeartbeatRequest>>,
         ) -> std::result::Result<Response<Self::HeartbeatStream>, Status> {
+            if self.fail_heartbeat {
+                return Err(Status::unavailable("mock initial heartbeat failure"));
+            }
+
             let (tx, rx) = mpsc::channel(4);
 
             common_runtime::spawn_global({
@@ -358,6 +524,93 @@ mod tests {
         Ok(frontend)
     }
 
+    #[tokio::test]
+    async fn test_server_start_failure_shuts_down_heartbeat() {
+        let meta_client_options = MetaClientOptions {
+            metasrv_addrs: vec!["localhost:0".to_string()],
+            ..Default::default()
+        };
+        let options = FrontendOptions {
+            meta_client: Some(meta_client_options.clone()),
+            ..Default::default()
+        };
+        let heartbeat_server = Arc::new(SuspendableHeartbeatServer {
+            suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: false,
+        });
+        let meta_client = create_meta_client(&meta_client_options, heartbeat_server).await;
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client.clone())
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let heartbeat_task = HeartbeatTask::new(
+            instance.frontend_peer_addr().to_string(),
+            &options,
+            meta_client,
+            Arc::new(HandlerGroupExecutor::new(vec![])),
+            Arc::new(ResourceStatImpl::default()),
+        );
+        let heartbeat_probe = heartbeat_task.clone();
+        let servers = ServerHandlers::default();
+        servers.insert((Box::new(FailingServer), "127.0.0.1:0".parse().unwrap()));
+        let mut frontend = Frontend {
+            instance,
+            servers,
+            heartbeat_task: Some(heartbeat_task),
+        };
+
+        assert!(frontend.start().await.is_err());
+        assert!(heartbeat_probe.is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn test_heartbeat_start_failure_shuts_down_extensions() {
+        let meta_client_options = MetaClientOptions {
+            metasrv_addrs: vec!["localhost:0".to_string()],
+            ..Default::default()
+        };
+        let options = FrontendOptions {
+            meta_client: Some(meta_client_options.clone()),
+            ..Default::default()
+        };
+        let heartbeat_server = Arc::new(SuspendableHeartbeatServer {
+            suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: true,
+        });
+        let meta_client = create_meta_client(&meta_client_options, heartbeat_server).await;
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client.clone())
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let extension = Arc::new(ShutdownTrackingExtension {
+            shutdown_calls: AtomicUsize::new(0),
+        });
+        let extensions = FrontendHeartbeatExtensions::default();
+        assert!(extensions.register(extension.clone()));
+        let heartbeat_task = HeartbeatTask::new(
+            instance.frontend_peer_addr().to_string(),
+            &options,
+            meta_client,
+            Arc::new(HandlerGroupExecutor::new(vec![])),
+            Arc::new(ResourceStatImpl::default()),
+        )
+        .with_extensions(extensions);
+        let heartbeat_probe = heartbeat_task.clone();
+        let mut frontend = Frontend {
+            instance,
+            servers: ServerHandlers::default(),
+            heartbeat_task: Some(heartbeat_task),
+        };
+
+        assert!(frontend.start().await.is_err());
+        assert!(heartbeat_probe.is_shutdown());
+        assert_eq!(extension.shutdown_calls.load(Ordering::Acquire), 1);
+    }
+
     async fn verify_suspend_state_by_http(
         frontend: &Frontend,
         expected: std::result::Result<&str, (StatusCode, &str)>,
@@ -454,6 +707,7 @@ mod tests {
 
         let server = Arc::new(SuspendableHeartbeatServer {
             suspend: Arc::new(AtomicBool::new(false)),
+            fail_heartbeat: false,
         });
         let meta_client = create_meta_client(&meta_client_options, server.clone()).await;
         let frontend = create_frontend(&options, meta_client).await?;

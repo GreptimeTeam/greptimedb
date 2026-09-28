@@ -318,8 +318,6 @@ impl StartCommand {
     }
 
     pub async fn build(&self, opts: MetasrvOptions) -> Result<Instance> {
-        common_runtime::init_global_runtimes(&opts.runtime);
-
         let guard = common_telemetry::init_global_logging(
             APP_NAME,
             &opts.component.logging,
@@ -327,6 +325,8 @@ impl StartCommand {
             None,
             None,
         );
+
+        common_runtime::init_global_runtimes(&opts.runtime);
 
         crate::options::flush_dropped_plugin_warnings();
         log_versions(verbose_version(), short_version(), APP_NAME);

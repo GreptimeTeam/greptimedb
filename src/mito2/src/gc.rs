@@ -410,7 +410,7 @@ impl LocalGcWorker {
             region_present = region.is_some()
         )
     )]
-    pub async fn do_region_gc(
+    pub(crate) async fn do_region_gc(
         &self,
         region_id: RegionId,
         region: Option<MitoRegionRef>,

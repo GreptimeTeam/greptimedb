@@ -20,7 +20,9 @@ use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_macro::ToMetaBuilder;
 use common_query::AddColumnLocation;
 use datafusion_expr::TableProviderFilterPushDown;
+use datatypes::error::time_index_not_widening_error;
 pub use datatypes::error::{Error as ConvertError, Result as ConvertResult};
+use datatypes::extension::json::json2_metadata_with_updated_settings;
 use datatypes::schema::{
     ColumnSchema, FulltextOptions, Schema, SchemaBuilder, SchemaRef, SkippingIndexOptions,
 };
@@ -30,15 +32,19 @@ use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use store_api::mito_engine_options::{
     APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, COMPACTION_TYPE, COMPACTION_TYPE_TWCS,
-    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, SST_FORMAT_KEY,
+    MAX_ROW_GROUP_ROW_COUNT, MERGE_MODE_KEY, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY,
+    TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM, TWCS_TRIGGER_FILE_NUM,
 };
 use store_api::region_request::{SetRegionOption, UnsetRegionOption};
 use store_api::storage::{ColumnDescriptor, ColumnDescriptorBuilder, ColumnId};
 
 use crate::error::{self, Result};
 use crate::requests::{
-    AddColumnRequest, AlterKind, ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY,
-    SetDefaultRequest, SetIndexOption, TableOptions, UnsetIndexOption,
+    AddColumnRequest, AlterKind, AnnotationContext, AnnotationFamily, AnnotationValidationError,
+    ModifyColumnTypeRequest, REPARTITION_COLUMN_HINT_KEY, REPARTITION_PARTITION_NUM_HINT_KEY,
+    SetDefaultRequest, SetIndexOption, SetJsonSettingsRequest, TableOptions, UnsetIndexOption,
+    has_stable_string_form, parse_entity_columns, parse_entity_option_key,
+    validate_and_normalize_annotation, validate_annotation_keys,
 };
 use crate::table_reference::TableReference;
 
@@ -327,14 +333,17 @@ impl TableMeta {
             AlterKind::ModifyColumnTypes { columns } => {
                 self.modify_column_types(table_name, columns)
             }
+            AlterKind::SetJsonSettings { request } => self.set_json_settings(table_name, request),
             // No need to rebuild table meta when renaming tables.
             AlterKind::RenameTable { .. } => Ok(self.new_meta_builder()),
             AlterKind::SetTableOptions { options } => self.set_table_options(options),
             AlterKind::UnsetTableOptions { keys } => self.unset_table_options(keys),
-            AlterKind::SetRepartitionColumnHint { column_name } => {
-                self.set_repartition_column_hint(table_name, column_name)
+            AlterKind::SetAnnotations { family, options } => {
+                self.set_annotations(table_name, *family, options)
             }
-            AlterKind::UnsetRepartitionColumnHint => self.unset_repartition_column_hint(),
+            AlterKind::UnsetAnnotations { family, keys } => {
+                self.unset_annotations(table_name, *family, keys)
+            }
             AlterKind::SetIndexes { options } => self.set_indexes(table_name, options),
             AlterKind::UnsetIndexes { options } => self.unset_indexes(table_name, options),
             AlterKind::DropDefaults { names } => self.drop_defaults(table_name, names),
@@ -357,8 +366,22 @@ impl TableMeta {
                     new_options.ttl = *new_ttl;
                 }
                 SetRegionOption::Twsc(key, value) => {
+                    let persisted_key = if matches!(
+                        key.as_str(),
+                        TWCS_TRIGGER_FILE_NUM | TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM
+                    ) {
+                        new_options.extra_options.remove(TWCS_TRIGGER_FILE_NUM);
+                        new_options
+                            .extra_options
+                            .remove(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM);
+                        TWCS_TRIGGER_FILE_NUM
+                    } else {
+                        key
+                    };
                     if !value.is_empty() {
-                        new_options.extra_options.insert(key.clone(), value.clone());
+                        new_options
+                            .extra_options
+                            .insert(persisted_key.to_string(), value.clone());
                         // Ensure node restart correctly.
                         new_options.extra_options.insert(
                             COMPACTION_TYPE.to_string(),
@@ -366,7 +389,7 @@ impl TableMeta {
                         );
                     } else {
                         // Invalidate the previous change option if an empty value has been set.
-                        new_options.extra_options.remove(key.as_str());
+                        new_options.extra_options.remove(persisted_key);
                     }
                 }
                 SetRegionOption::Format(value) => {
@@ -401,6 +424,23 @@ impl TableMeta {
                         new_options.extra_options.remove(MAX_ROW_GROUP_ROW_COUNT);
                     }
                 }
+                SetRegionOption::PreserveRowSequence(preserve) => {
+                    if *preserve {
+                        new_options
+                            .extra_options
+                            .insert(PRESERVE_ROW_SEQUENCE.to_string(), preserve.to_string());
+                    } else {
+                        new_options.extra_options.remove(PRESERVE_ROW_SEQUENCE);
+                    }
+                }
+                SetRegionOption::SkipWal(skip_wal) => {
+                    new_options.skip_wal = *skip_wal;
+                    // Keep the explicit table option so it remains distinguishable
+                    // from a value inherited from the schema.
+                    new_options
+                        .extra_options
+                        .insert(SKIP_WAL_KEY.to_string(), skip_wal.to_string());
+                }
             }
         }
         let mut builder = self.new_meta_builder();
@@ -414,67 +454,93 @@ impl TableMeta {
         self.set_table_options(&requests)
     }
 
-    fn set_repartition_column_hint(
+    /// Applies an annotation SET. Validation lives here, on the mutation
+    /// path, so it runs both at frontend verification and again inside the
+    /// alter procedure's prepare step — under the table lock, against fresh
+    /// metadata.
+    fn set_annotations(
         &self,
         table_name: &str,
-        column_name: &str,
+        family: AnnotationFamily,
+        options: &[(String, String)],
     ) -> Result<TableMetaBuilder> {
-        let column_name = column_name.trim();
-        ensure!(
-            !column_name.is_empty() && !column_name.contains(','),
+        validate_annotation_keys(options.iter().map(|(key, _)| key.as_str())).map_err(|err| {
             error::InvalidAlterRequestSnafu {
                 table: table_name,
-                err: format!("{REPARTITION_COLUMN_HINT_KEY} expects exactly one column name"),
+                err: err.to_string(),
             }
-        );
-
-        ensure!(
-            self.partition_key_indices.is_empty(),
-            error::InvalidAlterRequestSnafu {
-                table: table_name,
-                err: format!(
-                    "cannot set {REPARTITION_COLUMN_HINT_KEY} on a table with partition metadata"
-                ),
-            }
-        );
-
-        let column_index = self
-            .schema
-            .column_index_by_name(column_name)
-            .with_context(|| error::ColumnNotExistsSnafu {
-                column_name,
-                table_name,
-            })?;
-
-        if let Some(time_index) = self.schema.timestamp_index() {
+            .build()
+        })?;
+        let cx = AnnotationContext {
+            data_model: self.options.data_model(),
+            schema: &self.schema,
+            partition_key_indices: &self.partition_key_indices,
+        };
+        let mut new_options = self.options.clone();
+        for (key, value) in options {
             ensure!(
-                column_index != time_index,
+                AnnotationFamily::of_key(key) == Some(family),
                 error::InvalidAlterRequestSnafu {
                     table: table_name,
                     err: format!(
-                        "cannot set {REPARTITION_COLUMN_HINT_KEY} to the time index column"
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.namespace()
                     ),
                 }
             );
+            let checked = validate_and_normalize_annotation(family, &cx, key, value).map_err(
+                |e| match e {
+                    AnnotationValidationError::ColumnNotFound { column } => {
+                        error::ColumnNotExistsSnafu {
+                            column_name: column,
+                            table_name,
+                        }
+                        .build()
+                    }
+                    other => error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: other.to_string(),
+                    }
+                    .build(),
+                },
+            )?;
+            new_options.extra_options.insert(key.clone(), checked);
         }
-
-        let mut new_options = self.options.clone();
-        new_options.extra_options.insert(
-            REPARTITION_COLUMN_HINT_KEY.to_string(),
-            column_name.to_string(),
-        );
-
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
         Ok(builder)
     }
 
-    fn unset_repartition_column_hint(&self) -> Result<TableMetaBuilder> {
+    /// Applies an annotation UNSET. Deliberately lenient inside the family's
+    /// namespace: keys this version does not recognise may still be removed,
+    /// so options left behind by other versions can be cleaned up.
+    fn unset_annotations(
+        &self,
+        table_name: &str,
+        family: AnnotationFamily,
+        keys: &[String],
+    ) -> Result<TableMetaBuilder> {
+        validate_annotation_keys(keys.iter().map(String::as_str)).map_err(|err| {
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: err.to_string(),
+            }
+            .build()
+        })?;
         let mut new_options = self.options.clone();
-        new_options
-            .extra_options
-            .remove(REPARTITION_COLUMN_HINT_KEY);
-
+        for key in keys {
+            ensure!(
+                AnnotationFamily::of_key(key) == Some(family),
+                error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "`{key}` is outside the `{}` annotation namespace",
+                        family.namespace()
+                    ),
+                }
+            );
+            new_options.extra_options.remove(key);
+        }
         let mut builder = self.new_meta_builder();
         builder.options(new_options);
         Ok(builder)
@@ -765,6 +831,24 @@ impl TableMeta {
                     },
                 );
 
+                // A dropped column may leave a stale entity declaration behind;
+                // re-adding it must not hand the declaration a type without a
+                // stable string form.
+                if !has_stable_string_form(&col_to_add.column_schema.data_type)
+                    && let Some(key) =
+                        entity_option_referencing(&self.options, &col_to_add.column_schema.name)
+                {
+                    return error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column `{}` is referenced by entity option `{key}` and must \
+                             keep a type that renders as a string, got `{}`",
+                            col_to_add.column_schema.name, col_to_add.column_schema.data_type
+                        ),
+                    }
+                    .fail();
+                }
+
                 new_columns.push(col_to_add.clone());
             }
         }
@@ -958,6 +1042,25 @@ impl TableMeta {
                     table_name,
                 })?;
 
+            // A column referenced by an entity declaration may be dropped (the
+            // read-time derivation skips the stale declaration), but must not
+            // change to a type without a stable string form. Checked after the
+            // existence lookup so a missing column keeps reporting
+            // `ColumnNotExists` regardless of stale declarations.
+            if !has_stable_string_form(&col_to_change.target_type)
+                && let Some(key) = entity_option_referencing(&self.options, change_column_name)
+            {
+                return error::InvalidAlterRequestSnafu {
+                    table: table_name,
+                    err: format!(
+                        "column `{change_column_name}` is referenced by entity option \
+                         `{key}` and must keep a type that renders as a string, got `{}`",
+                        col_to_change.target_type
+                    ),
+                }
+                .fail();
+            }
+
             let column = &table_schema.column_schemas()[index];
 
             ensure!(
@@ -971,20 +1074,49 @@ impl TableMeta {
                 }
             );
 
-            if let Some(ts_index) = timestamp_index {
-                // Not allowed to change column datatype in timestamp index.
+            let is_time_index = timestamp_index == Some(index);
+            if is_time_index {
+                // The time index column is NOT NULL by construction and only
+                // supports widening its unit; historical data in SSTs is cast
+                // to the new unit on read, so no backfill is needed.
                 ensure!(
-                    index != ts_index,
+                    column
+                        .data_type
+                        .is_timestamp_unit_widening_to(&col_to_change.target_type),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: time_index_not_widening_error(
+                            &column.name,
+                            &column.data_type,
+                            &col_to_change.target_type,
+                        ),
+                    }
+                );
+            } else {
+                ensure!(
+                    column
+                        .data_type
+                        .can_arrow_type_cast_to(&col_to_change.target_type),
                     error::InvalidAlterRequestSnafu {
                         table: table_name,
                         err: format!(
-                            "Not allowed to change timestamp index column '{}' datatype",
-                            column.name
-                        )
+                            "column '{}' cannot be cast automatically to type '{}'",
+                            col_to_change.column_name, col_to_change.target_type,
+                        ),
+                    }
+                );
+
+                ensure!(
+                    column.is_nullable(),
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: format!(
+                            "column '{}' must be nullable to ensure safe conversion.",
+                            col_to_change.column_name,
+                        ),
                     }
                 );
             }
-
             ensure!(
                 modify_column_types
                     .insert(&col_to_change.column_name, col_to_change)
@@ -994,30 +1126,6 @@ impl TableMeta {
                     err: format!(
                         "change column datatype {} more than once",
                         col_to_change.column_name
-                    ),
-                }
-            );
-
-            ensure!(
-                column
-                    .data_type
-                    .can_arrow_type_cast_to(&col_to_change.target_type),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "column '{}' cannot be cast automatically to type '{}'",
-                        col_to_change.column_name, col_to_change.target_type,
-                    ),
-                }
-            );
-
-            ensure!(
-                column.is_nullable(),
-                error::InvalidAlterRequestSnafu {
-                    table: table_name,
-                    err: format!(
-                        "column '{}' must be nullable to ensure safe conversion.",
-                        col_to_change.column_name,
                     ),
                 }
             );
@@ -1074,6 +1182,77 @@ impl TableMeta {
             }
         })?;
 
+        let _ = meta_builder
+            .schema(Arc::new(new_schema))
+            .primary_key_indices(self.primary_key_indices.clone());
+
+        Ok(meta_builder)
+    }
+
+    fn set_json_settings(
+        &self,
+        table_name: &str,
+        req: &SetJsonSettingsRequest,
+    ) -> Result<TableMetaBuilder> {
+        let table_schema = &self.schema;
+        let idx = table_schema
+            .column_index_by_name(&req.column_name)
+            .with_context(|| error::ColumnNotExistsSnafu {
+                column_name: &req.column_name,
+                table_name,
+            })?;
+        let col = &table_schema.column_schemas()[idx];
+
+        ensure!(
+            !self.primary_key_indices.contains(&idx) && table_schema.timestamp_index() != Some(idx),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!(
+                    "Not allowed to change JSON settings for key or timestamp column '{}'",
+                    col.name
+                ),
+            }
+        );
+        ensure!(
+            col.data_type.is_json2(),
+            error::InvalidAlterRequestSnafu {
+                table: table_name,
+                err: format!("column '{}' is not a JSON2 column", col.name),
+            }
+        );
+
+        let target_metadata =
+            json2_metadata_with_updated_settings(col.metadata(), req.settings.clone()).map_err(
+                |err| {
+                    error::InvalidAlterRequestSnafu {
+                        table: table_name,
+                        err: err.to_string(),
+                    }
+                    .build()
+                },
+            )?;
+
+        let mut cols = table_schema.column_schemas().to_vec();
+        *cols[idx].mut_metadata() = target_metadata;
+
+        let mut builder = SchemaBuilder::try_from_columns(cols)
+            .with_context(|_| error::SchemaBuildSnafu {
+                msg: format!("Failed to convert column schemas into schema for table {table_name}"),
+            })?
+            .version(table_schema.version() + 1);
+
+        for (k, v) in table_schema.metadata().iter() {
+            builder = builder.add_metadata(k, v);
+        }
+
+        let new_schema = builder.build().with_context(|_| error::SchemaBuildSnafu {
+            msg: format!(
+                "Table {table_name} cannot change JSON settings for column {}",
+                req.column_name
+            ),
+        })?;
+
+        let mut meta_builder = self.new_meta_builder();
         let _ = meta_builder
             .schema(Arc::new(new_schema))
             .primary_key_indices(self.primary_key_indices.clone());
@@ -1387,6 +1566,7 @@ impl TableInfo {
     pub fn to_region_options(&self) -> HashMap<String, String> {
         let mut options = HashMap::from(&self.meta.options);
         options.remove(REPARTITION_COLUMN_HINT_KEY);
+        options.remove(REPARTITION_PARTITION_NUM_HINT_KEY);
         options
     }
 
@@ -1398,6 +1578,14 @@ impl TableInfo {
             self.name.as_str(),
         )
     }
+}
+
+fn entity_option_referencing<'a>(options: &'a TableOptions, column: &str) -> Option<&'a str> {
+    options.extra_options.iter().find_map(|(key, value)| {
+        (parse_entity_option_key(key).is_some()
+            && parse_entity_columns(value).iter().any(|c| c == column))
+        .then_some(key.as_str())
+    })
 }
 
 /// Set column fulltext options if it passed the validation.
@@ -1488,9 +1676,12 @@ mod tests {
     use common_error::ext::ErrorExt;
     use common_error::status_code::StatusCode;
     use datatypes::data_type::ConcreteDataType;
+    use datatypes::extension::json::{Json2ExtensionType, JsonMetadata};
+    use datatypes::json::JsonSettings;
     use datatypes::schema::{
         ColumnSchema, FulltextAnalyzer, FulltextBackend, Schema, SchemaBuilder,
     };
+    use datatypes::types::JsonType;
 
     use super::*;
     use crate::Error;
@@ -1583,6 +1774,141 @@ mod tests {
             .builder_with_alter_kind("my_table", &alter_kind)
             .unwrap();
         builder.build().unwrap()
+    }
+
+    #[test]
+    fn test_set_json_settings() {
+        let schema = Arc::new(
+            SchemaBuilder::try_from_columns(vec![
+                ColumnSchema::new("col1", ConcreteDataType::int32_datatype(), true),
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                json2_column_schema_v1("payload", JsonSettings::new_v2()),
+            ])
+            .unwrap()
+            .version(123)
+            .build()
+            .unwrap(),
+        );
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let alter_kind = AlterKind::SetJsonSettings {
+            request: SetJsonSettingsRequest {
+                column_name: "payload".to_string(),
+                settings: JsonSettings::try_new(vec![], Some(10)).unwrap(),
+            },
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let payload = new_meta.schema.column_schema_by_name("payload").unwrap();
+        let json_metadata: JsonMetadata =
+            serde_json::from_str(payload.metadata().get("ARROW:extension:metadata").unwrap())
+                .unwrap();
+        assert!(json_metadata.is_version_2());
+        assert_eq!(
+            Some(10),
+            json_metadata.json_settings().max_auto_expanded_paths()
+        );
+        assert_eq!(124, new_meta.schema.version());
+        assert_eq!(meta.primary_key_indices, new_meta.primary_key_indices);
+    }
+
+    fn json2_column_schema_v1(name: &str, settings: JsonSettings) -> ColumnSchema {
+        let mut column_schema =
+            ColumnSchema::new(name, ConcreteDataType::Json(JsonType::null()), true);
+        column_schema.with_extension_type(&Json2ExtensionType::new(Arc::new(
+            JsonMetadata::new_v1(settings),
+        )));
+        column_schema
+    }
+
+    #[test]
+    fn test_set_json_settings_rejects_non_json2_column() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let alter_kind = AlterKind::SetJsonSettings {
+            request: SetJsonSettingsRequest {
+                column_name: "col2".to_string(),
+                settings: JsonSettings::new_v2(),
+            },
+        };
+
+        let err = match meta.builder_with_alter_kind("my_table", &alter_kind) {
+            Ok(_) => panic!("expected modifying JSON settings on a non-JSON2 column to fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("is not a JSON2 column"));
+    }
+
+    #[test]
+    fn test_modify_time_index_column_type() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Widening the time index unit is allowed.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "ts".to_string(),
+                target_type: ConcreteDataType::timestamp_microsecond_datatype(),
+            }],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        let ts_column = new_meta.schema.column_schema_by_name("ts").unwrap();
+        assert_eq!(
+            ConcreteDataType::timestamp_microsecond_datatype(),
+            ts_column.data_type
+        );
+        assert!(ts_column.is_time_index());
+        assert!(!ts_column.is_nullable());
+        assert_eq!(new_meta.schema.version(), 124);
+        assert_eq!(&[0], &new_meta.primary_key_indices[..]);
+
+        // Any non-widening change (narrowing, same type, non-timestamp) is
+        // rejected.
+        for target in [
+            ConcreteDataType::timestamp_second_datatype(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            ConcreteDataType::string_datatype(),
+        ] {
+            let alter_kind = AlterKind::ModifyColumnTypes {
+                columns: vec![ModifyColumnTypeRequest {
+                    column_name: "ts".to_string(),
+                    target_type: target.clone(),
+                }],
+            };
+            let res = meta.builder_with_alter_kind("my_table", &alter_kind);
+            assert!(res.is_err(), "expected rejection for {target}");
+        }
     }
 
     #[test]
@@ -1688,6 +2014,272 @@ mod tests {
     }
 
     #[test]
+    fn test_set_preserve_row_sequence_option() {
+        let schema = Arc::new(new_test_schema());
+        let meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        let apply = |meta: &TableMeta, kind: &AlterKind| {
+            meta.builder_with_alter_kind("my_table", kind)
+                .unwrap()
+                .build()
+                .unwrap()
+        };
+
+        let with_true = apply(
+            &meta,
+            &AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::PreserveRowSequence(true)],
+            },
+        );
+        assert_eq!(
+            Some("true"),
+            with_true
+                .options
+                .extra_options
+                .get(PRESERVE_ROW_SEQUENCE)
+                .map(String::as_str)
+        );
+
+        let set_false = apply(
+            &with_true,
+            &AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::PreserveRowSequence(false)],
+            },
+        );
+        assert!(
+            !set_false
+                .options
+                .extra_options
+                .contains_key(PRESERVE_ROW_SEQUENCE)
+        );
+
+        let unset = apply(
+            &with_true,
+            &AlterKind::UnsetTableOptions {
+                keys: vec![UnsetRegionOption::PreserveRowSequence],
+            },
+        );
+        assert!(
+            !unset
+                .options
+                .extra_options
+                .contains_key(PRESERVE_ROW_SEQUENCE)
+        );
+    }
+
+    #[test]
+    fn test_set_skip_wal_updates_typed_and_extra_options() {
+        let mut meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        meta.options
+            .extra_options
+            .insert(SKIP_WAL_KEY.to_string(), false.to_string());
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(true)],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(new_meta.options.skip_wal);
+        assert_eq!(
+            Some("true"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
+
+        let alter_kind = AlterKind::SetTableOptions {
+            options: vec![SetRegionOption::SkipWal(false)],
+        };
+        let new_meta = new_meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+
+        assert!(!new_meta.options.skip_wal);
+        assert_eq!(
+            Some("false"),
+            new_meta
+                .options
+                .extra_options
+                .get(SKIP_WAL_KEY)
+                .map(String::as_str)
+        );
+    }
+
+    #[test]
+    fn test_set_unset_repartition_hints_together() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let options = vec![
+            (REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string()),
+            (
+                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                "10".to_string(),
+            ),
+        ];
+        for reverse in [false, true] {
+            let mut options = options.clone();
+            if reverse {
+                options.reverse();
+            }
+            let updated = meta
+                .builder_with_alter_kind(
+                    "t",
+                    &AlterKind::SetAnnotations {
+                        family: AnnotationFamily::RepartitionHint,
+                        options: options.clone(),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(
+                updated.options.extra_options,
+                options.iter().cloned().collect()
+            );
+            for (key, value) in [
+                (REPARTITION_COLUMN_HINT_KEY, "missing"),
+                (REPARTITION_PARTITION_NUM_HINT_KEY, "0"),
+            ] {
+                let invalid = options
+                    .iter()
+                    .map(|(k, v)| {
+                        (
+                            k.clone(),
+                            if k == key {
+                                value.to_string()
+                            } else {
+                                v.clone()
+                            },
+                        )
+                    })
+                    .collect();
+                assert!(
+                    updated
+                        .builder_with_alter_kind(
+                            "t",
+                            &AlterKind::SetAnnotations {
+                                family: AnnotationFamily::RepartitionHint,
+                                options: invalid,
+                            }
+                        )
+                        .is_err()
+                );
+                assert_eq!(
+                    updated.options.extra_options,
+                    options.iter().cloned().collect()
+                );
+            }
+            let cleared = updated
+                .builder_with_alter_kind(
+                    "t",
+                    &AlterKind::UnsetAnnotations {
+                        family: AnnotationFamily::RepartitionHint,
+                        keys: options.into_iter().map(|(key, _)| key).collect(),
+                    },
+                )
+                .unwrap()
+                .build()
+                .unwrap();
+            assert!(cleared.options.extra_options.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_repartition_partition_num_hint() {
+        for partition_key_indices in [vec![], vec![0]] {
+            let mut meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .partition_key_indices(partition_key_indices)
+                .engine("engine")
+                .next_column_id(3)
+                .build()
+                .unwrap();
+            for value in ["", " ", "0", "-1", "1.5", "abc", "4294967296"] {
+                let err = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::SetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            options: vec![(
+                                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                                value.to_string(),
+                            )],
+                        },
+                    )
+                    .err()
+                    .unwrap();
+                assert!(
+                    err.to_string().contains("expects a positive integer"),
+                    "{err}"
+                );
+            }
+            for (value, expected) in [(" 8 ", "8"), ("1", "1"), ("4294967295", "4294967295")] {
+                meta = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::SetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            options: vec![(
+                                REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                                value.to_string(),
+                            )],
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                assert_eq!(
+                    meta.options.extra_options,
+                    HashMap::from([(
+                        REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+                        expected.to_string()
+                    )])
+                );
+            }
+            for _ in 0..2 {
+                meta = meta
+                    .builder_with_alter_kind(
+                        "t",
+                        &AlterKind::UnsetAnnotations {
+                            family: AnnotationFamily::RepartitionHint,
+                            keys: vec![REPARTITION_PARTITION_NUM_HINT_KEY.to_string()],
+                        },
+                    )
+                    .unwrap()
+                    .build()
+                    .unwrap();
+                assert!(meta.options.extra_options.is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn test_set_repartition_column_hint() {
         let meta = TableMetaBuilder::empty()
             .schema(Arc::new(new_test_schema()))
@@ -1697,8 +2289,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " col1 ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                " col1 ".to_string(),
+            )],
         };
         let new_meta = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1726,8 +2322,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: " ".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), " ".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1750,8 +2347,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1,col2".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "col1,col2".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1774,8 +2375,12 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "missing".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                "missing".to_string(),
+            )],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1795,8 +2400,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "ts".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "ts".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1820,8 +2426,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let alter_kind = AlterKind::SetRepartitionColumnHint {
-            column_name: "col1".to_string(),
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string())],
         };
         let err = meta
             .builder_with_alter_kind("my_table", &alter_kind)
@@ -1850,7 +2457,13 @@ mod tests {
             .unwrap();
 
         let new_meta = meta
-            .builder_with_alter_kind("my_table", &AlterKind::UnsetRepartitionColumnHint)
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::UnsetAnnotations {
+                    family: AnnotationFamily::RepartitionHint,
+                    keys: vec![REPARTITION_COLUMN_HINT_KEY.to_string()],
+                },
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -1864,11 +2477,15 @@ mod tests {
     }
 
     #[test]
-    fn test_repartition_column_hint_is_not_region_option() {
+    fn test_repartition_hints_are_not_region_options() {
         let mut table_options = TableOptions::default();
         table_options
             .extra_options
             .insert(REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string());
+        table_options.extra_options.insert(
+            REPARTITION_PARTITION_NUM_HINT_KEY.to_string(),
+            "8".to_string(),
+        );
         let table_info = TableInfoBuilder::default()
             .table_id(1)
             .table_version(0)
@@ -1888,6 +2505,11 @@ mod tests {
             .build()
             .unwrap();
 
+        assert!(
+            !table_info
+                .to_region_options()
+                .contains_key(REPARTITION_PARTITION_NUM_HINT_KEY)
+        );
         assert!(
             !table_info
                 .to_region_options()
@@ -1960,6 +2582,49 @@ mod tests {
                 .extra_options
                 .contains_key(AUTO_FLUSH_INTERVAL_KEY)
         );
+    }
+
+    #[test]
+    fn test_set_twcs_trigger_persists_legacy_key() {
+        for key in [TWCS_TRIGGER_FILE_NUM, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM] {
+            let mut table_options = TableOptions::default();
+            table_options.extra_options.insert(
+                TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM.to_string(),
+                "4".to_string(),
+            );
+            let meta = TableMetaBuilder::empty()
+                .schema(Arc::new(new_test_schema()))
+                .primary_key_indices(vec![0])
+                .engine("engine")
+                .next_column_id(3)
+                .options(table_options)
+                .build()
+                .unwrap();
+            let alter_kind = AlterKind::SetTableOptions {
+                options: vec![SetRegionOption::Twsc(key.to_string(), "8".to_string())],
+            };
+
+            let new_meta = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            assert_eq!(
+                Some("8"),
+                new_meta
+                    .options
+                    .extra_options
+                    .get(TWCS_TRIGGER_FILE_NUM)
+                    .map(String::as_str)
+            );
+            assert!(
+                !new_meta
+                    .options
+                    .extra_options
+                    .contains_key(TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM)
+            );
+        }
     }
 
     #[test]
@@ -2585,5 +3250,306 @@ mod tests {
             table_type: TableType::Base,
         };
         assert_eq!(actual, expected);
+    }
+
+    use crate::requests::{SEMANTIC_METRIC_UNIT, SEMANTIC_SIGNAL_TYPE};
+
+    /// `host` is a tag, `service` and `note` are string fields, `payload` is a
+    /// binary field.
+    fn semantic_test_meta() -> TableMeta {
+        let column_schemas = vec![
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("payload", ConcreteDataType::binary_datatype(), true),
+            ColumnSchema::new("service", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("note", ConcreteDataType::string_datatype(), true),
+        ];
+        let schema = Arc::new(
+            SchemaBuilder::try_from(column_schemas)
+                .unwrap()
+                .build()
+                .unwrap(),
+        );
+        TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(5)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_set_semantic_annotations() {
+        let meta = semantic_test_meta();
+        // `service` is a plain field: entity columns may be tags or fields.
+        let alter_kind = AlterKind::SetAnnotations {
+            family: AnnotationFamily::Semantic,
+            options: vec![
+                (SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string()),
+                (
+                    "greptime.semantic.entity.service.id".to_string(),
+                    "service".to_string(),
+                ),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            new_meta.options.extra_options.get(SEMANTIC_SIGNAL_TYPE),
+            Some(&"trace".to_string())
+        );
+        assert_eq!(
+            new_meta
+                .options
+                .extra_options
+                .get("greptime.semantic.entity.service.id"),
+            Some(&"service".to_string())
+        );
+    }
+
+    #[test]
+    fn test_repartition_hint_batch_rejects_duplicate_keys() {
+        let meta = TableMetaBuilder::empty()
+            .schema(Arc::new(new_test_schema()))
+            .primary_key_indices(vec![0])
+            .engine("engine")
+            .next_column_id(3)
+            .build()
+            .unwrap();
+
+        // Direct gRPC can hand the mutation layer a duplicated batch the
+        // converter never saw; last-write-wins must not silently apply.
+        let dup_set = AlterKind::SetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            options: vec![
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col1".to_string()),
+                (REPARTITION_COLUMN_HINT_KEY.to_string(), "col2".to_string()),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_set)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("duplicate repartition hint keys"),
+            "{err}"
+        );
+
+        let dup_unset = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::RepartitionHint,
+            keys: vec![
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+                REPARTITION_COLUMN_HINT_KEY.to_string(),
+            ],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &dup_unset)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string().contains("duplicate repartition hint keys"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_set_semantic_annotations_rejects_invalid() {
+        let meta = semantic_test_meta();
+        let cases = [
+            (
+                "greptime.semantic.unknown_key",
+                "x",
+                "unknown semantic option",
+            ),
+            (SEMANTIC_SIGNAL_TYPE, "garbage", "invalid value"),
+            (
+                "greptime.semantic.entity.host.id",
+                "no_such_column",
+                "no_such_column",
+            ),
+            (
+                "greptime.semantic.entity.host.id",
+                "payload",
+                "cannot render as a string",
+            ),
+        ];
+        for (key, value, needle) in cases {
+            let alter_kind = AlterKind::SetAnnotations {
+                family: AnnotationFamily::Semantic,
+                options: vec![(key.to_string(), value.to_string())],
+            };
+            let err = meta
+                .builder_with_alter_kind("my_table", &alter_kind)
+                .err()
+                .unwrap();
+            assert!(
+                err.to_string().contains(needle),
+                "key `{key}`: unexpected error `{err}`"
+            );
+        }
+
+        // ALTER keeps missing columns on the 4002 contract (pinned by sqlness);
+        // the shared validator must not collapse it into InvalidArguments.
+        let missing = meta
+            .builder_with_alter_kind(
+                "my_table",
+                &AlterKind::SetAnnotations {
+                    family: AnnotationFamily::Semantic,
+                    options: vec![(
+                        "greptime.semantic.entity.host.id".to_string(),
+                        "no_such_column".to_string(),
+                    )],
+                },
+            )
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&missing)
+        );
+    }
+
+    #[test]
+    fn test_unset_semantic_annotations() {
+        let mut meta = semantic_test_meta();
+        meta.options
+            .extra_options
+            .insert(SEMANTIC_SIGNAL_TYPE.to_string(), "trace".to_string());
+        // A key this version does not recognise, still inside the namespace.
+        meta.options
+            .extra_options
+            .insert("greptime.semantic.future_key".to_string(), "x".to_string());
+
+        let alter_kind = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec![
+                SEMANTIC_SIGNAL_TYPE.to_string(),
+                "greptime.semantic.future_key".to_string(),
+                // Absent key: removal is a no-op, not an error.
+                SEMANTIC_METRIC_UNIT.to_string(),
+            ],
+        };
+        let new_meta = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key(SEMANTIC_SIGNAL_TYPE)
+        );
+        assert!(
+            !new_meta
+                .options
+                .extra_options
+                .contains_key("greptime.semantic.future_key")
+        );
+
+        let outside = AlterKind::UnsetAnnotations {
+            family: AnnotationFamily::Semantic,
+            keys: vec!["ttl".to_string()],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &outside)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("annotation namespace"), "{err}");
+    }
+
+    #[test]
+    fn test_modify_entity_column_type_keeps_string_form() {
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "service".to_string(),
+        );
+
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "service".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &alter_kind)
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // An unreferenced column may still change to a non-string form.
+        let alter_kind = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "note".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        meta.builder_with_alter_kind("my_table", &alter_kind)
+            .unwrap();
+    }
+
+    #[test]
+    fn test_stale_entity_declaration_guards_readd_and_reports_missing_column() {
+        // A stale declaration: `gone` was dropped after being declared.
+        let mut meta = semantic_test_meta();
+        meta.options.extra_options.insert(
+            "greptime.semantic.entity.service.id".to_string(),
+            "gone".to_string(),
+        );
+
+        // MODIFY on the missing column keeps the ColumnNotExists contract
+        // (4002), stale declaration or not.
+        let modify = AlterKind::ModifyColumnTypes {
+            columns: vec![ModifyColumnTypeRequest {
+                column_name: "gone".to_string(),
+                target_type: ConcreteDataType::binary_datatype(),
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &modify)
+            .err()
+            .unwrap();
+        assert_eq!(
+            common_error::status_code::StatusCode::TableColumnNotFound,
+            common_error::ext::ErrorExt::status_code(&err)
+        );
+
+        // Re-adding the declared column must not hand the declaration a
+        // non-string type...
+        let add = |ty: ConcreteDataType| AlterKind::AddColumns {
+            columns: vec![AddColumnRequest {
+                column_schema: ColumnSchema::new("gone", ty, true),
+                is_key: false,
+                location: None,
+                add_if_not_exists: false,
+            }],
+        };
+        let err = meta
+            .builder_with_alter_kind("my_table", &add(ConcreteDataType::binary_datatype()))
+            .err()
+            .unwrap();
+        assert!(
+            err.to_string()
+                .contains("must keep a type that renders as a string"),
+            "{err}"
+        );
+
+        // ...while a string re-add re-satisfies it.
+        meta.builder_with_alter_kind("my_table", &add(ConcreteDataType::string_datatype()))
+            .unwrap();
     }
 }

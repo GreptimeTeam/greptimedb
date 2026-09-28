@@ -31,7 +31,7 @@ use datatypes::scalars::ScalarVectorBuilder;
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::value::Value;
 use datatypes::vectors::{
-    ConstantVector, Int64Vector, Int64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
+    Int64Vector, Int64VectorBuilder, StringVector, StringVectorBuilder, VectorRef,
 };
 use futures::TryStreamExt;
 use snafu::{OptionExt, ResultExt};
@@ -408,18 +408,9 @@ impl InformationSchemaColumnsBuilder {
     fn finish(&mut self) -> Result<RecordBatch> {
         let rows_num = self.collation_names.len();
 
-        let privileges = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec![DEFAULT_PRIVILEGES])),
-            rows_num,
-        ));
-        let empty_string = Arc::new(ConstantVector::new(
-            Arc::new(StringVector::from(vec![EMPTY_STR])),
-            rows_num,
-        ));
-        let srs_ids = Arc::new(ConstantVector::new(
-            Arc::new(Int64Vector::from(vec![None])),
-            rows_num,
-        ));
+        let privileges = Arc::new(StringVector::from(vec![DEFAULT_PRIVILEGES; rows_num]));
+        let empty_string = Arc::new(StringVector::from(vec![EMPTY_STR; rows_num]));
+        let srs_ids = Arc::new(Int64Vector::from(vec![None; rows_num]));
 
         let columns: Vec<VectorRef> = vec![
             Arc::new(self.catalog_names.finish()),

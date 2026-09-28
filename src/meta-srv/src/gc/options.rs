@@ -38,7 +38,7 @@ impl Default for SoftDropGcOptions {
     fn default() -> Self {
         Self {
             enable: false,
-            retention: Duration::from_days(7),
+            retention: Duration::from_secs(7 * 86400),
         }
     }
 }
@@ -117,6 +117,14 @@ impl Default for GcSchedulerOptions {
 impl GcSchedulerOptions {
     /// Validates the configuration options.
     pub fn validate(&self) -> Result<()> {
+        #[cfg(not(feature = "enterprise"))]
+        ensure!(
+            !self.experimental_soft_drop.enable,
+            error::InvalidArgumentsSnafu {
+                err_msg: "gc.experimental_soft_drop.enable is only available in GreptimeDB Enterprise Edition",
+            }
+        );
+
         ensure!(
             !self.experimental_soft_drop.enable || self.enable,
             error::InvalidArgumentsSnafu {
@@ -234,18 +242,19 @@ mod tests {
 
         assert!(!options.experimental_soft_drop.enable);
         assert_eq!(
-            Duration::from_days(7),
+            Duration::from_secs(7 * 86400),
             options.experimental_soft_drop.retention
         );
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_valid_when_gc_is_enabled() {
         let options = GcSchedulerOptions {
             enable: true,
             experimental_soft_drop: SoftDropGcOptions {
                 enable: true,
-                retention: Duration::from_days(1),
+                retention: Duration::from_secs(86400),
             },
             ..Default::default()
         };
@@ -253,12 +262,29 @@ mod tests {
         assert!(options.validate().is_ok());
     }
 
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_soft_drop_rejected_in_non_enterprise_build() {
+        let options = GcSchedulerOptions {
+            enable: true,
+            experimental_soft_drop: SoftDropGcOptions {
+                enable: true,
+                retention: Duration::from_secs(86400),
+            },
+            ..Default::default()
+        };
+
+        let err = options.validate().unwrap_err();
+        assert!(err.to_string().contains("Enterprise Edition"));
+    }
+
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_requires_gc() {
         let options = GcSchedulerOptions {
             experimental_soft_drop: SoftDropGcOptions {
                 enable: true,
-                retention: Duration::from_days(1),
+                retention: Duration::from_secs(86400),
             },
             ..Default::default()
         };
@@ -266,6 +292,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_be_positive() {
         let options = GcSchedulerOptions {
@@ -280,6 +307,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_be_at_least_one_millisecond() {
         let options = GcSchedulerOptions {
@@ -294,6 +322,7 @@ mod tests {
         assert!(options.validate().is_err());
     }
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_soft_drop_retention_must_fit_i64_millis() {
         let options = GcSchedulerOptions {

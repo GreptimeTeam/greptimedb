@@ -1,19 +1,20 @@
 DESC TABLE information_schema.table_semantics;
 
-+------------------+--------+-----+------+---------+---------------+
-| Column           | Type   | Key | Null | Default | Semantic Type |
-+------------------+--------+-----+------+---------+---------------+
-| table_catalog    | String |     | NO   |         | FIELD         |
-| table_schema     | String |     | NO   |         | FIELD         |
-| table_name       | String |     | NO   |         | FIELD         |
-| table_id         | UInt32 |     | NO   |         | FIELD         |
-| signal_type      | String |     | YES  |         | FIELD         |
-| source           | String |     | YES  |         | FIELD         |
-| source_version   | String |     | YES  |         | FIELD         |
-| pipeline         | String |     | YES  |         | FIELD         |
-| metadata_quality | String |     | YES  |         | FIELD         |
-| semantic_options | String |     | YES  |         | FIELD         |
-+------------------+--------+-----+------+---------+---------------+
++---------------------+--------+-----+------+---------+---------------+
+| Column              | Type   | Key | Null | Default | Semantic Type |
++---------------------+--------+-----+------+---------+---------------+
+| table_catalog       | String |     | NO   |         | FIELD         |
+| table_schema        | String |     | NO   |         | FIELD         |
+| table_name          | String |     | NO   |         | FIELD         |
+| table_id            | UInt32 |     | NO   |         | FIELD         |
+| signal_type         | String |     | YES  |         | FIELD         |
+| source              | String |     | YES  |         | FIELD         |
+| source_version      | String |     | YES  |         | FIELD         |
+| pipeline            | String |     | YES  |         | FIELD         |
+| metadata_quality    | String |     | YES  |         | FIELD         |
+| semantic_options    | String |     | YES  |         | FIELD         |
+| entity_declarations | String |     | YES  |         | FIELD         |
++---------------------+--------+-----+------+---------+---------------+
 
 CREATE TABLE metrics_tagged (
   ts TIMESTAMP TIME INDEX,
@@ -83,6 +84,269 @@ DROP TABLE traces_tagged;
 Affected Rows: 0
 
 DROP TABLE plain_table;
+
+Affected Rows: 0
+
+-- ALTER TABLE manages semantic declarations on existing tables: SET appears in
+-- the view, UNSET disappears from it.
+CREATE TABLE altered_semantics (
+  ts TIMESTAMP TIME INDEX,
+  svc STRING,
+  payload BINARY,
+  val DOUBLE,
+);
+
+Affected Rows: 0
+
+ALTER TABLE altered_semantics SET 'greptime.semantic.signal_type' = 'metric', 'greptime.semantic.entity.service.id' = 'svc';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'altered_semantics';
+
++-------------------+-------------+-----------------------------+
+| table_name        | signal_type | semantic_options            |
++-------------------+-------------+-----------------------------+
+| altered_semantics | metric      | {"entity.service.id":"svc"} |
++-------------------+-------------+-----------------------------+
+
+-- Semantic options never share a statement with regular table options.
+ALTER TABLE altered_semantics SET 'greptime.semantic.source' = 'prometheus', 'ttl' = '7d';
+
+Error: 1004(InvalidArguments), Invalid table option request: `greptime.semantic.*` options must be altered separately from other table options
+
+-- Unknown semantic keys are rejected on SET.
+ALTER TABLE altered_semantics SET 'greptime.semantic.nonsense' = 'x';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: unknown semantic option `greptime.semantic.nonsense`
+
+-- Values outside the key's domain are rejected.
+ALTER TABLE altered_semantics SET 'greptime.semantic.signal_type' = 'garbage';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: invalid value `garbage` for semantic option `greptime.semantic.signal_type`
+
+-- Entity columns must exist.
+ALTER TABLE altered_semantics SET 'greptime.semantic.entity.host.id' = 'no_such_column';
+
+Error: 4002(TableColumnNotFound), Column no_such_column not exists in table altered_semantics
+
+-- Entity columns must render as strings.
+ALTER TABLE altered_semantics SET 'greptime.semantic.entity.host.id' = 'payload';
+
+Error: 1004(InvalidArguments), Invalid alter table(altered_semantics) request: entity column `payload` (option `greptime.semantic.entity.host.id`) has type `Binary`, which cannot render as a string
+
+ALTER TABLE altered_semantics UNSET 'greptime.semantic.entity.service.id';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'altered_semantics';
+
++-------------------+-------------+------------------+
+| table_name        | signal_type | semantic_options |
++-------------------+-------------+------------------+
+| altered_semantics | metric      |                  |
++-------------------+-------------+------------------+
+
+DROP TABLE altered_semantics;
+
+Affected Rows: 0
+
+-- Logical metric tables take the same metadata-only path.
+CREATE TABLE phy_sem (ts TIMESTAMP TIME INDEX, val DOUBLE) engine=metric with ("physical_metric_table" = "");
+
+Affected Rows: 0
+
+CREATE TABLE logical_sem (ts TIMESTAMP TIME INDEX, val DOUBLE, host STRING PRIMARY KEY) engine=metric with ("on_physical_table" = "phy_sem");
+
+Affected Rows: 0
+
+ALTER TABLE logical_sem SET 'greptime.semantic.signal_type' = 'metric', 'greptime.semantic.entity.host.id' = 'host';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'logical_sem';
+
++-------------+-------------+---------------------------+
+| table_name  | signal_type | semantic_options          |
++-------------+-------------+---------------------------+
+| logical_sem | metric      | {"entity.host.id":"host"} |
++-------------+-------------+---------------------------+
+
+-- Regular options still cannot be altered on logical tables.
+ALTER TABLE logical_sem SET 'ttl' = '7d';
+
+Error: 1004(InvalidArguments), Alter logical tables invalid arguments: Only support add columns operation
+
+ALTER TABLE logical_sem UNSET 'greptime.semantic.entity.host.id';
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options
+FROM information_schema.table_semantics
+WHERE table_name = 'logical_sem';
+
++-------------+-------------+------------------+
+| table_name  | signal_type | semantic_options |
++-------------+-------------+------------------+
+| logical_sem | metric      |                  |
++-------------+-------------+------------------+
+
+DROP TABLE logical_sem;
+
+Affected Rows: 0
+
+DROP TABLE phy_sem;
+
+Affected Rows: 0
+
+-- entity_declarations reports what a table actually contributes to the graph,
+-- including the declarations the built-in conventions derive. A whitelisted
+-- OTel descriptor table declares its entities without any entity option, and
+-- the generic container records the identity it yields to.
+CREATE TABLE greptime_otel_resource_info (
+  greptime_timestamp TIMESTAMP TIME INDEX,
+  greptime_value DOUBLE,
+  "job" STRING,
+  "instance" STRING,
+  "service.name" STRING,
+  "host.id" STRING,
+  "container.id" STRING,
+  "container.name" STRING,
+  "k8s.pod.uid" STRING,
+  "k8s.pod.name" STRING,
+  "k8s.container.name" STRING,
+  PRIMARY KEY ("job", "instance", "service.name", "host.id", "container.id", "container.name", "k8s.pod.uid", "k8s.pod.name", "k8s.container.name")
+)
+WITH (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'opentelemetry',
+  'greptime.semantic.metric.type' = 'info'
+);
+
+Affected Rows: 0
+
+SELECT table_name, entity_declarations
+FROM information_schema.table_semantics
+WHERE table_name = 'greptime_otel_resource_info';
+
++-----------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| table_name                  | entity_declarations                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
++-----------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| greptime_otel_resource_info | [{"entity_type":"container","origin":"convention","id":["container.id"],"superseded_by":["k8s.pod.uid","k8s.container.name"],"descriptive":["container.name"]},{"entity_type":"host","origin":"convention","id":["host.id"]},{"entity_type":"k8s.container","origin":"convention","id":["k8s.pod.uid","k8s.container.name"],"descriptive":["container.id","container.name"]},{"entity_type":"k8s.pod","origin":"convention","id":["k8s.pod.uid"],"descriptive":["k8s.pod.name"]},{"entity_type":"service","origin":"convention","id":["job"],"descriptive":["service.name"]},{"entity_type":"service.instance","origin":"convention","id":["job","instance"]}] |
++-----------------------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+-- The same table under the wrong source stamp derives nothing: the column is
+-- empty and `source` names the reason.
+CREATE TABLE kube_pod_info (
+  greptime_timestamp TIMESTAMP TIME INDEX,
+  greptime_value DOUBLE,
+  "namespace" STRING,
+  "pod" STRING,
+  "uid" STRING,
+  "node" STRING,
+  PRIMARY KEY ("namespace", "pod", "uid", "node")
+)
+WITH (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'influxdb'
+);
+
+Affected Rows: 0
+
+SELECT table_name, source, entity_declarations
+FROM information_schema.table_semantics
+WHERE table_name = 'kube_pod_info';
+
++---------------+----------+---------------------+
+| table_name    | source   | entity_declarations |
++---------------+----------+---------------------+
+| kube_pod_info | influxdb |                     |
++---------------+----------+---------------------+
+
+ALTER TABLE kube_pod_info SET 'greptime.semantic.source' = 'prometheus';
+
+Affected Rows: 0
+
+SELECT table_name, source, entity_declarations
+FROM information_schema.table_semantics
+WHERE table_name = 'kube_pod_info';
+
++---------------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| table_name    | source     | entity_declarations                                                                                                                                                    |
++---------------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| kube_pod_info | prometheus | [{"entity_type":"k8s.node","origin":"convention","id":["node"]},{"entity_type":"k8s.pod","origin":"convention","id":["uid"],"descriptive":["namespace","pod","node"]}] |
++---------------+------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE greptime_otel_resource_info;
+
+Affected Rows: 0
+
+DROP TABLE kube_pod_info;
+
+Affected Rows: 0
+
+-- A missing id column drops that entity alone: without `uid` there is no
+-- k8s.pod, and the k8s.node next to it still lands.
+CREATE TABLE kube_pod_info (
+  greptime_timestamp TIMESTAMP TIME INDEX,
+  greptime_value DOUBLE,
+  "namespace" STRING,
+  "pod" STRING,
+  "node" STRING,
+  PRIMARY KEY ("namespace", "pod", "node")
+)
+WITH (
+  'greptime.semantic.signal_type' = 'metric',
+  'greptime.semantic.source' = 'prometheus'
+);
+
+Affected Rows: 0
+
+SELECT table_name, entity_declarations
+FROM information_schema.table_semantics
+WHERE table_name = 'kube_pod_info';
+
++---------------+------------------------------------------------------------------+
+| table_name    | entity_declarations                                              |
++---------------+------------------------------------------------------------------+
+| kube_pod_info | [{"entity_type":"k8s.node","origin":"convention","id":["node"]}] |
++---------------+------------------------------------------------------------------+
+
+DROP TABLE kube_pod_info;
+
+Affected Rows: 0
+
+-- A trace table carries no semantic option at all, yet the conventions derive
+-- its entities: it must still be visible here, or the view cannot answer why
+-- it is in the graph.
+CREATE TABLE traces_untagged (
+  "timestamp" TIMESTAMP(9) TIME INDEX,
+  trace_id STRING,
+  span_id STRING,
+  service_name STRING,
+  "resource_attributes.host.id" STRING,
+  PRIMARY KEY (service_name)
+) WITH ('table_data_model' = 'greptime_trace_v1', 'append_mode' = 'true');
+
+Affected Rows: 0
+
+SELECT table_name, signal_type, semantic_options, entity_declarations
+FROM information_schema.table_semantics
+WHERE table_name = 'traces_untagged';
+
++-----------------+-------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| table_name      | signal_type | semantic_options | entity_declarations                                                                                                                                       |
++-----------------+-------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+| traces_untagged |             |                  | [{"entity_type":"host","origin":"convention","id":["resource_attributes.host.id"]},{"entity_type":"service","origin":"convention","id":["service_name"]}] |
++-----------------+-------------+------------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------+
+
+DROP TABLE traces_untagged;
 
 Affected Rows: 0
 

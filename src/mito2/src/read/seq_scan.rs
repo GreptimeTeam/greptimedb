@@ -76,7 +76,8 @@ impl SeqScan {
     pub(crate) fn new(input: ScanInput) -> Self {
         let mut properties = ScannerProperties::default()
             .with_append_mode(input.append_mode)
-            .with_total_rows(input.total_rows());
+            .with_total_rows(input.total_rows())
+            .with_total_rows_is_exact(input.append_mode && input.total_rows_is_exact());
         if let Some(counters) = input.query_stat_counters.clone() {
             properties.set_query_stat_counters(counters);
         }
@@ -263,7 +264,7 @@ impl SeqScan {
         };
 
         let reader = match &stream_ctx.input.series_row_selector {
-            Some(TimeSeriesRowSelector::LastRow) => {
+            Some(TimeSeriesRowSelector::LastRow { .. }) => {
                 Box::pin(FlatLastRowReader::new(reader).into_stream()) as _
             }
             None => reader,
@@ -574,6 +575,13 @@ impl RegionScanner for SeqScan {
         filter_exprs: Vec<Arc<dyn datafusion::physical_plan::PhysicalExpr>>,
     ) -> Vec<bool> {
         self.stream_ctx.add_dyn_filter_to_predicate(filter_exprs)
+    }
+
+    fn reset_state(&mut self) {
+        self.stream_ctx.input.predicate.clear_dyn_filters();
+        let num_workers = common_stat::get_total_cpu_cores().max(1);
+        self.pruner = Arc::new(Pruner::new(self.stream_ctx.clone(), num_workers));
+        self.metrics_list = PartitionMetricsList::default();
     }
 
     fn set_logical_region(&mut self, logical_region: bool) {

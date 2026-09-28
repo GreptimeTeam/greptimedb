@@ -2,6 +2,9 @@ mode = 'standalone'
 enable_memory_catalog = false
 require_lease_before_startup = true
 
+[query]
+parallelism = 4
+
 [[region_engine]]
 [region_engine.mito]
 {{ if enable_flat_format }}
@@ -50,3 +53,6 @@ retry_delay = "500ms"
 
 [event_recorder]
 event_types = []
+
+[otlp]
+experimental_enable_resource_info = true

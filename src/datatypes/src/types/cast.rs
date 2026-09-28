@@ -26,7 +26,7 @@ pub fn cast(src_value: Value, dest_type: &ConcreteDataType) -> Result<Value> {
     }
     let src_type = src_value.data_type();
     let scalar_value = src_value.try_to_scalar_value(&src_type)?;
-    let new_value = Helper::try_from_scalar_value(scalar_value, 1)?
+    let new_value = Helper::try_from_scalar_value(scalar_value, 1, None)?
         .cast(dest_type)?
         .get(0);
     Ok(new_value)

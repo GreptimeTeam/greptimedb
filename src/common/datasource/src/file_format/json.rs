@@ -313,16 +313,15 @@ mod tests {
             let compressed_file_name =
                 format!("test_compressed_json.{}", compression_type.file_extension());
             let compressed_file_path = temp_dir.path().join(&compressed_file_name);
-            let compressed_file_path_str = compressed_file_path.to_str().unwrap();
 
             // Create a simple file store for testing
-            let store = test_store("/");
+            let store = test_store(temp_dir.path().to_str().unwrap());
 
             // Export JSON with compression
             let rows = stream_to_json(
                 Box::pin(DfRecordBatchStreamAdapter::new(recordbatches.as_stream())),
                 store,
-                compressed_file_path_str,
+                &compressed_file_name,
                 1024,
                 1,
                 &format,
@@ -374,13 +373,13 @@ mod tests {
             }
 
             // Verify the compressed file can be decompressed and content matches original data
-            let store = test_store("/");
+            let store = test_store(temp_dir.path().to_str().unwrap());
             let schema = Arc::new(
                 JsonFormat {
                     compression_type,
                     ..Default::default()
                 }
-                .infer_schema(&store, compressed_file_path_str)
+                .infer_schema(&store, &compressed_file_name)
                 .await
                 .unwrap(),
             );
@@ -388,7 +387,7 @@ mod tests {
 
             let stream = file_to_stream(
                 &store,
-                compressed_file_path_str,
+                &compressed_file_name,
                 json_source.clone(),
                 None,
                 compression_type,

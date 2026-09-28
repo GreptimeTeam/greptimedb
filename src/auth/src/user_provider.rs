@@ -22,6 +22,7 @@ use std::path::Path;
 use std::{fmt, io};
 
 use common_base::secrets::ExposeSecret;
+use common_telemetry::warn;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -29,15 +30,24 @@ use subtle::ConstantTimeEq;
 
 use crate::common::{
     DEFAULT_PBKDF2_SHA256_SALT_LEN, Identity, MAX_PBKDF2_SHA256_ITERATIONS,
-    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, PG_SCRAM_SHA256_KEY_LEN, Password,
-    PgScramSha256Verifier, auth_mysql_with_hash_stage_2,
+    MAX_PBKDF2_SHA256_SALT_LEN, PBKDF2_SHA256_HASH_LEN, Password, PgScramSha256Verifier,
+    auth_mysql_with_hash_stage_2, parse_mysql_native_password_verifier,
+    parse_pg_scram_sha256_password_verifier,
 };
 use crate::error::{
-    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedPasswordTypeSnafu,
-    UserNotFoundSnafu, UserPasswordMismatchSnafu,
+    IllegalParamSnafu, InvalidConfigSnafu, IoSnafu, Result, UnsupportedAuthMethodSnafu,
+    UnsupportedPasswordTypeSnafu, UserNotFoundSnafu, UserPasswordMismatchSnafu,
 };
 use crate::user_info::{DefaultUserInfo, PermissionMode};
 use crate::{UserInfoRef, auth_mysql};
+
+/// Reserved SQL-protocol username selecting bearer-token authentication.
+///
+/// User providers must not define this as a password-authenticated user.
+/// SQL servers carry the token through their clear-password exchange; this
+/// selector does not itself require TLS, so transport policy remains a server
+/// deployment choice.
+pub const BEARER_TOKEN_USER: &str = "*";
 
 #[async_trait::async_trait]
 pub trait UserProvider: Send + Sync {
@@ -65,13 +75,78 @@ pub trait UserProvider: Send + Sync {
         Ok(user_info)
     }
 
-    async fn postgres_auth_info(&self, _id: Identity<'_>) -> Result<PgAuthInfo> {
+    /// Authenticates an opaque bearer token (e.g. a JWT or an OAuth2 access
+    /// token) and derives its user identity.
+    ///
+    /// Unlike [auth()](Self::auth), the caller has no `Identity`/`Password` —
+    /// the provider validates the token and *derives* the identity from it.
+    /// The token is opaque to the server, so JWT/JWKS/OIDC validation policy
+    /// stays pluggable and out of core.
+    ///
+    /// The default rejects token auth with
+    /// [`Error::UnsupportedAuthMethod`], so password-only providers keep
+    /// today's behavior. Providers that support token auth override this to
+    /// validate the token and resolve it to a user.
+    async fn authenticate_bearer_token(&self, _token: &str, _catalog: &str) -> Result<UserInfoRef> {
+        UnsupportedAuthMethodSnafu {
+            method: "bearer token",
+        }
+        .fail()
+    }
+
+    /// Combination of [`authenticate_bearer_token`](Self::authenticate_bearer_token)
+    /// and [`authorize`](Self::authorize).
+    async fn auth_bearer_token(
+        &self,
+        token: &str,
+        catalog: &str,
+        schema: &str,
+    ) -> Result<UserInfoRef> {
+        let user_info = self.authenticate_bearer_token(token, catalog).await?;
+        self.authorize(catalog, schema, &user_info).await?;
+        Ok(user_info)
+    }
+
+    fn mysql_auth_method(&self) -> MysqlAuthMethod {
+        if self.external() {
+            MysqlAuthMethod::ClearPassword
+        } else {
+            MysqlAuthMethod::NativePassword
+        }
+    }
+
+    /// Selects authentication after the MySQL handshake supplies a username.
+    /// The user is resolved in the same scope as [`authenticate`](Self::authenticate).
+    async fn mysql_auth_method_for_user(&self, _username: &str) -> Result<MysqlAuthMethod> {
+        Ok(self.mysql_auth_method())
+    }
+
+    async fn postgres_auth_info(&self, _id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         Ok(PgAuthInfo::Cleartext)
     }
 
     /// Returns whether this user provider implementation is backed by an external system.
     fn external(&self) -> bool {
         false
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MysqlAuthMethod {
+    NativePassword,
+    ClearPassword,
+}
+
+impl MysqlAuthMethod {
+    pub const NATIVE_PASSWORD_PLUGIN: &'static str = "mysql_native_password";
+    pub const CLEAR_PASSWORD_PLUGIN: &'static str = "mysql_clear_password";
+
+    /// Returns the MySQL authentication plugin name sent on the wire.
+    pub const fn plugin_name(self) -> &'static str {
+        match self {
+            Self::NativePassword => Self::NATIVE_PASSWORD_PLUGIN,
+            Self::ClearPassword => Self::CLEAR_PASSWORD_PLUGIN,
+        }
     }
 }
 
@@ -205,29 +280,13 @@ impl PasswordVerifier {
             });
         }
 
-        if let Some(verifier) = input.strip_prefix("mysql_native_password:") {
-            let hash_stage_2 = hex::decode(verifier).ok()?;
-            if hash_stage_2.len() != 20 {
-                return None;
-            }
-
+        if input.starts_with("mysql_native_password:") {
+            let hash_stage_2 = parse_mysql_native_password_verifier(input).ok()?;
             return Some(Self::MysqlNativePassword { hash_stage_2 });
         }
 
-        if let Some(verifier) = input.strip_prefix("pg_scram_sha256:") {
-            let mut parts = verifier.split(':');
-            let iterations = parts.next()?.parse::<u32>().ok()?;
-            let salt = hex::decode(parts.next()?).ok()?;
-            let stored_key = hex::decode(parts.next()?).ok()?;
-            let server_key = hex::decode(parts.next()?).ok()?;
-            if parts.next().is_some()
-                || stored_key.len() != PG_SCRAM_SHA256_KEY_LEN
-                || server_key.len() != PG_SCRAM_SHA256_KEY_LEN
-            {
-                return None;
-            }
-
-            return PgScramSha256Verifier::new(iterations, salt, stored_key, server_key)
+        if input.starts_with("pg_scram_sha256:") {
+            return parse_pg_scram_sha256_password_verifier(input)
                 .ok()
                 .map(Self::PgScramSha256);
         }
@@ -327,8 +386,24 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
     let file = File::open(path).context(IoSnafu)?;
     let credential = io::BufReader::new(file)
         .lines()
-        .map_while(std::result::Result::ok)
-        .filter_map(|line| {
+        .enumerate()
+        .map_while(|(idx, line)| match line {
+            Ok(line) => Some((idx, line)),
+            Err(err) => {
+                // A read error (I/O failure or invalid UTF-8) ends the iterator,
+                // so every remaining credential is dropped. Warn instead of
+                // vanishing silently, matching the malformed-line handling below.
+                warn!(
+                    "Failed to read line {} of user provider file {}: {}; \
+                     all remaining credentials are ignored",
+                    idx + 1,
+                    filepath,
+                    err
+                );
+                None
+            }
+        })
+        .filter_map(|(idx, line)| {
             // The line format is:
             // - `username=password` - Basic user with default permissions
             // - `username:permission_mode=password` - User with specific permission mode
@@ -339,7 +414,20 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
                 return None;
             }
 
-            parse_credential_line(line)
+            let parsed = parse_credential_line(line);
+            if parsed.is_none() {
+                // Don't log the line: it carries the password/verifier. A common
+                // cause is a plaintext password containing `=`, which splits the
+                // line into more than two parts.
+                warn!(
+                    "Ignoring malformed credential at line {} of user provider file {}: \
+                     expected `username[:permission]=verifier` with exactly one `=` \
+                     (passwords containing `=` are not supported)",
+                    idx + 1,
+                    filepath
+                );
+            }
+            parsed
         })
         .collect::<HashMap<String, _>>();
 
@@ -351,7 +439,44 @@ fn load_credential_from_file(filepath: &str) -> Result<UserInfoMap> {
         }
     );
 
+    warn_if_pg_scram_disabled(&credential);
+
     Ok(credential)
+}
+
+/// Returns the users whose verifier cannot back a Postgres SCRAM handshake.
+///
+/// Only [`PasswordVerifier::PlainText`] and [`PasswordVerifier::PgScramSha256`]
+/// support SCRAM. A `mysql_native_password` verifier is a double-SHA1 digest
+/// unrelated to PBKDF2, and a `pbkdf2_sha256` verifier was derived without
+/// SASLprep and cannot be safely reused as a SCRAM secret without the original
+/// password. Either kind forces the whole Postgres endpoint to fall back to
+/// cleartext (see [`postgres_auth_info_with_credential`]).
+fn pg_scram_unsupported_users(users: &UserInfoMap) -> Vec<&str> {
+    users
+        .iter()
+        .filter(|(_, (verifier, _))| !verifier.supports_pg_scram_sha256())
+        .map(|(username, _)| username.as_str())
+        .collect()
+}
+
+/// Warns once per credential load when the set disables Postgres SCRAM, so
+/// operators don't unknowingly serve cleartext passwords over Postgres while
+/// believing SCRAM is in effect.
+pub(crate) fn warn_if_pg_scram_disabled(users: &UserInfoMap) {
+    let unsupported = pg_scram_unsupported_users(users);
+    if !unsupported.is_empty() {
+        warn!(
+            "Postgres SCRAM authentication is disabled: {} of {} user(s) use a \
+             non-SCRAM password verifier {:?}, so all Postgres password \
+             authentication falls back to cleartext. Ensure TLS is enabled; if you \
+             rely on Postgres SCRAM, generate every user's verifier with the \
+             pg_scram_sha256 format.",
+            unsupported.len(),
+            users.len(),
+            unsupported
+        );
+    }
 }
 
 /// Parse a line of credential in the format of `username=password` or `username:permission_mode=password`.
@@ -371,7 +496,7 @@ pub(crate) fn parse_credential_line(
 
     let (username_part, password) = (parts[0], parts[1]);
     let (username, permission_mode) = if let Some((user, perm)) = username_part.split_once(':') {
-        (user, PermissionMode::from_str(perm))
+        (user, PermissionMode::from_str(perm)?)
     } else {
         (username_part, PermissionMode::default())
     };
@@ -674,6 +799,14 @@ mod tests {
         let result = parse_credential_line("user=pass=word");
         assert_eq!(result, None);
 
+        for line in [
+            "user:readonyl=password",
+            "user:=password",
+            "user:arbitrary=password",
+        ] {
+            assert_eq!(parse_credential_line(line), None);
+        }
+
         // Empty password
         let result = parse_credential_line("user=");
         assert_eq!(
@@ -901,6 +1034,51 @@ mod tests {
         let auth_info =
             postgres_auth_info_with_credential(&users, Identity::UserId("unknown", None)).unwrap();
         assert!(matches!(auth_info, PgAuthInfo::Cleartext));
+    }
+
+    #[test]
+    fn test_pg_scram_unsupported_users() {
+        let scram_verifier =
+            format_pg_scram_sha256_password_verifier(b"password", b"salt", 4096).unwrap();
+        let (_, scram_user) = parse_credential_line(&format!("scram={scram_verifier}")).unwrap();
+
+        let mut hash = [0u8; PBKDF2_SHA256_HASH_LEN];
+        pbkdf2_hmac::<Sha256>(b"password", b"salt", 4096, &mut hash);
+
+        let users = HashMap::from([
+            (
+                "plain".to_string(),
+                (plain("password"), PermissionMode::default()),
+            ),
+            ("scram".to_string(), scram_user),
+            (
+                "pbkdf2".to_string(),
+                (
+                    PasswordVerifier::Pbkdf2Sha256 {
+                        iterations: 4096,
+                        salt: b"salt".to_vec(),
+                        hash: hash.to_vec(),
+                    },
+                    PermissionMode::default(),
+                ),
+            ),
+            (
+                "mysql".to_string(),
+                (
+                    PasswordVerifier::MysqlNativePassword {
+                        hash_stage_2: mysql_native_password_hash(b"password"),
+                    },
+                    PermissionMode::default(),
+                ),
+            ),
+        ]);
+
+        let mut unsupported = pg_scram_unsupported_users(&users);
+        unsupported.sort();
+        // A pbkdf2_sha256 verifier is flagged alongside mysql_native_password:
+        // both force Postgres to fall back to cleartext, while plain and
+        // pg_scram back SCRAM.
+        assert_eq!(unsupported, vec!["mysql", "pbkdf2"]);
     }
 
     #[test]

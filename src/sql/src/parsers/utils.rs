@@ -22,10 +22,9 @@ use datafusion::execution::SessionStateBuilder;
 use datafusion::execution::context::SessionState;
 use datafusion::optimizer::simplify_expressions::ExprSimplifier;
 use datafusion_common::tree_node::{TreeNode, TreeNodeVisitor};
-use datafusion_common::{DFSchema, ScalarValue};
+use datafusion_common::{DFSchema, ScalarValue, TableReference};
 use datafusion_expr::simplify::SimplifyContext;
-use datafusion_expr::{AggregateUDF, Expr, ScalarUDF, TableSource, WindowUDF};
-use datafusion_sql::TableReference;
+use datafusion_expr::{AggregateUDF, Expr, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
 use datafusion_sql::planner::{ContextProvider, SqlToRel};
 use datatypes::arrow::datatypes::DataType;
 use datatypes::schema::{
@@ -33,9 +32,6 @@ use datatypes::schema::{
     COLUMN_FULLTEXT_OPT_KEY_CASE_SENSITIVE, COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_FULLTEXT_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
     COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY, COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
-    COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY, COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
-    COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD, COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
-    COLUMN_VECTOR_INDEX_OPT_KEY_METRIC,
 };
 use snafu::{ResultExt, ensure};
 use sqlparser::dialect::Dialect;
@@ -265,8 +261,10 @@ pub fn parser_expr_to_scalar_value_literal_at(
 
     // 2. simplify logical expr — use scheduled time if provided, else wall-clock
     let info = match scheduled_time {
-        Some(dt) => SimplifyContext::default().with_query_execution_start_time(Some(dt)),
-        None => SimplifyContext::default().with_current_time(),
+        Some(dt) => SimplifyContext::builder()
+            .with_query_execution_start_time(Some(dt))
+            .build(),
+        None => SimplifyContext::builder().with_current_time().build(),
     };
     let simplifier = ExprSimplifier::new(info);
 
@@ -316,6 +314,10 @@ impl ContextProvider for StubContextProvider {
         self.state.scalar_functions().get(name).cloned()
     }
 
+    fn get_higher_order_meta(&self, name: &str) -> Option<Arc<HigherOrderUDF>> {
+        self.state.higher_order_functions().get(name).cloned()
+    }
+
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
         self.state.aggregate_functions().get(name).cloned()
     }
@@ -334,6 +336,14 @@ impl ContextProvider for StubContextProvider {
 
     fn udf_names(&self) -> Vec<String> {
         self.state.scalar_functions().keys().cloned().collect()
+    }
+
+    fn higher_order_function_names(&self) -> Vec<String> {
+        self.state
+            .higher_order_functions()
+            .keys()
+            .cloned()
+            .collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {
@@ -361,17 +371,6 @@ pub fn validate_column_skipping_index_create_option(key: &str) -> bool {
         COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY,
         COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE,
         COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE,
-    ]
-    .contains(&key)
-}
-
-pub fn validate_column_vector_index_create_option(key: &str) -> bool {
-    [
-        COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE,
-        COLUMN_VECTOR_INDEX_OPT_KEY_METRIC,
-        COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY,
-        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD,
-        COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH,
     ]
     .contains(&key)
 }
@@ -553,7 +552,9 @@ SELECT * FROM tql_cte WHERE ts > 0
             ),
         ];
 
-        let info = SimplifyContext::default().with_query_execution_start_time(Some(now_time));
+        let info = SimplifyContext::builder()
+            .with_query_execution_start_time(Some(now_time))
+            .build();
         let simplifier = ExprSimplifier::new(info);
         for (expr, expected) in testcases {
             let expr_name = expr.schema_name().to_string();

@@ -15,9 +15,16 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use api::v1::value::ValueData;
+use api::v1::{
+    ColumnDataType, ColumnSchema, Row, RowInsertRequest, RowInsertRequests, Rows, SemanticType,
+};
+use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::{Output, OutputData};
 use common_recordbatch::util::collect_batches;
-use datatypes::arrow::array::{Float64Array, Int64Array};
+use datatypes::arrow::array::{Float64Array, Int64Array, StringArray, TimestampMillisecondArray};
+use datatypes::arrow::compute::cast;
+use datatypes::arrow::datatypes::DataType;
 use frontend::instance::Instance;
 use query::parser::{PromQuery, QueryLanguageParser, QueryStatement};
 use rstest::rstest;
@@ -637,28 +644,57 @@ async fn two_aggregators_combined_aggrs(instance: Arc<dyn MockInstance>) {
 // eval instant at 50m stddev by (instance)(http_requests)
 //   {instance="0"} 223.60679774998
 //   {instance="1"} 223.60679774998
+//
+// The values are compared with a tolerance rather than against a rendered table:
+// `stddev_pop` merges partial aggregates in a parallelism-dependent order, so the
+// last digits of its output are not stable across runs.
 #[apply(both_instances_cases)]
-#[ignore = "TODO(ruihang): fix this case"]
 async fn stddev_by_label(instance: Arc<dyn MockInstance>) {
     let instance = instance.frontend();
 
-    create_insert_query_assert(
+    execute_all(&instance, AGGREGATORS_CREATE_TABLE, QueryContext::arc()).await;
+    execute_all(&instance, AGGREGATORS_INSERT_DATA, QueryContext::arc()).await;
+
+    let batches = promql_query_as_batches(
         instance,
-        AGGREGATORS_CREATE_TABLE,
-        AGGREGATORS_INSERT_DATA,
         r#"stddev by (instance)(http_requests)"#,
+        None,
+        QueryContext::arc(),
         UNIX_EPOCH,
         unix_epoch_plus_100s(),
         Duration::from_secs(60),
         Duration::from_secs(0),
-        "+----------+---------------------+--------------------------------+\
-        \n| instance | ts                  | STDDEVPOP(http_requests.value) |\
-        \n+----------+---------------------+--------------------------------+\
-        \n| 0        | 1970-01-01T00:00:00 | 223.606797749979               |\
-        \n| 1        | 1970-01-01T00:00:00 | 223.606797749979               |\
-        \n+----------+---------------------+--------------------------------+",
     )
     .await;
+
+    let batches = batches.iter().collect::<Vec<_>>();
+    assert_eq!(batches.len(), 1);
+    // Tag columns come back dictionary-encoded.
+    let instances = cast(
+        batches[0].column_by_name("instance").unwrap(),
+        &DataType::Utf8,
+    )
+    .unwrap();
+    let instances = instances.as_any().downcast_ref::<StringArray>().unwrap();
+    let values = batches[0]
+        .column_by_name("stddev_pop(http_requests.value)")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap();
+
+    let mut actual = (0..values.len())
+        .map(|i| (instances.value(i), values.value(i)))
+        .collect::<Vec<_>>();
+    actual.sort_by(|a, b| a.0.cmp(b.0));
+    assert_eq!(actual.len(), 2, "{}", batches[0].pretty_print());
+    for (expected_instance, (instance, value)) in ["0", "1"].into_iter().zip(actual) {
+        assert_eq!(instance, expected_instance);
+        assert!(
+            (value - 223.606_797_749_979).abs() < 1e-9,
+            "instance {instance}: {value}"
+        );
+    }
 }
 
 // This is not derived from prometheus
@@ -944,4 +980,199 @@ async fn anon_promql_ratio_repro(instance: Arc<dyn MockInstance>) {
         "{}",
         whole[0].pretty_print()
     );
+}
+
+#[apply(both_instances_cases)]
+async fn promql_stale_marker_excludes_series_across_flushes(instance: Arc<dyn MockInstance>) {
+    let ins = instance.frontend();
+    let table = "promql_stale_marker";
+    execute_all(
+        &ins,
+        &format!(
+            "CREATE TABLE {table} (\
+                series STRING, \
+                ts TIMESTAMP TIME INDEX, \
+                val DOUBLE, \
+                PRIMARY KEY (series)\
+            ) WITH (sst_format = 'flat')"
+        ),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let rows = |samples: &[(&str, f64, i64)]| Rows {
+        schema: vec![
+            ColumnSchema {
+                column_name: "series".to_string(),
+                datatype: ColumnDataType::String as i32,
+                semantic_type: SemanticType::Tag as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "ts".to_string(),
+                datatype: ColumnDataType::TimestampMillisecond as i32,
+                semantic_type: SemanticType::Timestamp as i32,
+                ..Default::default()
+            },
+            ColumnSchema {
+                column_name: "val".to_string(),
+                datatype: ColumnDataType::Float64 as i32,
+                semantic_type: SemanticType::Field as i32,
+                ..Default::default()
+            },
+        ],
+        rows: samples
+            .iter()
+            .map(|(series, value, timestamp)| Row {
+                values: vec![
+                    ValueData::StringValue((*series).to_string()).into(),
+                    ValueData::TimestampMillisecondValue(*timestamp).into(),
+                    ValueData::F64Value(*value).into(),
+                ],
+            })
+            .collect(),
+    };
+    let insert = |samples: &[(&str, f64, i64)]| RowInsertRequests {
+        inserts: vec![RowInsertRequest {
+            table_name: table.to_string(),
+            rows: Some(rows(samples)),
+        }],
+    };
+
+    ins.handle_row_inserts(
+        insert(&[("stale", 10.0, 1_000), ("ordinary", 20.0, 1_000)]),
+        QueryContext::arc(),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+    execute_all(
+        &ins,
+        &format!("ADMIN FLUSH_TABLE('{table}')"),
+        QueryContext::arc(),
+    )
+    .await;
+
+    let ordinary_nan = f64::from_bits(0x7ff8_0000_0000_0000);
+    ins.handle_row_inserts(
+        insert(&[
+            ("stale", f64::from_bits(PROMETHEUS_STALE_NAN_BITS), 2_000),
+            ("ordinary", ordinary_nan, 2_000),
+        ]),
+        QueryContext::arc(),
+        false,
+        false,
+    )
+    .await
+    .unwrap();
+
+    let extract_samples = |batches: common_recordbatch::RecordBatches| {
+        let mut samples = batches
+            .iter()
+            .flat_map(|batch| {
+                let series = cast(
+                    batch.column_by_name("series").unwrap().as_ref(),
+                    &DataType::Utf8,
+                )
+                .unwrap();
+                let series = series.as_any().downcast_ref::<StringArray>().unwrap();
+                let values = batch
+                    .column_by_name("val")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<Float64Array>()
+                    .unwrap();
+                let timestamps = batch
+                    .column_by_name("ts")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap();
+                (0..batch.num_rows())
+                    .map(|row| {
+                        (
+                            series.value(row).to_string(),
+                            values.value(row),
+                            timestamps.value(row),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        samples.sort_by(|left, right| left.0.cmp(&right.0));
+        samples
+    };
+
+    let raw_output = ins
+        .do_query(
+            &format!("SELECT series, val, ts FROM {table} WHERE ts = 2000"),
+            QueryContext::arc(),
+        )
+        .await
+        .remove(0)
+        .unwrap();
+    let raw_batches = match raw_output.data {
+        OutputData::Stream(stream) => collect_batches(stream).await.unwrap(),
+        OutputData::RecordBatches(recordbatches) => recordbatches,
+        _ => unreachable!(),
+    };
+    let raw_samples = extract_samples(raw_batches);
+    assert_eq!(raw_samples.len(), 2, "{raw_samples:?}");
+    let stale_marker = raw_samples
+        .iter()
+        .find(|(series, _, _)| series == "stale")
+        .unwrap();
+    assert_eq!(stale_marker.1.to_bits(), PROMETHEUS_STALE_NAN_BITS);
+    let ordinary_marker = raw_samples
+        .iter()
+        .find(|(series, _, _)| series == "ordinary")
+        .unwrap();
+    assert_eq!(ordinary_marker.1.to_bits(), ordinary_nan.to_bits());
+
+    // Keep the finite 1000ms sample eligible so a stale marker cannot fall back to it.
+    let query_at = |at| {
+        let time = UNIX_EPOCH.checked_add(Duration::from_millis(at)).unwrap();
+        promql_query_as_batches(
+            ins.clone(),
+            table,
+            None,
+            QueryContext::arc(),
+            time,
+            time,
+            Duration::from_secs(1),
+            Duration::from_secs(3),
+        )
+    };
+    let assert_nan_series = |samples: Vec<(String, f64, i64)>, at| {
+        assert_eq!(samples.len(), 1, "{samples:?}");
+        assert_eq!(samples[0].0, "ordinary", "{samples:?}");
+        assert_eq!(samples[0].2, at, "{samples:?}");
+        assert_eq!(
+            samples[0].1.to_bits(),
+            ordinary_nan.to_bits(),
+            "{samples:?}"
+        );
+    };
+
+    for flush_markers in [false, true] {
+        if flush_markers {
+            execute_all(
+                &ins,
+                &format!("ADMIN FLUSH_TABLE('{table}')"),
+                QueryContext::arc(),
+            )
+            .await;
+        }
+
+        assert_eq!(
+            extract_samples(query_at(1_500).await),
+            vec![
+                ("ordinary".to_string(), 20.0, 1_500),
+                ("stale".to_string(), 10.0, 1_500)
+            ]
+        );
+        assert_nan_series(extract_samples(query_at(2_000).await), 2_000);
+        assert_nan_series(extract_samples(query_at(2_500).await), 2_500);
+    }
 }

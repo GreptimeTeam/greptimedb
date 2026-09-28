@@ -92,7 +92,7 @@ use crate::utils::database::DatabaseOperator;
 use crate::utils::insert_forwarder::InsertForwarder;
 
 /// The time window for twcs compaction of the region stats table.
-const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_days(1);
+const REGION_STATS_TABLE_TWCS_COMPACTION_TIME_WINDOW: Duration = Duration::from_secs(86400);
 
 // TODO(fys): try use derive_builder macro
 pub struct MetasrvBuilder {
@@ -250,6 +250,7 @@ impl MetasrvBuilder {
         let event_recorder = Arc::new(EventRecorderImpl::with_event_type_filter(
             Box::new(EventHandlerImpl::new(event_inserter)),
             options.event_recorder.event_types.clone(),
+            options.event_recorder.flush_interval,
         ));
 
         let selector = selector.unwrap_or_else(|| Arc::new(LeaseBasedSelector));
@@ -530,6 +531,8 @@ impl MetasrvBuilder {
             let gc_scheduler_ctx = DefaultGcSchedulerCtx::try_new(
                 table_metadata_manager.clone(),
                 procedure_manager.clone(),
+                runtime_switch_manager.clone(),
+                #[cfg(feature = "enterprise")]
                 ddl_manager.clone(),
                 meta_peer_client.clone(),
                 mailbox.clone(),
@@ -698,8 +701,11 @@ fn build_procedure_manager(
 }
 
 /// Resolves if soft-drop is enabled from metasrv options.
+///
+/// Soft drop is an enterprise-only feature; it is always disabled in
+/// non-enterprise builds regardless of the configuration.
 fn ddl_soft_drop_enabled(options: &MetasrvOptions) -> bool {
-    options.gc.experimental_soft_drop.enable
+    cfg!(feature = "enterprise") && options.gc.experimental_soft_drop.enable
 }
 
 /// Returns soft-drop retention for recovering persisted procedures.
@@ -723,6 +729,7 @@ pub struct DdlManagerConfigureContext {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_ddl_soft_drop_gate_preserves_retention_for_recovery() {
         let mut options = MetasrvOptions::default();
@@ -731,6 +738,22 @@ mod tests {
         options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
 
         assert!(ddl_soft_drop_enabled(&options));
+        assert_eq!(
+            Some(Duration::from_secs(123)),
+            ddl_soft_drop_retention(&options)
+        );
+    }
+
+    #[cfg(not(feature = "enterprise"))]
+    #[test]
+    fn test_ddl_soft_drop_is_always_disabled_in_non_enterprise_build() {
+        let mut options = MetasrvOptions::default();
+        options.gc.enable = true;
+        options.gc.experimental_soft_drop.enable = true;
+        options.gc.experimental_soft_drop.retention = Duration::from_secs(123);
+
+        assert!(!ddl_soft_drop_enabled(&options));
+        // Retention is preserved for recovering persisted procedures.
         assert_eq!(
             Some(Duration::from_secs(123)),
             ddl_soft_drop_retention(&options)

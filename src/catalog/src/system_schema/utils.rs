@@ -21,8 +21,25 @@ use crate::CatalogManager;
 use crate::error::{GetInformationExtensionSnafu, Result, UpgradeWeakCatalogManagerRefSnafu};
 use crate::information_schema::InformationExtensionRef;
 use crate::kvbackend::KvBackendCatalogManager;
+use crate::system_schema::semantic_graph::EntityGraphProviderRef;
 
 pub mod tables;
+
+/// Try to get the entity-graph provider from a `[CatalogManager]` weak reference.
+/// Returns `None` when the manager is not the kv-backed one or the provider has
+/// not been injected yet (the computed graph tables then stream empty).
+pub fn entity_graph_provider(
+    catalog_manager: &Weak<dyn CatalogManager>,
+) -> Result<Option<EntityGraphProviderRef>> {
+    let catalog_manager = catalog_manager
+        .upgrade()
+        .context(UpgradeWeakCatalogManagerRefSnafu)?;
+
+    Ok(catalog_manager
+        .as_any()
+        .downcast_ref::<KvBackendCatalogManager>()
+        .and_then(|manager| manager.entity_graph_provider()))
+}
 
 /// Try to get the `[InformationExtension]` from `[CatalogManager]` weak reference.
 pub fn information_extension(

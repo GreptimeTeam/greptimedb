@@ -270,18 +270,158 @@ pub fn datafusion_status_code<T: ErrorExt + 'static>(
     e: &DataFusionError,
     default_status: Option<StatusCode>,
 ) -> StatusCode {
-    match e {
+    let mut error = e;
+    loop {
+        error = match error {
+            DataFusionError::Shared(inner) => inner,
+            DataFusionError::Context(_, inner) | DataFusionError::Diagnostic(_, inner) => inner,
+            _ => break,
+        };
+    }
+
+    match error {
         DataFusionError::Internal(_) => StatusCode::Internal,
         DataFusionError::NotImplemented(_) => StatusCode::Unsupported,
         DataFusionError::Plan(_) => StatusCode::PlanQuery,
-        DataFusionError::External(e) => {
-            if let Some(ext) = (*e).downcast_ref::<T>() {
+        DataFusionError::External(error) => {
+            if let Some(ext) = (*error).downcast_ref::<T>() {
+                ext.status_code()
+            } else if let Some(ext) = (*error).downcast_ref::<BoxedError>() {
                 ext.status_code()
             } else {
                 default_status.unwrap_or(StatusCode::EngineExecuteQuery)
             }
         }
-        DataFusionError::Diagnostic(_, e) => datafusion_status_code::<T>(e, default_status),
         _ => default_status.unwrap_or(StatusCode::EngineExecuteQuery),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use common_error::ext::PlainError;
+
+    use super::*;
+
+    #[test]
+    fn test_datafusion_status_code_preserves_external_errors_through_wrappers() {
+        let boxed_error = |status| {
+            DataFusionError::External(Box::new(BoxedError::new(PlainError::new(
+                "neutral error".to_string(),
+                status,
+            ))))
+        };
+
+        for status in [
+            StatusCode::RequestOutdated,
+            StatusCode::Unknown,
+            StatusCode::Unsupported,
+        ] {
+            let errors = [
+                boxed_error(status),
+                DataFusionError::Shared(Arc::new(boxed_error(status))),
+                DataFusionError::Context("context".to_string(), Box::new(boxed_error(status))),
+                DataFusionError::Diagnostic(
+                    Box::new(datafusion_common::Diagnostic::new_error("diagnostic", None)),
+                    Box::new(boxed_error(status)),
+                ),
+                DataFusionError::Shared(Arc::new(DataFusionError::Context(
+                    "context".to_string(),
+                    Box::new(DataFusionError::Diagnostic(
+                        Box::new(datafusion_common::Diagnostic::new_error("diagnostic", None)),
+                        Box::new(boxed_error(status)),
+                    )),
+                ))),
+            ];
+
+            for error in errors {
+                assert_eq!(datafusion_status_code::<Error>(&error, None), status);
+                assert_eq!(
+                    datafusion_status_code::<Error>(&error, Some(StatusCode::PlanQuery)),
+                    status
+                );
+            }
+        }
+
+        let direct_error = DataFusionError::External(Box::new(Error::DynFilterPayloadTooLarge {
+            payload_size_bytes: 2,
+            max_payload_bytes: 1,
+            location: Location::default(),
+        }));
+        assert_eq!(
+            datafusion_status_code::<Error>(&direct_error, Some(StatusCode::Internal)),
+            StatusCode::PlanQuery
+        );
+
+        let boundary_error =
+            DataFusionError::Shared(Arc::new(DataFusionError::External(Box::new(
+                BoxedError::new(common_recordbatch::error::Error::PhysicalExpr {
+                    error: DataFusionError::NotImplemented("inner error".to_string()),
+                    location: Location::default(),
+                }),
+            ))));
+        assert_eq!(
+            datafusion_status_code::<Error>(&boundary_error, Some(StatusCode::PlanQuery)),
+            StatusCode::Internal
+        );
+    }
+
+    #[test]
+    fn test_datafusion_status_code_uses_default_for_untyped_errors() {
+        let wrap = |error| {
+            DataFusionError::Shared(Arc::new(DataFusionError::Context(
+                "context".to_string(),
+                Box::new(DataFusionError::Diagnostic(
+                    Box::new(datafusion_common::Diagnostic::new_error("diagnostic", None)),
+                    Box::new(error),
+                )),
+            )))
+        };
+        let errors = || {
+            [
+                (
+                    DataFusionError::External(Box::new(std::io::Error::other("neutral io error"))),
+                    StatusCode::EngineExecuteQuery,
+                    StatusCode::Unknown,
+                ),
+                (
+                    DataFusionError::Internal("neutral internal error".to_string()),
+                    StatusCode::Internal,
+                    StatusCode::Internal,
+                ),
+                (
+                    DataFusionError::NotImplemented("neutral not implemented error".to_string()),
+                    StatusCode::Unsupported,
+                    StatusCode::Unsupported,
+                ),
+                (
+                    DataFusionError::Plan("neutral plan error".to_string()),
+                    StatusCode::PlanQuery,
+                    StatusCode::PlanQuery,
+                ),
+                (
+                    DataFusionError::External(Box::new(DataFusionError::Internal(
+                        "inner error".to_string(),
+                    ))),
+                    StatusCode::EngineExecuteQuery,
+                    StatusCode::Unknown,
+                ),
+            ]
+        };
+
+        for (error, none_expected, default_expected) in
+            errors()
+                .into_iter()
+                .chain(errors().map(|(error, none_expected, default_expected)| {
+                    (wrap(error), none_expected, default_expected)
+                }))
+        {
+            assert_eq!(datafusion_status_code::<Error>(&error, None), none_expected);
+            assert_eq!(
+                datafusion_status_code::<Error>(&error, Some(StatusCode::Unknown)),
+                default_expected
+            );
+        }
     }
 }

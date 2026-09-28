@@ -20,7 +20,7 @@ use datafusion::datasource::file_format::file_compression_type::FileCompressionT
 use datafusion::datasource::listing::PartitionedFile;
 use datafusion::datasource::object_store::ObjectStoreUrl;
 use datafusion::datasource::physical_plan::{
-    CsvSource, FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource, FileStream,
+    CsvSource, FileGroup, FileScanConfig, FileScanConfigBuilder, FileSource, FileStreamBuilder,
     JsonOpener, JsonSource,
 };
 use datafusion::physical_plan::metrics::ExecutionPlanMetricsSet;
@@ -50,14 +50,14 @@ pub fn format_schema(schema: Schema) -> Vec<String> {
 
 pub fn test_store(root: &str) -> ObjectStore {
     let builder = Fs::default();
-    ObjectStore::new(builder.root(root)).unwrap().finish()
+    ObjectStore::new(builder.root(root)).unwrap()
 }
 
 pub fn test_tmp_store(root: &str) -> (ObjectStore, TempDir) {
     let dir = create_temp_dir(root);
 
-    let builder = Fs::default();
-    (ObjectStore::new(builder.root("/")).unwrap().finish(), dir)
+    let store = test_store(dir.path().to_str().unwrap());
+    (store, dir)
 }
 
 pub fn test_basic_schema() -> SchemaRef {
@@ -94,9 +94,11 @@ pub(crate) fn scan_config(
         .build()
 }
 
-pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usize) -> usize) {
-    let store = test_store("/");
-
+pub async fn setup_stream_to_json_test(
+    store: &ObjectStore,
+    origin_path: &str,
+    threshold: impl Fn(usize) -> usize,
+) {
     let schema = basic_schema_with_time_format();
 
     let json_opener = JsonOpener::new(
@@ -110,17 +112,16 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
     let size = store.read(origin_path).await.unwrap().len();
 
     let config = scan_config(None, origin_path, Arc::new(JsonSource::new(schema)));
-    let stream = FileStream::new(
-        &config,
-        0,
-        Arc::new(json_opener),
-        &ExecutionPlanMetricsSet::new(),
-    )
-    .unwrap();
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0)
+        .with_file_opener(Arc::new(json_opener))
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()
+        .unwrap();
 
-    let (tmp_store, dir) = test_tmp_store("test_stream_to_json");
+    let (tmp_store, _dir) = test_tmp_store("test_stream_to_json");
 
-    let output_path = format!("{}/{}", dir.path().display(), "output");
+    let output_path = "output";
 
     let json_format = JsonFormat::default();
 
@@ -128,7 +129,7 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
         stream_to_json(
             Box::pin(stream),
             tmp_store.clone(),
-            &output_path,
+            output_path,
             threshold(size),
             8,
             &json_format,
@@ -137,18 +138,17 @@ pub async fn setup_stream_to_json_test(origin_path: &str, threshold: impl Fn(usi
         .is_ok()
     );
 
-    let written = tmp_store.read(&output_path).await.unwrap();
+    let written = tmp_store.read(output_path).await.unwrap();
     let origin = store.read(origin_path).await.unwrap();
     assert_eq_lines(written.to_vec(), origin.to_vec());
 }
 
 pub async fn setup_stream_to_csv_test(
+    store: &ObjectStore,
     origin_path: &str,
     format_path: &str,
     threshold: impl Fn(usize) -> usize,
 ) {
-    let store = test_store("/");
-
     let schema = basic_schema_with_time_format();
 
     let csv_source = CsvSource::new(schema).with_batch_size(TEST_BATCH_SIZE);
@@ -162,11 +162,16 @@ pub async fn setup_stream_to_csv_test(
             0,
         )
         .unwrap();
-    let stream = FileStream::new(&config, 0, csv_opener, &ExecutionPlanMetricsSet::new()).unwrap();
+    let stream = FileStreamBuilder::new(&config)
+        .with_partition(0)
+        .with_file_opener(csv_opener)
+        .with_metrics(&ExecutionPlanMetricsSet::new())
+        .build()
+        .unwrap();
 
-    let (tmp_store, dir) = test_tmp_store("test_stream_to_csv");
+    let (tmp_store, _dir) = test_tmp_store("test_stream_to_csv");
 
-    let output_path = format!("{}/{}", dir.path().display(), "output");
+    let output_path = "output";
 
     let csv_format = CsvFormat {
         timestamp_format: Some("%m-%d-%Y".to_string()),
@@ -179,7 +184,7 @@ pub async fn setup_stream_to_csv_test(
         stream_to_csv(
             Box::pin(stream),
             tmp_store.clone(),
-            &output_path,
+            output_path,
             threshold(size),
             8,
             &csv_format,
@@ -188,7 +193,7 @@ pub async fn setup_stream_to_csv_test(
         .is_ok()
     );
 
-    let written = tmp_store.read(&output_path).await.unwrap();
+    let written = tmp_store.read(output_path).await.unwrap();
     let format_expect = store.read(format_path).await.unwrap();
     assert_eq_lines(written.to_vec(), format_expect.to_vec());
 }

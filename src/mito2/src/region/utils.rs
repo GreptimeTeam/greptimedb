@@ -370,8 +370,7 @@ mod tests {
         std::fs::create_dir(&storage_dir).unwrap();
         let object_store = ObjectStore::new(Fs::default().root(storage_dir.to_str().unwrap()))
             .unwrap()
-            .layer(HdfsCompatibilityLayer::new_for_test())
-            .finish();
+            .layer(HdfsCompatibilityLayer::new_for_test());
         let access_layer = Arc::new(AccessLayer::new(
             "table_dir",
             PathType::Bare,

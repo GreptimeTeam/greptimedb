@@ -14,15 +14,16 @@
 
 //! Parquet reader.
 
-#[cfg(feature = "vector_index")]
-use std::collections::BTreeSet;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use api::v1::SemanticType;
-use common_recordbatch::filter::SimpleFilterEvaluator;
-use common_telemetry::{error, tracing, warn};
+use arrow_schema::extension::{
+    EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
+};
+use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
+use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
 use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_expr::utils::expr_to_columns;
@@ -31,8 +32,9 @@ use datatypes::arrow::array::ArrayRef;
 use datatypes::arrow::datatypes::{Field, Schema as ArrowSchema, SchemaRef};
 use datatypes::arrow::record_batch::RecordBatch;
 use datatypes::data_type::ConcreteDataType;
-use datatypes::extension::json::is_structured_json_field;
+use datatypes::extension::json::{Json2ExtensionType, is_json2_extension_type};
 use datatypes::prelude::DataType;
+use datatypes::vectors::json::json2_physical_data_type;
 use futures::StreamExt;
 use mito_codec::row_converter::build_primary_key_codec;
 use object_store::ObjectStore;
@@ -51,8 +53,6 @@ use table::predicate::Predicate;
 
 use crate::cache::index::result_cache::PredicateKey;
 use crate::cache::{CacheStrategy, CachedSstMeta, SstMetaPreparation, prepare_sst_meta};
-#[cfg(feature = "vector_index")]
-use crate::error::ApplyVectorIndexSnafu;
 use crate::error::{
     ParquetToArrowSchemaSnafu, ReadDataPartSnafu, Result, SerializePartitionExprSnafu,
     UnexpectedSnafu,
@@ -64,6 +64,7 @@ use crate::metrics::{
 use crate::read::flat_projection::CompactionProjectionMapper;
 use crate::read::prune::FlatPruneReader;
 use crate::read::read_columns::ReadColumns;
+use crate::series_index::SeriesIndexReadContext;
 use crate::sst::file::FileHandle;
 use crate::sst::index::bloom_filter::applier::{
     BloomFilterIndexApplierRef, BloomFilterIndexApplyMetrics,
@@ -74,18 +75,15 @@ use crate::sst::index::fulltext_index::applier::{
 use crate::sst::index::inverted_index::applier::{
     InvertedIndexApplierRef, InvertedIndexApplyMetrics,
 };
-#[cfg(feature = "vector_index")]
-use crate::sst::index::vector_index::applier::VectorIndexApplierRef;
-use crate::sst::parquet::DEFAULT_READ_BATCH_SIZE;
 use crate::sst::parquet::file_range::{
     FileRangeContext, FileRangeContextRef, PartitionFilterContext, PreFilterMode, RangeBase,
 };
 use crate::sst::parquet::flat_format::{FlatReadFormat, primary_key_column_index};
 use crate::sst::parquet::format::{INTERNAL_COLUMN_NUM, need_override_sequence};
-use crate::sst::parquet::json_align::{NestedSchemaAligner, ProjectedRecordBatchStream};
+use crate::sst::parquet::json_align::{AlignMode, JsonSchemaAligner, ProjectedRecordBatchStream};
 use crate::sst::parquet::metadata::MetadataLoader;
 use crate::sst::parquet::prefilter::{
-    CachedPrimaryKeyFilter, PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
+    PrefilterContextBuilder, build_reader_filter_plan, execute_prefilter,
 };
 use crate::sst::parquet::push_decoder::{
     SstParquetRangeFetcher, build_sst_parquet_record_batch_stream,
@@ -94,6 +92,7 @@ use crate::sst::parquet::read_columns::{ProjectionMaskPlan, build_projection_pla
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 use crate::sst::parquet::row_selection::RowGroupSelection;
 use crate::sst::parquet::stats::RowGroupPruningStats;
+use crate::sst::parquet::{DEFAULT_READ_BATCH_SIZE, Json2RewriteTargets, Json2TargetLayout};
 use crate::sst::{override_pk_field_to_binary, tag_maybe_to_dictionary_field};
 
 const INDEX_TYPE_FULLTEXT: &str = "fulltext";
@@ -106,6 +105,43 @@ const MAX_ROW_GROUPS_TO_CHECK_PK: usize = 4;
 /// limit, signalling the writer likely fell back to plain encoding.
 fn should_read_pk_as_binary(parquet_meta: &ParquetMetaData) -> bool {
     should_read_pk_as_binary_with_limit(parquet_meta, DEFAULT_DICTIONARY_PAGE_SIZE_LIMIT)
+}
+
+fn apply_json2_rewrite_targets(
+    read_format: &FlatReadFormat,
+    targets: &Json2RewriteTargets,
+) -> Result<SchemaRef> {
+    let schema = read_format.output_arrow_schema()?;
+    if targets.is_empty() {
+        return Ok(schema);
+    }
+
+    let mut schema = schema.as_ref().clone();
+    let mut fields = schema.fields().iter().cloned().collect::<Vec<_>>();
+    for (column_id, layout) in targets.iter() {
+        let Some(index) = read_format.parquet_projected_index_by_id(*column_id) else {
+            continue;
+        };
+        let Some(field) = fields.get(index) else {
+            continue;
+        };
+        let mut field = field.as_ref().clone();
+        field.set_data_type(json2_physical_data_type(&layout.target_layout));
+
+        let mut metadata = field.metadata().clone();
+        metadata.insert(
+            EXTENSION_TYPE_NAME_KEY.to_string(),
+            Json2ExtensionType::NAME.to_string(),
+        );
+        metadata.insert(
+            EXTENSION_TYPE_METADATA_KEY.to_string(),
+            layout.extension_metadata.clone(),
+        );
+        field.set_metadata(metadata);
+        fields[index] = Arc::new(field);
+    }
+    schema.fields = fields.into();
+    Ok(Arc::new(schema))
 }
 
 fn should_read_pk_as_binary_with_limit(
@@ -125,7 +161,6 @@ fn should_read_pk_as_binary_with_limit(
 }
 const INDEX_TYPE_INVERTED: &str = "inverted";
 const INDEX_TYPE_BLOOM: &str = "bloom filter";
-const INDEX_TYPE_VECTOR: &str = "vector";
 
 macro_rules! handle_index_error {
     ($err:expr, $file_handle:expr, $index_type:expr) => {
@@ -150,6 +185,8 @@ macro_rules! handle_index_error {
 
 /// Parquet SST reader builder.
 pub struct ParquetReaderBuilder {
+    /// Index snapshot and store used to determine range-index availability.
+    series_index: Option<SeriesIndexReadContext>,
     /// SST directory.
     table_dir: String,
     /// Path type for generating file paths.
@@ -163,18 +200,14 @@ pub struct ParquetReaderBuilder {
     /// `None` reads all columns. Due to schema change, the projection
     /// can contain columns not in the parquet file.
     read_cols: Option<ReadColumns>,
+    /// Compaction-only JSON2 physical rewrite targets.
+    json2_rewrite_targets: Json2RewriteTargets,
     /// Strategy to cache SST data.
     cache_strategy: CacheStrategy,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
     fulltext_index_appliers: [Option<FulltextIndexApplierRef>; 2],
-    /// Vector index applier for KNN search.
-    #[cfg(feature = "vector_index")]
-    vector_index_applier: Option<VectorIndexApplierRef>,
-    /// Over-fetched k for vector index scan.
-    #[cfg(feature = "vector_index")]
-    vector_index_k: Option<usize>,
     /// Expected metadata of the region while reading the SST.
     /// This is usually the latest metadata of the region. The reader use
     /// it get the correct column id of a column by name.
@@ -183,6 +216,10 @@ pub struct ParquetReaderBuilder {
     compaction: bool,
     /// Mode to pre-filter columns.
     pre_filter_mode: PreFilterMode,
+    /// Whether to run the reduced-column predicate prefilter pass.
+    enable_predicate_prefilter: bool,
+    /// Whether to apply simple time index filters during the normal precise-filter pass.
+    postpone_time_index_filter: bool,
     /// Whether to decode primary key values eagerly when reading primary key format SSTs.
     decode_primary_key_values: bool,
     page_index_policy: PageIndexPolicy,
@@ -200,28 +237,35 @@ impl ParquetReaderBuilder {
         object_store: ObjectStore,
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
+            series_index: None,
             table_dir,
             path_type,
             file_handle,
             object_store,
             predicate: None,
             read_cols: None,
+            json2_rewrite_targets: Arc::default(),
             cache_strategy: CacheStrategy::Disabled,
             inverted_index_appliers: [None, None],
             bloom_filter_index_appliers: [None, None],
             fulltext_index_appliers: [None, None],
-            #[cfg(feature = "vector_index")]
-            vector_index_applier: None,
-            #[cfg(feature = "vector_index")]
-            vector_index_k: None,
             expected_metadata: None,
             compaction: false,
             pre_filter_mode: PreFilterMode::All,
+            enable_predicate_prefilter: true,
+            postpone_time_index_filter: false,
             decode_primary_key_values: false,
             page_index_policy: Default::default(),
             defer_optional_page_index: false,
             batch_size: DEFAULT_READ_BATCH_SIZE,
         }
+    }
+
+    /// Sets the captured series-index context for range-index reads.
+    #[must_use]
+    pub(crate) fn series_index(mut self, context: Option<SeriesIndexReadContext>) -> Self {
+        self.series_index = context;
+        self
     }
 
     /// Sets the scan-wide hint for rows in a decoded batch.
@@ -244,6 +288,13 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub fn projection(mut self, read_cols: Option<ReadColumns>) -> ParquetReaderBuilder {
         self.read_cols = read_cols;
+        self
+    }
+
+    /// Attaches fixed JSON2 physical layouts used by compaction readers.
+    #[must_use]
+    pub(crate) fn json2_rewrite_targets(mut self, targets: Json2RewriteTargets) -> Self {
+        self.json2_rewrite_targets = targets;
         self
     }
 
@@ -284,19 +335,6 @@ impl ParquetReaderBuilder {
         self
     }
 
-    /// Attaches the vector index applier to the builder.
-    #[cfg(feature = "vector_index")]
-    #[must_use]
-    pub(crate) fn vector_index_applier(
-        mut self,
-        applier: Option<VectorIndexApplierRef>,
-        k: Option<usize>,
-    ) -> Self {
-        self.vector_index_applier = applier;
-        self.vector_index_k = k;
-        self
-    }
-
     /// Attaches the expected metadata to the builder.
     #[must_use]
     pub fn expected_metadata(mut self, expected_metadata: Option<RegionMetadataRef>) -> Self {
@@ -315,6 +353,20 @@ impl ParquetReaderBuilder {
     #[must_use]
     pub(crate) fn pre_filter_mode(mut self, pre_filter_mode: PreFilterMode) -> Self {
         self.pre_filter_mode = pre_filter_mode;
+        self
+    }
+
+    /// Sets whether to run the reduced-column predicate prefilter pass.
+    #[must_use]
+    pub(crate) fn enable_predicate_prefilter(mut self, enable: bool) -> Self {
+        self.enable_predicate_prefilter = enable;
+        self
+    }
+
+    /// Sets whether to postpone simple time index filters to precise filtering.
+    #[must_use]
+    pub(crate) fn postpone_time_index_filter(mut self, postpone: bool) -> Self {
+        self.postpone_time_index_filter = postpone;
         self
     }
 
@@ -441,7 +493,7 @@ impl ParquetReaderBuilder {
         } else {
             let expected_meta = self.expected_metadata.as_ref().unwrap_or(&region_meta);
             // Lists all column ids to read, we always use the expected metadata if possible.
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 expected_meta
                     .column_metadatas
                     .iter()
@@ -451,24 +503,52 @@ impl ParquetReaderBuilder {
 
         let file_metadata = parquet_meta.file_metadata();
         let parquet_schema_desc = file_metadata.schema_descr();
-        let file_schema =
+        let file_schema = Arc::new(
             parquet_to_arrow_schema(parquet_schema_desc, file_metadata.key_value_metadata())
-                .context(ParquetToArrowSchemaSnafu { file: &file_path })?;
+                .context(ParquetToArrowSchemaSnafu { file: &file_path })?,
+        );
         let mut read_format = FlatReadFormat::new(
             region_meta.clone(),
             read_cols,
-            Some(Arc::new(file_schema)),
+            Some(file_schema.clone()),
             &file_path,
             skip_auto_convert,
         )?;
-        if need_override_sequence(&parquet_meta) {
-            read_format
-                .set_override_sequence(self.file_handle.meta_ref().sequence.map(|x| x.get()));
+        // `region_meta` comes from the Parquet/source file and must not be used as the
+        // target identity. When the caller has no current metadata, the handle is the
+        // only local identity available and therefore denotes a local read.
+        let expected_region_id = self
+            .expected_metadata
+            .as_ref()
+            .map(|metadata| metadata.region_id)
+            .unwrap_or(self.file_handle.region_id());
+        let is_foreign = self.file_handle.region_id() != expected_region_id;
+        if is_foreign {
+            debug!(
+                "Reading foreign SST, file_id: {}, source_region_id: {}, expected_region_id: {}",
+                self.file_handle.file_id().file_id(),
+                self.file_handle.region_id(),
+                expected_region_id,
+            );
+        }
+        let file_meta = self.file_handle.meta_ref();
+        let override_sequence = if is_foreign {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else if file_meta.preserve_row_sequence {
+            None
+        } else if need_override_sequence(&parquet_meta) {
+            file_meta.sequence.map(|sequence| sequence.get())
+        } else {
+            None
+        };
+        if let Some(sequence) = override_sequence {
+            read_format.set_override_sequence(Some(sequence));
         }
 
         // Computes the projection mask.
         let parquet_read_cols = read_format.parquet_read_columns();
-        let projection_plan = build_projection_plan(parquet_read_cols, parquet_schema_desc);
+        let projection_plan =
+            build_projection_plan(parquet_read_cols, parquet_schema_desc, &file_schema)?;
         let has_nested_projection = parquet_read_cols.has_nested();
         let selection = self
             .row_groups_to_read(&read_format, &parquet_meta, &mut metrics.filter_metrics)
@@ -497,8 +577,11 @@ impl ParquetReaderBuilder {
             self.predicate.as_ref(),
             self.expected_metadata.as_deref(),
             self.pre_filter_mode,
+            self.enable_predicate_prefilter,
+            self.postpone_time_index_filter,
             &read_format,
             &codec,
+            &parquet_meta,
         );
 
         if self.defer_optional_page_index
@@ -535,18 +618,20 @@ impl ParquetReaderBuilder {
             );
         }
 
+        let output_schema = apply_json2_rewrite_targets(&read_format, &self.json2_rewrite_targets)?;
+
         // Create ArrowReaderMetadata for async stream building.
         let mut arrow_reader_options = ArrowReaderOptions::new();
         if !read_format
             .arrow_schema()
             .fields()
             .iter()
-            .any(is_structured_json_field)
+            .any(is_json2_extension_type)
         {
             // Read `__primary_key` as Binary when it's too large for dictionary
             // encoding; convert_batch wraps it back to a DictionaryArray.
             let schema_for_reader = if should_read_pk_as_binary(&parquet_meta) {
-                read_format.set_pk_as_binary()?;
+                read_format.set_pk_as_binary(output_schema.clone());
                 override_pk_field_to_binary(read_format.arrow_schema())
             } else {
                 read_format.arrow_schema().clone()
@@ -557,7 +642,18 @@ impl ParquetReaderBuilder {
             ArrowReaderMetadata::try_new(parquet_meta.clone(), arrow_reader_options)
                 .context(ReadDataPartSnafu)?;
 
-        let output_schema = read_format.output_arrow_schema()?;
+        let json2_rewrite_targets = self
+            .json2_rewrite_targets
+            .iter()
+            .map(|(column_id, layout)| {
+                let column = region_meta
+                    .column_by_id(*column_id)
+                    .context(UnexpectedSnafu {
+                        reason: format!("JSON2 target column by id {column_id} does not exist"),
+                    })?;
+                Ok((column.column_schema.name.clone(), layout.clone()))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
             file_handle: self.file_handle.clone(),
@@ -566,6 +662,7 @@ impl ParquetReaderBuilder {
             parquet_metadata_size,
             arrow_metadata,
             output_schema,
+            json2_rewrite_targets,
             object_store: self.object_store.clone(),
             projection: projection_plan,
             has_nested_projection,
@@ -576,6 +673,19 @@ impl ParquetReaderBuilder {
 
         let partition_filter = self.build_partition_filter(&read_format, &prune_schema)?;
 
+        let range_index_store = self.series_index.as_ref().and_then(|context| {
+            let region_id = self
+                .expected_metadata
+                .as_ref()
+                .unwrap_or(&region_meta)
+                .region_id;
+            (self.file_handle.region_id() == region_id
+                && context
+                    .version
+                    .range_indexes
+                    .contains_key(&self.file_handle.file_id().file_id()))
+            .then(|| context.store.clone())
+        });
         let context = FileRangeContext::new(
             reader_builder,
             RangeBase {
@@ -590,6 +700,7 @@ impl ParquetReaderBuilder {
                 pre_filter_mode: self.pre_filter_mode,
                 partition_filter,
             },
+            range_index_store,
         );
 
         metrics.build_cost += start.elapsed();
@@ -710,7 +821,14 @@ impl ParquetReaderBuilder {
         let metadata = metadata_loader.load(cache_metrics).await?;
 
         let decoded = if self.cache_strategy.sst_meta_cache_enabled() {
-            let metadata = prepare_sst_meta(file_path, metadata, None, page_index_policy).await?;
+            let metadata = prepare_sst_meta(
+                file_path,
+                metadata,
+                None,
+                page_index_policy,
+                &self.cache_strategy.sst_meta_runtime(),
+            )
+            .await?;
             let decoded = metadata.decoded();
             match metadata {
                 SstMetaPreparation::Prepared(metadata) => {
@@ -832,19 +950,6 @@ impl ParquetReaderBuilder {
                 skip_fields,
             )
             .await;
-        }
-        #[cfg(feature = "vector_index")]
-        {
-            self.prune_row_groups_by_vector_index(
-                row_group_size,
-                num_row_groups,
-                &mut output,
-                metrics,
-            )
-            .await;
-            if output.is_empty() {
-                return output;
-            }
         }
         output
     }
@@ -1111,49 +1216,6 @@ impl ParquetReaderBuilder {
         pruned
     }
 
-    /// Prunes row groups by vector index results.
-    #[cfg(feature = "vector_index")]
-    async fn prune_row_groups_by_vector_index(
-        &self,
-        row_group_size: usize,
-        num_row_groups: usize,
-        output: &mut RowGroupSelection,
-        metrics: &mut ReaderFilterMetrics,
-    ) {
-        let Some(applier) = &self.vector_index_applier else {
-            return;
-        };
-        let Some(k) = self.vector_index_k else {
-            return;
-        };
-        if !self.file_handle.meta_ref().vector_index_available() {
-            return;
-        }
-
-        let file_size_hint = self.file_handle.meta_ref().index_file_size();
-        let apply_res = applier
-            .apply_with_k(self.file_handle.index_id(), Some(file_size_hint), k)
-            .await;
-        let row_ids = match apply_res {
-            Ok(res) => res.row_offsets,
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
-                return;
-            }
-        };
-
-        let selection = match vector_selection_from_offsets(row_ids, row_group_size, num_row_groups)
-        {
-            Ok(selection) => selection,
-            Err(err) => {
-                handle_index_error!(err, self.file_handle, INDEX_TYPE_VECTOR);
-                return;
-            }
-        };
-        metrics.rows_vector_selected += selection.row_count();
-        apply_selection_and_update_metrics(output, &selection, metrics, INDEX_TYPE_VECTOR);
-    }
-
     async fn prune_row_groups_by_fulltext_bloom(
         &self,
         row_group_size: usize,
@@ -1377,29 +1439,6 @@ fn apply_selection_and_update_metrics(
     *output = intersection;
 }
 
-#[cfg(feature = "vector_index")]
-fn vector_selection_from_offsets(
-    row_offsets: Vec<u64>,
-    row_group_size: usize,
-    num_row_groups: usize,
-) -> Result<RowGroupSelection> {
-    let mut row_ids = BTreeSet::new();
-    for offset in row_offsets {
-        let row_id = u32::try_from(offset).map_err(|_| {
-            ApplyVectorIndexSnafu {
-                reason: format!("Row offset {} exceeds u32::MAX", offset),
-            }
-            .build()
-        })?;
-        row_ids.insert(row_id);
-    }
-    Ok(RowGroupSelection::from_row_ids(
-        row_ids,
-        row_group_size,
-        num_row_groups,
-    ))
-}
-
 fn all_required_row_groups_searched(
     required_row_groups: &RowGroupSelection,
     cached_row_groups: &RowGroupSelection,
@@ -1425,8 +1464,6 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rg_minmax_filtered: usize,
     /// Number of row groups filtered by bloom filter index.
     pub(crate) rg_bloom_filtered: usize,
-    /// Number of row groups filtered by vector index.
-    pub(crate) rg_vector_filtered: usize,
 
     /// Number of rows in row group before filtering.
     pub(crate) rows_total: usize,
@@ -1436,10 +1473,6 @@ pub(crate) struct ReaderFilterMetrics {
     pub(crate) rows_inverted_filtered: usize,
     /// Number of rows in row group filtered by bloom filter index.
     pub(crate) rows_bloom_filtered: usize,
-    /// Number of rows filtered by vector index.
-    pub(crate) rows_vector_filtered: usize,
-    /// Number of rows selected by vector index.
-    pub(crate) rows_vector_selected: usize,
     /// Number of rows filtered by precise filter.
     pub(crate) rows_precise_filtered: usize,
 
@@ -1485,14 +1518,11 @@ impl ReaderFilterMetrics {
         self.rg_inverted_filtered += other.rg_inverted_filtered;
         self.rg_minmax_filtered += other.rg_minmax_filtered;
         self.rg_bloom_filtered += other.rg_bloom_filtered;
-        self.rg_vector_filtered += other.rg_vector_filtered;
 
         self.rows_total += other.rows_total;
         self.rows_fulltext_filtered += other.rows_fulltext_filtered;
         self.rows_inverted_filtered += other.rows_inverted_filtered;
         self.rows_bloom_filtered += other.rows_bloom_filtered;
-        self.rows_vector_filtered += other.rows_vector_filtered;
-        self.rows_vector_selected += other.rows_vector_selected;
         self.rows_precise_filtered += other.rows_precise_filtered;
 
         self.fulltext_index_cache_hit += other.fulltext_index_cache_hit;
@@ -1544,9 +1574,6 @@ impl ReaderFilterMetrics {
         READ_ROW_GROUPS_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rg_bloom_filtered as u64);
-        READ_ROW_GROUPS_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rg_vector_filtered as u64);
 
         PRECISE_FILTER_ROWS_TOTAL
             .with_label_values(&["parquet"])
@@ -1563,9 +1590,6 @@ impl ReaderFilterMetrics {
         READ_ROWS_IN_ROW_GROUP_TOTAL
             .with_label_values(&["bloom_filter_index_filtered"])
             .inc_by(self.rows_bloom_filtered as u64);
-        READ_ROWS_IN_ROW_GROUP_TOTAL
-            .with_label_values(&["vector_index_filtered"])
-            .inc_by(self.rows_vector_filtered as u64);
     }
 
     fn update_index_metrics(&mut self, index_type: &str, row_group_count: usize, row_count: usize) {
@@ -1582,64 +1606,8 @@ impl ReaderFilterMetrics {
                 self.rg_bloom_filtered += row_group_count;
                 self.rows_bloom_filtered += row_count;
             }
-            INDEX_TYPE_VECTOR => {
-                self.rg_vector_filtered += row_group_count;
-                self.rows_vector_filtered += row_count;
-            }
             _ => {}
         }
-    }
-}
-
-#[cfg(all(test, feature = "vector_index"))]
-mod vector_index_tests {
-    use super::*;
-
-    #[test]
-    fn test_vector_selection_from_offsets() {
-        let row_group_size = 4;
-        let num_row_groups = 3;
-        let selection =
-            vector_selection_from_offsets(vec![0, 1, 5, 9], row_group_size, num_row_groups)
-                .unwrap();
-
-        assert_eq!(selection.row_group_count(), 3);
-        assert_eq!(selection.row_count(), 4);
-        assert!(selection.contains_non_empty_row_group(0));
-        assert!(selection.contains_non_empty_row_group(1));
-        assert!(selection.contains_non_empty_row_group(2));
-    }
-
-    #[test]
-    fn test_vector_selection_from_offsets_out_of_range() {
-        let row_group_size = 4;
-        let num_row_groups = 2;
-        let selection = vector_selection_from_offsets(
-            vec![0, 7, u64::from(u32::MAX) + 1],
-            row_group_size,
-            num_row_groups,
-        );
-        assert!(selection.is_err());
-    }
-
-    #[test]
-    fn test_vector_selection_updates_metrics() {
-        let row_group_size = 4;
-        let total_rows = 8;
-        let mut output = RowGroupSelection::new(row_group_size, total_rows);
-        let selection = vector_selection_from_offsets(vec![1], row_group_size, 2).unwrap();
-        let mut metrics = ReaderFilterMetrics::default();
-
-        apply_selection_and_update_metrics(
-            &mut output,
-            &selection,
-            &mut metrics,
-            INDEX_TYPE_VECTOR,
-        );
-
-        assert_eq!(metrics.rg_vector_filtered, 1);
-        assert_eq!(metrics.rows_vector_filtered, 7);
-        assert_eq!(output.row_count(), 1);
     }
 }
 
@@ -1786,6 +1754,8 @@ pub(crate) struct RowGroupReaderBuilder {
     arrow_metadata: ArrowReaderMetadata,
     /// Projected output schema aligned with `projection.projected_root_presence`.
     output_schema: SchemaRef,
+    /// JSON2 columns that must be semantically rewritten into the projected target layout.
+    json2_rewrite_targets: HashMap<String, Json2TargetLayout>,
     /// Object store as an Operator.
     object_store: ObjectStore,
     /// Projection mask.
@@ -1838,13 +1808,6 @@ impl RowGroupReaderBuilder {
         self.prefilter_builder.is_some()
     }
 
-    /// Builds the encoded-primary-key filter selected by the reader filter plan.
-    pub(crate) fn primary_key_filter(&self) -> Option<CachedPrimaryKeyFilter> {
-        self.prefilter_builder
-            .as_ref()
-            .and_then(PrefilterContextBuilder::build_primary_key_filter)
-    }
-
     /// Builds a parquet record batch stream to read the row group at `row_group_idx`.
     ///
     /// If prefiltering is applicable (based on `build_ctx`), this performs a two-phase read:
@@ -1855,9 +1818,9 @@ impl RowGroupReaderBuilder {
     /// Predicates that cannot be lowered to prefilter columns (column not projected,
     /// expression not supported, etc.) are silently skipped. Correctness rests on the
     /// DataFusion `FilterExec` above this reader, which always re-applies the original
-    /// predicate. Tag and timestamp predicates that flow through [`SimpleFilterEvaluator`]
-    /// are an exception — the engine enforces them precisely, so the prefilter pass is the
-    /// only place they execute. See [`build_reader_filter_plan`] for the bucketing rules.
+    /// predicate. With predicate prefiltering enabled, tag and timestamp predicates that
+    /// flow through [`SimpleFilterEvaluator`] are enforced precisely in this pass. See
+    /// [`build_reader_filter_plan`] for the bucketing rules and disabled mode.
     ///
     /// When the prefilter result selects no rows, the second read still issues but
     /// parquet-rs short-circuits before any column-chunk IO: the row-group state machine
@@ -1867,7 +1830,10 @@ impl RowGroupReaderBuilder {
         &self,
         build_ctx: RowGroupBuildContext<'_>,
     ) -> Result<ProjectedRecordBatchStream> {
-        let prefilter_ctx = self.prefilter_builder.as_ref().map(|b| b.build());
+        let prefilter_ctx = self
+            .prefilter_builder
+            .as_ref()
+            .map(|b| b.build(build_ctx.row_group_idx));
 
         let Some(mut prefilter_ctx) = prefilter_ctx else {
             // No prefilter applicable, build stream with full projection.
@@ -1907,7 +1873,6 @@ impl RowGroupReaderBuilder {
     ///
     /// The series reader uses this after computing its own primary-key-only row
     /// selection.
-    #[allow(dead_code)]
     pub(crate) async fn build_without_prefilter(
         &self,
         build_ctx: RowGroupBuildContext<'_>,
@@ -1955,14 +1920,23 @@ impl RowGroupReaderBuilder {
         &self,
         stream: ProjectedRecordBatchStream,
     ) -> Result<ProjectedRecordBatchStream> {
-        if !self.has_nested_projection {
+        if !self.has_nested_projection && self.json2_rewrite_targets.is_empty() {
             return Ok(stream);
         }
 
-        Ok(NestedSchemaAligner::new(
+        let mode = if self.json2_rewrite_targets.is_empty() {
+            AlignMode::AlignToSchema
+        } else {
+            AlignMode::Rewrite {
+                columns: self.json2_rewrite_targets.clone(),
+            }
+        };
+
+        Ok(JsonSchemaAligner::new(
             stream,
             self.projection.projected_root_presence.clone(),
             self.output_schema.clone(),
+            mode,
         )?
         .boxed())
     }
@@ -2051,19 +2025,29 @@ impl SimpleFilterContext {
                 match sst_meta.column_by_id(column.column_id) {
                     Some(sst_column) => {
                         debug_assert_eq!(column.semantic_type, sst_column.semantic_type);
-                        // Schema evolution can make field columns with the same id have
-                        // different concrete data types across SSTs. In that case,
-                        // evaluating this simple filter against current SST column may
-                        // raise an invalid cross-type comparison error (e.g. Float64 == Utf8).
                         let maybe_filter = if sst_column.column_schema.data_type
                             == column.column_schema.data_type
                         {
                             MaybeFilter::Filter(filter)
                         } else {
-                            // Altering tag or timestamp column types is not allowed,
-                            // so only field columns can reach this branch.
-                            debug_assert_eq!(column.semantic_type, SemanticType::Field);
-                            return None;
+                            // Schema evolution (altered field columns, or a
+                            // widened time index unit) can make columns with
+                            // the same id have different types across SSTs;
+                            // evaluating the original filter may raise an
+                            // invalid cross-type comparison. Timestamp
+                            // predicates are not re-applied above this scan,
+                            // so cast them into the file's unit instead of
+                            // dropping them; other mismatches keep the
+                            // conservative skip (the query layer re-applies
+                            // those predicates).
+                            match filter.cast_timestamp_unit(&sst_column.column_schema.data_type) {
+                                Some(TimestampUnitCast::Filter(filter)) => {
+                                    MaybeFilter::Filter(filter)
+                                }
+                                Some(TimestampUnitCast::Pruned) => MaybeFilter::Pruned,
+                                Some(TimestampUnitCast::Matched) => MaybeFilter::Matched,
+                                None => return None,
+                            }
                         };
                         (column, maybe_filter)
                     }
@@ -2155,6 +2139,15 @@ impl PhysicalFilterContext {
                 let sst_column = sst_meta.column_by_id(column.column_id)?;
                 // Physical expr requires the column name to match the SST column name.
                 if sst_column.column_schema.name != column_name {
+                    return None;
+                }
+                // Schema evolution (an altered field column, or a widened time
+                // index unit) can make the column's file type differ from the
+                // expected type; evaluating the original expr against the
+                // file's column would raise a cross-type comparison error
+                // (e.g. Timestamp(ms) >= Timestamp(µs)). Drop the prefilter;
+                // the query layer re-applies the predicate above the scan.
+                if sst_column.column_schema.data_type != column.column_schema.data_type {
                     return None;
                 }
                 column
@@ -2425,10 +2418,11 @@ impl FlatRowGroupReader {
 
 #[cfg(test)]
 mod tests {
-    use std::any::Any;
+    use std::collections::HashMap;
     use std::fmt::{Debug, Formatter};
     use std::sync::{Arc, LazyLock};
 
+    use api::v1::OpType;
     use common_error::ext::WhateverResult;
     use common_function::scalars::json::json_get::JsonGetWithType;
     use common_function::scalars::udf::create_udf;
@@ -2440,24 +2434,280 @@ mod tests {
         ColumnarValue, Expr, ScalarFunctionArgs, ScalarUDF, ScalarUDFImpl, Signature, Volatility,
         col, lit,
     };
-    use datatypes::arrow::array::{ArrayRef, Int64Array, StringArray, StructArray};
-    use datatypes::arrow::datatypes::{Fields, Schema};
+    use datatypes::arrow::array::{
+        ArrayRef, BinaryDictionaryBuilder, Int64Array, StringArray, StructArray,
+        TimestampMillisecondArray, UInt8Array, UInt64Array,
+    };
+    use datatypes::arrow::datatypes::{Fields, Schema, UInt32Type};
     use datatypes::arrow::record_batch::RecordBatch;
-    use datatypes::extension::json::{JsonExtensionType, JsonMetadata};
+    use datatypes::extension::json::Json2ExtensionType;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::ColumnSchema;
     use object_store::services::Memory;
     use parquet::arrow::ArrowWriter;
+    use parquet::arrow::arrow_reader::RowSelector;
     use parquet::file::properties::WriterProperties;
+    use store_api::codec::PrimaryKeyEncoding;
     use store_api::metadata::{ColumnMetadata, RegionMetadata, RegionMetadataBuilder};
     use store_api::region_request::PathType;
     use store_api::storage::RegionId;
     use table::predicate::Predicate;
 
     use super::*;
+    use crate::cache::CacheManager;
     use crate::sst::parquet::metadata::MetadataLoader;
+    use crate::sst::parquet::prefilter::{build_reader_filter_plan, execute_prefilter};
     use crate::sst::parquet::read_columns::{ParquetReadColumn, ParquetReadColumns};
+    use crate::sst::parquet::row_group::ParquetFetchMetrics;
     use crate::test_util::sst_util::{sst_file_handle, sst_region_metadata};
+
+    async fn prefilter_test_builder(
+        object_store: ObjectStore,
+        predicate: Predicate,
+        cache_strategy: CacheStrategy,
+    ) -> (RowGroupReaderBuilder, Arc<RegionMetadata>) {
+        let metadata = Arc::new(
+            crate::test_util::sst_util::sst_region_metadata_with_encoding(
+                PrimaryKeyEncoding::Sparse,
+            ),
+        );
+        let batch = |start: i64, end: i64| {
+            let mut primary_key = BinaryDictionaryBuilder::<UInt32Type>::new();
+            let mut fields = Vec::new();
+            let mut timestamps = Vec::new();
+            for value in start..end {
+                let tag = if value == 4 { "b" } else { "a" };
+                primary_key
+                    .append(crate::test_util::sst_util::new_sparse_primary_key(
+                        &[tag, "x"],
+                        &metadata,
+                        1,
+                        100,
+                    ))
+                    .unwrap();
+                fields.push(value as u64);
+                timestamps.push(value);
+            }
+            RecordBatch::try_new(
+                crate::sst::to_flat_sst_arrow_schema(
+                    &metadata,
+                    &crate::sst::FlatSchemaOptions::from_encoding(PrimaryKeyEncoding::Sparse),
+                ),
+                vec![
+                    Arc::new(UInt64Array::from(fields)) as ArrayRef,
+                    Arc::new(TimestampMillisecondArray::from(timestamps)) as ArrayRef,
+                    Arc::new(primary_key.finish()) as ArrayRef,
+                    Arc::new(UInt64Array::from_value(1, (end - start) as usize)) as ArrayRef,
+                    Arc::new(UInt8Array::from_value(
+                        OpType::Put as u8,
+                        (end - start) as usize,
+                    )) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let first_batch = batch(0, 3);
+        let second_batch = batch(3, 6);
+        let mut bytes = Vec::new();
+        let mut writer = ArrowWriter::try_new(&mut bytes, first_batch.schema(), None).unwrap();
+        writer.write(&first_batch).unwrap();
+        writer.flush().unwrap();
+        writer.write(&second_batch).unwrap();
+        writer.close().unwrap();
+
+        let file_handle = sst_file_handle(0, 6);
+        let file_path = file_handle.file_path("prefilter_test", PathType::Bare);
+        let file_size = bytes.len() as u64;
+        object_store.write(&file_path, bytes).await.unwrap();
+
+        let mut cache_metrics = MetadataCacheMetrics::default();
+        let parquet_meta = Arc::new(
+            MetadataLoader::new(object_store.clone(), &file_path, file_size)
+                .load(&mut cache_metrics)
+                .await
+                .unwrap(),
+        );
+        let read_format = FlatReadFormat::new(
+            metadata.clone(),
+            ReadColumns::new(
+                metadata
+                    .column_metadatas
+                    .iter()
+                    .map(|column| column.column_id),
+            ),
+            None,
+            &file_path,
+            false,
+        )
+        .unwrap();
+        let codec = build_primary_key_codec(metadata.as_ref());
+        let filter_plan = build_reader_filter_plan(
+            Some(&predicate),
+            None,
+            PreFilterMode::All,
+            true,
+            false,
+            &read_format,
+            &codec,
+            &parquet_meta,
+        );
+        assert!(filter_plan.prefilter_builder.is_some());
+
+        let output_schema = read_format.arrow_schema().clone();
+        let parquet_schema = parquet_meta.file_metadata().schema_descr();
+        let source_schema = parquet_to_arrow_schema(
+            parquet_schema,
+            parquet_meta.file_metadata().key_value_metadata(),
+        )
+        .unwrap();
+        let projection = build_projection_plan(
+            read_format.parquet_read_columns(),
+            parquet_schema,
+            &source_schema,
+        )
+        .unwrap();
+        let arrow_metadata =
+            ArrowReaderMetadata::try_new(parquet_meta.clone(), ArrowReaderOptions::new()).unwrap();
+        (
+            RowGroupReaderBuilder {
+                file_handle: file_handle.clone(),
+                file_path,
+                parquet_meta,
+                parquet_metadata_size: 0,
+                arrow_metadata,
+                output_schema,
+                json2_rewrite_targets: HashMap::new(),
+                object_store,
+                projection,
+                has_nested_projection: false,
+                cache_strategy,
+                prefilter_builder: filter_plan.prefilter_builder,
+                batch_size: DEFAULT_READ_BATCH_SIZE,
+            },
+            metadata,
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_execute_prefilter_proven_filters_preserve_selection_without_fetching() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let predicate = Predicate::new(vec![col("field_0").gt_eq(lit(0_u64))]);
+        let (reader_builder, _) =
+            prefilter_test_builder(object_store, predicate, CacheStrategy::Disabled).await;
+        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
+
+        for original_selection in [
+            None,
+            Some(RowSelection::from(vec![
+                RowSelector::skip(1),
+                RowSelector::select(1),
+                RowSelector::skip(1),
+            ])),
+            Some(RowSelection::from(vec![])),
+        ] {
+            let mut prefilter_ctx = prefilter_builder.build(0);
+            let fetch_metrics = ParquetFetchMetrics::default();
+            let result = execute_prefilter(
+                &mut prefilter_ctx,
+                &reader_builder,
+                &RowGroupBuildContext {
+                    row_group_idx: 0,
+                    row_selection: original_selection.clone(),
+                    fetch_metrics: Some(&fetch_metrics),
+                },
+            )
+            .await
+            .unwrap();
+
+            let expected = original_selection.unwrap_or_else(|| {
+                RowSelection::from(vec![RowSelector::select(
+                    reader_builder.parquet_meta.row_group(0).num_rows() as usize,
+                )])
+            });
+            assert_eq!(result.refined_selection, expected);
+            assert_eq!(result.filtered_rows, 0);
+            let metrics = fetch_metrics.data.lock().unwrap();
+            assert_eq!(metrics.pages_to_fetch_store, 0);
+            assert_eq!(metrics.pages_to_fetch_mem, 0);
+            assert_eq!(metrics.pages_to_fetch_write_cache, 0);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_execute_prefilter_mixed_filters_use_nonzero_row_group_and_cache() {
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+        let predicate = Predicate::new(vec![
+            col("field_0").gt_eq(lit(3_u64)),
+            col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(6), None))),
+            col("field_0").in_list(vec![lit(3_u64), lit(4_u64)], false),
+            col("tag_0").eq(lit("a")),
+        ]);
+        let cache = CacheStrategy::EnableAll(Arc::new(
+            CacheManager::builder()
+                .prefilter_result_cache_size(1024)
+                .build(),
+        ));
+        let (reader_builder, _) =
+            prefilter_test_builder(object_store, predicate, cache.clone()).await;
+        let prefilter_builder = reader_builder.prefilter_builder.as_ref().unwrap();
+
+        for pass in 0..2 {
+            let mut prefilter_ctx = prefilter_builder.build(1);
+            let fetch_metrics = ParquetFetchMetrics::default();
+            let fetch_metrics_ref = (pass == 1).then_some(&fetch_metrics);
+            let result = execute_prefilter(
+                &mut prefilter_ctx,
+                &reader_builder,
+                &RowGroupBuildContext {
+                    row_group_idx: 1,
+                    row_selection: Some(RowSelection::from(vec![
+                        RowSelector::select(2),
+                        RowSelector::skip(1),
+                    ])),
+                    fetch_metrics: fetch_metrics_ref,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(result.filtered_rows, 1);
+            assert_eq!(
+                result.refined_selection,
+                RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2),])
+            );
+            if pass == 1 {
+                assert_eq!(fetch_metrics.data.lock().unwrap().pages_to_fetch_store, 0);
+            }
+        }
+
+        let disabled = prefilter_test_builder(
+            ObjectStore::new(Memory::default()).unwrap(),
+            Predicate::new(vec![
+                col("field_0").gt_eq(lit(3_u64)),
+                col("ts").lt(lit(ScalarValue::TimestampMillisecond(Some(6), None))),
+                col("field_0").in_list(vec![lit(3_u64), lit(4_u64)], false),
+                col("tag_0").eq(lit("a")),
+            ]),
+            CacheStrategy::Disabled,
+        )
+        .await;
+        let mut prefilter_ctx = disabled.0.prefilter_builder.as_ref().unwrap().build(1);
+        let result = execute_prefilter(
+            &mut prefilter_ctx,
+            &disabled.0,
+            &RowGroupBuildContext {
+                row_group_idx: 1,
+                row_selection: None,
+                fetch_metrics: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.filtered_rows, 2);
+        assert_eq!(
+            result.refined_selection,
+            RowSelection::from(vec![RowSelector::select(1), RowSelector::skip(2)])
+        );
+    }
 
     #[test]
     fn test_skip_prefilter_for_json_get() -> WhateverResult<()> {
@@ -2469,9 +2719,7 @@ mod tests {
         let metadata = Arc::new(sst_region_metadata());
         let format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2505,6 +2753,47 @@ mod tests {
         Ok(())
     }
 
+    /// A physical prefilter expr must be dropped when the column's file type
+    /// differs from the expected type (e.g. an old-unit SST after the time
+    /// index unit was widened): evaluating the expected-unit literals against
+    /// the file's column raises a cross-unit comparison error.
+    #[test]
+    fn test_physical_filter_dropped_on_file_type_mismatch() {
+        let file_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
+        // The region metadata after widening the `ts` unit to microsecond.
+        let mut expected = (*file_metadata).clone();
+        for column in expected.column_metadatas.iter_mut() {
+            if column.column_schema.name == "ts" {
+                column.column_schema.data_type = ConcreteDataType::timestamp_microsecond_datatype();
+            }
+        }
+        let expected = Arc::new(expected);
+
+        let format = FlatReadFormat::new(
+            file_metadata.clone(),
+            ReadColumns::new(file_metadata.column_metadatas.iter().map(|c| c.column_id)),
+            None,
+            "test",
+            true,
+        )
+        .unwrap();
+
+        let between = col("ts").between(
+            lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)),
+            lit(ScalarValue::TimestampMicrosecond(Some(2_000_000), None)),
+        );
+        // Same type: the prefilter is kept.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&file_metadata), &format, &between)
+                .is_some()
+        );
+        // Widened unit: the prefilter is dropped.
+        assert!(
+            PhysicalFilterContext::new_opt(&file_metadata, Some(&expected), &format, &between)
+                .is_none()
+        );
+    }
+
     #[tokio::test]
     async fn test_nested_projection_reads_partial_json2_physical_fields() -> WhateverResult<()> {
         // Write a full JSON2-like Arrow struct:
@@ -2520,7 +2809,7 @@ mod tests {
         let b_field = Arc::new(Field::new("b", DataType::Utf8, true));
         let json_fields = Fields::from(vec![a_field, b_field]);
         let json_field = Field::new("j", DataType::Struct(json_fields.clone()), true)
-            .with_extension_type(JsonExtensionType::new(Arc::new(JsonMetadata::default())));
+            .with_extension_type(Json2ExtensionType::default());
         let schema = Arc::new(Schema::new(vec![json_field]));
 
         let a_array = Arc::new(StructArray::new(
@@ -2541,9 +2830,7 @@ mod tests {
         // Persist the complete nested schema to an in-memory Parquet file so the projection is
         // exercised through parquet-rs rather than a mock.
 
-        let object_store = ObjectStore::new(Memory::default())
-            .map_err(|e| e.to_string())?
-            .finish();
+        let object_store = ObjectStore::new(Memory::default()).map_err(|e| e.to_string())?;
         let file_handle = sst_file_handle(0, 1);
         let file_path = file_handle.file_path("test_table", PathType::Bare);
 
@@ -2574,7 +2861,8 @@ mod tests {
             ParquetReadColumns::from_deduped(vec![ParquetReadColumn::new(0).with_nested_paths(
                 vec![vec!["j".to_string(), "a".to_string(), "x".to_string()]],
             )]);
-        let projection_plan = build_projection_plan(&projection, parquet_schema);
+        let projection_plan =
+            build_projection_plan(&projection, parquet_schema, batch.schema_ref()).unwrap();
         assert_eq!(vec![true], projection_plan.projected_root_presence);
         assert_eq!(
             projection_plan.mask,
@@ -2632,10 +2920,6 @@ mod tests {
         }
 
         impl ScalarUDFImpl for PanicDebugUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 "panic_debug_udf"
             }
@@ -2658,7 +2942,7 @@ mod tests {
             }
         }
 
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_handle = sst_file_handle(0, 1);
         let table_dir = "test_table".to_string();
         let path_type = PathType::Bare;
@@ -2676,7 +2960,7 @@ mod tests {
         let region_metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             region_metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
+            ReadColumns::new(
                 region_metadata
                     .column_metadatas
                     .iter()
@@ -2734,10 +3018,6 @@ mod tests {
         }
 
         impl ScalarUDFImpl for TestVolatilityUdf {
-            fn as_any(&self) -> &dyn Any {
-                self
-            }
-
             fn name(&self) -> &str {
                 &self.name
             }
@@ -2786,7 +3066,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_has_row_level_selection() {
-        let object_store = ObjectStore::new(Memory::default()).unwrap().finish();
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
         let file_path = "row_level_selection.parquet";
 
         let col = Arc::new(Int64Array::from_iter_values([1, 2, 3, 4, 5])) as ArrayRef;
@@ -2943,9 +3223,7 @@ mod tests {
         let expected_metadata = expected_metadata_with_reused_tag_name(metadata.as_ref());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,
@@ -2967,9 +3245,7 @@ mod tests {
         let metadata: RegionMetadataRef = Arc::new(sst_region_metadata());
         let read_format = FlatReadFormat::new(
             metadata.clone(),
-            ReadColumns::from_deduped_column_ids(
-                metadata.column_metadatas.iter().map(|c| c.column_id),
-            ),
+            ReadColumns::new(metadata.column_metadatas.iter().map(|c| c.column_id)),
             None,
             "test",
             true,

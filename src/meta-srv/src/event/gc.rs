@@ -211,13 +211,14 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::ColumnSchema;
-    use common_event_recorder::EventTypeFilter;
     use common_event_recorder::event_table::{
-        PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN, PROCEDURE_STATE_COLUMN,
-        PROCEDURE_TRIGGER_COLUMN, jsonb_value,
+        ACTOR_COLUMN, EVENT_CONTEXT_COLUMN, PROCEDURE_ERROR_COLUMN, PROCEDURE_ID_COLUMN,
+        PROCEDURE_STATE_COLUMN, PROCEDURE_TRIGGER_COLUMN, jsonb_value,
     };
     use common_event_recorder::testing::assert_event_contract;
+    use common_event_recorder::{EventTypeFilter, PersistentEventContext, TriggerReason};
     use common_meta::key::TableMetadataManager;
+    use common_meta::key::runtime_switch::RuntimeSwitchManager;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::sequence::SequenceBuilder;
     use common_procedure::{
@@ -330,11 +331,13 @@ mod tests {
     fn test_batch_gc_event_filter() {
         let procedure = batch_gc_procedure();
         let running = ProcedureState::Running;
+        let manual_context = PersistentEventContext::new(TriggerReason::Manual);
         let event_context = |trigger, lifecycle_state, event_type_filter| EventContext {
             procedure_id: ProcedureId::random(),
             lifecycle_state,
             trigger,
             event_type_filter: Arc::new(event_type_filter),
+            event_context: None,
         };
 
         assert!(
@@ -345,6 +348,17 @@ mod tests {
                     EventTypeFilter::All,
                 ))
                 .is_none()
+        );
+        assert!(
+            procedure
+                .event(&EventContext {
+                    procedure_id: ProcedureId::random(),
+                    lifecycle_state: &running,
+                    trigger: EventTrigger::Submitted,
+                    event_type_filter: Arc::new(EventTypeFilter::All),
+                    event_context: Some(&manual_context),
+                })
+                .is_some()
         );
 
         let report = GcReport {
@@ -447,6 +461,7 @@ mod tests {
             lifecycle_state: &running,
             trigger,
             event_type_filter: Arc::new(EventTypeFilter::All),
+            event_context: None,
         };
         let report = GcReport {
             need_retry_regions: HashSet::from([RegionId::new(1024, 2)]),
@@ -522,6 +537,8 @@ mod tests {
         );
         let mut event_schema = procedure_schema();
         event_schema.extend(schema());
+        event_schema.push(ACTOR_COLUMN.column_schema());
+        event_schema.push(EVENT_CONTEXT_COLUMN.column_schema());
         let mut values = vec![
             ValueData::StringValue(procedure_id.to_string()).into(),
             ValueData::StringValue("Done".to_string()).into(),
@@ -538,6 +555,8 @@ mod tests {
             )
             .values,
         );
+        values.push(Value { value_data: None });
+        values.push(Value { value_data: None });
 
         assert_event_contract(
             &event,
@@ -570,11 +589,13 @@ mod tests {
     fn batch_gc_procedure() -> BatchGcProcedure {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let table_metadata_manager = Arc::new(TableMetadataManager::new(kv_backend.clone()));
+        let runtime_switch_manager = Arc::new(RuntimeSwitchManager::new(kv_backend.clone()));
         let mailbox_sequence = SequenceBuilder::new("test_batch_gc_event", kv_backend).build();
         let mailbox = MailboxContext::new(mailbox_sequence);
         BatchGcProcedure::new(
             mailbox.mailbox().clone(),
             table_metadata_manager,
+            runtime_switch_manager,
             "localhost".to_string(),
             vec![RegionId::new(1024, 1)],
             true,

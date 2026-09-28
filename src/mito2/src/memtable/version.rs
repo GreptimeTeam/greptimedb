@@ -17,8 +17,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use common_time::Timestamp;
 use smallvec::SmallVec;
 use store_api::metadata::RegionMetadataRef;
+use store_api::storage::SequenceNumber;
 
 use crate::error::Result;
 use crate::memtable::time_partition::TimePartitionsRef;
@@ -61,6 +63,16 @@ impl MemtableVersion {
         self.mutable.list_memtables(&mut mems);
         mems.extend_from_slice(&self.immutables);
         mems
+    }
+
+    /// Returns a sequence lower bound covering mutable and immutable memtables.
+    /// Empty memtables impose no compaction barrier, including newly forked ones.
+    pub(crate) fn min_sequence(&self) -> Option<SequenceNumber> {
+        self.list_memtables()
+            .iter()
+            .filter(|mem| !mem.is_empty())
+            .map(|mem| mem.min_sequence())
+            .min()
     }
 
     /// Returns a new [MemtableVersion] which switches the old mutable memtable to immutable
@@ -149,6 +161,17 @@ impl MemtableVersion {
             .map(|mem| mem.stats().num_rows as u64)
             .sum::<u64>()
             + self.mutable.num_rows()
+    }
+
+    /// Returns the time range covered by the memtables, if any hold data.
+    pub(crate) fn time_range(&self) -> Option<(Timestamp, Timestamp)> {
+        let mut mutables = Vec::new();
+        self.mutable.list_memtables(&mut mutables);
+        self.immutables
+            .iter()
+            .chain(mutables.iter())
+            .filter_map(|mem| mem.stats().time_range())
+            .reduce(|(min_a, max_a), (min_b, max_b)| (min_a.min(min_b), max_a.max(max_b)))
     }
 
     /// Returns true if the memtable version is empty.

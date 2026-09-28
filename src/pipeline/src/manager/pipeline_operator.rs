@@ -14,11 +14,12 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use api::v1::CreateTableExpr;
 use catalog::{CatalogManagerRef, RegisterSystemTableRequest};
 use common_catalog::consts::{DEFAULT_PRIVATE_SCHEMA_NAME, default_engine};
+use common_meta::rpc::ddl::TriggerReason;
 use common_telemetry::info;
 use common_time::FOREVER;
 use datatypes::timestamp::TimestampNanosecond;
@@ -38,6 +39,7 @@ use crate::metrics::{
     METRIC_PIPELINE_CREATE_HISTOGRAM, METRIC_PIPELINE_DELETE_HISTOGRAM,
     METRIC_PIPELINE_RETRIEVE_HISTOGRAM,
 };
+use crate::options::PipelineOptions;
 use crate::table::{PIPELINE_TABLE_NAME, PipelineTable};
 
 /// PipelineOperator is responsible for managing pipelines.
@@ -54,6 +56,7 @@ pub struct PipelineOperator {
     catalog_manager: CatalogManagerRef,
     query_engine: QueryEngineRef,
     tables: RwLock<HashMap<String, PipelineTableRef>>,
+    cache_ttl: Duration,
 }
 
 impl PipelineOperator {
@@ -96,6 +99,7 @@ impl PipelineOperator {
                 self.statement_executor.clone(),
                 table,
                 self.query_engine.clone(),
+                self.cache_ttl,
             )),
         );
     }
@@ -131,7 +135,7 @@ impl PipelineOperator {
 
         // create table
         self.statement_executor
-            .create_table_inner(&mut expr, None, ctx.clone())
+            .create_table_inner(&mut expr, None, ctx.clone(), TriggerReason::AutoCreate)
             .await
             .context(CreateTableSnafu)?;
 
@@ -171,6 +175,7 @@ impl PipelineOperator {
         statement_executor: StatementExecutorRef,
         catalog_manager: CatalogManagerRef,
         query_engine: QueryEngineRef,
+        options: &PipelineOptions,
     ) -> Self {
         Self {
             inserter,
@@ -178,6 +183,7 @@ impl PipelineOperator {
             catalog_manager,
             tables: RwLock::new(HashMap::new()),
             query_engine,
+            cache_ttl: options.cache_ttl,
         }
     }
 

@@ -16,37 +16,47 @@ pub mod attributes;
 pub mod span;
 pub mod v0;
 pub mod v1;
+mod v2;
 
 use std::collections::HashSet;
 
 use api::v1::RowInsertRequests;
+// Column names. The trace fixed columns are canonically defined
+// in `common_catalog::consts` (shared with the read-time graph derivation).
 pub use common_catalog::consts::{
-    PARENT_SPAN_ID_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+    DURATION_NANO_COLUMN, SERVICE_NAME_COLUMN, SPAN_KIND_COLUMN,
+    SPAN_STATUS_CODE_COLUMN as SPAN_STATUS_CODE, TRACE_TIMESTAMP_COLUMN as TIMESTAMP_COLUMN,
 };
-use pipeline::{GreptimePipelineParams, PipelineWay};
-use session::context::QueryContextRef;
+pub use common_catalog::consts::{
+    PARENT_SPAN_ID_COLUMN, RESOURCE_ATTRIBUTES_COLUMN, SCOPE_ATTRIBUTES_COLUMN,
+    SPAN_ATTRIBUTES_COLUMN, SPAN_ID_COLUMN, SPAN_NAME_COLUMN, TRACE_ID_COLUMN,
+};
+use pipeline::PipelineWay;
 
 use crate::error::{NotSupportedSnafu, Result};
 use crate::otlp::trace::span::TraceSpan;
-use crate::query_handler::PipelineHandlerRef;
 
-// column names
-pub const SERVICE_NAME_COLUMN: &str = "service_name";
-pub const TIMESTAMP_COLUMN: &str = "timestamp";
-pub const DURATION_NANO_COLUMN: &str = "duration_nano";
-pub const SPAN_KIND_COLUMN: &str = "span_kind";
-pub const SPAN_STATUS_CODE: &str = "span_status_code";
+pub const TIMESTAMP_END_COLUMN: &str = "timestamp_end";
 pub const SPAN_STATUS_MESSAGE_COLUMN: &str = "span_status_message";
-pub const SPAN_ATTRIBUTES_COLUMN: &str = "span_attributes";
 pub const SPAN_EVENTS_COLUMN: &str = "span_events";
+pub const SPAN_LINKS_COLUMN: &str = "span_links";
 pub const SCOPE_NAME_COLUMN: &str = "scope_name";
 pub const SCOPE_VERSION_COLUMN: &str = "scope_version";
-pub const RESOURCE_ATTRIBUTES_COLUMN: &str = "resource_attributes";
 pub const TRACE_STATE_COLUMN: &str = "trace_state";
 
 // const keys
 pub const KEY_SERVICE_NAME: &str = "service.name";
+pub const KEY_SERVICE_NAMESPACE: &str = "service.namespace";
 pub const KEY_SERVICE_INSTANCE_ID: &str = "service.instance.id";
+pub const KEY_HOST_ID: &str = "host.id";
+pub const KEY_HOST_NAME: &str = "host.name";
+pub const KEY_CONTAINER_ID: &str = "container.id";
+pub const KEY_CONTAINER_NAME: &str = "container.name";
+pub const KEY_K8S_POD_UID: &str = "k8s.pod.uid";
+pub const KEY_K8S_POD_NAME: &str = "k8s.pod.name";
+pub const KEY_K8S_CONTAINER_NAME: &str = "k8s.container.name";
+pub const KEY_K8S_NAMESPACE_NAME: &str = "k8s.namespace.name";
+pub const KEY_K8S_NODE_NAME: &str = "k8s.node.name";
 pub const KEY_SPAN_KIND: &str = "span.kind";
 
 // jaeger const keys, not sure if they are general
@@ -64,7 +74,7 @@ pub const SPAN_KIND_PREFIX: &str = "SPAN_KIND_";
 // The span status code prefix in the database.
 pub const SPAN_STATUS_PREFIX: &str = "STATUS_CODE_";
 pub const SPAN_STATUS_UNSET: &str = "STATUS_CODE_UNSET";
-pub const SPAN_STATUS_ERROR: &str = "STATUS_CODE_ERROR";
+pub use common_catalog::consts::SPAN_STATUS_ERROR;
 
 /// Deduplicated auxiliary trace entities derived from successfully ingested
 /// spans.
@@ -102,28 +112,12 @@ impl TraceAuxData {
 pub fn to_grpc_insert_requests_from_spans(
     spans: &[TraceSpan],
     pipeline: &PipelineWay,
-    pipeline_params: &GreptimePipelineParams,
     table_name: &str,
-    query_ctx: &QueryContextRef,
-    pipeline_handler: PipelineHandlerRef,
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
-        PipelineWay::OtlpTraceDirectV0 => v0::v0_to_grpc_main_insert_requests(
-            spans,
-            pipeline,
-            pipeline_params,
-            table_name,
-            query_ctx,
-            pipeline_handler,
-        ),
-        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_main_insert_requests(
-            spans,
-            pipeline,
-            pipeline_params,
-            table_name,
-            query_ctx,
-            pipeline_handler,
-        ),
+        PipelineWay::OtlpTraceDirectV0 => v0::v0_to_grpc_main_insert_requests(spans, table_name),
+        PipelineWay::OtlpTraceDirectV1 => v1::v1_to_grpc_main_insert_requests(spans, table_name),
+        PipelineWay::OtlpTraceDirectV2 => v2::v2_to_grpc_main_insert_requests(spans, table_name),
         _ => NotSupportedSnafu {
             feat: "Unsupported pipeline for trace",
         }
@@ -143,7 +137,9 @@ pub fn to_grpc_insert_requests_for_aux_tables(
 ) -> Result<(RowInsertRequests, usize)> {
     match pipeline {
         PipelineWay::OtlpTraceDirectV0 => v0::build_aux_table_requests(aux_data, table_name),
-        PipelineWay::OtlpTraceDirectV1 => v1::build_aux_table_requests(aux_data, table_name),
+        PipelineWay::OtlpTraceDirectV1 | PipelineWay::OtlpTraceDirectV2 => {
+            v1::build_aux_table_requests(aux_data, table_name)
+        }
         _ => NotSupportedSnafu {
             feat: "Unsupported pipeline for trace",
         }

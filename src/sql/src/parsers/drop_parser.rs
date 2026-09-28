@@ -19,12 +19,15 @@ use sqlparser::tokenizer::Token;
 use crate::error::{self, InvalidFlowNameSnafu, InvalidTableNameSnafu, Result};
 use crate::parser::{FLOW, ParserContext};
 #[cfg(feature = "enterprise")]
+use crate::statements::drop::UndropTable;
+#[cfg(feature = "enterprise")]
 use crate::statements::drop::trigger::DropTrigger;
-use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView, UndropTable};
+use crate::statements::drop::{DropDatabase, DropFlow, DropTable, DropView};
 use crate::statements::statement::Statement;
 
 /// DROP statement parser implementation
 impl ParserContext<'_> {
+    #[cfg(feature = "enterprise")]
     pub(crate) fn parse_undrop_table(&mut self) -> Result<Statement> {
         let _ = self.parser.next_token();
         if !self.parser.parse_keyword(Keyword::TABLE) {
@@ -194,8 +197,10 @@ mod tests {
     use super::*;
     use crate::dialect::GreptimeDbDialect;
     use crate::parser::ParseOptions;
+    #[cfg(feature = "enterprise")]
     use crate::statements::drop::UndropTable;
 
+    #[cfg(feature = "enterprise")]
     #[test]
     fn test_undrop_table() {
         let cases = [

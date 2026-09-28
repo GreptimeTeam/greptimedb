@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::any::Any;
 use std::collections::{HashMap, HashSet};
 
 use api::v1::column_def::try_as_column_def;
@@ -65,7 +64,6 @@ impl State for ReconcileRegions {
         let table_meta = ctx.build_table_meta(&self.column_metadatas)?;
         ctx.volatile_ctx.table_meta = Some(table_meta);
         let table_id = ctx.table_id();
-        let table_name = ctx.table_name();
 
         let primary_keys = self
             .column_metadatas
@@ -126,10 +124,12 @@ impl State for ReconcileRegions {
             }
         }
 
-        let mut results = future::join_all(sync_column_tsks)
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>>>()?;
+        let results = future::join_all(sync_column_tsks).await;
+        let updated_region_count = results.iter().filter(|result| result.is_ok()).count();
+        ctx.volatile_ctx
+            .result_summary
+            .record_updated_regions(updated_region_count);
+        let mut results = results.into_iter().collect::<Result<Vec<_>>>()?;
 
         // Ensures all the column metadatas are the same.
         let column_metadatas =
@@ -137,17 +137,22 @@ impl State for ReconcileRegions {
                 UnexpectedSnafu {
                     err_msg: format!(
                         "The table column metadata schemas from datanodes are not the same, table: {}, table_id: {}",
-                        table_name,
+                        ctx.table_name(),
                         table_id
                     ),
                 },
             )?;
 
+        ctx.volatile_ctx
+            .result_summary
+            .mark_region_phase_completed();
+
         // Checks all column metadatas are consistent, and updates the table info if needed.
         if column_metadatas != self.column_metadatas {
             info!(
                 "Datanode column metadatas are not consistent with metasrv, updating metasrv's column metadatas, table: {}, table_id: {}",
-                table_name, table_id
+                ctx.table_name(),
+                table_id
             );
             // Safety: fetched in the above.
             let table_info_value = ctx.persistent_ctx.table_info_value.clone().unwrap();
@@ -158,10 +163,6 @@ impl State for ReconcileRegions {
         }
 
         Ok((Box::new(ReconciliationEnd), Status::executing(false)))
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
     }
 }
 

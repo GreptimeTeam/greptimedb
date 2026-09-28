@@ -14,6 +14,19 @@
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+const MARKER_PREFIX = '<!-- query-regression-admission v1';
+const MARKER_SUFFIX = '-->';
+const ADMISSION_MAC_FIELDS = [
+  'run_id',
+  'pr_number',
+  'head_sha',
+  'head_repo',
+  'base_repo',
+  'candidate_sha',
+  'base_sha',
+];
 
 function skip(core, message) {
   core.info(message);
@@ -92,7 +105,7 @@ function thresholdStatus(thresholds, query) {
   const hits = (Array.isArray(thresholds) ? thresholds : [])
     .filter(item => query === undefined || (hasScopedQuery(item) && String(item.query) === query))
     .map(formatThreshold);
-  return hits.length > 0 ? hits.join(', ') : 'N/A';
+  return hits.length > 0 ? hits.join('; ') : 'N/A';
 }
 
 function hasScopedQuery(threshold) {
@@ -115,7 +128,7 @@ function formatThreshold(threshold) {
   return `${name}${scope.length > 0 ? ` [${scope.join(', ')}]` : ''}: ${status}${reason}`;
 }
 
-function syntheticThresholdStatus(thresholds, measurementNames) {
+function classifyThresholds(thresholds, measurementNames) {
   const unscoped = [];
   const unmatched = new Map();
   for (const threshold of Array.isArray(thresholds) ? thresholds : []) {
@@ -130,7 +143,11 @@ function syntheticThresholdStatus(thresholds, measurementNames) {
       unmatched.set(query, entries);
     }
   }
+  return { unscoped, unmatched };
+}
 
+function syntheticThresholdStatus(thresholds, measurementNames) {
+  const { unscoped, unmatched } = classifyThresholds(thresholds, measurementNames);
   const parts = [];
   if (unscoped.length > 0) {
     parts.push(`case/storage threshold: ${thresholdStatus(unscoped)}`);
@@ -139,6 +156,21 @@ function syntheticThresholdStatus(thresholds, measurementNames) {
     parts.push(`unmatched query ${query}: ${thresholdStatus(unmatched.get(query))}`);
   }
   return parts.length > 0 ? parts.join('; ') : 'N/A';
+}
+
+// Case-level (query-unscoped) thresholds formatted for the collapsible details
+// block below the summary table: individual items, `; `-separated, without the
+// `case/storage threshold:` label (the section heading already says that).
+function syntheticThresholdDetail(thresholds, measurementNames) {
+  const { unscoped, unmatched } = classifyThresholds(thresholds, measurementNames);
+  const items = [];
+  if (unscoped.length > 0) {
+    items.push(thresholdStatus(unscoped));
+  }
+  for (const query of Array.from(unmatched.keys()).sort()) {
+    items.push(`unmatched query ${query}: ${thresholdStatus(unmatched.get(query))}`);
+  }
+  return items.length > 0 ? items.join('; ') : 'N/A';
 }
 
 function joinDetails(...details) {
@@ -229,7 +261,7 @@ function collectReportRows(report, reportPath) {
       ),
     };
   });
-  const syntheticThresholds = syntheticThresholdStatus(thresholds, measurementNames);
+  const syntheticThresholds = syntheticThresholdDetail(thresholds, measurementNames);
   if (syntheticThresholds !== 'N/A') {
     rows.push({
       caseName: name,
@@ -239,9 +271,28 @@ function collectReportRows(report, reportPath) {
       candidateMedian: 'N/A',
       regression: 'N/A',
       threshold: syntheticThresholds,
+      kind: 'case-thresholds',
     });
   }
   return rows;
+}
+
+function renderThresholdDetails(rows) {
+  const entries = rows.filter(row => row.kind === 'case-thresholds');
+  if (entries.length === 0) {
+    return '';
+  }
+  // The <details>/<summary> tags are emitted literally; only the entry content
+  // goes through text() (so `[ ] ( ) |` etc. stay escaped while the tags render).
+  const lines = [
+    '<details><summary>Case / storage thresholds</summary>',
+    '',
+  ];
+  for (const row of entries) {
+    lines.push(`- ${text(row.caseName)}: ${text(row.threshold)}`);
+  }
+  lines.push('</details>');
+  return lines.join('\n');
 }
 
 function renderSummaryTable(rows) {
@@ -250,102 +301,224 @@ function renderSummaryTable(rows) {
     '| --- | --- | --- | ---: | ---: | ---: | --- |',
   ];
   for (const row of rows) {
+    if (row.kind === 'case-thresholds') {
+      continue;
+    }
     lines.push(
-      `| ${text(row.caseName)} | ${text(row.query)} | ${statusEmoji(row.status)} \`${text(row.status)}\` | ${text(row.baseMedian)} | ${text(row.candidateMedian)} | ${text(row.regression)} | ${text(row.threshold)} |`
+      `| ${text(row.caseName)} | ${text(row.query)} | ${statusEmoji(row.status)} ${text(row.status)} | ${text(row.baseMedian)} | ${text(row.candidateMedian)} | ${text(row.regression)} | ${text(row.threshold)} |`
     );
   }
-  return lines.join('\n');
+  const details = renderThresholdDetails(rows);
+  const table = lines.join('\n');
+  return details === '' ? table : `${table}\n\n${details}`;
+}
+
+function admissionMacMessage(identity) {
+  return ADMISSION_MAC_FIELDS.map(field => {
+    const value = String(identity[field] ?? '');
+    return field.endsWith('_sha') ? value.toLowerCase() : value;
+  }).join('|');
+}
+
+function admissionMac(secret, identity) {
+  return crypto.createHmac('sha256', secret).update(admissionMacMessage(identity)).digest('hex');
+}
+
+function verifyAdmissionMac(secret, identity, mac) {
+  if (!secret || !mac) {
+    return false;
+  }
+  const expected = admissionMac(secret, identity);
+  const actual = String(mac);
+  if (expected.length !== actual.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(Buffer.from(expected, 'utf8'), Buffer.from(actual, 'utf8'));
+  } catch {
+    return false;
+  }
+}
+
+function formatAdmissionMarker(identity) {
+  return `${MARKER_PREFIX}\n${JSON.stringify(identity, Object.keys(identity).sort())}\n${MARKER_SUFFIX}\n`;
+}
+
+function parseAdmissionMarker(body) {
+  const start = String(body || '').indexOf(MARKER_PREFIX);
+  if (start < 0) {
+    return null;
+  }
+  const rest = String(body).slice(start + MARKER_PREFIX.length);
+  const end = rest.indexOf(MARKER_SUFFIX);
+  if (end < 0) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(rest.slice(0, end).trim());
+    return payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAdmissionIdentity(payload) {
+  return ADMISSION_MAC_FIELDS.every(field => {
+    const value = payload?.[field];
+    return value !== undefined && value !== null && String(value) !== '';
+  });
+}
+
+async function loadAdmissionMarker(github, { owner, repo, prNumber, runId, secret }) {
+  // Newest first: the marker is posted at admit time, so it is among the
+  // latest comments. Oldest-first with a page cap misses it on busy PRs.
+  for (let page = 1; ; page += 1) {
+    const { data } = await github.rest.issues.listComments({
+      owner,
+      repo,
+      issue_number: prNumber,
+      per_page: 100,
+      page,
+      sort: 'created',
+      direction: 'desc',
+    });
+    if (!Array.isArray(data) || data.length === 0) {
+      return null;
+    }
+    for (const comment of data) {
+      const payload = parseAdmissionMarker(comment.body);
+      if (!payload || !isAdmissionIdentity(payload)) {
+        continue;
+      }
+      if (Number(payload.run_id) !== Number(runId)) {
+        continue;
+      }
+      if (!verifyAdmissionMac(secret, payload, payload.mac)) {
+        continue;
+      }
+      return { id: Number(comment.id), payload };
+    }
+    if (data.length < 100) {
+      return null;
+    }
+  }
+}
+
+function identitiesMatch(admission, metadata) {
+  return ADMISSION_MAC_FIELDS.every(field => {
+    const left = String(admission[field] ?? '');
+    const right = String(metadata[field] ?? '');
+    if (field === 'pr_number' || field === 'run_id') {
+      return Number(left) === Number(right);
+    }
+    if (field.endsWith('_sha')) {
+      return left.toLowerCase() === right.toLowerCase();
+    }
+    return left === right;
+  });
 }
 
 module.exports = async function validateQueryRegressionComment({ github, context, core }) {
   const artifactDir = 'query-regression-comment';
+  const admissionPath = path.join('query-regression-admission', 'query-regression-admission.json');
   const metadataPath = path.join(artifactDir, 'query-regression-pr.json');
   const summaryPath = path.join(artifactDir, 'query-regression-summary.md');
 
+  if (!fs.existsSync(admissionPath)) {
+    return skip(core, 'Missing trusted admission identity; skipping sticky comment.');
+  }
   if (!fs.existsSync(metadataPath)) {
     return skip(core, 'Missing query-regression-pr.json; skipping sticky comment.');
   }
 
+  let admission;
   let metadata;
   try {
+    admission = JSON.parse(fs.readFileSync(admissionPath, 'utf8'));
     metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
   } catch (error) {
-    core.warning(`Invalid PR metadata JSON: ${error.message}`);
-    return skip(core, 'Invalid PR metadata JSON; skipping sticky comment.');
+    core.warning(`Invalid admission or PR metadata JSON: ${error.message}`);
+    return skip(core, 'Invalid admission or PR metadata JSON; skipping.');
+  }
+
+  // Artifact identity is a lookup hint only. Candidate code on ECS shares this
+  // run and can overwrite artifacts; the signed PR comment is the source of truth.
+  if (!identitiesMatch(admission, metadata)) {
+    return skip(core, 'Runner artifact identity does not match admission artifact; skipping.');
   }
 
   const expectedRunId = Number(process.env.WORKFLOW_RUN_ID);
   const expectedRunAttempt = Number(process.env.WORKFLOW_RUN_ATTEMPT);
-  if (metadata.run_id !== expectedRunId || metadata.run_attempt !== expectedRunAttempt) {
-    return skip(core, 'Artifact metadata does not match this workflow_run; skipping.');
+  // parse is not rerun on "Re-run failed jobs", so admission keeps attempt 1.
+  // Bind it to the stable run id; the runner artifact must match this attempt.
+  if (Number(admission.run_id) !== expectedRunId) {
+    return skip(core, 'Trusted admission does not match this workflow_run; skipping.');
   }
-
-  if (metadata.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
-    return skip(core, `PR targets ${metadata.base_repo}, not this repository; skipping.`);
-  }
-
-  const prNumber = Number(metadata.pr_number);
-  if (!Number.isInteger(prNumber) || prNumber <= 0) {
-    return skip(core, 'Invalid PR number in metadata; skipping.');
+  if (
+    Number(metadata.run_id) !== expectedRunId ||
+    Number(metadata.run_attempt) !== expectedRunAttempt
+  ) {
+    return skip(core, 'Runner artifact does not match this workflow_run attempt; skipping.');
   }
 
   const run = context.payload.workflow_run;
-  if (run.event !== 'pull_request') {
-    return skip(core, `Workflow run event is ${run.event}, not pull_request; skipping.`);
-  }
-  if (run.head_sha !== metadata.head_sha) {
-    return skip(core, 'Workflow run head SHA differs from artifact metadata; skipping.');
-  }
-  const runHeadRepo = run.head_repository?.full_name;
-  if (!runHeadRepo) {
-    return skip(core, 'Workflow run head repository is missing; skipping.');
-  }
-  if (runHeadRepo !== metadata.head_repo) {
-    return skip(core, 'Workflow run head repository differs from artifact metadata; skipping.');
+  // Command-handler runs execute from repository_dispatch on the default
+  // branch, so workflow_run head SHA/repo are that commit, not the PR.
+  if (run.event !== 'repository_dispatch') {
+    return skip(core, `Workflow run event is ${run.event}, not repository_dispatch; skipping.`);
   }
 
-  // GitHub leaves workflow_run.pull_requests empty for fork PRs. When present,
-  // use it as an extra guard; otherwise resolve the unique open PR from trusted
-  // workflow_run head repo/branch/SHA metadata before accepting the artifact PR.
-  const workflowPrNumbers = new Set(
-    (run.pull_requests || []).map(pr => Number(pr.number)).filter(Number.isInteger)
-  );
-  if (workflowPrNumbers.size > 0) {
-    if (!workflowPrNumbers.has(prNumber)) {
-      return skip(core, `PR #${prNumber} is not listed in workflow_run ${run.id}; skipping.`);
-    }
-  } else {
-    const runHeadOwner = run.head_repository?.owner?.login;
-    const runHeadBranch = run.head_branch;
-    if (!runHeadOwner || !runHeadBranch) {
-      return skip(core, 'Workflow run head owner or branch is missing; skipping.');
-    }
+  const hmacSecret = (process.env.QUERY_REGRESSION_ADMISSION_HMAC || '').trim();
+  if (!hmacSecret) {
+    return skip(core, 'QUERY_REGRESSION_ADMISSION_HMAC is unset; skipping sticky comment.');
+  }
 
-    let matchingPrs;
-    try {
-      const { data: pullRequests } = await github.rest.pulls.list({
-        owner: context.repo.owner,
-        repo: context.repo.repo,
-        state: 'open',
-        head: `${runHeadOwner}:${runHeadBranch}`,
-        per_page: 100,
-      });
-      matchingPrs = pullRequests.filter(pr => (
-        pr.head.repo?.full_name === runHeadRepo &&
-        pr.head.sha === run.head_sha &&
-        pr.base.repo?.full_name === metadata.base_repo
-      ));
-    } catch (error) {
-      core.warning(`Could not resolve PR from workflow_run metadata: ${error.message}`);
-      return skip(core, 'Could not resolve PR from workflow_run metadata; skipping.');
-    }
+  const hintedPrNumber = Number(admission.pr_number);
+  if (!Number.isInteger(hintedPrNumber) || hintedPrNumber <= 0) {
+    return skip(core, 'Invalid PR number in admission artifact; skipping.');
+  }
 
-    if (matchingPrs.length !== 1) {
-      return skip(core, `Workflow run matched ${matchingPrs.length} open PRs; skipping.`);
-    }
-    if (Number(matchingPrs[0].number) !== prNumber) {
-      return skip(core, `Artifact PR #${prNumber} does not match workflow_run PR #${matchingPrs[0].number}; skipping.`);
-    }
+  let marker;
+  try {
+    marker = await loadAdmissionMarker(github, {
+      owner: context.repo.owner,
+      repo: context.repo.repo,
+      prNumber: hintedPrNumber,
+      runId: expectedRunId,
+      secret: hmacSecret,
+    });
+  } catch (error) {
+    core.warning(`Could not list admission markers on PR #${hintedPrNumber}: ${error.message}`);
+    return skip(core, `Could not list admission markers on PR #${hintedPrNumber}; skipping.`);
+  }
+  if (!marker) {
+    return skip(
+      core,
+      'No signed admission marker for this run on the hinted PR; skipping.',
+    );
+  }
+
+  admission = {
+    pr_number: marker.payload.pr_number,
+    head_sha: marker.payload.head_sha,
+    head_repo: marker.payload.head_repo,
+    base_repo: marker.payload.base_repo,
+    candidate_sha: marker.payload.candidate_sha,
+    base_sha: marker.payload.base_sha,
+    run_id: marker.payload.run_id,
+  };
+
+  if (!identitiesMatch(admission, metadata)) {
+    return skip(core, 'Runner artifact identity does not match signed admission marker; skipping.');
+  }
+
+  if (admission.base_repo !== `${context.repo.owner}/${context.repo.repo}`) {
+    return skip(core, `PR targets ${admission.base_repo}, not this repository; skipping.`);
+  }
+
+  const prNumber = Number(admission.pr_number);
+  if (!Number.isInteger(prNumber) || prNumber <= 0) {
+    return skip(core, 'Invalid PR number in signed admission marker; skipping.');
   }
 
   let pull;
@@ -363,11 +536,14 @@ module.exports = async function validateQueryRegressionComment({ github, context
   if (pull.state !== 'open') {
     return skip(core, `PR #${prNumber} is ${pull.state}; skipping.`);
   }
-  if (pull.base.repo.full_name !== metadata.base_repo || pull.head.repo.full_name !== metadata.head_repo) {
-    return skip(core, 'Current PR repository metadata does not match artifact; skipping.');
+  if (
+    pull.base?.repo?.full_name !== admission.base_repo ||
+    pull.head?.repo?.full_name !== admission.head_repo
+  ) {
+    return skip(core, 'Current PR repository metadata does not match trusted admission; skipping.');
   }
-  if (pull.head.sha !== metadata.head_sha) {
-    return skip(core, 'Current PR head SHA differs from artifact; skipping stale run.');
+  if (pull.head?.sha !== admission.head_sha) {
+    return skip(core, 'Current PR head SHA differs from trusted admission; skipping stale run.');
   }
 
   const reportPaths = findReports(artifactDir);
@@ -379,9 +555,9 @@ module.exports = async function validateQueryRegressionComment({ github, context
     '',
     `- **Workflow run:** ${serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${expectedRunId}`,
     `- **Built base SHA:** \`${text(metadata.built_base_sha)}\``,
-    `- **Event base SHA:** \`${text(metadata.event_base_sha)}\``,
-    `- **Head SHA:** \`${text(metadata.head_sha)}\``,
-    `- **Candidate merge SHA:** \`${text(metadata.candidate_sha)}\``,
+    `- **Event base SHA:** \`${text(admission.base_sha)}\``,
+    `- **Head SHA:** \`${text(admission.head_sha)}\``,
+    `- **Candidate merge SHA:** \`${text(admission.candidate_sha)}\``,
     '',
   ].join('\n');
 
@@ -408,4 +584,11 @@ module.exports = async function validateQueryRegressionComment({ github, context
   core.setOutput('summary_path', summaryPath);
 };
 
-module.exports._test = { collectReportRows, renderSummaryTable };
+module.exports._test = {
+  collectReportRows,
+  renderSummaryTable,
+  admissionMac,
+  verifyAdmissionMac,
+  formatAdmissionMarker,
+  parseAdmissionMarker,
+};

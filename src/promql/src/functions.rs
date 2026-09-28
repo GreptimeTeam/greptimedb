@@ -16,6 +16,7 @@ mod aggr_over_time;
 mod changes;
 mod deriv;
 mod double_exponential_smoothing;
+mod edge_count;
 mod extrapolate_rate;
 mod idelta;
 mod native_histogram;
@@ -26,6 +27,7 @@ mod resets;
 mod round;
 #[cfg(test)]
 mod test_util;
+mod vector_matching;
 
 pub use aggr_over_time::{
     AbsentOverTime, AvgOverTime, CountOverTime, LastOverTime, MaxOverTime, MinOverTime,
@@ -44,7 +46,7 @@ pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
 pub use idelta::IDelta;
 pub use native_histogram::{
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
     NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramFraction,
@@ -53,13 +55,14 @@ pub use native_histogram::{
     NativeHistogramNotEq, NativeHistogramPresentOverTime, NativeHistogramQuantile,
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
-    NativeHistogramToString,
+    NativeHistogramToString, PromqlFloatToString,
 };
 pub use predict_linear::PredictLinear;
 pub use quantile::QuantileOverTime;
 pub use quantile_aggr::{QUANTILE_NAME, quantile_udaf};
 pub use resets::Resets;
 pub use round::Round;
+pub use vector_matching::{MatchGroupViolation, UniqueMatchGroup};
 
 use crate::range_array::RangeArray;
 

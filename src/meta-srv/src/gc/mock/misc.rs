@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use common_meta::peer::Peer;
+use common_procedure::ProcedureContext;
 use common_telemetry::init_default_ut_logging;
 use store_api::storage::{FileRefsManifest, GcReport, RegionId};
 
@@ -71,7 +72,12 @@ async fn test_empty_file_refs_manifest() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     match report {
@@ -159,7 +165,12 @@ async fn test_multiple_regions_per_table() {
     )]);
 
     let report = scheduler
-        .parallel_process_datanodes(datanode_to_candidates, HashMap::new(), HashMap::new())
+        .parallel_process_datanodes(
+            datanode_to_candidates,
+            HashMap::new(),
+            HashMap::new(),
+            ProcedureContext::default(),
+        )
         .await;
 
     match report {

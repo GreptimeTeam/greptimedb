@@ -37,7 +37,9 @@ use crate::error::{
     YamlLoadSnafu, YamlParseSnafu,
 };
 use crate::etl::processor::ProcessorKind;
-use crate::etl::transform::transformer::greptime::{RowWithTableSuffix, values_to_rows};
+use crate::etl::transform::transformer::greptime::{
+    RowWithTableSuffix, values_to_row, values_to_rows,
+};
 use crate::tablesuffix::TableSuffixTemplate;
 use crate::{
     ContextOpt, GreptimeTransformer, IdentityTimeIndex, PipelineContext, SchemaInfo,
@@ -236,6 +238,14 @@ pub enum PipelineExecOutput {
     Filtered,
 }
 
+/// The result after processors and dispatcher rules have run.
+#[derive(Debug)]
+pub enum PipelineProcessOutput {
+    Processed(VrlValue),
+    DispatchedTo(DispatchedTo, VrlValue),
+    Filtered,
+}
+
 /// Output from a successful pipeline transformation.
 ///
 /// Rows are grouped by their ContextOpt, with each row having its own optional
@@ -303,24 +313,42 @@ impl Pipeline {
 
     pub fn exec_mut(
         &self,
-        mut val: VrlValue,
+        val: VrlValue,
         pipeline_ctx: &PipelineContext<'_>,
         schema_info: &mut SchemaInfo,
     ) -> Result<PipelineExecOutput> {
-        // process
+        match self.process_mut(val)? {
+            PipelineProcessOutput::Processed(val) => self
+                .transform_mut(val, pipeline_ctx, schema_info)
+                .map(PipelineExecOutput::Transformed),
+            PipelineProcessOutput::DispatchedTo(dispatched_to, val) => {
+                Ok(PipelineExecOutput::DispatchedTo(dispatched_to, val))
+            }
+            PipelineProcessOutput::Filtered => Ok(PipelineExecOutput::Filtered),
+        }
+    }
+
+    pub fn process_mut(&self, mut val: VrlValue) -> Result<PipelineProcessOutput> {
         for processor in self.processors.iter() {
             val = processor.exec_mut(val)?;
             if val.is_null() {
-                // line is filtered
-                return Ok(PipelineExecOutput::Filtered);
+                return Ok(PipelineProcessOutput::Filtered);
             }
         }
 
-        // dispatch, fast return if matched
         if let Some(rule) = self.dispatcher.as_ref().and_then(|d| d.exec(&val)) {
-            return Ok(PipelineExecOutput::DispatchedTo(rule.into(), val));
+            return Ok(PipelineProcessOutput::DispatchedTo(rule.into(), val));
         }
 
+        Ok(PipelineProcessOutput::Processed(val))
+    }
+
+    pub fn transform_mut(
+        &self,
+        val: VrlValue,
+        pipeline_ctx: &PipelineContext<'_>,
+        schema_info: &mut SchemaInfo,
+    ) -> Result<TransformedOutput> {
         let mut val = if val.is_array() {
             val
         } else {
@@ -356,9 +384,7 @@ impl Pipeline {
             }
         };
 
-        Ok(PipelineExecOutput::Transformed(TransformedOutput {
-            rows_by_context,
-        }))
+        Ok(TransformedOutput { rows_by_context })
     }
 
     pub fn processors(&self) -> &processor::Processors {
@@ -367,6 +393,10 @@ impl Pipeline {
 
     pub fn transformer(&self) -> &TransformerMode {
         &self.transformer
+    }
+
+    pub fn resolve_table_suffix(&self, value: &VrlValue) -> Option<String> {
+        ContextOpt::resolve_table_suffix(self.tablesuffix.as_ref(), value)
     }
 
     // the method is for test purpose
@@ -409,34 +439,43 @@ fn transform_array_elements_by_ctx(
             );
         }
 
-        let values =
-            unwrap_or_continue_if_err!(transformer.transform_mut(element, is_v1), skip_error);
+        let table_suffix = ContextOpt::resolve_table_suffix(tablesuffix_template, element);
+        let values = unwrap_or_continue_if_err!(
+            transformer.transform_mut_with_schema(
+                element,
+                is_v1,
+                schema_info,
+                table_suffix.as_deref(),
+            ),
+            skip_error
+        );
         if is_v1 {
             // v1 mode: just use transformer output directly
-            let mut opt = unwrap_or_continue_if_err!(
+            let opt = unwrap_or_continue_if_err!(
                 ContextOpt::from_pipeline_map_to_opt(element),
                 skip_error
             );
-            let table_suffix = opt.resolve_table_suffix(tablesuffix_template, element);
             rows_by_context
                 .entry(opt)
                 .or_insert_with(Vec::new)
                 .push((Row { values }, table_suffix));
         } else {
             // v2 mode: combine with auto-transform for remaining fields
-            let element_rows_map = values_to_rows(
-                schema_info,
-                element.clone(),
-                pipeline_ctx,
-                Some(values),
-                false,
-                tablesuffix_template,
-            )
-            .map_err(Box::new)
-            .context(TransformArrayElementSnafu { index })?;
-            for (k, v) in element_rows_map {
-                rows_by_context.entry(k).or_default().extend(v);
-            }
+            let mut value = element.clone();
+            let opt = unwrap_or_continue_if_err!(
+                ContextOpt::from_pipeline_map_to_opt(&mut value),
+                skip_error
+            );
+            let row = unwrap_or_continue_if_err!(
+                values_to_row(schema_info, value, pipeline_ctx, Some(values), false,)
+                    .map_err(Box::new)
+                    .context(TransformArrayElementSnafu { index }),
+                skip_error
+            );
+            rows_by_context
+                .entry(opt)
+                .or_default()
+                .push((row, table_suffix));
         }
     }
 

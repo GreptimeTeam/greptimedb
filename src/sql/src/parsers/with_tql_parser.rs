@@ -129,6 +129,7 @@ impl ParserContext<'_> {
                                 data_type: None,
                             })
                             .collect(),
+                        at: None,
                     },
                     query: body,
                     from: None,

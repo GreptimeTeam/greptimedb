@@ -14,22 +14,25 @@
 
 pub mod builder;
 mod dashboard;
+mod entity_graph;
+mod export_database;
 mod grpc;
+mod import_packed;
 mod influxdb;
 mod jaeger;
 mod log_handler;
+mod logical_batcher;
 mod logs;
 mod opentsdb;
 mod otlp;
 pub mod prom_store;
 mod promql;
 mod region_query;
-pub mod standalone;
 
 use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, atomic};
+use std::sync::{Arc, OnceLock, atomic};
 use std::time::{Duration, SystemTime};
 
 use async_stream::stream;
@@ -59,6 +62,7 @@ use common_recordbatch::error::StreamTimeoutSnafu;
 use common_telemetry::logging::SlowQueryOptions;
 use common_telemetry::{debug, error, tracing};
 use dashmap::DashMap;
+use datafusion::dataframe::DataFrame;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::LogicalPlan;
 use futures::{Stream, StreamExt, future};
@@ -75,6 +79,7 @@ use query::metrics::OnDone;
 use query::parser::{PromQuery, QueryStatement};
 use query::query_engine::DescribeResult;
 use query::query_engine::options::{QueryOptions, validate_catalog_and_schema};
+use servers::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use servers::error::{
     self as server_error, AuthSnafu, CommonMetaSnafu, ExecuteQuerySnafu,
     OtlpMetricModeIncompatibleSnafu, UnexpectedResultSnafu,
@@ -99,7 +104,6 @@ use sql::statements::statement::Statement;
 use sql::statements::tql::Tql;
 use sql::util::{extract_tables_from_prom_expr_checked, extract_tables_from_statement_checked};
 use sqlparser::ast::{AnalyzeFormat, ObjectName};
-pub use standalone::StandaloneDatanodeManager;
 use table::requests::{OTLP_METRIC_COMPAT_KEY, OTLP_METRIC_COMPAT_PROM};
 use tracing::Span;
 
@@ -121,12 +125,14 @@ lazy_static! {
 #[derive(Clone)]
 pub struct Instance {
     frontend_peer_addr: String,
+    experimental_metric_export: bool,
     catalog_manager: CatalogManagerRef,
     pipeline_operator: Arc<PipelineOperator>,
     statement_executor: Arc<StatementExecutor>,
     query_engine: QueryEngineRef,
     plugins: Plugins,
     inserter: InserterRef,
+    logical_batcher: Arc<OnceLock<Option<Arc<LogicalTablePendingRowsBatcher>>>>,
     deleter: DeleterRef,
     table_metadata_manager: TableMetadataManagerRef,
     event_recorder: EventRecorderRef,
@@ -135,6 +141,7 @@ pub struct Instance {
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
+    otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
 
     // cache for otlp metrics
@@ -230,31 +237,37 @@ fn parse_stmt(sql: &str, dialect: &(dyn Dialect + Send + Sync)) -> Result<Vec<St
 
 fn is_explain_analyze_verbose(stmt: &Statement) -> bool {
     matches!(stmt, Statement::Explain(explain) if explain.analyze && explain.verbose)
+        || matches!(stmt, Statement::Tql(Tql::Analyze(analyze)) if analyze.is_verbose)
 }
 
 fn validate_analyze_stream_statement(stmt: &mut Statement) -> Result<()> {
-    let Statement::Explain(explain) = stmt else {
-        return InvalidSqlSnafu {
-            err_msg: "only EXPLAIN ANALYZE VERBOSE statement is supported",
+    let (is_verbose, format) = match stmt {
+        Statement::Explain(explain) => (explain.analyze && explain.verbose, &mut explain.format),
+        Statement::Tql(Tql::Analyze(analyze)) => (analyze.is_verbose, &mut analyze.format),
+        _ => {
+            return InvalidSqlSnafu {
+                err_msg: "only EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported",
+            }
+            .fail();
         }
-        .fail();
     };
+
     ensure!(
-        explain.analyze && explain.verbose,
+        is_verbose,
         InvalidSqlSnafu {
-            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE"
+            err_msg: "statement must be EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE"
         }
     );
-    match explain.format {
+    match format {
         None | Some(AnalyzeFormat::JSON) => {
             // Keep explicit FORMAT JSON accepted, but pass JSON through
-            // QueryContext.explain_format instead of the statement to avoid the
-            // planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
-            explain.format = None;
+            // QueryContext.explain_format instead of the statement to avoid
+            // the planner's current `EXPLAIN VERBOSE with FORMAT` limitation.
+            *format = None;
             Ok(())
         }
         Some(_) => InvalidSqlSnafu {
-            err_msg: "only FORMAT JSON is supported for analyze stream",
+            err_msg: "only FORMAT JSON is supported for EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE",
         }
         .fail(),
     }
@@ -383,6 +396,30 @@ impl Instance {
             }
             _ => {
                 query_interceptor.pre_execute(Some(&stmt), None, query_ctx.clone())?;
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(
+                    CopyDatabase::From(arg),
+                )) = &stmt
+                    && arg.with.get("metric_data_layout").is_some()
+                {
+                    return self
+                        .copy_packed_database(arg.clone(), &stmt, query_ctx)
+                        .await;
+                }
+                if let Statement::ShowVariables(show) = &stmt
+                    && show
+                        .variable
+                        .to_string()
+                        .eq_ignore_ascii_case("experimental_metric_export")
+                {
+                    return self.show_metric_export_capability();
+                }
+                if let Statement::Copy(sql::statements::copy::Copy::CopyDatabase(CopyDatabase::To(
+                    arg,
+                ))) = &stmt
+                    && export_database::parse_metric_export_requested(&arg.with)?
+                {
+                    return self.copy_metric_database(arg.clone(), query_ctx).await;
+                }
                 self.statement_executor
                     .execute_sql(stmt, query_ctx)
                     .await
@@ -710,7 +747,7 @@ impl Instance {
         ensure!(
             stmts.len() == 1,
             InvalidSqlSnafu {
-                err_msg: "only single EXPLAIN ANALYZE VERBOSE statement is supported"
+                err_msg: "only a single EXPLAIN ANALYZE VERBOSE or TQL ANALYZE VERBOSE statement is supported"
             }
         );
         let mut stmt = stmts.remove(0);
@@ -847,6 +884,22 @@ impl Instance {
 
         query_interceptor.pre_execute(stmt.as_ref(), Some(&plan), query_ctx.clone())?;
 
+        // TQL EXPLAIN/ANALYZE formats are consumed from the query context at
+        // execution time (see `optimize_physical_plan`); re-apply the side
+        // effect of `plan_tql` that was lost when the plan was built during
+        // Describe. `explain_format` is per-query state, so this never
+        // overwrites anything.
+        if let Some(Statement::Tql(tql)) = &stmt {
+            let format = match tql {
+                Tql::Explain(explain) => explain.format.as_ref(),
+                Tql::Analyze(analyze) => analyze.format.as_ref(),
+                Tql::Eval(_) => None,
+            };
+            if let Some(format) = format {
+                query_ctx.set_explain_format(format.to_string());
+            }
+        }
+
         let query = stmt
             .as_ref()
             .map(|s| s.to_string())
@@ -928,6 +981,59 @@ impl Instance {
         vec![result]
     }
 
+    /// Builds the [`DataFrame`] for an information-schema-backed `SHOW`
+    /// statement; `None` for other statements. The future is boxed to keep
+    /// `do_describe_inner`'s state machine small.
+    fn show_statement_dataframe<'a>(
+        &'a self,
+        stmt: &'a Statement,
+        query_ctx: &'a QueryContextRef,
+    ) -> Pin<Box<dyn Future<Output = Option<query::error::Result<DataFrame>>> + Send + 'a>> {
+        Box::pin(async move {
+            let engine = &self.query_engine;
+            let catalog_manager = self.catalog_manager();
+            let ctx = query_ctx.clone();
+            let dataframe = match stmt {
+                Statement::ShowDatabases(show) => {
+                    query::sql::show_databases_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTables(show) => {
+                    query::sql::show_tables_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowViews(show) => {
+                    query::sql::show_views_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowFlows(show) => {
+                    query::sql::show_flows_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowColumns(show) => {
+                    query::sql::show_columns_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowTableStatus(show) => {
+                    query::sql::show_table_status_dataframe(show, engine, catalog_manager, ctx)
+                        .await
+                }
+                Statement::ShowCharset(kind) => {
+                    query::sql::show_charsets_dataframe(kind, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowCollation(kind) => {
+                    query::sql::show_collations_dataframe(kind, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowIndex(show) => {
+                    query::sql::show_index_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowRegion(show) => {
+                    query::sql::show_region_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                Statement::ShowProcesslist(show) => {
+                    query::sql::show_processlist_dataframe(show, engine, catalog_manager, ctx).await
+                }
+                _ => return None,
+            };
+            Some(dataframe)
+        })
+    }
+
     async fn do_describe_inner(
         &self,
         stmt: Statement,
@@ -946,6 +1052,37 @@ impl Instance {
         };
         let plannable = is_inner_plannable(&stmt)
             || matches!(&stmt, Statement::Explain(explain) if is_inner_plannable(explain.statement.as_ref()));
+
+        if let Statement::Tql(tql) = stmt {
+            // TQL produces a logical plan; describe it from the plan so the
+            // extended-protocol RowDescription matches the executed DataRows.
+            self.check_sql_permission(&Statement::Tql(tql.clone()), &query_ctx)
+                .await?;
+            let plan = self.statement_executor.plan_tql(tql, &query_ctx).await?;
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
+
+        // Describe SHOW statements from the same projection the executor builds.
+        if let Some(dataframe) = self
+            .show_statement_dataframe(&stmt, &query_ctx)
+            .await
+            .transpose()
+            .context(PlanStatementSnafu)?
+        {
+            self.check_sql_permission(&stmt, &query_ctx).await?;
+            let plan = dataframe.into_unoptimized_plan();
+            return self
+                .query_engine
+                .describe(plan, query_ctx)
+                .await
+                .map(Some)
+                .context(error::DescribeStatementSnafu);
+        }
 
         if plannable {
             self.check_sql_permission(&stmt, &query_ctx).await?;
@@ -1222,6 +1359,7 @@ impl PrometheusHandler for Instance {
         self.check_query_target_permission(targets, &query_ctx)
             .await?;
 
+        let requires_output_ordering = query.requires_output_ordering();
         let (query, stmt) = query.into_parts();
 
         let QueryStatement::Promql(eval_stmt, _) = &stmt else {
@@ -1234,6 +1372,12 @@ impl PrometheusHandler for Instance {
             .await
             .map_err(BoxedError::new)
             .context(ExecuteQuerySnafu)?;
+
+        let plan = if requires_output_ordering {
+            plan
+        } else {
+            promql::remove_output_sort(plan)
+        };
 
         interceptor.pre_execute(&query, &eval_stmt.expr, Some(&plan), query_ctx.clone())?;
 
@@ -1395,6 +1539,20 @@ impl PrometheusHandler for Instance {
             .context(ExecuteQuerySnafu)
     }
 
+    async fn query_metric_names_by_labels(
+        &self,
+        matchers: Vec<Matcher>,
+        schema: &str,
+        start: SystemTime,
+        end: SystemTime,
+        ctx: &QueryContextRef,
+    ) -> server_error::Result<Vec<String>> {
+        self.handle_query_metric_names_by_labels(matchers, schema, start, end, ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn query_label_values(
         &self,
         metric: String,
@@ -1531,6 +1689,7 @@ pub fn check_permission(
                 validate_param(table_name, query_ctx)?;
             }
         }
+        #[cfg(feature = "enterprise")]
         Statement::UndropTable(stmt) => {
             validate_param(stmt.table_name(), query_ctx)?;
         }
@@ -1557,6 +1716,11 @@ pub fn check_permission(
         }
         Statement::ShowFlows(stmt) => {
             validate_db_permission!(stmt, query_ctx);
+        }
+        Statement::ShowFlowStatus(_stmt) => {
+            // Flow statistics are organized based on the catalog dimension and
+            // filtered by the current catalog, so there is no need to check the
+            // permission of the database(schema).
         }
         #[cfg(feature = "enterprise")]
         Statement::ShowTriggers(_stmt) => {
@@ -1660,6 +1824,7 @@ fn should_track_plan_process(stmt: Option<&Statement>, plan: &LogicalPlan) -> bo
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
     use std::collections::HashMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -1668,26 +1833,31 @@ mod tests {
     use std::time::Duration;
 
     use api::prom_store::remote::label_matcher::Type as PromMatcherType;
-    use api::prom_store::remote::{LabelMatcher, Query as RemoteQuery, ReadRequest};
+    use api::prom_store::remote::{
+        Label, LabelMatcher, Query as RemoteQuery, ReadRequest, ReadResponse, Sample,
+    };
+    use api::v1::greptime_request::Request;
     use api::v1::meta::{ProcedureDetailResponse, ReconcileRequest, ReconcileResponse};
+    use api::v1::query_request::Query;
     use auth::{
         DASHBOARD_DELETE, DASHBOARD_QUERY, DASHBOARD_SAVE, JAEGER_QUERY, PIPELINE_DELETE,
-        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfoRef,
+        PIPELINE_INSERT, PIPELINE_QUERY, PermissionAction, PermissionResp, UserInfo, UserInfoRef,
     };
     use catalog::process_manager::{ProcessManager, QueryStatement, SlowQueryTimer};
     use common_base::Plugins;
     use common_catalog::consts::DEFAULT_PRIVATE_SCHEMA_NAME;
-    use common_error::ext::{BoxedError, PlainError};
+    use common_error::ext::{BoxedError, ErrorExt, PlainError};
     use common_error::status_code::StatusCode;
     use common_event_recorder::{Event, EventRecorder, EventTypeFilter, EventTypeFilterRef};
     use common_frontend::slow_query_event::SlowQueryEvent;
     use common_meta::cache::LayeredCacheRegistryBuilder;
     use common_meta::kv_backend::memory::MemoryKvBackend;
     use common_meta::procedure_executor::{ExecutorContext, ProcedureExecutor};
-    use common_meta::rpc::ddl::{SubmitDdlTaskRequest, SubmitDdlTaskResponse};
+    use common_meta::rpc::ddl::{DdlTask, SubmitDdlTaskRequest, SubmitDdlTaskResponse};
     use common_meta::rpc::procedure::{
         MigrateRegionRequest, MigrateRegionResponse, ProcedureStateResponse,
     };
+    use common_query::prelude::greptime_value;
     use common_query::{Output, OutputMeta};
     use common_recordbatch::{
         OrderOption, RecordBatch, RecordBatchStream, SendableRecordBatchStream,
@@ -1699,8 +1869,12 @@ mod tests {
     use datafusion_expr::{LogicalPlanBuilder, LogicalTableSource};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema as GtSchema, SchemaRef as GtSchemaRef};
-    use datatypes::vectors::{StringVector, TimestampNanosecondVector, VectorRef};
+    use datatypes::vectors::{
+        Float64Vector, StringVector, TimestampMillisecondVector, TimestampNanosecondVector,
+        VectorRef,
+    };
     use log_query::LogQuery;
+    use prost::Message;
     use query::query_engine::options::QueryOptions;
     use servers::query_handler::{
         DashboardHandler, JaegerQueryHandler, LogQueryHandler, PipelineHandler, PipelineHandlerRef,
@@ -1715,16 +1889,18 @@ mod tests {
     };
     use store_api::storage::ScanRequest;
     use strfmt::Format;
-    use table::metadata::{FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{
+        FilterPushDownType, TableInfo, TableInfoBuilder, TableMetaBuilder, TableType,
+    };
     use table::table_name::TableName;
     use table::test_util::{EmptyTable, MemTable};
     use table::{Table, TableRef};
     use tokio::sync::{mpsc, oneshot};
     use tower::ServiceExt;
 
-    use super::*;
     use crate::frontend::FrontendOptions;
     use crate::instance::builder::FrontendBuilder;
+    use crate::instance::*;
 
     fn parse_test_sql(sql: &str) -> Vec<Statement> {
         parse_stmt(sql, &GreptimeDbDialect {}).unwrap()
@@ -1758,6 +1934,9 @@ mod tests {
             "explain analyze select 1",
             "explain analyze verbose format text select 1",
             "explain analyze verbose format graphviz select 1",
+            "TQL ANALYZE (0, 10, '5s') physical_metric",
+            "TQL EXPLAIN VERBOSE (0, 10, '5s') physical_metric",
+            "TQL ANALYZE VERBOSE FORMAT TEXT (0, 10, '5s') physical_metric",
         ] {
             let mut stmts = parse_test_sql(sql);
             assert!(
@@ -1769,16 +1948,19 @@ mod tests {
         for sql in [
             "explain analyze verbose select 1",
             "explain analyze verbose format json select 1",
+            "TQL ANALYZE VERBOSE (0, 10, '5s') physical_metric",
+            "TQL ANALYZE VERBOSE FORMAT JSON (0, 10, '5s') physical_metric",
         ] {
             let mut stmts = parse_test_sql(sql);
             assert!(
                 validate_analyze_stream_statement(&mut stmts[0]).is_ok(),
                 "{sql}"
             );
-            let Statement::Explain(explain) = &stmts[0] else {
-                unreachable!();
-            };
-            assert!(explain.format.is_none());
+            match &stmts[0] {
+                Statement::Explain(explain) => assert!(explain.format.is_none()),
+                Statement::Tql(Tql::Analyze(analyze)) => assert!(analyze.format.is_none()),
+                _ => unreachable!(),
+            }
         }
 
         assert_eq!(
@@ -1789,11 +1971,16 @@ mod tests {
         assert!(is_explain_analyze_verbose(
             &parse_test_sql("explain analyze verbose select 1")[0]
         ));
+        assert!(is_explain_analyze_verbose(
+            &parse_test_sql("TQL ANALYZE VERBOSE (0, 10, '5s') physical_metric")[0]
+        ));
         for sql in [
             "select 1",
             "explain select 1",
             "explain analyze select 1",
             "explain verbose select 1",
+            "TQL ANALYZE (0, 10, '5s') physical_metric",
+            "TQL EXPLAIN VERBOSE (0, 10, '5s') physical_metric",
         ] {
             assert!(
                 !is_explain_analyze_verbose(&parse_test_sql(sql)[0]),
@@ -1926,6 +2113,23 @@ mod tests {
                 .process_id(process_id)
                 .build(),
         )
+    }
+
+    #[derive(Debug)]
+    struct AdminUserInfo;
+
+    impl UserInfo for AdminUserInfo {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn username(&self) -> &str {
+            "admin"
+        }
+
+        fn is_admin(&self) -> bool {
+            true
+        }
     }
 
     struct RejectUnresolvedPermissionChecker;
@@ -2247,13 +2451,146 @@ mod tests {
     impl ProcedureExecutor for NoopProcedureExecutor {
         async fn submit_ddl_task(
             &self,
-            _ctx: &ExecutorContext,
+            _ctx: ExecutorContext,
             _request: SubmitDdlTaskRequest,
         ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
             common_meta::error::UnsupportedSnafu {
                 operation: "submit_ddl_task",
             }
             .fail()
+        }
+
+        async fn migrate_region(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: MigrateRegionRequest,
+        ) -> common_meta::error::Result<MigrateRegionResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "migrate_region",
+            }
+            .fail()
+        }
+
+        async fn reconcile(
+            &self,
+            _ctx: &ExecutorContext,
+            _request: ReconcileRequest,
+        ) -> common_meta::error::Result<ReconcileResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "reconcile",
+            }
+            .fail()
+        }
+
+        async fn query_procedure_state(
+            &self,
+            _ctx: &ExecutorContext,
+            _pid: &str,
+        ) -> common_meta::error::Result<ProcedureStateResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "query_procedure_state",
+            }
+            .fail()
+        }
+
+        async fn list_procedures(
+            &self,
+            _ctx: &ExecutorContext,
+        ) -> common_meta::error::Result<ProcedureDetailResponse> {
+            common_meta::error::UnsupportedSnafu {
+                operation: "list_procedures",
+            }
+            .fail()
+        }
+    }
+
+    /// A test [`ProcedureExecutor`] that completes create/drop DDL tasks against the
+    /// in-memory catalog, mimicking what the meta DDL procedures do in production.
+    /// This allows happy-path DDL requests (create/drop table/view) to be exercised
+    /// end to end through the gRPC ingress.
+    struct MockProcedureExecutor {
+        catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
+        next_table_id: std::sync::atomic::AtomicU32,
+        submitted: std::sync::Mutex<Vec<DdlTask>>,
+    }
+
+    impl MockProcedureExecutor {
+        fn new(catalog_manager: Arc<catalog::memory::MemoryCatalogManager>) -> Self {
+            Self {
+                catalog_manager,
+                next_table_id: std::sync::atomic::AtomicU32::new(1026),
+                submitted: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ProcedureExecutor for MockProcedureExecutor {
+        async fn submit_ddl_task(
+            &self,
+            _ctx: ExecutorContext,
+            request: SubmitDdlTaskRequest,
+        ) -> common_meta::error::Result<SubmitDdlTaskResponse> {
+            self.submitted.lock().unwrap().push(request.task.clone());
+            match request.task {
+                DdlTask::CreateTable(task) => {
+                    let table_id = self
+                        .next_table_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut table_info = task.table_info;
+                    table_info.ident.table_id = table_id;
+                    self.catalog_manager
+                        .register_table_sync(catalog::RegisterTableRequest {
+                            catalog: table_info.catalog_name.clone(),
+                            schema: table_info.schema_name.clone(),
+                            table_name: table_info.name.clone(),
+                            table_id,
+                            table: table::dist_table::DistTable::table(Arc::new(table_info)),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse {
+                        key: Vec::new(),
+                        table_ids: vec![table_id],
+                    })
+                }
+                DdlTask::CreateView(task) => {
+                    let view_id = self
+                        .next_table_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let mut view_info = task.view_info;
+                    view_info.ident.table_id = view_id;
+                    self.catalog_manager
+                        .register_table_sync(catalog::RegisterTableRequest {
+                            catalog: task.create_view.catalog_name.clone(),
+                            schema: task.create_view.schema_name.clone(),
+                            table_name: task.create_view.view_name.clone(),
+                            table_id: view_id,
+                            table: table::dist_table::DistTable::table(Arc::new(view_info)),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse {
+                        key: Vec::new(),
+                        table_ids: vec![view_id],
+                    })
+                }
+                DdlTask::DropView(task) => {
+                    self.catalog_manager
+                        .deregister_table_sync(catalog::DeregisterTableRequest {
+                            catalog: task.catalog.clone(),
+                            schema: task.schema.clone(),
+                            table_name: task.view.clone(),
+                        })
+                        .map_err(BoxedError::new)
+                        .context(common_meta::error::ExternalSnafu)?;
+                    Ok(SubmitDdlTaskResponse::default())
+                }
+                other => common_meta::error::UnsupportedSnafu {
+                    operation: format!("mock submit_ddl_task: {other:?}"),
+                }
+                .fail(),
+            }
         }
 
         async fn migrate_region(
@@ -2426,6 +2763,116 @@ mod tests {
         )
     }
 
+    struct ReleasedExportSource {
+        schema: GtSchemaRef,
+        channels: std::sync::Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    impl DataSource for ReleasedExportSource {
+        fn get_stream(
+            &self,
+            _request: ScanRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, BoxedError> {
+            let (started, release) = self.channels.lock().unwrap().take().unwrap();
+            let schema = self.schema.clone();
+            let stream = futures::stream::once(async move {
+                started.send(()).unwrap();
+                release.await.unwrap();
+                Ok(RecordBatch::new_empty(schema))
+            });
+            Ok(Box::pin(RecordBatchStreamWrapper::new(
+                self.schema.clone(),
+                Box::pin(stream),
+            )))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_metric_export_http_timeout_drains_ordinary_writer() {
+        let destination = common_test_util::temp_dir::create_temp_dir("metric_export_timeout");
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let info = test_table_info(1024, "source").unwrap();
+        let source = Arc::new(Table::new(
+            Arc::new(info.clone()),
+            FilterPushDownType::Unsupported,
+            Arc::new(ReleasedExportSource {
+                schema: info.meta.schema.clone(),
+                channels: std::sync::Mutex::new(Some((started_tx, release_rx))),
+            }),
+        ));
+        let catalog = catalog::memory::MemoryCatalogManager::new_with_table(source);
+        let kv = Arc::new(MemoryKvBackend::new());
+        let instance = FrontendBuilder::new(
+            FrontendOptions {
+                experimental_metric_export: true,
+                ..Default::default()
+            },
+            kv.clone(),
+            test_cache_registry(kv).unwrap(),
+            catalog,
+            Arc::new(client::client_manager::NodeClients::default()),
+            Arc::new(NoopProcedureExecutor),
+            Arc::new(ProcessManager::new("export-timeout".into(), None)),
+        )
+        .with_local_file_access(
+            common_datasource::object_store::LocalFileAccess::sandboxed(destination.path())
+                .unwrap(),
+        )
+        .try_build()
+        .await
+        .unwrap();
+        let server = servers::http::HttpServerBuilder::new(servers::http::HttpOptions {
+            timeout: Duration::from_secs(2),
+            ..Default::default()
+        })
+        .with_sql_handler(Arc::new(instance))
+        .build();
+        let app = server.build(server.make_app()).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let sql = format!(
+            "COPY DATABASE greptime.public TO '{}/' WITH (experimental_metric_export='true')",
+            destination.path().display()
+        );
+        let request = tokio::spawn(async move {
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .unwrap()
+                .post(format!("http://{addr}/v1/sql"))
+                .form(&[("sql", sql)])
+                .send()
+                .await
+                .unwrap()
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
+        // A dropped ordinary stream would close this receiver before release.
+        release_tx.send(()).unwrap();
+        let file = destination.path().join("source.parquet");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if std::fs::read(&file)
+                    .is_ok_and(|bytes| bytes.len() > 8 && bytes.ends_with(b"PAR1"))
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        server_task.abort();
+    }
+
     fn pending_table(
         table_id: u32,
         table_name: &str,
@@ -2479,9 +2926,28 @@ mod tests {
         plugins: Plugins,
         metric_names_table: Option<TableRef>,
     ) -> TestResult<Instance> {
+        let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
+        test_instance_with_catalog_manager(
+            catalog_manager,
+            target_table,
+            plugins,
+            metric_names_table,
+            Arc::new(NoopProcedureExecutor),
+        )
+        .await
+    }
+
+    /// Builds a test frontend `Instance` over the given (already source-registered)
+    /// catalog manager, completing DDL tasks through `procedure_executor`.
+    async fn test_instance_with_catalog_manager(
+        catalog_manager: Arc<catalog::memory::MemoryCatalogManager>,
+        target_table: TableRef,
+        plugins: Plugins,
+        metric_names_table: Option<TableRef>,
+        procedure_executor: ProcedureExecutorRef,
+    ) -> TestResult<Instance> {
         let kv_backend = Arc::new(MemoryKvBackend::new());
         let process_manager = Arc::new(ProcessManager::new("test-frontend".to_string(), None));
-        let catalog_manager = catalog::memory::MemoryCatalogManager::new_with_table(source_table);
         let target_table_name = "target";
         catalog_manager
             .register_table_sync(catalog::RegisterTableRequest {
@@ -2522,7 +2988,7 @@ mod tests {
             cache_registry,
             catalog_manager,
             Arc::new(client::client_manager::NodeClients::default()),
-            Arc::new(NoopProcedureExecutor),
+            procedure_executor,
             process_manager,
         )
         .with_plugin(plugins)
@@ -2563,6 +3029,296 @@ mod tests {
         targets: Option<PermissionTableTargets>,
     ) {
         assert_eq!(CheckedAction { action, targets }, checker.take_check());
+    }
+
+    #[tokio::test]
+    async fn database_export_authorizes_all_tables_before_preparation() -> TestResult<()> {
+        struct ExportAcl(std::sync::Mutex<Vec<PermissionTableTargets>>);
+        impl PermissionChecker for ExportAcl {
+            fn check_permission(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+            ) -> auth::error::Result<PermissionResp> {
+                assert!(matches!(
+                    req,
+                    PermissionReq::SqlStatement(Statement::Copy(
+                        sql::statements::copy::Copy::CopyDatabase(
+                            sql::statements::copy::CopyDatabase::To(_)
+                        )
+                    ))
+                ));
+                Ok(PermissionResp::Allow)
+            }
+            fn check_permission_with_table_targets(
+                &self,
+                _: UserInfoRef,
+                req: PermissionReq,
+                targets: PermissionTableTargets,
+            ) -> auth::error::Result<PermissionResp> {
+                self.0.lock().unwrap().push(targets.clone());
+                let PermissionTableTargets::Resolved(tables) = targets else {
+                    panic!("unresolved export")
+                };
+                if req.is_readonly() {
+                    // The first table is readable; the later table has only write access.
+                    Ok(if tables.iter().any(|t| t.table == "target") {
+                        PermissionResp::Reject
+                    } else {
+                        PermissionResp::Allow
+                    })
+                } else {
+                    self.check_permission(QueryContext::arc().current_user(), req)
+                }
+            }
+        }
+        let checker = Arc::new(ExportAcl(Default::default()));
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(checker.clone());
+        let instance = test_instance_with_plugins(
+            test_logical_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+        let req = table::requests::CopyDatabaseRequest {
+            catalog_name: "greptime".into(),
+            schema_name: "public".into(),
+            location: "invalid-destination".into(),
+            with: Default::default(),
+            connection: Default::default(),
+            time_range: None,
+        };
+        let result = instance
+            .export_database_for_test(
+                req.clone(),
+                None,
+                &tokio_util::sync::CancellationToken::new(),
+                QueryContext::arc(),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Permission { .. })));
+        let expected = PermissionTableTargets::resolved(vec![
+            PermissionTableTarget::new("greptime", "public", "source"),
+            PermissionTableTarget::new("greptime", "public", "target"),
+        ]);
+        assert_eq!(*checker.0.lock().unwrap(), vec![expected.clone(), expected]);
+        // An empty selection must still check the operation privilege.
+        instance
+            .plugins
+            .map_mut::<PermissionCheckerRef, _, _>(|checker| {
+                *checker.unwrap() = Arc::new(WriteOnlyPermissionChecker)
+            });
+        let result = instance
+            .export_database_for_test(
+                req,
+                Some(&[]),
+                &tokio_util::sync::CancellationToken::new(),
+                QueryContext::arc(),
+            )
+            .await;
+        assert!(matches!(result, Err(Error::Permission { .. })));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_with_custom_timestamp_and_value_columns() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("custom_value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("custom_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let response = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    start_timestamp_ms: 1500,
+                    end_timestamp_ms: 2500,
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "custom_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        let response = ReadResponse::decode(body.as_slice()).unwrap();
+
+        assert_eq!(1, response.results.len());
+        assert_eq!(1, response.results[0].timeseries.len());
+        let timeseries = &response.results[0].timeseries[0];
+        assert_eq!(
+            vec![Label {
+                name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                value: "custom_metric".to_string(),
+            }],
+            timeseries.labels
+        );
+        assert_eq!(
+            vec![Sample {
+                value: 2.0,
+                timestamp: 2000,
+            }],
+            timeseries.samples
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_prefers_default_value_column() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("extra_field", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new(
+                greptime_value(),
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000, 2000, 3000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![99.0, 99.0, 99.0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0, 2.0, 3.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("multi_field_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let response = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    start_timestamp_ms: 1500,
+                    end_timestamp_ms: 2500,
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "multi_field_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .unwrap();
+        let body = servers::prom_store::snappy_decompress(&response.body).unwrap();
+        let response = ReadResponse::decode(body.as_slice()).unwrap();
+
+        assert_eq!(1, response.results.len());
+        assert_eq!(1, response.results[0].timeseries.len());
+        let timeseries = &response.results[0].timeseries[0];
+        assert_eq!(
+            vec![
+                Label {
+                    name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "multi_field_metric".to_string(),
+                },
+                Label {
+                    name: "extra_field".to_string(),
+                    value: "99".to_string(),
+                },
+            ],
+            timeseries.labels
+        );
+        assert_eq!(
+            vec![Sample {
+                value: 2.0,
+                timestamp: 2000,
+            }],
+            timeseries.samples
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_prom_remote_read_rejects_ambiguous_value_columns() -> TestResult<()> {
+        let schema = Arc::new(GtSchema::new(vec![
+            ColumnSchema::new(
+                "custom_ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("field_a", ConcreteDataType::float64_datatype(), false),
+            ColumnSchema::new("field_b", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let recordbatch = RecordBatch::new(
+            schema,
+            vec![
+                Arc::new(TimestampMillisecondVector::from_vec(vec![1000])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![1.0])) as VectorRef,
+                Arc::new(Float64Vector::from_vec(vec![2.0])) as VectorRef,
+            ],
+        )
+        .unwrap();
+        let instance = test_instance_with_tables(
+            MemTable::table("ambiguous_metric", recordbatch),
+            test_table(1025, "target")?,
+        )
+        .await?;
+
+        let err = PromStoreProtocolHandler::read(
+            &instance,
+            ReadRequest {
+                queries: vec![RemoteQuery {
+                    matchers: vec![LabelMatcher {
+                        r#type: PromMatcherType::Eq as i32,
+                        name: servers::prom_store::METRIC_NAME_LABEL.to_string(),
+                        value: "ambiguous_metric".to_string(),
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+            test_query_ctx(1),
+        )
+        .await
+        .err()
+        .expect("ambiguous value columns should fail remote read");
+
+        assert_eq!(StatusCode::InvalidArguments, err.status_code());
+        assert!(format!("{err:?}").contains("Ambiguous value column"));
+
+        Ok(())
     }
 
     #[tokio::test]
@@ -2732,6 +3488,45 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(axum::http::StatusCode::FORBIDDEN, response.status());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_write_only_grpc_sql_is_checked_after_parsing() -> TestResult<()> {
+        let plugins = Plugins::new();
+        plugins.insert::<PermissionCheckerRef>(Arc::new(WriteOnlyPermissionChecker));
+        let instance = test_instance_with_plugins(
+            test_table(1024, "source")?,
+            test_table(1025, "target")?,
+            plugins,
+        )
+        .await?;
+
+        let insert = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql(
+                "INSERT INTO target SELECT * FROM source".to_string(),
+            )),
+        });
+        servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            insert,
+            QueryContext::arc(),
+        )
+        .await
+        .unwrap();
+
+        let select = Request::Query(api::v1::QueryRequest {
+            query: Some(Query::Sql("SELECT * FROM source".to_string())),
+        });
+        assert_permission_denied(
+            servers::query_handler::grpc::GrpcQueryHandler::do_query(
+                &instance,
+                select,
+                QueryContext::arc(),
+            )
+            .await,
+        );
 
         Ok(())
     }
@@ -3072,6 +3867,57 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_show_processlist_catalog_scope() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+        let _current_catalog = instance.process_manager().register_query(
+            "greptime".to_string(),
+            vec!["public".to_string()],
+            "current_catalog_query".to_string(),
+            String::new(),
+            None,
+            None,
+        );
+        let _other_catalog = instance.process_manager().register_query(
+            "other".to_string(),
+            vec!["public".to_string()],
+            "other_catalog_query".to_string(),
+            String::new(),
+            None,
+            None,
+        );
+
+        for sql in ["SHOW PROCESSLIST", "SHOW FULL PROCESSLIST"] {
+            let output = execute_one_sql(&instance, sql, test_query_ctx(43)).await?;
+            let process_list = output.data.pretty_print().await;
+            assert!(
+                process_list.contains("current_catalog_query"),
+                "{process_list}"
+            );
+            assert!(
+                !process_list.contains("other_catalog_query"),
+                "{process_list}"
+            );
+
+            let admin_ctx = test_query_ctx(44);
+            admin_ctx.set_current_user(Arc::new(AdminUserInfo));
+            let output = execute_one_sql(&instance, sql, admin_ctx).await?;
+            let process_list = output.data.pretty_print().await;
+            assert!(
+                process_list.contains("current_catalog_query"),
+                "{process_list}"
+            );
+            assert!(
+                process_list.contains("other_catalog_query"),
+                "{process_list}"
+            );
+        }
+
+        Ok(())
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_kill_query_cancels_insert_select() -> TestResult<()> {
         assert_kill_cancels_insert_select("KILL QUERY 4242").await
@@ -3228,8 +4074,11 @@ mod tests {
         replace_test(sql, plugins.clone(), &query_ctx);
 
         // test undrop table
-        let sql = "UNDROP TABLE {catalog}{schema}demo;";
-        replace_test(sql, plugins.clone(), &query_ctx);
+        #[cfg(feature = "enterprise")]
+        {
+            let sql = "UNDROP TABLE {catalog}{schema}demo;";
+            replace_test(sql, plugins.clone(), &query_ctx);
+        }
 
         // test show tables
         let sql = "SHOW TABLES FROM public";
@@ -3266,5 +4115,370 @@ mod tests {
             let result = check_permission(plugins.clone(), stmt, &query_ctx);
             assert_eq!(result.is_ok(), is_ok);
         }
+    }
+
+    /// A `DropView` DDL sent through the direct gRPC ingress must return an error
+    /// (e.g. table not found) instead of panicking on `todo!()`.
+    #[tokio::test]
+    async fn qx_152_drop_view_via_grpc_ddl_returns_error_not_panic() -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "non_existent_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: false,
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("DropView DDL request must return an error instead of panicking"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.status_code(),
+            StatusCode::TableNotFound,
+            "dropping a non-existent view without IF EXISTS must report TableNotFound, got {err}"
+        );
+        Ok(())
+    }
+
+    /// `DROP VIEW IF EXISTS` on a missing view through the direct gRPC ingress must
+    /// succeed with 0 affected rows (no error, no DDL task submitted), instead of
+    /// returning `TableNotFound`.
+    #[tokio::test]
+    async fn qx_152_drop_view_if_exists_missing_view_via_grpc_ddl_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "non_existent_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: true,
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let output = match result {
+            Ok(output) => output,
+            Err(err) => {
+                panic!("DROP VIEW IF EXISTS on a missing view must succeed, got error: {err}")
+            }
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "DROP VIEW IF EXISTS on a missing view must report 0 affected rows"
+        );
+        assert!(
+            procedure_executor.submitted.lock().unwrap().is_empty(),
+            "DROP VIEW IF EXISTS on a missing view must not submit a DDL task"
+        );
+        Ok(())
+    }
+
+    /// A `CREATE VIEW` followed by `DROP VIEW` through the direct gRPC ingress must
+    /// succeed end to end: the view is registered in the catalog and then removed.
+    #[tokio::test]
+    async fn qx_152_drop_existing_view_via_grpc_ddl_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        // The default "greptime.public" schema must be visible to the kv-backed table
+        // metadata manager for `CREATE VIEW`/`CREATE TABLE` to pass validation.
+        instance
+            .table_metadata_manager()
+            .schema_manager()
+            .create(
+                common_meta::key::schema_name::SchemaNameKey::new("greptime", "public"),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let create_view_request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateView(
+                api::v1::CreateViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "my_view".to_string(),
+                    logical_plan: vec![1, 2, 3],
+                    create_if_not_exists: false,
+                    or_replace: false,
+                    table_names: vec![],
+                    columns: vec![],
+                    plan_columns: vec![],
+                    definition: "CREATE VIEW my_view AS SELECT * FROM source".to_string(),
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            create_view_request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("CREATE VIEW via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "CREATE VIEW via gRPC DDL must report 0 affected rows"
+        );
+
+        // The view is registered in the catalog as a view.
+        let view = instance
+            .catalog_manager()
+            .table("greptime", "public", "my_view", None)
+            .await
+            .unwrap()
+            .expect("view should exist after CREATE VIEW");
+        assert_eq!(view.table_info().table_type, TableType::View);
+
+        let drop_view_request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::DropView(
+                api::v1::DropViewExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    view_name: "my_view".to_string(),
+                    view_id: None,
+                    drop_if_exists: false,
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            drop_view_request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("DROP VIEW via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "DROP VIEW via gRPC DDL must report 0 affected rows"
+        );
+
+        // The view is gone after the drop.
+        assert!(
+            instance
+                .catalog_manager()
+                .table("greptime", "public", "my_view", None)
+                .await
+                .unwrap()
+                .is_none(),
+            "view should be removed after DROP VIEW"
+        );
+
+        let submitted = procedure_executor.submitted.lock().unwrap();
+        assert_eq!(
+            submitted.len(),
+            2,
+            "expected create and drop view tasks, got {submitted:?}"
+        );
+        assert!(matches!(&submitted[0], DdlTask::CreateView(_)));
+        assert!(matches!(&submitted[1], DdlTask::DropView(_)));
+        Ok(())
+    }
+
+    /// A direct gRPC `CreateTable` whose time index column is not a timestamp must
+    /// be rejected with `InvalidArguments` instead of panicking while building the schema.
+    #[tokio::test]
+    async fn qx_153_create_table_with_non_timestamp_time_index_via_grpc_returns_error()
+    -> TestResult<()> {
+        let instance =
+            test_instance_with_tables(test_table(1024, "source")?, test_table(1025, "target")?)
+                .await?;
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    table_name: "demo".to_string(),
+                    desc: String::new(),
+                    column_defs: vec![api::v1::ColumnDef {
+                        name: "host".to_string(),
+                        data_type: api::v1::ColumnDataType::String as i32,
+                        is_nullable: true,
+                        default_constraint: vec![],
+                        semantic_type: 0,
+                        comment: String::new(),
+                        datatype_extension: None,
+                        options: None,
+                    }],
+                    time_index: "host".to_string(),
+                    primary_keys: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::new(),
+                    table_id: None,
+                    engine: "mito".to_string(),
+                },
+            )),
+        });
+
+        let result = servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await;
+
+        let err = match result {
+            Ok(_) => panic!("CreateTable with a non-timestamp time index must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+        Ok(())
+    }
+
+    /// A valid `CREATE TABLE` (timestamp time index) through the direct gRPC ingress
+    /// must succeed, guarding that the `validate_create_expr` ingress check doesn't
+    /// accidentally reject good requests.
+    #[tokio::test]
+    async fn qx_153_create_table_with_timestamp_time_index_via_grpc_succeeds() -> TestResult<()> {
+        let catalog_manager =
+            catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+        let procedure_executor = Arc::new(MockProcedureExecutor::new(catalog_manager.clone()));
+        let instance = test_instance_with_catalog_manager(
+            catalog_manager,
+            test_table(1025, "target")?,
+            Plugins::new(),
+            None,
+            procedure_executor.clone() as ProcedureExecutorRef,
+        )
+        .await?;
+
+        // The default "greptime.public" schema must be visible to the kv-backed table
+        // metadata manager for `CREATE TABLE` to pass validation.
+        instance
+            .table_metadata_manager()
+            .schema_manager()
+            .create(
+                common_meta::key::schema_name::SchemaNameKey::new("greptime", "public"),
+                None,
+                true,
+            )
+            .await
+            .unwrap();
+
+        let request = api::v1::greptime_request::Request::Ddl(api::v1::DdlRequest {
+            expr: Some(api::v1::ddl_request::Expr::CreateTable(
+                api::v1::CreateTableExpr {
+                    catalog_name: String::new(),
+                    schema_name: String::new(),
+                    table_name: "demo".to_string(),
+                    desc: String::new(),
+                    column_defs: vec![
+                        api::v1::ColumnDef {
+                            name: "host".to_string(),
+                            data_type: api::v1::ColumnDataType::String as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                            semantic_type: 0,
+                            comment: String::new(),
+                            datatype_extension: None,
+                            options: None,
+                        },
+                        api::v1::ColumnDef {
+                            name: "ts".to_string(),
+                            data_type: api::v1::ColumnDataType::TimestampMillisecond as i32,
+                            is_nullable: true,
+                            default_constraint: vec![],
+                            semantic_type: 0,
+                            comment: String::new(),
+                            datatype_extension: None,
+                            options: None,
+                        },
+                    ],
+                    time_index: "ts".to_string(),
+                    primary_keys: vec![],
+                    create_if_not_exists: false,
+                    table_options: HashMap::new(),
+                    table_id: None,
+                    engine: "mito".to_string(),
+                },
+            )),
+        });
+
+        let output = match servers::query_handler::grpc::GrpcQueryHandler::do_query(
+            &instance,
+            request,
+            QueryContext::arc(),
+        )
+        .await
+        {
+            Ok(output) => output,
+            Err(err) => panic!("CREATE TABLE via gRPC DDL must succeed, got error: {err}"),
+        };
+        assert!(
+            matches!(output.data, OutputData::AffectedRows(0)),
+            "CREATE TABLE via gRPC DDL must report 0 affected rows"
+        );
+
+        // The table is registered in the catalog.
+        let table = instance
+            .catalog_manager()
+            .table("greptime", "public", "demo", None)
+            .await
+            .unwrap()
+            .expect("table should exist after CREATE TABLE");
+        assert_eq!(table.table_info().table_type, TableType::Base);
+
+        let submitted = procedure_executor.submitted.lock().unwrap();
+        assert_eq!(
+            submitted.len(),
+            1,
+            "expected one create table task, got {submitted:?}"
+        );
+        assert!(matches!(&submitted[0], DdlTask::CreateTable(_)));
+        Ok(())
     }
 }

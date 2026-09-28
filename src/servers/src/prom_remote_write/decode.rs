@@ -56,6 +56,12 @@ pub(crate) struct PromTimeSeries {
 impl Clear for PromTimeSeries {
     fn clear(&mut self) {
         self.table_name.clear();
+        self.schema.clear();
+        self.physical_table.clear();
+        // Labels borrow from the request buffer, which may be replaced after this reset.
+        for label in self.labels.iter_mut() {
+            label.clear();
+        }
         self.labels.clear();
         self.samples.clear();
     }
@@ -93,27 +99,31 @@ impl PromTimeSeries {
                 }
 
                 #[allow(deprecated)]
-                match label.name {
+                let is_special_label = match label.name {
                     METRIC_NAME_LABEL_BYTES => {
                         self.table_name = prom_validation_mode.decode_string(label.value)?;
-                        self.labels.truncate(self.labels.len() - 1);
+                        true
                     }
                     SCHEMA_LABEL_BYTES => {
                         self.schema = Some(prom_validation_mode.decode_string(label.value)?);
-                        self.labels.truncate(self.labels.len() - 1);
+                        true
                     }
                     DATABASE_LABEL_BYTES | DATABASE_LABEL_ALT_BYTES => {
                         if self.schema.is_none() {
                             self.schema = Some(prom_validation_mode.decode_string(label.value)?);
                         }
-                        self.labels.truncate(self.labels.len() - 1);
+                        true
                     }
                     PHYSICAL_TABLE_LABEL_BYTES | PHYSICAL_TABLE_LABEL_ALT_BYTES => {
                         self.physical_table =
                             Some(prom_validation_mode.decode_string(label.value)?);
-                        self.labels.truncate(self.labels.len() - 1);
+                        true
                     }
-                    _ => {}
+                    _ => false,
+                };
+                if is_special_label {
+                    label.clear();
+                    self.labels.truncate(self.labels.len() - 1);
                 }
 
                 Ok(())
@@ -129,6 +139,9 @@ impl PromTimeSeries {
                 Ok(())
             }
             3u32 => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
+            4u32 => Err(DecodeError::new(
+                "remote write v1 native histogram ingestion is unsupported; use remote write v2",
+            )),
             _ => prost::encoding::skip_field(wire_type, tag, buf, Default::default()),
         }
     }
@@ -170,6 +183,7 @@ pub struct PromWriteRequest<'a> {
 
 impl<'a> Clear for PromWriteRequest<'a> {
     fn clear(&mut self) {
+        self.series.clear();
         self.table_data.clear();
     }
 }
@@ -186,6 +200,7 @@ impl<'a> PromWriteRequest<'a> {
         processor: &mut PromSeriesProcessor,
     ) -> Result<(), DecodeError> {
         const STRUCT_NAME: &str = "PromWriteRequest";
+        self.clear();
         self.table_data.set_raw_data(buf);
         let mut offset = 0;
         while offset < self.table_data.raw_data.len() {
@@ -247,8 +262,7 @@ impl<'a> PromWriteRequest<'a> {
             }
 
             if decoded_timeseries {
-                self.series.labels.clear();
-                self.series.samples.clear();
+                self.series.clear();
             }
         }
 
@@ -371,7 +385,7 @@ impl PromSeriesProcessor {
 mod tests {
     use std::collections::HashMap;
 
-    use api::prom_store::remote::WriteRequest;
+    use api::prom_store::remote::{Histogram, Label, Sample, TimeSeries, WriteRequest};
     use api::v1::{Row, RowInsertRequests, Rows};
     use bytes::Bytes;
     use prost::Message;
@@ -451,6 +465,130 @@ mod tests {
                 &expected_rows,
             );
         }
+    }
+
+    #[test]
+    fn test_decode_rejects_remote_write_v1_native_histograms() {
+        for samples in [
+            Vec::new(),
+            vec![Sample {
+                value: 1.0,
+                timestamp: 1000,
+            }],
+        ] {
+            let request = WriteRequest {
+                timeseries: vec![TimeSeries {
+                    samples,
+                    histograms: vec![Histogram::default()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            let mut processor = PromSeriesProcessor::default_processor();
+            let mut write_request = PromWriteRequest::default();
+            let error = write_request
+                .decode(
+                    request.encode_to_vec(),
+                    PromValidationMode::Strict,
+                    &mut processor,
+                )
+                .unwrap_err();
+
+            assert!(error.to_string().contains(
+                "remote write v1 native histogram ingestion is unsupported; use remote write v2"
+            ));
+            assert_eq!(
+                write_request.as_row_insert_requests().ref_all_req().count(),
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn test_decode_clears_state_after_error() {
+        let label = |name: &str, value: &str| Label {
+            name: name.to_string(),
+            value: value.to_string(),
+        };
+        let sample = Sample {
+            value: 1.0,
+            timestamp: 1000,
+        };
+        let failed_request = WriteRequest {
+            timeseries: vec![
+                TimeSeries {
+                    labels: vec![
+                        label("__name__", "stale_metric"),
+                        label("stale_label", "stale_value"),
+                    ],
+                    samples: vec![sample],
+                    ..Default::default()
+                },
+                TimeSeries {
+                    labels: vec![
+                        label("__name__", "rejected_metric"),
+                        label("rejected_label", "rejected_value"),
+                        label("__schema__", "rejected_schema"),
+                        label("x_greptime_physical_table", "rejected_physical_table"),
+                    ],
+                    samples: vec![sample],
+                    histograms: vec![Histogram::default()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let successful_request = WriteRequest {
+            timeseries: vec![TimeSeries {
+                labels: vec![
+                    label("__name__", "fresh_metric"),
+                    label("fresh_label", "fresh_value"),
+                ],
+                samples: vec![sample],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut processor = PromSeriesProcessor::default_processor();
+        let mut write_request = PromWriteRequest::default();
+
+        write_request
+            .decode(
+                failed_request.encode_to_vec(),
+                PromValidationMode::Strict,
+                &mut processor,
+            )
+            .unwrap_err();
+        write_request
+            .decode(
+                successful_request.encode_to_vec(),
+                PromValidationMode::Strict,
+                &mut processor,
+            )
+            .unwrap();
+
+        assert_eq!(write_request.table_data.tables.len(), 1);
+        let (prom_ctx, tables) = write_request.table_data.tables.iter().next().unwrap();
+        assert_eq!(prom_ctx.schema, None);
+        assert_eq!(prom_ctx.physical_table, None);
+        assert_eq!(tables.len(), 1);
+        assert!(tables.contains_key("fresh_metric"));
+
+        let requests = write_request
+            .as_row_insert_requests()
+            .all_req()
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].table_name, "fresh_metric");
+        let rows = requests[0].rows.as_ref().unwrap();
+        assert_eq!(rows.rows.len(), 1);
+        assert_eq!(
+            rows.schema
+                .iter()
+                .map(|column| column.column_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![greptime_timestamp(), greptime_value(), "fresh_label"]
+        );
     }
 
     #[test]

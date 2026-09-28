@@ -60,6 +60,7 @@ async fn test_drop_database_with_logical_tables() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
 
     while !procedure.execute(&ctx).await.unwrap().is_done() {
@@ -108,6 +109,7 @@ async fn test_drop_database_retryable_error() {
     let ctx = ProcedureContext {
         procedure_id: ProcedureId::random(),
         provider: Arc::new(MockContextProvider::default()),
+        event_context: None,
     };
 
     loop {

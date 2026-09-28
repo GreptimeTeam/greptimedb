@@ -1,0 +1,78 @@
+// Copyright 2023 Greptime Team
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Series index construction, search, and maintenance.
+//!
+//! Under development. Index files are currently stored on the local filesystem.
+
+mod bucket;
+mod builder;
+mod catalog;
+mod maintenance;
+mod purger;
+mod searcher;
+mod task;
+#[cfg(test)]
+mod tests;
+mod version;
+mod writer;
+
+use std::sync::Arc;
+
+use futures::stream::BoxStream;
+use object_store::ObjectStore;
+use store_api::metric_engine_consts::{
+    DATA_SCHEMA_TABLE_ID_COLUMN_NAME as TABLE_ID_COLUMN,
+    DATA_SCHEMA_TSID_COLUMN_NAME as TSID_COLUMN,
+};
+
+use crate::error::Result;
+#[cfg(test)]
+pub(crate) use crate::series_index::catalog::{RangeIndexEntry, SeriesIndexEntry};
+pub(crate) use crate::series_index::catalog::{
+    delete_catalogs, load_version_control, series_index_path,
+};
+pub(crate) use crate::series_index::purger::{IndexFilePurger, series_index_channel};
+pub use crate::series_index::searcher::SeriesIndexSearcher;
+pub(crate) use crate::series_index::task::{SeriesIndexTaskState, spawn_series_index_tasks};
+pub(crate) use crate::series_index::version::{
+    SeriesIndexFileHandle, SeriesIndexVersion, SeriesIndexVersionControl,
+};
+pub use crate::series_index::writer::{
+    SeriesIndexWriter, SeriesIndexWriterMetrics, SeriesIndexWriterOptions, series_index_schema,
+};
+
+/// Index storage and pinned catalog snapshot for a query.
+#[derive(Clone)]
+pub(crate) struct SeriesIndexReadContext {
+    pub(crate) store: ObjectStore,
+    pub(crate) version: Arc<SeriesIndexVersion>,
+}
+
+pub(crate) const MIN_TS_COLUMN: &str = "__series_min_ts";
+pub(crate) const MAX_TS_COLUMN: &str = "__series_max_ts";
+pub(crate) const ROW_COUNT_COLUMN: &str = "__series_row_count";
+pub(crate) const METRIC_SERIES_ID_BATCH_SIZE: usize = 500;
+
+/// Identifies one series in a physical metric region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct MetricSeriesId {
+    /// Logical table ID inside the physical metric region.
+    pub table_id: u32,
+    /// Time-series ID inside the logical table.
+    pub tsid: u64,
+}
+
+/// Stream of bounded batches of matching metric-series IDs.
+pub type MetricSeriesIdStream = BoxStream<'static, Result<Vec<MetricSeriesId>>>;

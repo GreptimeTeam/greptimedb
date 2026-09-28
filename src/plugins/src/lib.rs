@@ -28,7 +28,8 @@ pub use flownode::{
     setup_flownode_plugins_post_build, setup_flownode_plugins_pre_build, start_flownode_plugins,
 };
 pub use frontend::{
-    setup_frontend_plugins_post_build, setup_frontend_plugins_pre_build, start_frontend_plugins,
+    setup_frontend_heartbeat_extensions, setup_frontend_plugins_post_build,
+    setup_frontend_plugins_pre_build, start_frontend_plugins,
 };
 pub use meta_srv::{
     setup_metasrv_plugins_post_build, setup_metasrv_plugins_pre_build, start_metasrv_plugins,

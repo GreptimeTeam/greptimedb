@@ -74,7 +74,6 @@ pub(crate) enum RequestCancelResult {
     CancelIssued,
     AlreadyCancelling,
     TooLateToCancel,
-    NotRunning,
 }
 
 #[cfg(test)]

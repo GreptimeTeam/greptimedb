@@ -1,0 +1,8 @@
+name = "json2_unknown_type"
+reason = "Reopen unknown JSON2 schemas across versions using the historical absent extension or the recursive JsonNativeType marker, then write and reopen JSON2 values. Run in both upgrade and downgrade directions."
+introduced_by = "PR #9145"
+topologies = ["distributed", "standalone"]
+from_range = [">=v1.2.0"]
+to_range = [">=v1.2.0"]
+features = ["json2", "table", "write", "read", "downgrade"]
+owner = "query"

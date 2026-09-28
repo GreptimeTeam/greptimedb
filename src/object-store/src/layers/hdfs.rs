@@ -16,14 +16,12 @@ use std::fmt::{self, Debug};
 use std::sync::Arc;
 
 use hdfs_native::{Client, ClientBuilder};
-#[cfg(any(test, feature = "testing"))]
-use opendal::raw::OpRename;
-use opendal::raw::oio::{Delete as _, Read as _, Write as _};
+use opendal::raw::oio::{Delete as _, Read as _, ReadStream as _, Write as _};
 use opendal::raw::{
-    Access, Layer, LayeredAccess, OpCopier, OpCopy, OpDelete, OpList, OpRead, OpWrite, RpCopy,
-    RpDelete, RpList, RpRead, RpWrite, oio,
+    Layer, OpCompose, OpCopy, OpCreateDir, OpDelete, OpList, OpPresign, OpRead, OpRename, OpStat,
+    OpWrite, RpCreateDir, RpPresign, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
 };
-use opendal::{Buffer, ErrorKind, Metadata, Result};
+use opendal::{Buffer, Capability, ErrorKind, Metadata, OperationContext, Result};
 use uuid::Uuid;
 
 /// Adds atomic writes and streaming copies to the native HDFS backend.
@@ -77,7 +75,7 @@ impl HdfsCompatibilityLayer {
         })
     }
 
-    /// Creates a compatibility layer backed by the inner accessor's rename.
+    /// Creates a compatibility layer backed by the inner service's rename.
     #[cfg(any(test, feature = "testing"))]
     pub fn new_for_test() -> Self {
         Self {
@@ -97,7 +95,13 @@ enum AtomicRenamer {
 }
 
 impl AtomicRenamer {
-    async fn rename<A: Access>(&self, _inner: &A, from: &str, to: &str) -> Result<()> {
+    async fn rename(
+        &self,
+        _inner: &Servicer,
+        _ctx: &OperationContext,
+        from: &str,
+        to: &str,
+    ) -> Result<()> {
         match self {
             Self::Native { client, root } => {
                 // OpenDAL's HDFS rename removes an existing destination before
@@ -112,7 +116,10 @@ impl AtomicRenamer {
                     .map_err(hdfs_error)
             }
             #[cfg(any(test, feature = "testing"))]
-            Self::Raw => _inner.rename(from, to, OpRename::new()).await.map(|_| ()),
+            Self::Raw => _inner
+                .rename(_ctx, from, to, OpRename::new())
+                .await
+                .map(|_| ()),
         }
     }
 }
@@ -121,49 +128,44 @@ fn hdfs_error(error: hdfs_native::HdfsError) -> opendal::Error {
     opendal::Error::new(ErrorKind::Unexpected, "native HDFS operation failed").set_source(error)
 }
 
-impl<A: Access> Layer<A> for HdfsCompatibilityLayer {
-    type LayeredAccess = HdfsCompatibilityAccessor<A>;
-
-    fn layer(&self, inner: A) -> Self::LayeredAccess {
-        inner.info().update_full_capability(|mut capability| {
-            capability.copy = true;
-            capability
-        });
-        HdfsCompatibilityAccessor {
-            inner: Arc::new(inner),
+impl Layer for HdfsCompatibilityLayer {
+    fn apply_service(&self, inner: Servicer) -> Servicer {
+        Arc::new(HdfsCompatibilityService {
+            inner,
             renamer: self.renamer.clone(),
-        }
+        })
     }
 }
 
-pub struct HdfsCompatibilityAccessor<A: Access> {
-    inner: Arc<A>,
+struct HdfsCompatibilityService {
+    inner: Servicer,
     renamer: AtomicRenamer,
 }
 
-impl<A: Access> Debug for HdfsCompatibilityAccessor<A> {
+impl Debug for HdfsCompatibilityService {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HdfsCompatibilityAccessor")
+        f.debug_struct("HdfsCompatibilityService")
             .field("inner", &self.inner)
             .finish()
     }
 }
 
 /// A writer that publishes non-append writes with an atomic rename.
-pub struct HdfsWriter<A: Access>(HdfsWriterInner<A>);
+struct HdfsWriter(HdfsWriterInner);
 
-enum HdfsWriterInner<A: Access> {
-    Direct(A::Writer),
+enum HdfsWriterInner {
+    Direct(oio::Writer),
     Atomic {
-        inner: Arc<A>,
+        inner: Servicer,
+        context: OperationContext,
         renamer: AtomicRenamer,
-        writer: Option<A::Writer>,
+        writer: Option<oio::Writer>,
         temporary_path: String,
         target_path: String,
     },
 }
 
-impl<A: Access> oio::Write for HdfsWriter<A> {
+impl oio::Write for HdfsWriter {
     async fn write(&mut self, buffer: Buffer) -> Result<()> {
         match &mut self.0 {
             HdfsWriterInner::Direct(writer) => writer.write(buffer).await,
@@ -182,6 +184,7 @@ impl<A: Access> oio::Write for HdfsWriter<A> {
             HdfsWriterInner::Direct(writer) => writer.close().await,
             HdfsWriterInner::Atomic {
                 inner,
+                context,
                 renamer,
                 writer,
                 temporary_path,
@@ -192,14 +195,17 @@ impl<A: Access> oio::Write for HdfsWriter<A> {
                     Ok(metadata) => metadata,
                     Err(error) => {
                         drop(writer);
-                        let _ = delete_path(inner, temporary_path).await;
+                        let _ = delete_path(inner, context, temporary_path).await;
                         return Err(error);
                     }
                 };
                 drop(writer);
 
-                if let Err(error) = renamer.rename(inner, temporary_path, target_path).await {
-                    let _ = delete_path(inner, temporary_path).await;
+                if let Err(error) = renamer
+                    .rename(inner, context, temporary_path, target_path)
+                    .await
+                {
+                    let _ = delete_path(inner, context, temporary_path).await;
                     return Err(error);
                 }
 
@@ -213,6 +219,7 @@ impl<A: Access> oio::Write for HdfsWriter<A> {
             HdfsWriterInner::Direct(writer) => writer.abort().await,
             HdfsWriterInner::Atomic {
                 inner,
+                context,
                 writer,
                 temporary_path,
                 ..
@@ -224,7 +231,7 @@ impl<A: Access> oio::Write for HdfsWriter<A> {
                 } else {
                     Ok(())
                 };
-                let cleanup_result = delete_path(inner, temporary_path).await;
+                let cleanup_result = delete_path(inner, context, temporary_path).await;
 
                 match abort_result {
                     Err(error) if error.kind() != ErrorKind::Unsupported => Err(error),
@@ -242,52 +249,68 @@ fn writer_unavailable() -> opendal::Error {
     )
 }
 
-impl<A: Access> LayeredAccess for HdfsCompatibilityAccessor<A> {
-    type Inner = Arc<A>;
-    type Reader = A::Reader;
-    type Writer = HdfsWriter<A>;
-    type Lister = A::Lister;
-    type Deleter = A::Deleter;
+impl Service for HdfsCompatibilityService {
+    type Reader = oio::Reader;
+    type Writer = HdfsWriter;
+    type Lister = oio::Lister;
+    type Deleter = oio::Deleter;
     type Copier = oio::OneShotCopier;
+    type Composer = oio::Composer;
 
-    fn inner(&self) -> &Self::Inner {
-        &self.inner
+    fn info(&self) -> ServiceInfo {
+        self.inner.info()
     }
 
-    async fn read(&self, path: &str, args: OpRead) -> Result<(RpRead, Self::Reader)> {
-        self.inner.read(path, args).await
+    fn capability(&self) -> Capability {
+        let mut capability = self.inner.capability();
+        capability.copy = true;
+        capability
     }
 
-    async fn write(&self, path: &str, args: OpWrite) -> Result<(RpWrite, Self::Writer)> {
+    async fn create_dir(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        self.inner.create_dir(ctx, path, args).await
+    }
+
+    async fn stat(&self, ctx: &OperationContext, path: &str, args: OpStat) -> Result<RpStat> {
+        self.inner.stat(ctx, path, args).await
+    }
+
+    fn read(&self, ctx: &OperationContext, path: &str, args: OpRead) -> Result<Self::Reader> {
+        self.inner.read(ctx, path, args)
+    }
+
+    fn write(&self, ctx: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
         if args.append() {
             return self
                 .inner
-                .write(path, args)
-                .await
-                .map(|(response, writer)| (response, HdfsWriter(HdfsWriterInner::Direct(writer))));
+                .write(ctx, path, args)
+                .map(|writer| HdfsWriter(HdfsWriterInner::Direct(writer)));
         }
 
         let temporary_path = temporary_path(path);
-        let (response, writer) = self.inner.write(&temporary_path, args).await?;
-        Ok((
-            response,
-            HdfsWriter(HdfsWriterInner::Atomic {
-                inner: Arc::clone(&self.inner),
-                renamer: self.renamer.clone(),
-                writer: Some(writer),
-                temporary_path,
-                target_path: path.to_string(),
-            }),
-        ))
+        let writer = self.inner.write(ctx, &temporary_path, args)?;
+        Ok(HdfsWriter(HdfsWriterInner::Atomic {
+            inner: Arc::clone(&self.inner),
+            context: ctx.clone(),
+            renamer: self.renamer.clone(),
+            writer: Some(writer),
+            temporary_path,
+            target_path: path.to_string(),
+        }))
     }
 
-    async fn copy(
+    fn copy(
         &self,
+        ctx: &OperationContext,
         from: &str,
         to: &str,
         args: OpCopy,
-        _opts: OpCopier,
-    ) -> Result<(RpCopy, Self::Copier)> {
+    ) -> Result<Self::Copier> {
         if args.if_not_exists() || args.if_match().is_some() {
             return Err(opendal::Error::new(
                 ErrorKind::Unsupported,
@@ -296,41 +319,64 @@ impl<A: Access> LayeredAccess for HdfsCompatibilityAccessor<A> {
         }
 
         let inner = Arc::clone(&self.inner);
+        let context = ctx.clone();
         let renamer = self.renamer.clone();
         let from = from.to_string();
         let to = to.to_string();
-        Ok((
-            RpCopy::default(),
-            oio::OneShotCopier::new(async move {
-                copy_via_read_write(inner, renamer, &from, &to).await
-            }),
-        ))
+        Ok(oio::OneShotCopier::new(async move {
+            copy_via_read_write(inner, &context, renamer, &from, &to).await
+        }))
     }
 
-    async fn delete(&self) -> Result<(RpDelete, Self::Deleter)> {
-        self.inner.delete().await
+    fn delete(&self, ctx: &OperationContext) -> Result<Self::Deleter> {
+        self.inner.delete(ctx)
     }
 
-    async fn list(&self, path: &str, args: OpList) -> Result<(RpList, Self::Lister)> {
-        self.inner.list(path, args).await
+    fn list(&self, ctx: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
+        self.inner.list(ctx, path, args)
+    }
+
+    fn compose(&self, ctx: &OperationContext, to: &str, args: OpCompose) -> Result<Self::Composer> {
+        self.inner.compose(ctx, to, args)
+    }
+
+    async fn rename(
+        &self,
+        ctx: &OperationContext,
+        from: &str,
+        to: &str,
+        args: OpRename,
+    ) -> Result<RpRename> {
+        self.inner.rename(ctx, from, to, args).await
+    }
+
+    async fn presign(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpPresign,
+    ) -> Result<RpPresign> {
+        self.inner.presign(ctx, path, args).await
     }
 }
 
-async fn copy_via_read_write<A: Access>(
-    inner: Arc<A>,
+async fn copy_via_read_write(
+    inner: Servicer,
+    context: &OperationContext,
     renamer: AtomicRenamer,
     source_path: &str,
     target_path: &str,
 ) -> Result<Metadata> {
-    let (_, mut reader) = inner.read(source_path, OpRead::new()).await?;
+    let reader = inner.read(context, source_path, OpRead::new())?;
+    let (_, mut reader) = reader.open(opendal::BytesRange::from(..)).await?;
     let temporary_path = temporary_path(target_path);
-    let (_, mut writer) = inner.write(&temporary_path, OpWrite::new()).await?;
+    let mut writer = inner.write(context, &temporary_path, OpWrite::new())?;
 
     loop {
         let buffer = match reader.read().await {
             Ok(buffer) => buffer,
             Err(error) => {
-                abort_and_delete(&inner, writer, &temporary_path).await;
+                abort_and_delete(&inner, context, writer, &temporary_path).await;
                 return Err(error);
             }
         };
@@ -338,7 +384,7 @@ async fn copy_via_read_write<A: Access>(
             break;
         }
         if let Err(error) = writer.write(buffer).await {
-            abort_and_delete(&inner, writer, &temporary_path).await;
+            abort_and_delete(&inner, context, writer, &temporary_path).await;
             return Err(error);
         }
     }
@@ -347,28 +393,36 @@ async fn copy_via_read_write<A: Access>(
         Ok(metadata) => metadata,
         Err(error) => {
             drop(writer);
-            let _ = delete_path(&inner, &temporary_path).await;
+            let _ = delete_path(&inner, context, &temporary_path).await;
             return Err(error);
         }
     };
     drop(writer);
 
-    if let Err(error) = renamer.rename(&inner, &temporary_path, target_path).await {
-        let _ = delete_path(&inner, &temporary_path).await;
+    if let Err(error) = renamer
+        .rename(&inner, context, &temporary_path, target_path)
+        .await
+    {
+        let _ = delete_path(&inner, context, &temporary_path).await;
         return Err(error);
     }
 
     Ok(metadata)
 }
 
-async fn abort_and_delete<A: Access>(inner: &A, mut writer: A::Writer, path: &str) {
+async fn abort_and_delete(
+    inner: &Servicer,
+    context: &OperationContext,
+    mut writer: oio::Writer,
+    path: &str,
+) {
     let _ = writer.abort().await;
     drop(writer);
-    let _ = delete_path(inner, path).await;
+    let _ = delete_path(inner, context, path).await;
 }
 
-async fn delete_path<A: Access>(inner: &A, path: &str) -> Result<()> {
-    let (_, mut deleter) = inner.delete().await?;
+async fn delete_path(inner: &Servicer, context: &OperationContext, path: &str) -> Result<()> {
+    let mut deleter = inner.delete(context)?;
     deleter.delete(path, OpDelete::new()).await?;
     deleter.close().await
 }
@@ -393,9 +447,32 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let store = Operator::new(Fs::default().root(directory.path().to_str().unwrap()))
             .unwrap()
-            .layer(HdfsCompatibilityLayer::new_for_test())
-            .finish();
+            .layer(HdfsCompatibilityLayer::new_for_test());
         (directory, store)
+    }
+
+    #[tokio::test]
+    async fn test_service_operations() {
+        let (_directory, store) = test_store();
+        store.create_dir("data/").await.unwrap();
+        store.write("data/source", "contents").await.unwrap();
+        assert_eq!(8, store.stat("data/source").await.unwrap().content_length());
+        assert_eq!(
+            b"onte",
+            store
+                .read_with("data/source")
+                .range(1..5)
+                .await
+                .unwrap()
+                .to_bytes()
+                .as_ref()
+        );
+        store.rename("data/source", "data/target").await.unwrap();
+        let entries = store.list("data/").await.unwrap();
+        assert!(entries.iter().any(|entry| entry.path() == "data/target"));
+        assert!(!store.exists("data/source").await.unwrap());
+        store.delete("data/target").await.unwrap();
+        assert!(!store.exists("data/target").await.unwrap());
     }
 
     #[tokio::test]

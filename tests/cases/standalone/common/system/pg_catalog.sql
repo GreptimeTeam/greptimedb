@@ -53,6 +53,7 @@ WHERE c.relkind IN ('r','p','v','m','S','f','')
       AND n.nspname <> 'pg_catalog'
       AND n.nspname !~ '^pg_toast'
       AND n.nspname <> 'information_schema'
+      AND n.nspname <> 'greptime_private'
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
@@ -68,6 +69,7 @@ WHERE c.relkind IN ('r','p','')
       AND n.nspname <> 'pg_catalog'
       AND n.nspname !~ '^pg_toast'
       AND n.nspname <> 'information_schema'
+      AND n.nspname <> 'greptime_private'
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
@@ -110,6 +112,7 @@ WHERE c.relkind IN ('r','p','')
       AND n.nspname <> 'pg_catalog'
       AND n.nspname !~ '^pg_toast'
       AND n.nspname <> 'information_schema'
+      AND n.nspname <> 'greptime_private'
   AND pg_catalog.pg_table_is_visible(c.oid)
 ORDER BY 1,2;
 
@@ -152,6 +155,7 @@ SELECT
     FROM information_schema.tables
     WHERE quote_ident(table_schema) NOT IN ('information_schema',
                                 'pg_catalog',
+                                'greptime_private',
                                 '_timescaledb_cache',
                                 '_timescaledb_catalog',
                                 '_timescaledb_internal',
@@ -201,6 +205,7 @@ where relnamespace in (
     where nspname <> 'public'
       and nspname <> 'information_schema'
       and nspname <> 'pg_catalog'
+      and nspname <> 'greptime_private'
 )
 order by relnamespace, relname;
 
@@ -269,10 +274,33 @@ CREATE table foo
 );
 
 -- SQLNESS PROTOCOL POSTGRES
-SELECT attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
+SELECT attr.attnum, attname, atttypid FROM pg_catalog.pg_class AS cls INNER JOIN
 pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid INNER JOIN
 pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid WHERE attr.attnum >= 0 AND
 cls.oid = 'foo'::regclass::oid ORDER BY attr.attnum;
 
 -- SQLNESS PROTOCOL POSTGRES
 DROP TABLE foo;
+
+-- array_upper / array_lower UDFs (DataFusion ships array_length but not these)
+SELECT array_upper(ARRAY[1,2,3], 1), array_lower(ARRAY[5,6,7], 1);
+
+-- NULL semantics: out-of-range dim (dim < 1) yields NULL
+SELECT array_upper(ARRAY[1,2], 0), array_lower(ARRAY[1,2], 0);
+
+-- generate_series with int4 bounds from array_upper must execute (widened to int8)
+SELECT n FROM generate_series(1, array_upper(ARRAY[10,20,30], 1)) AS t(n);
+
+-- ADBC type-info predicate: retain bool, excluding zero receivers and arrays.
+-- SQLNESS PROTOCOL POSTGRES
+WITH type_info AS (
+    SELECT oid, typname, typreceive, typbasetype, typrelid, typarray
+    FROM pg_catalog.pg_type
+    WHERE (typreceive != 0 OR typsend != 0)
+      AND typtype != 'r'
+      AND typreceive::TEXT != 'array_recv'
+)
+SELECT oid, typname, typreceive
+FROM type_info
+WHERE oid IN (16, 269, 1000)
+ORDER BY oid;

@@ -1,0 +1,322 @@
+on:
+  schedule:
+    - cron: "0 15 * * 1-5"
+  merge_group:
+  pull_request:
+    types: [ opened, synchronize, reopened, ready_for_review ]
+    paths-ignore:
+      - 'docs/**'
+      - 'config/**'
+      - '**.md'
+      - '.dockerignore'
+      - 'docker/**'
+      - '.gitignore'
+      - 'grafana/**'
+      - 'Makefile'
+  workflow_dispatch:
+    inputs:
+      ci_command:
+        description: Internal comment-command marker
+        required: false
+        default: false
+        type: boolean
+
+name: Rust CI
+
+env:
+  CARGO_SHEAR_VERSION: "1.13.4"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: rustfmt
+      - name: Check format
+        run: make fmt-check
+
+  clippy:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares across multiple jobs
+          # Shares with `Check` job
+          shared-key: "check-lint"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo clippy
+        run: make clippy
+
+  check-udeps:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Check Unused Dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install cargo-shear
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-shear@${{ env.CARGO_SHEAR_VERSION }}
+          fallback: none
+      - name: Check unused dependencies
+        run: make check-udeps
+
+  check-riscv64:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Check riscv64 build
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install riscv64 cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu g++-riscv64-linux-gnu
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Add riscv64 target
+        run: rustup target add riscv64gc-unknown-linux-gnu
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-riscv64"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo check for riscv64
+        run: cargo check --locked --workspace --all-targets --features servers/dashboard --target riscv64gc-unknown-linux-gnu
+
+  check-windows:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Check Windows build
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "check-windows"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run cargo check for Windows
+        run: cargo check --locked --workspace --all-targets
+        env:
+          RUSTFLAGS: "-D warnings"
+
+  test-windows:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false) }}
+    name: Test Windows
+    runs-on: windows-2022
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTFLAGS: "-D warnings -C linker=lld-link"
+      RUST_BACKTRACE: 1
+      RUST_MIN_STACK: 8388608 # 8MB
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-cyborg
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: KyleMayes/install-llvm-action@v1
+        with:
+          version: "14.0"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "test-windows"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Cargo Nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install WSL distribution
+        uses: Vampire/setup-wsl@v2
+        with:
+          distribution: Ubuntu-22.04
+      - name: Run Windows tests
+        run: cargo nextest run --locked --workspace -F dashboard --no-fail-fast
+
+  conflict-check:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    name: Check for conflict
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Merge Conflict Finder
+        uses: olivernybroe/action-conflict-finder@v4.0
+
+  test:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name != 'merge_group' && (github.event_name != 'pull_request' || github.event.pull_request.draft == false || github.run_attempt > 1) }}
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 60
+    needs: [conflict-check, clippy, fmt, check-udeps]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          cache-all-crates: "true"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
+      - name: Run nextest cases
+        run: cargo nextest run --workspace -F dashboard -F pg_kvbackend -F mysql_kvbackend -F ai_functions
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 8388608 # 8MB
+          CARGO_INCREMENTAL: 0
+          # Runs the object-store matrix against the local MinIO from
+          # tests-integration/fixtures. Real AWS S3 is covered by the nightly
+          # jobs and by the release build.
+          GT_S3_BUCKET: greptime
+          GT_S3_ACCESS_KEY_ID: superpower_ci_user
+          GT_S3_ACCESS_KEY: superpower_password
+          GT_S3_REGION: us-west-2
+          GT_S3_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+
+  coverage:
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && github.event_name == 'merge_group' }}
+    runs-on: ubuntu-22.04-8-cores
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: rui314/setup-mold@v1
+      - name: Install toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: llvm-tools
+          cache: false
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Shares cross multiple jobs
+          shared-key: "coverage-test"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install latest nextest release
+        uses: taiki-e/install-action@nextest
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Setup external services
+        working-directory: tests-integration/fixtures
+        run: ../../.github/scripts/pull-test-deps-images.sh && docker compose up -d --wait
+
+      - name: Run nextest cases
+        run: cargo llvm-cov nextest --workspace --lcov --output-path lcov.info -F dashboard -F pg_kvbackend -F mysql_kvbackend -F ai_functions
+        env:
+          CARGO_BUILD_RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+          RUST_BACKTRACE: 1
+          CARGO_INCREMENTAL: 0
+          # Runs the object-store matrix against the local MinIO from
+          # tests-integration/fixtures. Real AWS S3 is covered by the nightly
+          # jobs and by the release build.
+          GT_S3_BUCKET: greptime
+          GT_S3_ACCESS_KEY_ID: superpower_ci_user
+          GT_S3_ACCESS_KEY: superpower_password
+          GT_S3_REGION: us-west-2
+          GT_S3_ENDPOINT_URL: http://127.0.0.1:9000
+          GT_ETCD_TLS_ENDPOINTS: https://127.0.0.1:2378
+          GT_ETCD_ENDPOINTS: http://127.0.0.1:2379
+          GT_POSTGRES_ENDPOINTS: postgres://greptimedb:admin@127.0.0.1:5432/postgres
+          GT_POSTGRES15_ENDPOINTS: postgres://test_user:test_password@127.0.0.1:5433/postgres
+          GT_POSTGRES15_SCHEMA: test_schema
+          GT_MYSQL_ENDPOINTS: mysql://greptimedb:admin@127.0.0.1:3306/mysql
+          GT_KAFKA_ENDPOINTS: 127.0.0.1:9092
+          GT_KAFKA_SASL_ENDPOINTS: 127.0.0.1:9093
+          UNITTEST_LOG_DIR: "__unittest_logs"
+      - name: Codecov upload
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./lcov.info
+          flags: rust
+          fail_ci_if_error: false
+          verbose: true

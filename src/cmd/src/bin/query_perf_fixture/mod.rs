@@ -95,9 +95,9 @@ pub async fn run() {
         Some(Command::PromRemoteWrite(rw)) => run_prom_remote_write(rw)
             .await
             .expect("prom remote write failed"),
-        Some(Command::InspectFooter(inspect)) => {
-            run_inspect_footer(inspect).expect("inspect footer failed")
-        }
+        Some(Command::InspectFooter(inspect)) => run_inspect_footer(inspect)
+            .await
+            .expect("inspect footer failed"),
         Some(Command::Plan(plan)) => run_plan(plan).expect("plan failed"),
         None => run_direct_sst(args.legacy).await,
     }

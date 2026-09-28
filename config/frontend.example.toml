@@ -11,6 +11,10 @@ default_column_prefix = "greptime"
 ## When `false`, a missing table is never auto-created even if the request sets the `auto_create_table` hint to `true`. Default: `true`.
 #+ auto_create_table = true
 
+## Enables experimental Parquet COPY DATABASE using shared Metric physical scans.
+## Resume requires the previous export and storage writes to have ended; HTTP timeout is not confirmation.
+#+ experimental_metric_export = false
+
 ## The user provider for authentication.
 ## Examples: "static_user_provider:file:/path/to/users", "static_user_provider:cmd:greptime_user=greptime_pwd"
 ## Password verifier formats: "plain:<password>", "pbkdf2_sha256:<iterations>:<hex_salt>:<hex_hash>",
@@ -44,7 +48,7 @@ default_column_prefix = "greptime"
 ## The number of threads to execute compact operations.
 #+ compact_rt_size = 4
 ## The maximum number of blocking threads for compact operations.
-## Defaults to max(num_cpus / 2, 1).
+## Defaults to max(num_cpus / 2, 2).
 #+ compact_rt_max_blocking_threads = 4
 
 ## The HTTP server options.
@@ -52,8 +56,9 @@ default_column_prefix = "greptime"
 ## The address to bind the HTTP server.
 addr = "127.0.0.1:4000"
 ## HTTP request timeout. Set to 0 to disable timeout.
-## When Prometheus pending-row batching is enabled, a nonzero timeout less than or equal to the
-## `prom_store.pending_rows_flush_interval` plus 1 second is adjusted to that value.
+## When synchronous Prometheus, OTLP metrics, or ordinary-table batching is enabled, a nonzero timeout is
+## raised to at least the largest active flush interval plus 1 second. The intervals come from
+## `pending_rows_batcher.logical_table.pending_rows_flush_interval` and `pending_rows_batcher.pending_rows_flush_interval`.
 timeout = "0s"
 ## HTTP request body limit.
 ## The following units are supported: `B`, `KB`, `KiB`, `MB`, `MiB`, `GB`, `GiB`, `TB`, `TiB`, `PB`, `PiB`.
@@ -65,16 +70,6 @@ enable_cors = true
 ## Customize allowed origins for HTTP CORS.
 ## @toml2docs:none-default
 cors_allowed_origins = ["https://example.com"]
-## Whether to enable validation for Prometheus remote write requests.
-## Available options:
-## - strict: deny invalid UTF-8 strings (default).
-## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
-## - unchecked: do not valid strings.
-prom_validation_mode = "strict"
-## Experimental: enable Prometheus remote write v2 native histogram ingestion.
-experimental_enable_prometheus_native_histogram = false
-## Experimental: enable POST /v1/sql/analyze/stream for streaming EXPLAIN ANALYZE VERBOSE metrics.
-experimental_enable_explain_analyze_stream = true
 
 ## Whether to start the dedicated public HTTP **API** server. This server serves
 ## only the `v1` interfaces plus the dashboard, and shares every other `[http]`
@@ -236,6 +231,61 @@ enable = true
 ## Available values: "last_non_null", "last_row".
 default_merge_mode = "last_non_null"
 
+## Ordinary-table batching for opted-in ingestion protocols.
+## PENDING_ROWS_BATCH_SYNC defaults to true for both batchers. Set it to false to acknowledge
+## queue admission without waiting for storage; later failures cannot be returned to the client.
+## Omitted or empty protocols disables batching. Prom without metric engine uses this batcher.
+## OTLP logs, traces and ordinary metrics use this batcher.
+## MySQL and PostgreSQL use the same acknowledgement policy. Protocol timeouts are unchanged.
+## Single-connection writes and INSERT SELECT may incur additional flush waits.
+[pending_rows_batcher]
+# protocols = [
+#     "influxdb",
+#     "opentsdb",
+#     "otlp",
+#     "logs",
+#     "loki",
+#     "splunk",
+#     "elasticsearch",
+#     "http_sql",
+#     "mysql",
+#     "postgres",
+#     "prom",
+# ]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by the frontend batcher.
+max_concurrent_flushes = 256
+## Maximum queued submissions per table worker.
+worker_channel_capacity = 65536
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued table Flow notifications.
+flow_notification_queue_capacity = 1024
+
+## Metric-engine logical-table batching for Prom remote write and non-legacy OTLP metrics.
+## Requires prom_store.with_metric_engine. Logs, traces and legacy metrics are not eligible.
+## Enable independently with protocols and a nonzero flush interval.
+## Omitted fields use independent defaults, not parent settings.
+## Empty protocols or a zero interval disables logical batching without fallback.
+## Omitting this entire section preserves legacy Prom batching; it does not enable OTLP batching.
+[pending_rows_batcher.logical_table]
+# protocols = ["prom", "otlp"]
+## Flush interval measured from the first pending submission. Zero disables batching.
+pending_rows_flush_interval = "0s"
+## Flush after a complete submission reaches this row threshold.
+max_batch_rows = 100000
+## Maximum concurrent flushes shared by Prom and OTLP metrics.
+max_concurrent_flushes = 256
+## Maximum queued submissions per physical-table worker.
+worker_channel_capacity = 65536
+## Maximum admitted original requests awaiting completion.
+max_inflight_requests = 3000
+## Maximum number of queued logical-table Flow notifications.
+flow_notification_queue_capacity = 1024
+
 ## Jaeger protocol options.
 [jaeger]
 ## Whether to enable Jaeger protocol in HTTP API.
@@ -247,6 +297,9 @@ enable = true
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
+## resource attributes, so metrics-only services reach the semantic graph.
+experimental_enable_resource_info = false
 
 ## Prometheus remote storage options
 [prom_store]
@@ -254,19 +307,13 @@ trace_ingest_chunk_size = 512
 enable = true
 ## Whether to store the data from Prometheus remote write in metric engine.
 with_metric_engine = true
-## Interval to flush pending rows batcher.
-## Set to "0s" to disable batching mode in Prometheus Remote Write endpoint
-#+pending_rows_flush_interval = "0s"
-## Max rows per pending batch before triggering a flush.
-#+max_batch_rows = 100000
-## Max number of concurrent batch flushes.
-#+max_concurrent_flushes = 256
-## Capacity of the pending batch worker channel.
-#+worker_channel_capacity = 65526
-## Max inflight write requests before backpressure.
-#+max_inflight_requests = 3000
-## Maximum number of logical-table flow notifications waiting in the shared queue.
-#+flow_notification_queue_capacity = 1024
+## Whether to enable validation for Prometheus remote write requests.
+## Available options:
+## - strict: deny invalid UTF-8 strings (default).
+## - lossy: allow invalid UTF-8 strings, replace invalid characters with REPLACEMENT_CHARACTER(U+FFFD).
+## - unchecked: do not valid strings.
+prom_validation_mode = "strict"
+
 
 ## The metasrv client options.
 [meta_client]
@@ -310,6 +357,30 @@ allow_query_fallback = false
 ## NOTE: This does NOT limit memory used by table scans (only applies to datanodes).
 memory_pool_size = "50%"
 
+## Experimental memory pool allocation policy:
+## - "greedy" (default): first-come-first-served allocation; preserves current behavior.
+## - "fair": divides available memory among spillable operators and may spill earlier.
+## Only effective when `memory_pool_size` is bounded (>0).
+#+ experimental_memory_pool_policy = "greedy"
+
+# --- Experimental: DataFusion spill-to-disk controls ---
+## Spill mode:
+## - "default": preserve DataFusion built-in OS temp directory (default).
+## - "custom": explicitly configure spill path, quota, and compression.
+## - "disabled": explicitly disable disk spilling.
+## Set this to "custom" before using the path/quota/compression keys below.
+#+ experimental_spill_mode = "default"
+## Spill directory path. Ignored unless mode is "custom".
+## @toml2docs:none-default
+#+ experimental_spill_path = "/path/to/spill"
+## Maximum total size of spill directory (default: "1GiB").
+## Ignored unless mode is "custom".
+#+ experimental_spill_max_temp_directory_size = "1GiB"
+## Compression for spilled data files: "uncompressed" (default), "lz4_frame", "zstd".
+## Ignored unless mode is "custom".
+#+ experimental_spill_compression = "uncompressed"
+# --- End spill-to-disk ---
+
 ## Datanode options.
 [datanode]
 ## Datanode client options.
@@ -339,11 +410,18 @@ otlp_endpoint = "http://localhost:4318/v1/traces"
 ## Whether to append logs to stdout.
 append_stdout = true
 
+## Whether to write logs to files in `dir`.
+enable_file_logging = true
+
 ## The log format. Can be `text`/`json`.
 log_format = "text"
 
 ## The maximum amount of log files.
 max_log_files = 720
+
+## The maximum total size of managed log files in `dir`.
+## Old closed log files are removed before writing when necessary. Active files may exceed it. Set to `0B` to disable.
+max_log_dir_size = "0B"
 
 ## Whether to enable per-region metrics.
 ## Default to false.
@@ -398,7 +476,17 @@ ttl = "90d"
 ## Default is true.
 enable_heap_profiling = true
 
+## The pipeline options.
+[pipeline]
+## Time to live of the frontend-local pipeline cache. A pipeline created or deleted on
+## another frontend takes effect on this one after at most this duration.
+cache_ttl = "10s"
+
 ## Configuration options for the event recorder.
 [event_recorder]
 ## TTL for the events table that will be used to store the events. Default is `90d`.
 ttl = "90d"
+## Event types to record. Current available event type: `admin_function`.
+## When omitted, all current and future event types are recorded.
+## Set to an empty array to disable event recording.
+#+ event_types = ["admin_function"]

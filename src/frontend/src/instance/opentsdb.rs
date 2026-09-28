@@ -21,7 +21,7 @@ use auth::{
 };
 use common_error::ext::BoxedError;
 use common_telemetry::tracing;
-use servers::error::{self as server_error, AuthSnafu, ExecuteGrpcQuerySnafu};
+use servers::error::{AuthSnafu, ExecuteGrpcQuerySnafu, Result as ServerResult};
 use servers::opentsdb::codec::DataPoint;
 use servers::opentsdb::data_point_to_grpc_row_insert_requests;
 use servers::query_handler::OpentsdbProtocolHandler;
@@ -44,11 +44,7 @@ fn permission_targets(data_points: &[DataPoint], ctx: &QueryContextRef) -> Permi
 
 #[async_trait]
 impl OpentsdbProtocolHandler for Instance {
-    async fn preflight(
-        &self,
-        data_points: &[DataPoint],
-        ctx: QueryContextRef,
-    ) -> server_error::Result<()> {
+    async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> ServerResult<()> {
         self.check_table_permission(
             &ctx,
             PermissionReq::Action(OPENTSDB_WRITE),
@@ -59,11 +55,30 @@ impl OpentsdbProtocolHandler for Instance {
     }
 
     #[tracing::instrument(skip_all, fields(protocol = "opentsdb"))]
-    async fn exec(
+    async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> ServerResult<usize> {
+        // Keep diagnostic per-point errors independent of other batched writes.
+        let mut ctx = ctx.fork();
+        ctx.set_batching_enabled(false);
+        self.execute_opentsdb_write(data_points, Arc::new(ctx))
+            .await
+    }
+
+    #[tracing::instrument(skip_all, fields(protocol = "opentsdb"))]
+    async fn exec_batch(
         &self,
         data_points: Vec<DataPoint>,
         ctx: QueryContextRef,
-    ) -> server_error::Result<usize> {
+    ) -> ServerResult<usize> {
+        self.execute_opentsdb_write(data_points, ctx).await
+    }
+}
+
+impl Instance {
+    async fn execute_opentsdb_write(
+        &self,
+        data_points: Vec<DataPoint>,
+        ctx: QueryContextRef,
+    ) -> ServerResult<usize> {
         self.plugins
             .get::<PermissionCheckerRef>()
             .as_ref()
@@ -99,7 +114,7 @@ impl OpentsdbProtocolHandler for Instance {
 mod tests {
     use session::context::QueryContext;
 
-    use super::*;
+    use crate::instance::opentsdb::*;
 
     #[test]
     fn test_permission_targets_do_not_require_row_conversion() {

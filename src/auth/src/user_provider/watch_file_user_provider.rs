@@ -86,7 +86,7 @@ impl UserProvider for WatchFileUserProvider {
         authenticate_with_credential(&users, id, password)
     }
 
-    async fn postgres_auth_info(&self, id: Identity<'_>) -> Result<PgAuthInfo> {
+    async fn postgres_auth_info(&self, id: Identity<'_>, _catalog: &str) -> Result<PgAuthInfo> {
         let users = self.users.lock().expect("users credential must be valid");
         postgres_auth_info_with_credential(&users, id)
     }

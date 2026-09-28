@@ -22,6 +22,39 @@ use servers::otlp::coerce::{
 
 use crate::instance::otlp::trace_semconv::trace_semconv_fixed_type;
 
+/// Attribute values are user data echoed back in the OTLP partial-success
+/// message and the server log, so diagnostics keep at most this many characters.
+const TRACE_VALUE_DIAGNOSTIC_LIMIT: usize = 16;
+
+/// Truncates to `limit` characters, marking the cut with `...`.
+///
+/// Diagnostics carry user-controlled text; slicing by byte offset would panic in
+/// the middle of a multi-byte sequence.
+pub(super) fn truncate_for_diagnostics(text: &str, limit: usize) -> String {
+    match text.char_indices().nth(limit) {
+        Some((offset, _)) => format!("{}...", &text[..offset]),
+        None => text.to_string(),
+    }
+}
+
+/// Renders a failing trace value as `Type(value)`, e.g. `String("")`.
+fn describe_trace_value(value: &ValueData, request_type: ColumnDataType) -> String {
+    let payload = match value {
+        ValueData::StringValue(string_value) => format!(
+            "{:?}",
+            truncate_for_diagnostics(string_value, TRACE_VALUE_DIAGNOSTIC_LIMIT)
+        ),
+        ValueData::BoolValue(bool_value) => bool_value.to_string(),
+        ValueData::I64Value(int_value) => int_value.to_string(),
+        ValueData::F64Value(float_value) => float_value.to_string(),
+        ValueData::BinaryValue(bytes) => format!("{} bytes", bytes.len()),
+        // Other value kinds never reach trace coercion, so report the type alone.
+        _ => return format!("{request_type:?}"),
+    };
+
+    format!("{request_type:?}({payload})")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TraceReconcileDecision {
     UseExisting(ColumnDataType),
@@ -191,8 +224,10 @@ pub(super) fn prepare_trace_column_rewrites(
             let Some(value) = row.values.get(pending_rewrite.col_idx) else {
                 continue;
             };
-            let Some(request_type) = value.value_data.as_ref().and_then(trace_value_datatype)
-            else {
+            let Some(request_value) = value.value_data.as_ref() else {
+                continue;
+            };
+            let Some(request_type) = trace_value_datatype(request_value) else {
                 continue;
             };
             if request_type == pending_rewrite.target_type {
@@ -201,20 +236,18 @@ pub(super) fn prepare_trace_column_rewrites(
 
             let value_data =
                 coerce_value_data(&value.value_data, pending_rewrite.target_type, request_type)
-                    .map_err(|_| {
-                        TraceColumnRewriteError {
-                error: error::InvalidParameterSnafu {
-                    reason: format!(
-                        "failed to coerce trace column '{}' in table '{}' from {:?} to {:?}",
-                        pending_rewrite.column_name,
-                        table_name,
-                        request_type,
-                        pending_rewrite.target_type
-                    ),
-                }
-                .build(),
-                column_name: pending_rewrite.column_name.clone(),
-            }
+                    .map_err(|_| TraceColumnRewriteError {
+                        error: error::InvalidParameterSnafu {
+                            reason: format!(
+                                "failed to coerce trace column '{}' in table '{}' from {} to {:?}",
+                                pending_rewrite.column_name,
+                                table_name,
+                                describe_trace_value(request_value, request_type),
+                                pending_rewrite.target_type
+                            ),
+                        }
+                        .build(),
+                        column_name: pending_rewrite.column_name.clone(),
                     })?;
             values.push(PreparedTraceValueRewrite {
                 row_idx,
@@ -301,8 +334,8 @@ mod tests {
 
     use super::{
         PendingTraceColumnRewrite, TraceReconcileDecision, choose_trace_reconcile_decision,
-        enrich_trace_reconcile_error, is_trace_reconcile_candidate_type,
-        prepare_trace_column_rewrites, push_observed_trace_type,
+        describe_trace_value, enrich_trace_reconcile_error, is_trace_reconcile_candidate_type,
+        prepare_trace_column_rewrites, push_observed_trace_type, truncate_for_diagnostics,
     };
 
     #[test]
@@ -315,6 +348,24 @@ mod tests {
             )
             .unwrap(),
             Some(TraceReconcileDecision::UseExisting(ColumnDataType::Int64))
+        );
+    }
+
+    #[test]
+    fn test_choose_trace_reconcile_decision_existing_uint64_keeps_uint64() {
+        // Backward-compat for the unsigned -> signed transition: an existing
+        // table whose `duration_nano` is still UInt64 must keep that type (no
+        // ALTER) when new signed (Int64) ingest arrives, coercing the value in
+        // place. This is the no-ALTER guarantee for the trace path; it relies on
+        // the Int64 -> UInt64 coercion arm added in Phase 0.
+        assert_eq!(
+            choose_trace_reconcile_decision(
+                "duration_nano",
+                &[ColumnDataType::Int64],
+                Some(ColumnDataType::Uint64)
+            )
+            .unwrap(),
+            Some(TraceReconcileDecision::UseExisting(ColumnDataType::Uint64))
         );
     }
 
@@ -458,6 +509,90 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.error.status_code(), StatusCode::InvalidArguments);
         assert_eq!(err.column_name, "span_attributes.attr_int");
+        assert!(
+            err.error.to_string().contains(
+                "failed to coerce trace column 'span_attributes.attr_int' in table \
+                 'trace_type_atomicity' from String(\"not_a_number\") to Int64"
+            ),
+            "unexpected error message: {}",
+            err.error
+        );
+    }
+
+    /// The PHP instrumentation case: an empty string must be distinguishable
+    /// from any other unparsable value in the reported diagnostics.
+    #[test]
+    fn test_prepare_trace_column_rewrites_reports_empty_string_value() {
+        let rows = vec![Row {
+            values: vec![Value {
+                value_data: Some(ValueData::StringValue(String::new())),
+            }],
+        }];
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Int64,
+            column_name: "span_attributes.http.response.body.size".to_string(),
+        }];
+
+        let err = prepare_trace_column_rewrites(&rows, pending_rewrites, "opentelemetry_traces")
+            .unwrap_err();
+        assert!(
+            err.error.to_string().contains(
+                "'span_attributes.http.response.body.size' in table 'opentelemetry_traces' \
+                 from String(\"\") to Int64"
+            ),
+            "unexpected error message: {}",
+            err.error
+        );
+    }
+
+    #[test]
+    fn test_describe_trace_value_bounds_and_escapes_strings() {
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue(String::new()),
+                ColumnDataType::String
+            ),
+            r#"String("")"#
+        );
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue("a\tb\"c".to_string()),
+                ColumnDataType::String
+            ),
+            r#"String("a\tb\"c")"#
+        );
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::StringValue("0123456789abcdefghij".to_string()),
+                ColumnDataType::String
+            ),
+            r#"String("0123456789abcdef...")"#
+        );
+    }
+
+    #[test]
+    fn test_describe_trace_value_omits_binary_content() {
+        assert_eq!(
+            describe_trace_value(
+                &ValueData::BinaryValue(vec![1_u8, 2, 3]),
+                ColumnDataType::Binary
+            ),
+            "Binary(3 bytes)"
+        );
+        assert_eq!(
+            describe_trace_value(&ValueData::F64Value(1.5), ColumnDataType::Float64),
+            "Float64(1.5)"
+        );
+    }
+
+    /// Truncation runs over user-supplied text, so it must not split a
+    /// multi-byte character.
+    #[test]
+    fn test_truncate_for_diagnostics_cuts_on_char_boundary() {
+        assert_eq!(truncate_for_diagnostics("日本語テキスト", 3), "日本語...");
+        assert_eq!(truncate_for_diagnostics("short", 16), "short");
+        assert_eq!(truncate_for_diagnostics("exact", 5), "exact");
     }
 
     #[test]
@@ -492,6 +627,42 @@ mod tests {
         assert_eq!(
             rows.rows[0].values[0].value_data,
             Some(ValueData::I64Value(503))
+        );
+    }
+
+    #[test]
+    fn test_prepare_trace_column_rewrites_coerces_int64_into_existing_uint64() {
+        // Existing-table backward-compat for the trace path: new signed ingest
+        // arrives as Int64, but the existing `duration_nano` column is UInt64, so
+        // the rewrite coerces the value into the existing type in place (no
+        // ALTER). Mirrors what happens for a table created before the
+        // unsigned -> signed flip.
+        let mut rows = Rows {
+            schema: vec![ColumnSchema {
+                datatype: ColumnDataType::Int64 as i32,
+                ..Default::default()
+            }],
+            rows: vec![Row {
+                values: vec![Value {
+                    value_data: Some(ValueData::I64Value(42)),
+                }],
+            }],
+        };
+        let pending_rewrites = vec![PendingTraceColumnRewrite {
+            col_idx: 0,
+            target_type: ColumnDataType::Uint64,
+            column_name: "duration_nano".to_string(),
+        }];
+
+        let prepared =
+            prepare_trace_column_rewrites(&rows.rows, pending_rewrites, "trace_type_atomicity")
+                .unwrap();
+
+        prepared.apply(&mut rows);
+        assert_eq!(rows.schema[0].datatype, ColumnDataType::Uint64 as i32);
+        assert_eq!(
+            rows.rows[0].values[0].value_data,
+            Some(ValueData::U64Value(42))
         );
     }
 

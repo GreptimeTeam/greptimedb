@@ -25,8 +25,8 @@ use common_datasource::object_store::build_backend_for_write_with_path;
 use common_query::Output;
 use common_recordbatch::adapter::DfRecordBatchStreamAdapter;
 use common_recordbatch::{
-    RecordBatchStream, SendableRecordBatchMapper, SendableRecordBatchStream,
-    map_json_type_to_string, map_json_type_to_string_schema,
+    SendableRecordBatchMapper, SendableRecordBatchStream, map_json_type_to_string,
+    map_json_type_to_string_schema,
 };
 use common_telemetry::{debug, tracing};
 use datafusion::datasource::DefaultTableSource;
@@ -35,6 +35,7 @@ use datafusion_expr::LogicalPlanBuilder;
 use object_store::ObjectStore;
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
+use table::TableRef;
 use table::requests::CopyTableRequest;
 use table::table::adapter::DfTableProviderAdapter;
 use table::table_reference::TableReference;
@@ -85,18 +86,14 @@ impl StatementExecutor {
             )
             .await
             .context(error::WriteStreamToFileSnafu { path }),
-            Format::Parquet(_) => {
-                let schema = stream.schema();
-                stream_to_parquet(
-                    Box::pin(DfRecordBatchStreamAdapter::new(stream)),
-                    schema,
-                    object_store,
-                    path,
-                    WRITE_CONCURRENCY,
-                )
-                .await
-                .context(error::WriteStreamToFileSnafu { path })
-            }
+            Format::Parquet(_) => stream_to_parquet(
+                Box::pin(DfRecordBatchStreamAdapter::new(stream)),
+                object_store,
+                path,
+                WRITE_CONCURRENCY,
+            )
+            .await
+            .context(error::WriteStreamToFileSnafu { path }),
             _ => error::UnsupportedFormatSnafu {
                 format: format.clone(),
             }
@@ -112,7 +109,18 @@ impl StatementExecutor {
     ) -> Result<usize> {
         let table_ref = TableReference::full(&req.catalog_name, &req.schema_name, &req.table_name);
         let table = self.get_table(&table_ref).await?;
-        let table_id = table.table_info().table_id();
+        self.copy_captured_table_to(table, req, query_ctx).await
+    }
+
+    pub(crate) async fn copy_captured_table_to(
+        &self,
+        table: TableRef,
+        req: CopyTableRequest,
+        query_ctx: QueryContextRef,
+    ) -> Result<usize> {
+        let info = table.table_info();
+        let table_ref = TableReference::full(&info.catalog_name, &info.schema_name, &info.name);
+        let table_id = info.table_id();
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
 
         let df_table_ref = DfTableReference::from(table_ref);

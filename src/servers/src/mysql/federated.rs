@@ -31,23 +31,47 @@ use regex::bytes::RegexSet;
 use session::SessionRef;
 use session::context::QueryContextRef;
 
-static SELECT_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| Regex::new("(?i)^(SELECT @@(.*))").unwrap());
-static MYSQL_CONN_JAVA_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(/\\* mysql-connector-j(.*))").unwrap());
-static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'lower_case_table_names'(.*))").unwrap());
-static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES( LIKE (.*))?)").unwrap());
+/// Matches the optional `GLOBAL`/`SESSION`/`LOCAL` scope MySQL accepts before `VARIABLES`.
+const VARIABLES_SCOPE: &str = "(GLOBAL |SESSION |LOCAL )?";
+
+static SELECT_VAR_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new("(?i)^(SELECT\\s+@@(.*))").unwrap());
+static SHOW_LOWER_CASE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES LIKE 'lower_case_table_names'(.*))"
+    ))
+    .unwrap()
+});
+static SHOW_VARIABLES_LIKE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES( LIKE (.*))?)"
+    ))
+    .unwrap()
+});
 static SHOW_WARNINGS_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(/\\* ApplicationName=.*)?SHOW WARNINGS").unwrap());
+    Lazy::new(|| Regex::new("(?i)^(SHOW WARNINGS)").unwrap());
+
+// Capture 1: a parenless session-user keyword. Capture 2: a user variable. Both parse as
+// column references, which the planner then cannot resolve. Anchored at both ends so
+// `SELECT user FROM t` still reads the column.
+static SELECT_USER_OR_VAR_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        "(?i)^SELECT\\s+(?:(CURRENT_USER|SESSION_USER|SYSTEM_USER|USER)|(@[a-z0-9_$.]+))\\s*;?\\s*$",
+    )
+    .unwrap()
+});
 
 // SELECT TIMEDIFF(NOW(), UTC_TIMESTAMP());
 static SELECT_TIME_DIFF_FUNC_PATTERN: Lazy<Regex> =
     Lazy::new(|| Regex::new("(?i)^(SELECT TIMEDIFF\\(NOW\\(\\), UTC_TIMESTAMP\\(\\)\\))").unwrap());
 
 // sqlalchemy < 1.4.30
-static SHOW_SQL_MODE_PATTERN: Lazy<Regex> =
-    Lazy::new(|| Regex::new("(?i)^(SHOW VARIABLES LIKE 'sql_mode'(.*))").unwrap());
+static SHOW_SQL_MODE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(&format!(
+        "(?i)^(SHOW {VARIABLES_SCOPE}VARIABLES LIKE 'sql_mode'(.*))"
+    ))
+    .unwrap()
+});
 
 static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
     RegexSet::new([
@@ -55,6 +79,7 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(ROLLBACK(.*))",
         "(?i)^(COMMIT(.*))",
         "(?i)^(START(.*))",
+        "(?i)^(BEGIN(.*))",
 
         // Set.
         "(?i)^(SET NAMES(.*))",
@@ -88,13 +113,9 @@ static OTHER_NOT_SUPPORTED_STMT: Lazy<RegexSet> = Lazy::new(|| {
         "(?i)^(/\\*!40101 SET(.*) \\*/)$",
 
         // DBeaver.
-        "(?i)^(/\\* ApplicationName=(.*)SHOW PLUGINS)",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW ENGINES)",
-        "(?i)^(/\\* ApplicationName=(.*)SELECT @@(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW @@(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SET net_write_timeout(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SET SQL_SELECT_LIMIT(.*))",
-        "(?i)^(/\\* ApplicationName=(.*)SHOW VARIABLES(.*))",
+        "(?i)^(SHOW PLUGINS)",
+        "(?i)^(SHOW ENGINES)",
+        "(?i)^(SHOW @@(.*))",
 
         // pt-toolkit
         "(?i)^(/\\*!40101 SET(.*) \\*/)$",
@@ -128,7 +149,7 @@ static VAR_VALUES: Lazy<HashMap<&str, &str>> = Lazy::new(|| {
 // Format:
 // |function_name|
 // |value|
-fn select_function(name: &str, value: &str) -> RecordBatches {
+fn select_function(name: &str, value: Option<&str>) -> RecordBatches {
     let schema = Arc::new(Schema::new(vec![ColumnSchema::new(
         name,
         ConcreteDataType::string_datatype(),
@@ -227,14 +248,28 @@ fn select_variable(query: &str, query_context: QueryContextRef) -> Option<Output
 }
 
 fn check_select_variable(query: &str, query_context: QueryContextRef) -> Option<Output> {
-    if [&SELECT_VAR_PATTERN, &MYSQL_CONN_JAVA_PATTERN]
-        .iter()
-        .any(|r| r.is_match(query))
-    {
+    if SELECT_VAR_PATTERN.is_match(query) {
         select_variable(query, query_context)
     } else {
         None
     }
+}
+
+fn check_select_user_or_var(query: &str, query_context: QueryContextRef) -> Option<Output> {
+    let captures = SELECT_USER_OR_VAR_PATTERN.captures(query)?;
+
+    let recordbatches = if let Some(keyword) = captures.get(1) {
+        let user = query_context.current_user();
+        select_function(keyword.as_str(), Some(user.username()))
+    } else {
+        // `SET @var` is accepted and discarded, so a user variable is always unset, which
+        // MySQL reports as NULL.
+        let var = captures
+            .get(2)
+            .expect("one of the two groups always matches");
+        select_function(var.as_str(), None)
+    };
+    Some(Output::new_with_record_batches(recordbatches))
 }
 
 fn check_show_variables(query: &str) -> Option<Output> {
@@ -303,12 +338,170 @@ fn check_others(query: &str, _query_ctx: QueryContextRef) -> Option<Output> {
     let recordbatches = if SELECT_TIME_DIFF_FUNC_PATTERN.is_match(query) {
         Some(select_function(
             "TIMEDIFF(NOW(), UTC_TIMESTAMP())",
-            "00:00:00",
+            Some("00:00:00"),
         ))
     } else {
         None
     };
     recordbatches.map(Output::new_with_record_batches)
+}
+
+/// Strips leading whitespace and SQL comments.
+///
+/// All patterns above are anchored at the start of the statement, but JDBC clients such as
+/// DataGrip and DBeaver prefix every statement they send with a `/* ApplicationName=... */`
+/// comment. Without stripping it first, those statements miss every pattern and reach the
+/// query engine, which rejects the ones this module exists to absorb.
+fn strip_leading_comments(query: &str) -> &str {
+    let mut rest = query.trim_start();
+    loop {
+        // A MySQL executable comment carries the statement itself — mysqldump emits its
+        // initialization as `/*!40101 SET NAMES ... */`. The patterns above match those
+        // verbatim, so the comment must survive.
+        if rest.starts_with("/*!") {
+            return rest;
+        }
+        if let Some(tail) = rest.strip_prefix("/*") {
+            // An unterminated block comment leaves no statement to match against.
+            let Some(end) = tail.find("*/") else {
+                return "";
+            };
+            rest = tail[end + 2..].trim_start();
+        } else if rest.starts_with('#')
+            // MySQL only treats `--` as a comment when followed by whitespace.
+            || (rest.starts_with("--")
+                && rest[2..].chars().next().is_none_or(|c| c.is_whitespace()))
+        {
+            let Some(end) = rest.find('\n') else {
+                return "";
+            };
+            rest = rest[end + 1..].trim_start();
+        } else {
+            return rest;
+        }
+    }
+}
+
+/// The statement keywords that only [`OTHER_NOT_SUPPORTED_STMT`] matches. `SELECT` and
+/// `SHOW` are dispatched separately below.
+///
+/// Keep in sync with the patterns above: a statement whose leading keyword is absent from
+/// this list and from that dispatch cannot match anything, and skips every regex.
+const OTHER_LEADING_KEYWORDS: [&str; 7] = [
+    "SET", "COMMIT", "ROLLBACK", "START", "BEGIN", "LOCK", "UNLOCK",
+];
+
+/// Returns the leading run of ASCII letters, which is the statement keyword for everything
+/// this module matches.
+fn leading_keyword(query: &str) -> &str {
+    let end = query
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(query.len());
+    &query[..end]
+}
+
+/// Returns the index just past the line terminator at or after `from`.
+fn line_comment_end(bytes: &[u8], from: usize) -> usize {
+    bytes[from..]
+        .iter()
+        .position(|c| *c == b'\n')
+        .map_or(bytes.len(), |p| from + p + 1)
+}
+
+/// Returns the index just past the closing `quote` of the literal starting at `start`.
+fn quoted_end(bytes: &[u8], start: usize, quote: u8) -> usize {
+    let mut i = start + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            // Backquoted identifiers take no backslash escapes.
+            b'\\' if quote != b'`' => i += 2,
+            c if c == quote => {
+                // A doubled quote is an escaped quote, not the end of the literal.
+                if bytes.get(i + 1) == Some(&quote) {
+                    i += 2;
+                } else {
+                    return i + 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// Returns true if another statement follows the first statement-level `;`.
+///
+/// Expects [`strip_leading_comments`] to have run, so a leading comment is never the reason
+/// an executable comment is rejected below.
+///
+/// Every pattern here ends in `(.*)`, so absorbing a multi-statement request would discard
+/// its trailing statements without executing them — `BEGIN; INSERT INTO t VALUES (1)` would
+/// report success and write nothing. Such a request must reach the query engine, which
+/// executes each statement.
+///
+/// Plain comments, string literals and empty statements are skipped, so a `;` inside a
+/// comment or a literal does not split the request, and `BEGIN; -- done` stays a single
+/// statement.
+///
+/// A `/*!...*/` executable comment carries a statement, so anything but a request that
+/// starts with one — mysqldump's `/*!40101 SET NAMES ... */`, which the patterns match
+/// whole — also counts as a trailing statement.
+fn has_trailing_statement(query: &str) -> bool {
+    let bytes = query.as_bytes();
+    let mut i = 0;
+    let mut seen_semicolon = false;
+    let mut seen_content = false;
+
+    // Comparisons are all against ASCII bytes, which never occur inside a multi-byte UTF-8
+    // sequence, so scanning by byte cannot mistake one for a delimiter.
+    while i < bytes.len() {
+        match bytes[i] {
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                if bytes.get(i + 2) == Some(&b'!') && seen_content {
+                    return true;
+                }
+                i = match bytes[i + 2..].windows(2).position(|w| w == b"*/") {
+                    Some(p) => i + 2 + p + 2,
+                    // An unterminated comment runs to the end of the request.
+                    None => bytes.len(),
+                };
+                seen_content = true;
+            }
+            b'#' => {
+                i = line_comment_end(bytes, i);
+                seen_content = true;
+            }
+            // MySQL only treats `--` as a comment when followed by whitespace.
+            b'-' if bytes.get(i + 1) == Some(&b'-')
+                && bytes.get(i + 2).is_none_or(|c| c.is_ascii_whitespace()) =>
+            {
+                i = line_comment_end(bytes, i);
+                seen_content = true;
+            }
+            quote @ (b'\'' | b'"' | b'`') => {
+                if seen_semicolon {
+                    return true;
+                }
+                seen_content = true;
+                i = quoted_end(bytes, i, quote);
+            }
+            b';' => {
+                seen_semicolon = true;
+                seen_content = true;
+                i += 1;
+            }
+            c if c.is_ascii_whitespace() => i += 1,
+            _ => {
+                if seen_semicolon {
+                    return true;
+                }
+                seen_content = true;
+                i += 1;
+            }
+        }
+    }
+
+    false
 }
 
 // Check whether the query is a federated or driver setup command,
@@ -318,21 +511,37 @@ pub(crate) fn check(
     query_ctx: QueryContextRef,
     session: SessionRef,
 ) -> Option<Output> {
-    // INSERT don't need MySQL federated check. We assume the query doesn't contain
-    // federated or driver setup command if it starts with a 'INSERT' statement.
-    let the_6th_index = query.char_indices().nth(6).map(|(i, _)| i);
-    if let Some(index) = the_6th_index
-        && query[..index].eq_ignore_ascii_case("INSERT")
+    let query = strip_leading_comments(query);
+    let keyword = leading_keyword(query);
+
+    // Dispatch on the leading keyword so ordinary queries — INSERT, UPDATE, CREATE, and the
+    // `SELECT`s that carry real work — run as few regexes as possible.
+    let absorbed = if keyword.eq_ignore_ascii_case("SELECT") {
+        // First to check the query is like "select @@variables".
+        check_select_variable(query, query_ctx.clone())
+            .or_else(|| check_select_user_or_var(query, query_ctx.clone()))
+            .or_else(|| check_others(query, query_ctx))
+    } else if keyword.eq_ignore_ascii_case("SHOW") {
+        check_show_variables(query)
+            .or_else(|| check_show_warnings(query, &session))
+            .or_else(|| check_others(query, query_ctx))
+    } else if query.starts_with("/*!")
+        || OTHER_LEADING_KEYWORDS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(keyword))
     {
+        check_others(query, query_ctx)
+    } else {
+        return None;
+    };
+
+    // Only a request that is about to be absorbed needs the scan, and those are short. A
+    // query the patterns did not match never pays for it.
+    if absorbed.is_some() && has_trailing_statement(query) {
         return None;
     }
 
-    // First to check the query is like "select @@variables".
-    check_select_variable(query, query_ctx.clone())
-        .or_else(|| check_show_variables(query))
-        .or_else(|| check_show_warnings(query, &session))
-        // Last check
-        .or_else(|| check_others(query, query_ctx))
+    absorbed
 }
 
 #[cfg(test)]
@@ -493,5 +702,261 @@ mod test {
             session.clone(),
         );
         assert!(output.is_some());
+    }
+
+    #[test]
+    fn test_check_select_user_or_var() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+
+        fn pretty(query: &str, session: &SessionRef) -> String {
+            let output = check(query, QueryContext::arc(), session.clone())
+                .unwrap_or_else(|| panic!("{query} was not absorbed"));
+            let OutputData::RecordBatches(batches) = output.data else {
+                unreachable!()
+            };
+            batches.pretty_print().unwrap()
+        }
+
+        // The column name keeps the spelling the client sent.
+        assert_eq!(
+            pretty("SELECT CURRENT_USER", &session),
+            "\
++--------------+
+| CURRENT_USER |
++--------------+
+| greptime     |
++--------------+"
+        );
+        assert_eq!(
+            pretty("select session_user;", &session),
+            "\
++--------------+
+| session_user |
++--------------+
+| greptime     |
++--------------+"
+        );
+
+        // A user variable is always unset.
+        assert_eq!(
+            pretty("SELECT @v", &session),
+            "\
++----+
+| @v |
++----+
+|    |
++----+"
+        );
+
+        // Anything that is not the whole statement must reach the query engine: these are
+        // column references, or real queries that happen to start with the same keyword.
+        for query in [
+            "SELECT user FROM t",
+            "SELECT current_user, 1",
+            "SELECT @v FROM t",
+            "SELECT @v + 1",
+            "SELECT userid",
+            "SELECT 1",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} must not be absorbed"
+            );
+        }
+    }
+
+    /// A multi-statement request must reach the query engine. Absorbing it would report
+    /// success for the whole request while executing none of it.
+    #[test]
+    fn test_check_skips_multi_statement() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        for query in [
+            "BEGIN; INSERT INTO t VALUES (1); COMMIT",
+            "BEGIN;\nINSERT INTO t VALUES (1)",
+            "START TRANSACTION; DELETE FROM t",
+            "COMMIT; INSERT INTO t VALUES (1)",
+            "SET NAMES utf8mb4; INSERT INTO t VALUES (1)",
+            "SELECT @@version; INSERT INTO t VALUES (1)",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} must not be absorbed"
+            );
+        }
+
+        // A trailing semicolon, comment or empty statement is still a single statement.
+        for query in [
+            "BEGIN;",
+            "COMMIT; ",
+            "SET NAMES utf8mb4;\n",
+            "BEGIN; -- done",
+            "COMMIT; /* done */",
+            "BEGIN; # done",
+            "BEGIN;;",
+            "COMMIT; ; /* done */ ;",
+            "BEGIN; -- done\n",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} was not absorbed"
+            );
+        }
+
+        // A statement after a trailing comment still counts.
+        for query in [
+            "BEGIN; -- go\nINSERT INTO t VALUES (1)",
+            "COMMIT; /* go */ INSERT INTO t VALUES (1)",
+            "BEGIN;; INSERT INTO t VALUES (1)",
+            // The `;` inside the comment does not end the statement; the one after it does.
+            "BEGIN /* previous delimiter; -- note */; INSERT INTO t VALUES (1)",
+            "SET NAMES 'a;b'; INSERT INTO t VALUES (1)",
+            // An executable comment carries a statement.
+            "BEGIN; /*! INSERT INTO t VALUES (1) */",
+            "BEGIN /*! INSERT INTO t VALUES (1) */",
+            "/*!40101 SET NAMES utf8mb4 */; INSERT INTO t VALUES (1)",
+            "/*!40101 SET NAMES utf8mb4 */ /*! INSERT INTO t VALUES (1) */",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} must not be absorbed"
+            );
+        }
+
+        // A `;` inside a comment or a literal is not a statement boundary.
+        for query in [
+            "BEGIN /* previous delimiter; -- note */",
+            "BEGIN -- a; b",
+            "SET NAMES 'a;b'",
+            "SET NAMES \"a;b\"",
+            "SET NAMES 'it\\'s; here'",
+            "SET NAMES 'a;b';",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_some(),
+                "{query} was not absorbed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_skips_non_federated_keywords() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        for query in [
+            "INSERT INTO t VALUES (1)",
+            "UPDATE t SET a = 1",
+            "DELETE FROM t",
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX)",
+            "WITH x AS (SELECT 1) SELECT * FROM x",
+            "TQL EVAL (0, 10, '5s') up",
+        ] {
+            assert!(
+                check(query, QueryContext::arc(), session.clone()).is_none(),
+                "{query} must not be absorbed"
+            );
+        }
+    }
+
+    #[test]
+    fn test_strip_leading_comments() {
+        assert_eq!(strip_leading_comments("SELECT 1"), "SELECT 1");
+        assert_eq!(strip_leading_comments("  \n\tSELECT 1"), "SELECT 1");
+        assert_eq!(
+            strip_leading_comments("/* ApplicationName=DataGrip 2026.2.5 */ COMMIT"),
+            "COMMIT"
+        );
+        assert_eq!(strip_leading_comments("/* a */ /* b */COMMIT"), "COMMIT");
+        assert_eq!(strip_leading_comments("-- a comment\nCOMMIT"), "COMMIT");
+        assert_eq!(strip_leading_comments("# a comment\nCOMMIT"), "COMMIT");
+        // `--` without trailing whitespace is not a comment.
+        assert_eq!(strip_leading_comments("--x\nCOMMIT"), "--x\nCOMMIT");
+        // Nothing left to match against.
+        assert_eq!(strip_leading_comments("/* unterminated"), "");
+        assert_eq!(strip_leading_comments("-- trailing"), "");
+        // Executable comments carry the statement and must survive.
+        assert_eq!(
+            strip_leading_comments("/*!40101 SET NAMES utf8mb4 */"),
+            "/*!40101 SET NAMES utf8mb4 */"
+        );
+        assert_eq!(
+            strip_leading_comments("/* App */ /*!40101 SET NAMES utf8mb4 */"),
+            "/*!40101 SET NAMES utf8mb4 */"
+        );
+        // Comments inside the statement are left alone; only the prefix is stripped.
+        assert_eq!(
+            strip_leading_comments("/* a */SELECT /* b */ 1"),
+            "SELECT /* b */ 1"
+        );
+    }
+
+    /// JDBC clients prefix every statement with a comment. Those statements must still reach
+    /// the federated handling, and the ones MySQL answers with a result set must keep doing so.
+    #[test]
+    fn test_check_comment_prefixed() {
+        let session = Arc::new(Session::new(None, Channel::Mysql, Default::default(), 0));
+        let prefix = "/* ApplicationName=DataGrip 2026.2.5 */ ";
+
+        for query in [
+            "SET TRANSACTION READ WRITE",
+            "SET SESSION TRANSACTION READ ONLY",
+            "SET NAMES utf8mb4",
+            "BEGIN",
+            "START TRANSACTION",
+            "COMMIT",
+            "ROLLBACK",
+            // Covers the rest of OTHER_LEADING_KEYWORDS.
+            "LOCK TABLES t WRITE",
+            "UNLOCK TABLES",
+        ] {
+            let output = check(
+                &format!("{prefix}{query}"),
+                QueryContext::arc(),
+                session.clone(),
+            );
+            let OutputData::RecordBatches(batches) = output
+                .unwrap_or_else(|| panic!("{query} was not absorbed"))
+                .data
+            else {
+                unreachable!()
+            };
+            assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+        }
+
+        // mysqldump initialization arrives as executable comments, which the patterns match
+        // verbatim; stripping them would leave an empty statement and fail the import.
+        for query in [
+            "/*!40101 SET NAMES utf8mb4 */",
+            "/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */",
+            "/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */",
+            "/*!80003 SET @OLD_x=1 */",
+        ] {
+            let output = check(query, QueryContext::arc(), session.clone());
+            let OutputData::RecordBatches(batches) = output
+                .unwrap_or_else(|| panic!("{query} was not absorbed"))
+                .data
+            else {
+                unreachable!()
+            };
+            assert_eq!(batches.iter().map(|b| b.num_rows()).sum::<usize>(), 0);
+        }
+
+        // DataGrip reads the scheduler status through these two. A column-less output is written
+        // as an OK packet, which the JDBC driver reports as "statement has not returned cursor".
+        for query in [
+            "SELECT @@GLOBAL.event_scheduler",
+            "SHOW GLOBAL VARIABLES LIKE 'event_scheduler'",
+        ] {
+            let output = check(
+                &format!("{prefix}{query}"),
+                QueryContext::arc(),
+                session.clone(),
+            );
+            let OutputData::RecordBatches(batches) = output
+                .unwrap_or_else(|| panic!("{query} was not absorbed"))
+                .data
+            else {
+                unreachable!()
+            };
+            assert!(!batches.schema().column_schemas().is_empty(), "{query}");
+        }
     }
 }

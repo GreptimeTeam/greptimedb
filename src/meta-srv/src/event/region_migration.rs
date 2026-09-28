@@ -17,13 +17,13 @@ use std::time::Duration;
 
 use api::v1::value::ValueData;
 use api::v1::{ColumnSchema, Row};
-use common_event_recorder::Event;
 use common_event_recorder::error::{Result, SerializeEventSnafu};
 use common_event_recorder::event_table::{
     REGION_ID_COLUMN, REGION_MIGRATION_DST_NODE_ID_COLUMN, REGION_MIGRATION_DST_PEER_ADDR_COLUMN,
     REGION_MIGRATION_SRC_NODE_ID_COLUMN, REGION_MIGRATION_SRC_PEER_ADDR_COLUMN,
     REGION_MIGRATION_TRIGGER_REASON_COLUMN, REGION_NUMBER_COLUMN, TABLE_ID_COLUMN, column_schemas,
 };
+use common_event_recorder::{Event, TriggerReason};
 use serde::Serialize;
 use snafu::ResultExt;
 use store_api::storage::RegionId;
@@ -58,10 +58,10 @@ struct Payload {
 }
 
 impl RegionMigrationEvent {
-    pub fn from_persistent_ctx(ctx: &PersistentContext) -> Self {
+    pub fn from_persistent_ctx(ctx: &PersistentContext, trigger_reason: TriggerReason) -> Self {
         Self {
             region_ids: ctx.region_ids.clone(),
-            trigger_reason: ctx.trigger_reason,
+            trigger_reason: RegionMigrationTriggerReason::from_trigger_reason(trigger_reason),
             src_node_id: ctx.from_peer.id,
             src_peer_addr: ctx.from_peer.addr.clone(),
             dst_node_id: ctx.to_peer.id,

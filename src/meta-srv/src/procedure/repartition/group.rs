@@ -270,7 +270,7 @@ impl Procedure for RepartitionGroupProcedure {
         let event = if matches!(ctx.trigger, EventTrigger::Submitted) {
             RepartitionGroupEvent::submitted(&self.context.persistent_ctx)
         } else {
-            RepartitionGroupEvent::lifecycle()
+            RepartitionGroupEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }
@@ -713,6 +713,7 @@ mod tests {
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(event_type_filter),
+            event_context: None,
         };
 
         let allowed = procedure

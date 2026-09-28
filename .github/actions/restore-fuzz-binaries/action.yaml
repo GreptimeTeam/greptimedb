@@ -1,0 +1,41 @@
+name: Restore Fuzz Binaries
+description: Unpack and verify prebuilt fuzz target executables
+inputs:
+  targets:
+    description: Newline-separated fuzz targets expected in the archive
+    required: true
+  directory:
+    description: Directory containing the downloaded fuzz-target-binaries.tar
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        FUZZ_TARGETS: ${{ inputs.targets }}
+        FUZZ_BIN_DIR: ${{ inputs.directory }}/greptime-fuzz-binaries
+        FUZZ_BIN_ARCHIVE: ${{ inputs.directory }}/fuzz-target-binaries.tar
+      run: |
+        set -euo pipefail
+
+        echo "Downloaded fuzz archive:"
+        ls -lh "${FUZZ_BIN_ARCHIVE}"
+        echo "Archive contents:"
+        tar -tvf "${FUZZ_BIN_ARCHIVE}"
+
+        rm -rf "${FUZZ_BIN_DIR}"
+        tar -C "$(dirname "${FUZZ_BIN_DIR}")" -xf "${FUZZ_BIN_ARCHIVE}"
+
+        echo "Restored fuzz binaries:"
+        find "${FUZZ_BIN_DIR}" -maxdepth 1 -type f \
+          -printf '%f %s bytes mode=%m\n' | sort
+
+        while IFS= read -r target; do
+          [[ -z "${target}" ]] && continue
+          binary="${FUZZ_BIN_DIR}/${target}"
+          if [[ ! -x "${binary}" ]]; then
+            echo "Expected executable fuzz binary is missing: ${binary}" >&2
+            exit 1
+          fi
+          file "${binary}"
+        done <<<"${FUZZ_TARGETS}"

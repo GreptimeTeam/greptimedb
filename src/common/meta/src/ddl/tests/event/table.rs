@@ -40,6 +40,7 @@ use crate::ddl::event::table::{
     TABLE_DDL_PAYLOAD_VERSION, TableDdlEvent, TableDdlEventType, TableDdlLocator,
     alter_table_kind_name,
 };
+#[cfg(feature = "enterprise")]
 use crate::ddl::purge_dropped_table::PurgeDroppedTableProcedure;
 use crate::ddl::test_util::create_table::test_create_table_task as test_create_table_task_with_id;
 use crate::ddl::test_util::test_create_logical_table_task;
@@ -47,10 +48,13 @@ use crate::ddl::tests::alter_logical_tables::make_alter_logical_table_add_column
 use crate::ddl::tests::alter_table::test_alter_table_task;
 use crate::ddl::tests::create_table::test_create_table_task;
 use crate::ddl::truncate_table::TruncateTableProcedure;
+#[cfg(feature = "enterprise")]
 use crate::ddl::undrop_table::UndropTableProcedure;
 use crate::key::DeserializedValueWithBytes;
 use crate::key::table_info::TableInfoValue;
-use crate::rpc::ddl::{DropTableTask, PurgeDroppedTableTask, TruncateTableTask, UndropTableTask};
+use crate::rpc::ddl::{DropTableTask, TruncateTableTask};
+#[cfg(feature = "enterprise")]
+use crate::rpc::ddl::{PurgeDroppedTableTask, UndropTableTask};
 use crate::test_util::{MockDatanodeManager, new_ddl_context};
 
 struct EventCase {
@@ -104,13 +108,26 @@ fn submitted_event_contracts_are_bounded_and_fixed() {
                 .all(|column| column.semantic_type == SemanticType::Field as i32)
         );
 
-        let lifecycle = TableDdlEvent::lifecycle(case.event_type);
+        let lifecycle = TableDdlEvent::lifecycle(
+            case.event_type,
+            [TableDdlLocator::new(
+                DEFAULT_CATALOG_NAME,
+                DEFAULT_SCHEMA_NAME,
+                "lifecycle",
+            )],
+        );
         assert_eq!(lifecycle.extra_schema(), schema);
         assert_eq!(lifecycle.json_payload().unwrap(), JsonValue::Null);
-        assert_eq!(
-            lifecycle.extra_rows().unwrap()[0].values,
-            vec![Value::default(); schema.len()]
-        );
+        assert_eq!(lifecycle.extra_rows().unwrap()[0].values, {
+            let mut values = table_locator_values(Some("lifecycle"), None);
+            if matches!(
+                case.event_type,
+                TableDdlEventType::CreateLogicalTables | TableDdlEventType::AlterLogicalTables
+            ) {
+                values.push(Value::default());
+            }
+            values
+        });
     }
 }
 
@@ -154,6 +171,12 @@ fn later_lifecycle_events_are_uniform() {
     for case in procedure_cases() {
         let submitted = event_for(case.procedure.as_ref(), EventTrigger::Submitted);
         let schema = submitted.extra_schema();
+        let expected_rows = submitted
+            .extra_rows()
+            .unwrap()
+            .into_iter()
+            .map(|row| row.values)
+            .collect::<Vec<_>>();
 
         for trigger in &triggers {
             let event = event_for(case.procedure.as_ref(), trigger.clone());
@@ -162,8 +185,13 @@ fn later_lifecycle_events_are_uniform() {
             assert_eq!(event.extra_schema(), schema);
             assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
             assert_eq!(
-                event.extra_rows().unwrap()[0].values,
-                vec![Value::default(); schema.len()]
+                event
+                    .extra_rows()
+                    .unwrap()
+                    .into_iter()
+                    .map(|row| row.values)
+                    .collect::<Vec<_>>(),
+                expected_rows
             );
         }
     }
@@ -183,7 +211,7 @@ fn create_success_events_keep_allocated_ids() {
     assert_eq!(event.json_payload().unwrap(), JsonValue::Null);
     assert_eq!(
         event.extra_rows().unwrap()[0].values,
-        table_locator_values(None, Some(42))
+        table_locator_values(Some("create_success"), Some(42))
     );
 
     let logical_tables = CreateLogicalTablesProcedure::new(
@@ -306,12 +334,14 @@ fn event_cases() -> Vec<EventCase> {
             }),
             rows: vec![table_locator_values(Some("drop"), Some(12))],
         },
+        #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::UndropTable,
             event: TableDdlEvent::undrop_table_submitted(TableDdlLocator::from_table_id(13)),
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
             rows: vec![table_locator_values(None, Some(13))],
         },
+        #[cfg(feature = "enterprise")]
         EventCase {
             event_type: TableDdlEventType::PurgeDroppedTable,
             event: TableDdlEvent::purge_dropped_table_submitted(TableDdlLocator::from_table_id(14)),
@@ -361,6 +391,7 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             ),
         ],
         43,
+        vec![],
         test_context(),
     );
     let drop_table = DropTableProcedure::new(
@@ -373,7 +404,9 @@ fn procedure_cases() -> Vec<ProcedureCase> {
         },
         test_context(),
     );
+    #[cfg(feature = "enterprise")]
     let undrop_table = UndropTableProcedure::new(UndropTableTask { table_id: 45 }, test_context());
+    #[cfg(feature = "enterprise")]
     let purge_dropped_table =
         PurgeDroppedTableProcedure::new(PurgeDroppedTableTask { table_id: 46 }, test_context());
     let truncate_table = truncate_procedure(TruncateTableTask {
@@ -441,12 +474,14 @@ fn procedure_cases() -> Vec<ProcedureCase> {
             }),
             rows: vec![table_locator_values(Some("drop"), Some(44))],
         },
+        #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(undrop_table),
             event_type: "undrop_table",
             payload: json!({"version": TABLE_DDL_PAYLOAD_VERSION}),
             rows: vec![table_locator_values(None, Some(45))],
         },
+        #[cfg(feature = "enterprise")]
         ProcedureCase {
             procedure: Box::new(purge_dropped_table),
             event_type: "purge_dropped_table",
@@ -547,6 +582,7 @@ fn event_for_state(
             lifecycle_state,
             trigger,
             event_type_filter: Arc::new(EventTypeFilter::All),
+            event_context: None,
         })
         .unwrap()
 }

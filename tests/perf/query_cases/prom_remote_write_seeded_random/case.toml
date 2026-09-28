@@ -46,3 +46,13 @@ iterations = 15
 
 [scenario.queries.thresholds]
 max_candidate_latency_regression_pct = 75
+
+[[scenario.queries]]
+name = "binary_1d_ignoring_host"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704067200, 1704153600, '1h') prom_remote_write_seeded_random / ignoring(host) prom_remote_write_seeded_random"
+warmup = 2
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 75

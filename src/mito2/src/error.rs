@@ -67,6 +67,20 @@ pub enum Error {
         error: object_store::Error,
     },
 
+    #[snafu(display(
+        "Manifest delta {} disappeared after it was listed, path: {}",
+        version,
+        path
+    ))]
+    ManifestDeltaNotFound {
+        version: ManifestVersion,
+        path: String,
+        #[snafu(source)]
+        error: object_store::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Fail to compress object by {}, path: {}", compress_type, path))]
     CompressObject {
         compress_type: CompressionType,
@@ -268,6 +282,36 @@ pub enum Error {
         region_id: RegionId,
         given_seq: u64,
         min_enforceable_seq: u64,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "SEQUENCE_RANGE_UNSUPPORTED: exact sequence-range read unsupported, region: {}, min_seq: {}, max_seq: {}, reason: {}, retry_hint: FALLBACK_MEMTABLE_ONLY_OR_FULL_RECOMPUTE",
+        region_id,
+        min_seq,
+        max_seq,
+        reason
+    ))]
+    SequenceRangeUnsupported {
+        region_id: RegionId,
+        min_seq: u64,
+        max_seq: u64,
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
+        "region {} is unusable for sequence reads: file {} declares region {}",
+        region_id,
+        file_id,
+        file_region_id
+    ))]
+    RegionSequenceDomainBroken {
+        region_id: RegionId,
+        file_region_id: RegionId,
+        file_id: FileId,
         #[snafu(implicit)]
         location: Location,
     },
@@ -729,14 +773,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to apply vector index: {}", reason))]
-    ApplyVectorIndex {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Failed to push index value"))]
     PushIndexValue {
         source: index::inverted_index::error::Error,
@@ -1094,6 +1130,21 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid SST primary key range: {reason}"))]
+    InvalidPrimaryKeyRange {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("Failed to decode SST primary key range {endpoint} endpoint"))]
+    DecodePrimaryKeyRange {
+        endpoint: &'static str,
+        source: mito_codec::error::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Region {} is busy", region_id))]
     RegionBusy {
         region_id: RegionId,
@@ -1138,24 +1189,11 @@ pub enum Error {
         location: Location,
     },
 
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to build vector index: {}", reason))]
-    VectorIndexBuild {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[cfg(feature = "vector_index")]
-    #[snafu(display("Failed to finish vector index: {}", reason))]
-    VectorIndexFinish {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Manual compaction is override by following operations."))]
     ManualCompactionOverride {},
+
+    #[snafu(display("Manual compaction is already running for region {region_id}."))]
+    ManualCompactionAlreadyRunning { region_id: RegionId },
 
     #[snafu(display("Compaction is cancelled."))]
     CompactionCancelled {},
@@ -1356,6 +1394,7 @@ impl Error {
     pub(crate) fn is_object_not_found(&self) -> bool {
         match self {
             Error::OpenDal { error, .. } => error.kind() == ErrorKind::NotFound,
+            Error::ManifestDeltaNotFound { .. } => true,
             _ => false,
         }
     }
@@ -1397,7 +1436,9 @@ impl ErrorExt for Error {
 
         match self {
             DataTypeMismatch { source, .. } => source.status_code(),
-            OpenDal { .. } | ReadParquet { .. } => StatusCode::StorageUnavailable,
+            OpenDal { .. } | ManifestDeltaNotFound { .. } | ReadParquet { .. } => {
+                StatusCode::StorageUnavailable
+            }
             WriteWal { source, .. } | ReadWal { source, .. } | DeleteWal { source, .. } => {
                 source.status_code()
             }
@@ -1446,7 +1487,10 @@ impl ErrorExt for Error {
 
             IncrementalQueryStale { .. } | SnapshotFenceStale { .. } => StatusCode::RequestOutdated,
 
-            RegionMetadataNotFound { .. }
+            SequenceRangeUnsupported { .. } => StatusCode::Unsupported,
+
+            RegionSequenceDomainBroken { .. }
+            | RegionMetadataNotFound { .. }
             | Join { .. }
             | WorkerStopped { .. }
             | Recv { .. }
@@ -1503,8 +1547,6 @@ impl ErrorExt for Error {
             | PushIndexValue { source, .. }
             | ApplyInvertedIndex { source, .. }
             | IndexFinish { source, .. } => source.status_code(),
-            #[cfg(feature = "vector_index")]
-            ApplyVectorIndex { .. } => StatusCode::Internal,
             PuffinReadBlob { source, .. }
             | PuffinAddBlob { source, .. }
             | PuffinInitStager { source, .. }
@@ -1533,7 +1575,10 @@ impl ErrorExt for Error {
             FulltextPushText { source, .. }
             | FulltextFinish { source, .. }
             | ApplyFulltextIndex { source, .. } => source.status_code(),
-            DecodeStats { .. } | StatsNotPresent { .. } => StatusCode::Internal,
+            DecodeStats { .. }
+            | StatsNotPresent { .. }
+            | InvalidPrimaryKeyRange { .. }
+            | DecodePrimaryKeyRange { .. } => StatusCode::Internal,
             RegionBusy { .. } => StatusCode::RegionBusy,
             GetSchemaMetadata { source, .. } => source.status_code(),
             Timeout { .. } => StatusCode::Cancelled,
@@ -1544,12 +1589,14 @@ impl ErrorExt for Error {
                 source.status_code()
             }
 
-            #[cfg(feature = "vector_index")]
-            VectorIndexBuild { .. } | VectorIndexFinish { .. } => StatusCode::Internal,
-
             ManualCompactionOverride {} | CompactionCancelled {} | FlushCancelled {} => {
                 StatusCode::Cancelled
             }
+
+            // A concurrent manual compaction fails fast instead of being queued;
+            // the conflict is reported to the caller, which decides whether to
+            // issue a new request after the running one finishes.
+            ManualCompactionAlreadyRunning { .. } => StatusCode::RegionBusy,
 
             CompactionMemoryExhausted { source, .. } => source.status_code(),
 
@@ -1592,7 +1639,9 @@ impl ErrorExt for Error {
             | UpdateManifest { .. }
             | RegionStopped { .. }
             | RegionBusy { .. }
-            | FlushableRegionState { .. } => RetryHint::Retryable,
+            | ManualCompactionAlreadyRunning { .. }
+            | FlushableRegionState { .. }
+            | ManifestDeltaNotFound { .. } => RetryHint::Retryable,
 
             OpenDal { error, .. }
             | DeleteSsts { error, .. }

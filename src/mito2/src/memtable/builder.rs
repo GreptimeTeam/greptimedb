@@ -22,8 +22,8 @@ use datatypes::arrow::array::{
 };
 use datatypes::arrow::buffer::Buffer;
 use datatypes::arrow_array::StringArray;
-use datatypes::data_type::DataType;
 use datatypes::prelude::{ConcreteDataType, MutableVector, VectorRef};
+use datatypes::schema::ColumnSchema;
 use datatypes::value::ValueRef;
 use datatypes::vectors::StringVector;
 
@@ -35,11 +35,11 @@ pub(crate) enum FieldBuilder {
 
 impl FieldBuilder {
     /// Creates a [FieldBuilder] instance with given type and capacity.
-    pub fn create(data_type: &ConcreteDataType, init_cap: usize) -> Self {
-        if let ConcreteDataType::String(_) = data_type {
+    pub(crate) fn create(column_schema: &ColumnSchema, init_cap: usize) -> Self {
+        if let ConcreteDataType::String(_) = &column_schema.data_type {
             Self::String(StringBuilder::with_capacity(init_cap / 16, init_cap))
         } else {
-            Self::Other(data_type.create_mutable_vector(init_cap))
+            Self::Other(column_schema.create_mutable_vector(init_cap))
         }
     }
 

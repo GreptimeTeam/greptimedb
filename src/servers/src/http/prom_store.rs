@@ -35,20 +35,23 @@ use serde::{Deserialize, Serialize};
 use session::context::{Channel, QueryContext, QueryContextRef};
 use snafu::prelude::*;
 use table::requests::{
-    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_SIGNAL_TYPE,
-    SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC, SOURCE_PROMETHEUS,
+    METADATA_QUALITY_INFERRED, SEMANTIC_METRIC_METADATA_QUALITY, SEMANTIC_PER_TABLE_INDEX_KEY,
+    SEMANTIC_SIGNAL_TYPE, SEMANTIC_SOURCE, SEMANTIC_SOURCE_VERSION, SIGNAL_TYPE_METRIC,
+    SOURCE_PROMETHEUS,
 };
 
+use crate::batcher::logical_table::LogicalTablePendingRowsBatcher;
 use crate::error::{self, InternalSnafu, PipelineSnafu, Result};
 use crate::http::extractor::PipelineInfo;
 use crate::http::header::{
     CONTENT_TYPE_PROTOBUF_STR, GREPTIME_DB_HEADER_METRICS, write_cost_header_map,
 };
-use crate::pending_rows_batcher::PendingRowsBatcher;
 use crate::prom_remote_write::decode::PromSeriesProcessor;
-use crate::prom_remote_write::decode_remote_write_request;
-use crate::prom_remote_write::v2::{decode_remote_write_v2_request, into_write_requests};
+use crate::prom_remote_write::v2::decode_remote_write_v2;
 use crate::prom_remote_write::validation::PromValidationMode;
+use crate::prom_remote_write::{
+    REMOTE_WRITE_V1_VERSION, REMOTE_WRITE_V2_VERSION, decode_remote_write_request,
+};
 use crate::prom_store::snappy_decompress;
 use crate::query_handler::{PipelineHandlerRef, PromStoreProtocolHandlerRef, PromStoreResponse};
 
@@ -56,8 +59,6 @@ pub const PHYSICAL_TABLE_PARAM: &str = "physical_table";
 pub const DEFAULT_ENCODING: &str = "snappy";
 pub const VM_ENCODING: &str = "zstd";
 pub const VM_PROTO_VERSION: &str = "1";
-const REMOTE_WRITE_V1_VERSION: &str = "1.0";
-const REMOTE_WRITE_V2_VERSION: &str = "2.0";
 const REMOTE_WRITE_V1_PROTO: &str = "prometheus.WriteRequest";
 const REMOTE_WRITE_V2_PROTO: &str = "io.prometheus.write.v2.Request";
 const CONTENT_TYPE_PROTO_PARAM: &str = "proto";
@@ -73,8 +74,7 @@ pub struct PromStoreState {
     pub pipeline_handler: Option<PipelineHandlerRef>,
     pub prom_store_with_metric_engine: bool,
     pub prom_validation_mode: PromValidationMode,
-    pub experimental_enable_prometheus_native_histogram: bool,
-    pub pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pub pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -145,7 +145,6 @@ async fn remote_write_v1(
         pipeline_handler,
         prom_store_with_metric_engine,
         prom_validation_mode,
-        experimental_enable_prometheus_native_histogram: _,
         pending_rows_batcher,
     } = state;
 
@@ -155,6 +154,7 @@ async fn remote_write_v1(
 
     let (db, query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V1_VERSION);
+    let query_ctx = Arc::new(query_ctx);
 
     let mut processor = PromSeriesProcessor::default_processor();
 
@@ -173,12 +173,20 @@ async fn remote_write_v1(
         processor.set_pipeline(pipeline_handler, query_ctx.clone(), pipeline_def);
     }
 
-    let mut req = decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
+    let mut decoded =
+        decode_remote_write_request(is_zstd, body, prom_validation_mode, &mut processor)?;
 
+    // Parsing borrows the decode buffer, but row building copies out of it: tag
+    // values through `decode_string`, column names through `to_owned`, and the
+    // borrowing `col_indexes` dies inside `as_insert_requests`. Nothing below
+    // references the buffer, so it need not span the write.
     let req = if processor.use_pipeline {
+        drop(decoded);
         processor.exec_pipeline().await?
     } else {
-        req.as_insert_requests()
+        let req = decoded.as_insert_requests();
+        drop(decoded);
+        req
     };
     let batches = into_prom_write_batches(req, query_ctx);
 
@@ -192,11 +200,11 @@ async fn remote_write_v1(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            record_remote_write_samples(&db, error.rows_written);
+            record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, error.rows_written);
             return Err(error.error);
         }
     };
-    record_remote_write_samples(&db, outcome.rows_written);
+    record_remote_write_samples(&db, REMOTE_WRITE_V1_VERSION, outcome.rows_written);
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -218,7 +226,6 @@ async fn remote_write_v2(
         pipeline_handler: _,
         prom_store_with_metric_engine,
         prom_validation_mode: _,
-        experimental_enable_prometheus_native_histogram,
         pending_rows_batcher,
     } = state;
 
@@ -230,29 +237,19 @@ async fn remote_write_v2(
     // optional pipeline parameter and ingest samples directly.
     let _ = pipeline_info;
 
-    let (db, query_ctx, _timer) =
+    let (db, mut query_ctx, _timer) =
         prepare_remote_write_context(&params, query_ctx, REMOTE_WRITE_V2_VERSION);
 
-    let request = match decode_remote_write_v2_request(is_zstd, body) {
-        Ok(request) => request,
-        Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
-    };
-    if !experimental_enable_prometheus_native_histogram && request_has_native_histograms(&request) {
-        return Ok(remote_write_v2_error_response(
-            error::InvalidPromRemoteRequestSnafu {
-                msg: "prometheus remote write v2 native histogram ingestion is experimental; set http.experimental_enable_prometheus_native_histogram = true to enable it"
-                    .to_string(),
-            }
-            .build(),
-            0,
-            0,
-            0,
-        ));
-    }
-    let req = match into_write_requests(request) {
+    let req = match decode_remote_write_v2(is_zstd, body) {
         Ok(req) => req,
         Err(error) => return Ok(remote_write_v2_error_response(error, 0, 0, 0)),
     };
+    // The v2 per-series metadata upgrades the written tables' semantic options
+    // (metric type/unit, declared quality) at auto-create time.
+    if let Some(index) = req.semantic_index.encode(&query_ctx.current_schema()) {
+        query_ctx.set_extension(SEMANTIC_PER_TABLE_INDEX_KEY, index);
+    }
+    let query_ctx = Arc::new(query_ctx);
     let sample_count = req.sample_count;
     let histogram_count = req.histogram_count;
     let sample_batches = into_prom_write_batches(req.samples, query_ctx.clone());
@@ -268,8 +265,8 @@ async fn remote_write_v2(
     {
         Ok(outcome) => outcome,
         Err(error) => {
-            record_remote_write_samples(&db, error.samples_written);
-            record_remote_write_histograms(&db, error.histograms_written);
+            record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, error.samples_written);
+            record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, error.histograms_written);
             return Ok(remote_write_v2_error_response(
                 error.error,
                 error.samples_written,
@@ -280,8 +277,8 @@ async fn remote_write_v2(
     };
     debug_assert_eq!(outcome.samples_written, sample_count);
     debug_assert_eq!(outcome.histograms_written, histogram_count);
-    record_remote_write_samples(&db, outcome.samples_written);
-    record_remote_write_histograms(&db, outcome.histograms_written);
+    record_remote_write_samples(&db, REMOTE_WRITE_V2_VERSION, outcome.samples_written);
+    record_remote_write_histograms(&db, REMOTE_WRITE_V2_VERSION, outcome.histograms_written);
 
     let mut headers = write_cost_header_map(outcome.write_cost);
     append_remote_write_v2_written_headers(
@@ -294,15 +291,6 @@ async fn remote_write_v2(
     Ok((StatusCode::NO_CONTENT, headers).into_response())
 }
 
-fn request_has_native_histograms(
-    request: &api::greptime_proto::io::prometheus::write::v2::Request,
-) -> bool {
-    request
-        .timeseries
-        .iter()
-        .any(|series| !series.histograms.is_empty())
-}
-
 fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response::Response> {
     params
         .get_vm_proto_version
@@ -310,11 +298,14 @@ fn vm_proto_version_response(params: &RemoteWriteQuery) -> Option<axum::response
         .map(|_| VM_PROTO_VERSION.into_response())
 }
 
+/// Returns the context still un-shared so the caller can attach
+/// request-derived extensions (the v2 per-table metadata index) before
+/// wrapping it in an `Arc`.
 fn prepare_remote_write_context(
     params: &RemoteWriteQuery,
     mut query_ctx: QueryContext,
     remote_write_version: &str,
-) -> (String, Arc<QueryContext>, HistogramTimer) {
+) -> (String, QueryContext, HistogramTimer) {
     let db = params.db.clone().unwrap_or_default();
     query_ctx.set_channel(Channel::Prometheus);
     let physical_table = params
@@ -325,14 +316,14 @@ fn prepare_remote_write_context(
     // Stamp the Prometheus metric identity here, before `as_req_iter` splits into the
     // batched and direct write paths, so both inherit it (the batched path bypasses
     // `PromStoreProtocolHandler::write`). Prometheus remote-write metadata is weak
-    // here, so the type is inferred from naming.
+    // here, so the type is inferred from naming; v2 upgrades tables whose series
+    // carry inline metadata via the per-table index.
     query_ctx.set_extension(SEMANTIC_SIGNAL_TYPE, SIGNAL_TYPE_METRIC);
     query_ctx.set_extension(SEMANTIC_SOURCE, SOURCE_PROMETHEUS);
     query_ctx.set_extension(SEMANTIC_SOURCE_VERSION, remote_write_version);
     query_ctx.set_extension(SEMANTIC_METRIC_METADATA_QUALITY, METADATA_QUALITY_INFERRED);
-    let query_ctx = Arc::new(query_ctx);
     let timer = crate::metrics::METRIC_HTTP_PROM_STORE_WRITE_ELAPSED
-        .with_label_values(&[db.as_str()])
+        .with_label_values(&[db.as_str(), remote_write_version])
         .start_timer();
 
     (db, query_ctx, timer)
@@ -368,9 +359,9 @@ trait PromWriteBatcher: Send + Sync {
 }
 
 #[async_trait]
-impl PromWriteBatcher for PendingRowsBatcher {
+impl PromWriteBatcher for LogicalTablePendingRowsBatcher {
     async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
-        PendingRowsBatcher::submit(self, requests, ctx).await
+        LogicalTablePendingRowsBatcher::submit(self, requests, ctx).await
     }
 }
 
@@ -382,12 +373,16 @@ async fn preflight_prometheus_rows(
     prom_store_handler: &PromStoreProtocolHandlerRef,
     batches: &mut [PromWriteBatch],
 ) -> Result<()> {
-    for (ctx, reqs) in batches {
+    for (ctx, reqs) in batches.iter_mut() {
         prom_store_handler.pre_write(reqs, ctx.clone()).await?;
         // Detach from context clones retained by pre-write hooks so the checked
         // schema cannot change before this prepared batch is written.
         *ctx = Arc::new(ctx.fork());
     }
+    operator::insert::admit_row_insert_batches(batches)
+        .await
+        .map_err(common_error::ext::BoxedError::new)
+        .context(error::ExecuteGrpcQuerySnafu)?;
     Ok(())
 }
 
@@ -397,7 +392,7 @@ async fn preflight_prometheus_rows(
 /// sample/histogram headers even when a later table write fails.
 async fn write_prometheus_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
     mut batches: Vec<PromWriteBatch>,
 ) -> std::result::Result<PromWriteOutcome, PromWriteError> {
@@ -463,7 +458,7 @@ async fn write_prometheus_rows_with_progress(
 
 async fn write_prometheus_v2_rows_with_progress(
     prom_store_handler: PromStoreProtocolHandlerRef,
-    pending_rows_batcher: Option<Arc<PendingRowsBatcher>>,
+    pending_rows_batcher: Option<Arc<LogicalTablePendingRowsBatcher>>,
     prom_store_with_metric_engine: bool,
     sample_batches: Vec<PromWriteBatch>,
     histogram_batches: Vec<PromWriteBatch>,
@@ -618,21 +613,21 @@ fn incomplete_prom_write_error() -> error::Error {
     .build()
 }
 
-fn record_remote_write_samples(db: &str, rows: u64) {
+fn record_remote_write_samples(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_SAMPLES
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 
-fn record_remote_write_histograms(db: &str, rows: u64) {
+fn record_remote_write_histograms(db: &str, version: &str, rows: u64) {
     if rows == 0 {
         return;
     }
     crate::metrics::PROM_STORE_REMOTE_WRITE_HISTOGRAMS
-        .with_label_values(&[db])
+        .with_label_values(&[db, version])
         .inc_by(rows);
 }
 
@@ -780,7 +775,6 @@ mod tests {
 
     use super::*;
     use crate::prom_remote_write::validation::PromValidationMode;
-    use crate::prom_store::Metrics;
     use crate::query_handler::PromStoreProtocolHandler;
 
     #[test]
@@ -921,7 +915,8 @@ mod tests {
 
     #[async_trait]
     impl PromWriteBatcher for RecordingPromWriteBatcher {
-        async fn submit(&self, requests: RowInsertRequests, _ctx: QueryContextRef) -> Result<u64> {
+        async fn submit(&self, requests: RowInsertRequests, ctx: QueryContextRef) -> Result<u64> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
             record_write_event(&self.events, "batch", &requests);
             Ok(prom_write_row_count(&requests))
         }
@@ -945,9 +940,10 @@ mod tests {
         async fn write_prepared(
             &self,
             request: RowInsertRequests,
-            _ctx: QueryContextRef,
+            ctx: QueryContextRef,
             _with_metric_engine: bool,
         ) -> Result<Output> {
+            assert_eq!(ctx.write_rows_to_admit("greptime", "public", 1), 0);
             record_write_event(&self.events, "direct", &request);
             Ok(Output::new_with_affected_rows(0))
         }
@@ -974,10 +970,6 @@ mod tests {
             _request: ReadRequest,
             _ctx: QueryContextRef,
         ) -> Result<PromStoreResponse> {
-            unimplemented!()
-        }
-
-        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
             unimplemented!()
         }
     }
@@ -1018,7 +1010,6 @@ mod tests {
             pipeline_handler: None,
             prom_store_with_metric_engine: false,
             prom_validation_mode: PromValidationMode::Strict,
-            experimental_enable_prometheus_native_histogram: false,
             pending_rows_batcher: None,
         }
     }
@@ -1075,10 +1066,6 @@ mod tests {
             _request: ReadRequest,
             _ctx: QueryContextRef,
         ) -> Result<PromStoreResponse> {
-            unimplemented!()
-        }
-
-        async fn ingest_metrics(&self, _metrics: Metrics) -> Result<()> {
             unimplemented!()
         }
     }

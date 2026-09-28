@@ -25,9 +25,9 @@ use table::table_name::TableName;
 use crate::ddl::DdlContext;
 use crate::ddl::create_flow::{
     CreateFlowData, CreateFlowProcedure, CreateFlowState, DEFER_ON_MISSING_SOURCE_KEY,
-    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, defer_on_missing_source,
-    effective_eval_schedule_from_flow_info, resolve_schedule_defaults_into_task,
-    validate_flow_options,
+    FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY, FlowType, ceil_to_whole_sec,
+    defer_on_missing_source, effective_eval_schedule_from_flow_info,
+    resolve_schedule_defaults_into_task, validate_flow_options,
 };
 use crate::ddl::test_util::create_table::test_create_table_task;
 use crate::ddl::test_util::flownode_handler::NaiveFlownodeHandler;
@@ -67,6 +67,7 @@ pub(crate) fn test_create_flow_task(
         create_if_not_exists,
         expire_after: Some(300),
         eval_interval_secs: None,
+        eval_offset_secs: None,
         comment: "".to_string(),
         sql: "select 1".to_string(),
         flow_options: Default::default(),
@@ -333,7 +334,6 @@ fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
         "eval_interval_missed_tick_policy",
         "eval_interval_catchup_max_runs",
         "eval_interval_catchup_max_lag",
-        "__greptime_internal_eval_schedule",
     ] {
         let mut task = test_create_flow_task(
             "my_flow",
@@ -351,6 +351,78 @@ fn test_validate_flow_options_rejects_schedule_and_internal_keys_as_unknown() {
                 .contains(&format!("Unknown flow option '{key}'")),
             "unexpected error for {key}: {err}"
         );
+    }
+}
+
+#[test]
+fn test_validate_flow_options_rejects_internal_transport_keys() {
+    for key in [
+        "__greptime_internal_eval_schedule",
+        "__greptime_internal_eval_offset_secs",
+    ] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(300);
+        task.flow_options
+            .insert(key.to_string(), "value".to_string());
+
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("flow option '{key}' is reserved for internal use")),
+            "unexpected error for {key}: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_validate_flow_options_rejects_invalid_eval_offset() {
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.eval_interval_secs = None;
+    task.eval_offset_secs = Some(60);
+    let err = validate_flow_options(&task).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("EVAL OFFSET requires EVAL INTERVAL"),
+        "unexpected error: {err}"
+    );
+
+    for offset_secs in [-1, 300, 301] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(300);
+        task.eval_offset_secs = Some(offset_secs);
+        let err = validate_flow_options(&task).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("EVAL OFFSET must be in range [0, EVAL INTERVAL)"),
+            "unexpected error for offset {offset_secs}: {err}"
+        );
+    }
+
+    for offset_secs in [0, 1, 299] {
+        let mut task = test_create_flow_task(
+            "my_flow",
+            vec![],
+            TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+            false,
+        );
+        task.eval_interval_secs = Some(300);
+        task.eval_offset_secs = Some(offset_secs);
+        validate_flow_options(&task).unwrap();
     }
 }
 
@@ -381,7 +453,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
     task.eval_interval_secs = Some(300);
 
     // Simulate on_prepare: resolve defaults into task.
-    resolve_schedule_defaults_into_task(&mut task, None);
+    resolve_schedule_defaults_into_task(&mut task, None).unwrap();
 
     // Verify typed schedule config is populated.
     let sched = task.eval_schedule.as_ref().unwrap();
@@ -410,7 +482,7 @@ fn test_resolved_schedule_defaults_in_create_request() {
 
     // Idempotent: second call does not overwrite.
     let start_before = sched.start_secs;
-    resolve_schedule_defaults_into_task(&mut task, None);
+    resolve_schedule_defaults_into_task(&mut task, None).unwrap();
     assert_eq!(
         task.eval_schedule.as_ref().unwrap().start_secs,
         start_before
@@ -484,6 +556,221 @@ fn test_resolved_schedule_defaults_in_create_request() {
 }
 
 #[test]
+fn test_resolve_schedule_with_eval_offset_uses_epoch_phase() {
+    // 1h interval + 120s offset must yield the `:02` phase: anchor 120 and a
+    // start on `120 + k * 3600`, and no earlier boundary than the prepare ceil.
+    let prepare_ceil = ceil_to_whole_sec(chrono::Utc::now()).unwrap();
+
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.eval_interval_secs = Some(3600);
+    task.eval_offset_secs = Some(120);
+
+    resolve_schedule_defaults_into_task(&mut task, None).unwrap();
+    let sched = task.eval_schedule.as_ref().unwrap();
+    assert_eq!(sched.anchor_secs, 120);
+    assert!(sched.start_secs >= prepare_ceil);
+    assert_eq!((sched.start_secs - 120) % 3600, 0);
+
+    // The offset key must not leak into user runtime options / persisted info.
+    let flow_context = FlowQueryContext {
+        catalog: DEFAULT_CATALOG_NAME.to_string(),
+        schema: DEFAULT_SCHEMA_NAME.to_string(),
+        timezone: "UTC".to_string(),
+        extensions: HashMap::new(),
+        channel: 0,
+        snapshot_seqs: HashMap::new(),
+        sst_min_sequences: HashMap::new(),
+    };
+    let data = CreateFlowData {
+        state: CreateFlowState::CreateFlows,
+        task,
+        flow_id: Some(1024),
+        peers: vec![],
+        source_table_ids: vec![],
+        unresolved_source_table_names: vec![],
+        flow_context: flow_context.clone(),
+        prev_flow_info_value: None,
+        did_replace: false,
+        flow_type: Some(FlowType::Batching),
+    };
+    let request: CreateRequest = (&data).into();
+    assert!(
+        !request
+            .flow_options
+            .contains_key("__greptime_internal_eval_offset_secs"),
+        "CreateRequest must not contain internal eval offset key"
+    );
+    let (flow_info, _) = <(FlowInfoValue, Vec<(_, _)>)>::from(&data);
+    assert_eq!(flow_info.eval_schedule.as_ref().unwrap().anchor_secs, 120);
+    assert!(
+        !flow_info
+            .options
+            .contains_key("__greptime_internal_eval_offset_secs"),
+        "FlowInfoValue.options must not contain internal eval offset key"
+    );
+}
+
+#[test]
+fn test_resolve_schedule_or_replace_preserves_and_recomputes() {
+    let sink = TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table");
+
+    let mut task = test_create_flow_task("my_flow", vec![], sink.clone(), false);
+    task.or_replace = false;
+    task.eval_interval_secs = Some(3600);
+    task.eval_offset_secs = Some(120);
+    resolve_schedule_defaults_into_task(&mut task, None).unwrap();
+    let original_sched = task.eval_schedule.clone().unwrap();
+    assert_eq!(original_sched.anchor_secs, 120);
+
+    let prev_info = flow_info_for_schedule_test(
+        Some(original_sched.clone()),
+        Some(3600),
+        HashMap::new(),
+        1_700_000_000,
+    );
+
+    let mut replace_same = test_create_flow_task("my_flow", vec![], sink.clone(), false);
+    replace_same.or_replace = true;
+    replace_same.eval_interval_secs = Some(3600);
+    replace_same.eval_offset_secs = Some(120);
+    resolve_schedule_defaults_into_task(&mut replace_same, Some(&prev_info)).unwrap();
+    assert_eq!(replace_same.eval_schedule, Some(original_sched.clone()));
+
+    let mut replace_changed = test_create_flow_task("my_flow", vec![], sink.clone(), false);
+    replace_changed.or_replace = true;
+    replace_changed.eval_interval_secs = Some(3600);
+    replace_changed.eval_offset_secs = Some(180);
+    resolve_schedule_defaults_into_task(&mut replace_changed, Some(&prev_info)).unwrap();
+    let recomputed = replace_changed.eval_schedule.as_ref().unwrap();
+    assert_eq!(recomputed.anchor_secs, 180);
+    assert_eq!((recomputed.start_secs - 180) % 3600, 0);
+    assert_ne!(recomputed.start_secs, original_sched.start_secs);
+
+    let mut replace_interval = test_create_flow_task("my_flow", vec![], sink.clone(), false);
+    replace_interval.or_replace = true;
+    replace_interval.eval_interval_secs = Some(1800);
+    replace_interval.eval_offset_secs = Some(120);
+    resolve_schedule_defaults_into_task(&mut replace_interval, Some(&prev_info)).unwrap();
+    assert_eq!(
+        replace_interval.eval_schedule.as_ref().unwrap().anchor_secs,
+        120
+    );
+
+    let mut replace_omitted = test_create_flow_task("my_flow", vec![], sink, false);
+    replace_omitted.or_replace = true;
+    replace_omitted.eval_interval_secs = Some(3600);
+    replace_omitted.eval_offset_secs = None;
+    resolve_schedule_defaults_into_task(&mut replace_omitted, Some(&prev_info)).unwrap();
+    let reset = replace_omitted.eval_schedule.as_ref().unwrap();
+    assert_eq!(reset.anchor_secs, 0);
+    assert_eq!(reset.start_secs % 3600, 0);
+}
+
+#[test]
+fn test_create_flow_task_serde_defaults_for_old_data() {
+    // Old serialized CreateFlowTask data without `eval_offset_secs` must
+    // deserialize with `eval_offset_secs: None`.
+    let json = r#"{
+        "catalog_name": "catalog",
+        "flow_name": "flow",
+        "source_table_names": [],
+        "sink_table_name": {"catalog_name": "catalog", "schema_name": "schema", "table_name": "sink"},
+        "or_replace": false,
+        "create_if_not_exists": false,
+        "expire_after": null,
+        "eval_interval_secs": 300,
+        "comment": "",
+        "sql": "select 1",
+        "flow_options": {}
+    }"#;
+    let task: CreateFlowTask = serde_json::from_str(json).unwrap();
+    assert_eq!(task.eval_offset_secs, None);
+    assert_eq!(task.eval_interval_secs, Some(300));
+    let encoded = serde_json::to_string(&task).unwrap();
+    let decoded: CreateFlowTask = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.eval_offset_secs, None);
+
+    // A task with an offset round-trips through JSON (procedure dump/restore).
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.eval_interval_secs = Some(3600);
+    task.eval_offset_secs = Some(120);
+    let encoded = serde_json::to_string(&task).unwrap();
+    let decoded: CreateFlowTask = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.eval_offset_secs, Some(120));
+    assert_eq!(decoded.eval_interval_secs, Some(3600));
+}
+
+#[test]
+fn test_create_flow_task_proto_roundtrip_preserves_offset_key() {
+    // Path A: the operator inserts the trusted offset key into flow_options
+    // (as produced by `to_create_flow_task_expr`); the proto round-trip
+    // (frontend -> metasrv DDL task) must preserve it.
+    let mut task = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    task.eval_interval_secs = Some(3600);
+    task.flow_options.insert(
+        "__greptime_internal_eval_offset_secs".to_string(),
+        "120".to_string(),
+    );
+
+    let pb: api::v1::meta::CreateFlowTask = task.clone().into();
+    assert_eq!(
+        pb.create_flow
+            .as_ref()
+            .unwrap()
+            .flow_options
+            .get("__greptime_internal_eval_offset_secs"),
+        Some(&"120".to_string())
+    );
+
+    let parsed = CreateFlowTask::try_from(pb).unwrap();
+    assert_eq!(parsed.eval_offset_secs, Some(120));
+    assert!(
+        !parsed
+            .flow_options
+            .contains_key("__greptime_internal_eval_offset_secs")
+    );
+    assert_eq!(parsed.eval_interval_secs, Some(3600));
+
+    // Path B: a typed task carrying `eval_offset_secs` (e.g. after procedure
+    // dump/restore) re-inserts the key when converted back to proto.
+    let mut typed = test_create_flow_task(
+        "my_flow",
+        vec![],
+        TableName::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, "my_sink_table"),
+        false,
+    );
+    typed.eval_interval_secs = Some(3600);
+    typed.eval_offset_secs = Some(120);
+    let pb: api::v1::meta::CreateFlowTask = typed.clone().into();
+    assert_eq!(
+        pb.create_flow
+            .as_ref()
+            .unwrap()
+            .flow_options
+            .get("__greptime_internal_eval_offset_secs"),
+        Some(&"120".to_string())
+    );
+    let reparsed = CreateFlowTask::try_from(pb).unwrap();
+    assert_eq!(reparsed.eval_offset_secs, Some(120));
+    assert_eq!(reparsed.flow_options, typed.flow_options);
+}
+
+#[test]
 fn test_effective_eval_schedule_prefers_typed_config() {
     let typed = FlowScheduleConfig {
         anchor_secs: 0,
@@ -496,7 +783,9 @@ fn test_effective_eval_schedule_prefers_typed_config() {
     let flow_info =
         flow_info_for_schedule_test(Some(typed.clone()), Some(60), unrelated_options, 1);
 
-    let effective = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    let effective = effective_eval_schedule_from_flow_info(&flow_info)
+        .unwrap()
+        .unwrap();
     assert_eq!(effective, typed);
 }
 
@@ -504,7 +793,9 @@ fn test_effective_eval_schedule_prefers_typed_config() {
 fn test_effective_eval_schedule_uses_created_time_default() {
     let flow_info = flow_info_for_schedule_test(None, Some(60), HashMap::new(), 61);
 
-    let effective = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    let effective = effective_eval_schedule_from_flow_info(&flow_info)
+        .unwrap()
+        .unwrap();
     assert_eq!(effective.anchor_secs, 0);
     assert_eq!(effective.start_secs, 120);
     assert_eq!(
@@ -518,7 +809,11 @@ fn test_effective_eval_schedule_uses_created_time_default() {
 #[test]
 fn test_effective_eval_schedule_none_without_eval_interval() {
     let flow_info = flow_info_for_schedule_test(None, None, HashMap::new(), 61);
-    assert!(effective_eval_schedule_from_flow_info(&flow_info).is_none());
+    assert!(
+        effective_eval_schedule_from_flow_info(&flow_info)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -526,8 +821,12 @@ fn test_effective_eval_schedule_deterministic_on_old_metadata() {
     // Old metadata: no typed eval_schedule, but has eval_interval_secs and
     // a fixed created_time. Repeated calls must produce the same config.
     let flow_info = flow_info_for_schedule_test(None, Some(60), HashMap::new(), 61);
-    let first = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
-    let second = effective_eval_schedule_from_flow_info(&flow_info).unwrap();
+    let first = effective_eval_schedule_from_flow_info(&flow_info)
+        .unwrap()
+        .unwrap();
+    let second = effective_eval_schedule_from_flow_info(&flow_info)
+        .unwrap()
+        .unwrap();
     assert_eq!(first, second);
     // Sanity: the derived values are based on created_time=61 + interval=60.
     assert_eq!(first.anchor_secs, 0);
@@ -556,7 +855,9 @@ fn test_old_flow_info_json_without_eval_schedule_deserializes() {
     let decoded: FlowInfoValue = serde_json::from_value(json).unwrap();
     assert!(decoded.eval_schedule.is_none());
 
-    let effective = effective_eval_schedule_from_flow_info(&decoded).unwrap();
+    let effective = effective_eval_schedule_from_flow_info(&decoded)
+        .unwrap()
+        .unwrap();
     assert_eq!(effective.anchor_secs, 0);
     assert_eq!(effective.start_secs, 120);
     assert_eq!(
@@ -974,6 +1275,7 @@ fn create_test_flow_task_for_serialization() -> CreateFlowTask {
         create_if_not_exists: false,
         expire_after: None,
         eval_interval_secs: None,
+        eval_offset_secs: None,
         comment: "test comment".to_string(),
         sql: "SELECT * FROM source_table".to_string(),
         flow_options: HashMap::new(),

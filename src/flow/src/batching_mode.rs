@@ -20,14 +20,15 @@ use common_grpc::channel_manager::ClientTlsOption;
 use serde::{Deserialize, Serialize};
 use session::ReadPreference;
 
-mod checkpoint;
+pub(crate) mod batching_execution;
+pub(crate) mod checkpoint;
 pub(crate) mod engine;
 mod eval_schedule;
 pub(crate) mod frontend_client;
-mod state;
+pub(crate) mod state;
 mod table_creator;
-mod task;
-mod time_window;
+pub(crate) mod task;
+pub(crate) mod time_window;
 pub(crate) mod utils;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -44,6 +45,8 @@ pub struct BatchingModeOptions {
     /// The gRPC connection timeout
     #[serde(with = "humantime_serde")]
     pub grpc_conn_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub experimental_flight_do_get_timeout: Duration,
     /// The gRPC max retry number
     pub experimental_grpc_max_retries: u32,
     /// Flow wait for available frontend timeout,
@@ -72,6 +75,7 @@ impl Default for BatchingModeOptions {
             slow_query_threshold: Duration::from_secs(60),
             experimental_min_refresh_duration: Duration::new(5, 0),
             grpc_conn_timeout: Duration::from_secs(5),
+            experimental_flight_do_get_timeout: Duration::from_secs(10),
             experimental_grpc_max_retries: 3,
             experimental_frontend_scan_timeout: Duration::from_secs(30),
             experimental_max_filter_num_per_query: 20,

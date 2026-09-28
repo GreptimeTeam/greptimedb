@@ -41,7 +41,7 @@ impl State for RegionMigrationAbort {
     async fn next(
         &mut self,
         ctx: &mut Context,
-        _procedure_ctx: &ProcedureContext,
+        procedure_ctx: &ProcedureContext,
     ) -> Result<(Box<dyn State>, Status)> {
         warn!(
             "Region migration is aborted: {}, regions: {:?}, from_peer: {}, to_peer: {}, trigger_reason: {}, {}",
@@ -49,7 +49,7 @@ impl State for RegionMigrationAbort {
             ctx.persistent_ctx.region_ids,
             ctx.persistent_ctx.from_peer,
             ctx.persistent_ctx.to_peer,
-            ctx.persistent_ctx.trigger_reason,
+            ctx.trigger_reason(procedure_ctx.event_context.as_ref()),
             ctx.volatile_ctx.metrics,
         );
         error::MigrationAbortSnafu {

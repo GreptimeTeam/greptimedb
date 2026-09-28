@@ -18,11 +18,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use common_base::readable_size::ReadableSize;
-use common_telemetry::info;
 use common_telemetry::tracing::warn;
+use common_telemetry::{error, info};
 use humantime_serde::re::humantime;
 use snafu::{ResultExt, ensure};
 use store_api::logstore::LogStore;
+use store_api::logstore::provider::Provider;
 use store_api::metadata::{
     InvalidSetRegionOptionRequestSnafu, MetadataError, RegionMetadata, RegionMetadataBuilder,
     RegionMetadataRef,
@@ -50,8 +51,19 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         request: RegionAlterRequest,
         sender: OptionOutputTx,
     ) {
-        let region = match self.regions.writable_non_staging_region(region_id) {
-            Ok(region) => region,
+        let requested_skip_wal = skip_wal_value(&request.kind);
+        let (region, follower_skip_wal) = match self.regions.writable_non_staging_region(region_id)
+        {
+            Ok(region) => (region, None),
+            Err(_) if requested_skip_wal.is_some() => {
+                match self.regions.follower_region(region_id) {
+                    Ok(region) => (region, requested_skip_wal),
+                    Err(e) => {
+                        sender.send(Err(e));
+                        return;
+                    }
+                }
+            }
             Err(e) => {
                 sender.send(Err(e));
                 return;
@@ -59,6 +71,26 @@ impl<S: LogStore> RegionWorkerLoop<S> {
         };
 
         info!("Try to alter region: {}, request: {:?}", region_id, request);
+
+        // Followers only accept skip-WAL changes, which are in-memory option changes and must
+        // never enter the leader path that may flush memtables.
+        if let Some(skip_wal) = follower_skip_wal {
+            if let Err(e) = validate_skip_wal_change(&region, skip_wal) {
+                sender.send(Err(e).context(InvalidMetadataSnafu));
+                return;
+            }
+            let mut options = region.version().options.clone();
+            if options.skip_wal != skip_wal {
+                info!(
+                    "Set skip_wal for follower region: {}, previous: {} new: {}",
+                    region_id, options.skip_wal, skip_wal
+                );
+                options.skip_wal = skip_wal;
+                region.version_control.alter_options(options);
+            }
+            sender.send(Ok(0));
+            return;
+        }
 
         // Gets the version before alter.
         let version = region.version();
@@ -141,6 +173,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             "Try to alter region {}, version.metadata: {:?}, version.options: {:?}, request: {:?}",
             region_id, version.metadata, version.options, request,
         );
+        log_time_index_widening_overflow(region.region_id, &version, &request);
         self.handle_alter_region_with_empty_memtable(region, version, request, new_options, sender);
     }
 
@@ -175,7 +208,11 @@ impl<S: LogStore> RegionWorkerLoop<S> {
     /// Handles requests that changes region options, like TTL. It only affects memory state
     /// since changes are persisted in the `DatanodeTableValue` in metasrv.
     ///
-    /// If the options require empty memtable, it only does validation.
+    /// Options that can be applied without an empty memtable (e.g. TTL,
+    /// `preserve_row_sequence`) are applied directly through the fast path.
+    /// If another option in the same ALTER requires an empty memtable (e.g.
+    /// `append_mode`), only the complete final options are staged and the
+    /// existing flush path is followed.
     ///
     /// Returns the staged options if they need further alteration.
     fn handle_alter_region_options_fast(
@@ -220,6 +257,9 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         &value,
                         region.region_id,
                     )?;
+                    if !value.is_empty() {
+                        current_options.compaction_override = true;
+                    }
                 }
                 SetRegionOption::Format(format_str) => {
                     let new_format = format_str.parse::<FormatType>().map_err(|_| {
@@ -279,19 +319,76 @@ impl<S: LogStore> RegionWorkerLoop<S> {
                         all_options_altered = false;
                     }
                 }
+                SetRegionOption::PreserveRowSequence(new_preserve) => {
+                    if new_preserve != current_options.preserve_row_sequence {
+                        info!(
+                            "Update region preserve_row_sequence: {}, previous: {:?} new: {:?}",
+                            region.region_id, current_options.preserve_row_sequence, new_preserve
+                        );
+                        current_options.preserve_row_sequence = new_preserve;
+                    }
+                }
+                SetRegionOption::SkipWal(skip_wal) => {
+                    validate_skip_wal_change(region, skip_wal)?;
+                    if current_options.skip_wal != skip_wal {
+                        info!(
+                            "Set skip_wal for region: {}, previous: {} new: {}",
+                            region.region_id, current_options.skip_wal, skip_wal
+                        );
+                        current_options.skip_wal = skip_wal;
+                    }
+                }
             }
         }
+        let kind = AlterKind::SetRegionOptions { options };
+        // Validate the complete final options. The loop above validates
+        // per-option, but a combined ALTER may flip append_mode and toggle
+        // preserve_row_sequence in the same request, which is only valid when
+        // viewed together (order-independent). Validating the staged outcome
+        // also guarantees that a preserve-only toggle applied via the fast path
+        // below cannot create an invalid state (preserve requires append_mode).
+        let candidate = new_region_options_on_empty_memtable(&current_options, &kind)
+            .unwrap_or_else(|| current_options.clone());
+        candidate.validate().map_err(|e| {
+            store_api::metadata::InvalidRegionRequestSnafu {
+                region_id: region.region_id,
+                err: e.to_string(),
+            }
+            .build()
+        })?;
         if all_options_altered {
-            region.version_control.alter_options(current_options);
+            region.version_control.alter_options(candidate);
             Ok(None)
         } else {
-            let kind = AlterKind::SetRegionOptions { options };
-            Ok(new_region_options_on_empty_memtable(
-                &current_options,
-                &kind,
-            ))
+            // Some options require an empty memtable (e.g. append_mode,
+            // sst_format, or max_row_group_row_count).
+            Ok(Some(candidate))
         }
     }
+}
+
+fn skip_wal_value(kind: &AlterKind) -> Option<bool> {
+    let AlterKind::SetRegionOptions { options } = kind else {
+        return None;
+    };
+    let [SetRegionOption::SkipWal(skip_wal)] = options.as_slice() else {
+        return None;
+    };
+    Some(*skip_wal)
+}
+
+fn validate_skip_wal_change(
+    region: &MitoRegionRef,
+    skip_wal: bool,
+) -> std::result::Result<(), MetadataError> {
+    ensure!(
+        skip_wal || !matches!(&region.provider, Provider::Noop),
+        store_api::metadata::InvalidRegionRequestSnafu {
+            region_id: region.region_id,
+            err: "cannot enable WAL because the region uses the Noop WAL provider".to_string(),
+        }
+    );
+    Ok(())
 }
 
 /// Returns the new region options if there are updates to the options.
@@ -315,7 +412,8 @@ fn new_region_options_on_empty_memtable(
             SetRegionOption::WriteBufferSize(_)
             | SetRegionOption::Ttl(_)
             | SetRegionOption::Twsc(_, _)
-            | SetRegionOption::AutoFlushInterval(_) => (),
+            | SetRegionOption::AutoFlushInterval(_)
+            | SetRegionOption::SkipWal(_) => (),
             SetRegionOption::Format(format_str) => {
                 // Safety: handle_alter_region_options_fast() has validated this.
                 let new_format = format_str.parse::<FormatType>().unwrap();
@@ -331,6 +429,9 @@ fn new_region_options_on_empty_memtable(
             }
             SetRegionOption::MaxRowGroupRowCount(new_row_count) => {
                 current_options.max_row_group_row_count = *new_row_count;
+            }
+            SetRegionOption::PreserveRowSequence(new_preserve) => {
+                current_options.preserve_row_sequence = *new_preserve;
             }
         }
     }
@@ -362,10 +463,70 @@ fn set_twcs_options(
     region_id: RegionId,
 ) -> std::result::Result<(), MetadataError> {
     match key {
-        mito_engine_options::TWCS_TRIGGER_FILE_NUM => {
-            let files = parse_usize_with_default(key, value, default_option.trigger_file_num)?;
-            log_option_update(region_id, key, options.trigger_file_num, files);
-            options.trigger_file_num = files;
+        mito_engine_options::TWCS_TRIGGER_FILE_NUM
+        | mito_engine_options::TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.active_window_trigger_file_num,
+            )?;
+            log_option_update(
+                region_id,
+                key,
+                options.active_window_trigger_file_num,
+                files,
+            );
+            options.active_window_trigger_file_num = files;
+        }
+        mito_engine_options::TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.active_window_l1_merge_trigger,
+            )?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
+            log_option_update(
+                region_id,
+                key,
+                options.active_window_l1_merge_trigger,
+                files,
+            );
+            options.active_window_l1_merge_trigger = files;
+        }
+        mito_engine_options::TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.inactive_window_trigger_file_num,
+            )?;
+            log_option_update(
+                region_id,
+                key,
+                options.inactive_window_trigger_file_num,
+                files,
+            );
+            options.inactive_window_trigger_file_num = files;
+        }
+        mito_engine_options::TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER => {
+            let files = parse_usize_with_default(
+                key,
+                value,
+                default_option.inactive_window_l1_merge_trigger,
+            )?;
+            ensure!(
+                files >= 2,
+                InvalidSetRegionOptionRequestSnafu { key, value }
+            );
+            log_option_update(
+                region_id,
+                key,
+                options.inactive_window_l1_merge_trigger,
+                files,
+            );
+            options.inactive_window_l1_merge_trigger = files;
         }
         mito_engine_options::TWCS_MAX_OUTPUT_FILE_SIZE => {
             let size = if value.is_empty() {
@@ -422,6 +583,51 @@ fn log_option_update<T: std::fmt::Debug>(
     );
 }
 
+/// Logs a time index unit widening whose rescaled values would overflow the
+/// target unit's `i64` range in existing data. Memtables are flushed before
+/// an alter, so each SST's time range bounds its values; overflowing values
+/// cast to NULL on read, which is deemed acceptable.
+fn log_time_index_widening_overflow(
+    region_id: RegionId,
+    version: &VersionRef,
+    request: &RegionAlterRequest,
+) {
+    let AlterKind::ModifyColumnTypes { columns } = &request.kind else {
+        return;
+    };
+    let time_index = version.metadata.time_index_column();
+    for column in columns {
+        if column.column_name != time_index.column_schema.name {
+            continue;
+        }
+        // Non-timestamp targets and narrowing changes are rejected by
+        // `RegionAlterRequest::validate` before the request reaches here.
+        let Some(target_unit) = column.target_type.as_timestamp().map(|t| t.unit()) else {
+            continue;
+        };
+        for level in version.ssts.levels() {
+            for file in level.files.values() {
+                let (start, end) = file.time_range();
+                if start.convert_to(target_unit).is_none() || end.convert_to(target_unit).is_none()
+                {
+                    error!(
+                        "Time index widening for region {} overflows file {}: widening column \
+                         '{}' to {:?}, but data spans [{}, {}] beyond the target unit's i64 \
+                         range; overflowing values read back as NULL",
+                        region_id,
+                        file.file_id(),
+                        column.column_name,
+                        target_unit,
+                        start.to_iso8601_string(),
+                        end.to_iso8601_string(),
+                    );
+                    return;
+                }
+            }
+        }
+    }
+}
+
 /// Used to determine whether we can build index directly after schema change.
 fn need_change_index(kind: &AlterKind) -> bool {
     match kind {
@@ -438,6 +644,115 @@ fn need_change_index(kind: &AlterKind) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_set_twcs_window_trigger_options() {
+        let mut options = TwcsOptions::default();
+        let defaults = options.clone();
+        let region_id = RegionId::new(1, 1);
+
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.trigger_file_num",
+            "8",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "16",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "3",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+            "12",
+            region_id,
+        )
+        .unwrap();
+        assert_eq!(8, options.active_window_trigger_file_num);
+        assert_eq!(16, options.active_window_l1_merge_trigger);
+        assert_eq!(3, options.inactive_window_trigger_file_num);
+        assert_eq!(12, options.inactive_window_l1_merge_trigger);
+
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.trigger_file_num",
+            "",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.trigger_file_num",
+            "",
+            region_id,
+        )
+        .unwrap();
+        set_twcs_options(
+            &mut options,
+            &defaults,
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+            "",
+            region_id,
+        )
+        .unwrap();
+        assert_eq!(defaults, options);
+    }
+
+    #[test]
+    fn test_set_twcs_window_trigger_accepts_one() {
+        let defaults = TwcsOptions::default();
+        for key in [
+            "compaction.twcs.trigger_file_num",
+            "compaction.twcs.active_window.trigger_file_num",
+            "compaction.twcs.inactive_window.trigger_file_num",
+        ] {
+            let mut options = defaults.clone();
+            assert!(
+                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_ok(),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_twcs_l1_merge_triggers_reject_one() {
+        let defaults = TwcsOptions::default();
+        for key in [
+            "compaction.twcs.active_window.l1_merge_trigger",
+            "compaction.twcs.inactive_window.l1_merge_trigger",
+        ] {
+            let mut options = TwcsOptions::default();
+            assert!(
+                set_twcs_options(&mut options, &defaults, key, "1", RegionId::new(1, 1)).is_err(),
+                "{key}"
+            );
+        }
+    }
 
     #[test]
     fn test_new_region_options_with_idempotent_append_mode() {

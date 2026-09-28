@@ -13,7 +13,6 @@
 // limitations under the License.
 
 use std::collections::HashSet;
-use std::collections::hash_set::Entry;
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
 
@@ -46,15 +45,13 @@ impl WalPruneProcedureTracker {
     /// consume acquire a semaphore permit for the given topic name.
     pub fn insert_running_procedure(&self, topic_name: String) -> Option<WalPruneProcedureGuard> {
         let mut running_procedures = self.running_procedures.write().unwrap();
-        match running_procedures.entry(topic_name.clone()) {
-            Entry::Occupied(_) => None,
-            Entry::Vacant(entry) => {
-                entry.insert();
-                Some(WalPruneProcedureGuard {
-                    topic_name,
-                    running_procedures: self.running_procedures.clone(),
-                })
-            }
+        if running_procedures.insert(topic_name.clone()) {
+            Some(WalPruneProcedureGuard {
+                topic_name,
+                running_procedures: self.running_procedures.clone(),
+            })
+        } else {
+            None
         }
     }
 

@@ -31,12 +31,6 @@ use snafu::{Location, Snafu};
 #[snafu(visibility(pub))]
 #[stack_trace_debug]
 pub enum EvalError {
-    #[snafu(display("Division by zero"))]
-    DivisionByZero {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Type mismatch: expected {expected}, actual {actual}"))]
     TypeMismatch {
         expected: ConcreteDataType,
@@ -84,22 +78,8 @@ pub enum EvalError {
         location: Location,
     },
 
-    #[snafu(display("Optimize error: {reason}"))]
-    Optimize {
-        reason: String,
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Overflowed during evaluation"))]
     Overflow {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
-    #[snafu(display("Incoming data already expired by {} ms", expired_by))]
-    DataAlreadyExpired {
-        expired_by: i64,
         #[snafu(implicit)]
         location: Location,
     },
@@ -134,20 +114,16 @@ impl ErrorExt for EvalError {
     fn status_code(&self) -> StatusCode {
         use EvalError::*;
         match self {
-            DivisionByZero { .. }
-            | TypeMismatch { .. }
+            TypeMismatch { .. }
             | TryFromValue { .. }
-            | DataAlreadyExpired { .. }
             | InvalidArgument { .. }
             | Overflow { .. } => StatusCode::InvalidArguments,
 
             CastValue { source, .. } | DataType { source, .. } => source.status_code(),
 
-            Internal { .. }
-            | Optimize { .. }
-            | Arrow { .. }
-            | Datafusion { .. }
-            | External { .. } => StatusCode::Internal,
+            Internal { .. } | Arrow { .. } | Datafusion { .. } | External { .. } => {
+                StatusCode::Internal
+            }
         }
     }
 

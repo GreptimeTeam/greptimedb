@@ -66,7 +66,10 @@ use servers::error::{
     self as servers_error, ExecuteGrpcRequestSnafu, Result as ServerResult, SuspendedSnafu,
 };
 use servers::grpc::FlightCompression;
-use servers::grpc::flight::{FlightCraft, FlightRecordBatchStream, TonicStream};
+use servers::grpc::flight::{
+    FlightCraft, FlightRecordBatchSource, FlightRecordBatchStream, FlightRecordBatchStreamInput,
+    TonicStream,
+};
 use servers::grpc::region_server::RegionServerHandler;
 use session::context::{
     FLIGHT_METRICS_HEARTBEAT_INTERVAL, QueryContext, QueryContextBuilder, QueryContextRef,
@@ -684,7 +687,7 @@ impl RegionServer {
             }
             Err(err) => {
                 crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                    .with_label_values(&[request_type])
+                    .with_label_values(&[request_type, err.status_code().as_ref()])
                     .inc_by(batch_size as u64);
                 Err(err)
             }
@@ -976,13 +979,23 @@ impl FlightCraft for RegionServer {
             .map(|h| Arc::new(QueryContext::from(h)))
             .unwrap_or(QueryContext::arc());
 
-        let result = self
-            .handle_remote_read(request, query_ctx.clone())
-            .trace(tracing_context.attach(info_span!("RegionServer::handle_read")))
-            .await?;
+        let region_server = self.clone();
+        let initializer_query_ctx = query_ctx.clone();
+        let initializer_tracing_context = tracing_context.clone();
+        let initializer = async move {
+            region_server
+                .handle_remote_read(request, initializer_query_ctx)
+                .trace(initializer_tracing_context.attach(info_span!("RegionServer::handle_read")))
+                .await
+                .map_err(Into::into)
+        };
 
         let stream = Box::pin(FlightRecordBatchStream::new(
-            result,
+            FlightRecordBatchStreamInput::initializer(async move {
+                initializer
+                    .await
+                    .map(FlightRecordBatchSource::RecordBatches)
+            }),
             tracing_context,
             self.flight_compression,
             query_ctx,
@@ -1272,13 +1285,17 @@ impl RegionServerInner {
         requests: Vec<(RegionId, RegionOpenRequest)>,
         ignore_nonexistent_region: bool,
     ) -> Result<Vec<RegionId>> {
+        let request_count = requests.len();
         let region_changes = requests
             .iter()
             .map(|(region_id, open)| {
                 let attribute = parse_region_attribute(&open.engine, &open.options)?;
                 Ok((*region_id, RegionChange::Register(attribute)))
             })
-            .collect::<Result<HashMap<_, _>>>()?;
+            .collect::<Result<HashMap<_, _>>>()
+            .inspect_err(|err| {
+                record_region_open_failures(engine.name(), err.status_code(), request_count);
+            })?;
 
         for (&region_id, region_change) in &region_changes {
             self.set_region_status_not_ready(region_id, &engine, region_change)
@@ -1301,6 +1318,7 @@ impl RegionServerInner {
                                 .await
                             {
                                 error!(e; "Failed to set region to ready: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(BoxedError::new(e));
                             } else {
                                 open_regions.push(region_id)
@@ -1314,6 +1332,7 @@ impl RegionServerInner {
                                 warn!("Region {} not found, ignore it, source: {:?}", region_id, e);
                             } else {
                                 error!(e; "Failed to open region: {}", region_id);
+                                record_region_open_failures(engine.name(), e.status_code(), 1);
                                 errors.push(e);
                             }
                         }
@@ -1325,16 +1344,14 @@ impl RegionServerInner {
                     self.unset_region_status(region_id, &engine, *region_change);
                 }
                 error!(e; "Failed to open batch regions");
+                record_region_open_failures(engine.name(), e.status_code(), request_count);
                 errors.push(BoxedError::new(e));
             }
         }
 
         if !errors.is_empty() {
-            return error::UnexpectedSnafu {
-                // Returns the first error.
-                violated: format!("Failed to open batch regions: {:?}", errors[0]),
-            }
-            .fail();
+            // Preserve the first region error so callers can honor its status code and retry hint.
+            return Err(errors.swap_remove(0)).context(HandleBatchOpenRequestSnafu);
         }
 
         Ok(open_regions)
@@ -1363,7 +1380,10 @@ impl RegionServerInner {
                 .read()
                 .unwrap()
                 .get(&engine)
-                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })?
+                .with_context(|| RegionEngineNotFoundSnafu { name: &engine })
+                .inspect_err(|err| {
+                    record_region_open_failures(&engine, err.status_code(), requests.len());
+                })?
                 .clone();
             results.push(
                 self.handle_batch_open_requests_inner(
@@ -1565,6 +1585,24 @@ impl RegionServerInner {
         region_id: RegionId,
         request: RegionRequest,
     ) -> Result<RegionResponse> {
+        let open_engine = match &request {
+            RegionRequest::Open(open) => Some(open.engine.clone()),
+            _ => None,
+        };
+        self.handle_request_inner(region_id, request)
+            .await
+            .inspect_err(|err| {
+                if let Some(engine) = open_engine {
+                    record_region_open_failures(&engine, err.status_code(), 1);
+                }
+            })
+    }
+
+    async fn handle_request_inner(
+        &self,
+        region_id: RegionId,
+        request: RegionRequest,
+    ) -> Result<RegionResponse> {
         let request_type = request.request_type();
         let _timer = crate::metrics::HANDLE_REGION_REQUEST_ELAPSED
             .with_label_values(&[request_type])
@@ -1630,7 +1668,7 @@ impl RegionServerInner {
             Err(err) => {
                 if matches!(region_change, RegionChange::Ingest) {
                     crate::metrics::REGION_SERVER_INSERT_FAIL_COUNT
-                        .with_label_values(&[request_type])
+                        .with_label_values(&[request_type, err.status_code().as_ref()])
                         .inc();
                 }
                 // Removes the region status if the operation fails.
@@ -1936,6 +1974,17 @@ fn is_metric_engine(engine: &str) -> bool {
     engine == METRIC_ENGINE_NAME
 }
 
+/// Records failed open attempts without using arbitrary engine names as metric labels.
+fn record_region_open_failures(engine: &str, status_code: StatusCode, count: usize) {
+    let engine = match engine {
+        MITO_ENGINE_NAME | METRIC_ENGINE_NAME | FILE_ENGINE_NAME => engine,
+        _ => "unknown",
+    };
+    crate::metrics::REGION_OPEN_FAILURES_TOTAL
+        .with_label_values(&[engine, status_code.as_ref()])
+        .inc_by(count as u64);
+}
+
 fn parse_region_attribute(
     engine: &str,
     options: &HashMap<String, String>,
@@ -1979,7 +2028,7 @@ mod tests {
     use std::sync::Arc;
 
     use api::v1::{Rows, SemanticType};
-    use common_error::ext::ErrorExt;
+    use common_error::ext::{ErrorExt, RetryHint};
     use common_recordbatch::RecordBatches;
     use common_recordbatch::adapter::{RecordBatchMetrics, RegionWatermarkEntry};
     use datatypes::prelude::{ConcreteDataType, VectorRef};
@@ -2008,6 +2057,7 @@ mod tests {
 
         assert!(RegionServerInner::is_ingest_request(&RegionRequest::Put(
             RegionPutRequest {
+                skip_wal: false,
                 rows: rows(),
                 hint: None,
                 partition_expr_version: None,
@@ -2514,7 +2564,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.status_code(), StatusCode::Unexpected);
+        assert_matches!(&err, error::Error::HandleBatchOpenRequest { .. });
+        assert_eq!(err.status_code(), StatusCode::RegionNotFound);
+        assert_eq!(err.retry_hint(), RetryHint::NonRetryable);
     }
 
     struct CurrentEngineTest {

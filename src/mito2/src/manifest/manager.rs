@@ -551,6 +551,28 @@ impl RegionManifestManager {
         action_list: RegionMetaActionList,
         is_staging: bool,
     ) -> Result<ManifestVersion> {
+        self.update_inner(action_list, is_staging, !is_staging)
+            .await
+    }
+
+    /// Updates the normal manifest without starting a checkpoint.
+    ///
+    /// This is only used while a leader is downgrading. The final flush still
+    /// publishes its manifest edit, but must not start cleanup after the
+    /// downgrade checkpoint barrier.
+    pub(crate) async fn update_normal_without_checkpoint(
+        &mut self,
+        action_list: RegionMetaActionList,
+    ) -> Result<ManifestVersion> {
+        self.update_inner(action_list, false, false).await
+    }
+
+    async fn update_inner(
+        &mut self,
+        action_list: RegionMetaActionList,
+        is_staging: bool,
+        allow_checkpoint: bool,
+    ) -> Result<ManifestVersion> {
         let _t = MANIFEST_OP_ELAPSED
             .with_label_values(&["update"])
             .start_timer();
@@ -616,11 +638,19 @@ impl RegionManifestManager {
                 .checkpointer
                 .update_manifest_removed_files(new_manifest)?;
             self.manifest = Arc::new(updated_manifest);
-            self.checkpointer
-                .maybe_do_checkpoint(self.manifest.as_ref());
+            if allow_checkpoint {
+                self.checkpointer
+                    .maybe_do_checkpoint(self.manifest.as_ref())
+                    .await;
+            }
         }
 
         Ok(version)
+    }
+
+    /// Waits for an in-flight checkpoint to finish, including its cleanup.
+    pub(crate) async fn wait_for_pending_checkpoint(&mut self) {
+        self.checkpointer.wait_for_pending_checkpoint().await;
     }
 
     /// Clear deleted files from manifest's `removed_files` field without update version. Notice if datanode exit before checkpoint then new manifest by open region may still contain these deleted files, which is acceptable for gc process.

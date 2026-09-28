@@ -14,6 +14,7 @@
 
 use api::v1::ColumnDataType;
 use api::v1::value::ValueData;
+use common_telemetry::warn;
 use jsonb::{Number as JsonbNumber, Value as JsonbValue};
 use opentelemetry_proto::tonic::common::v1::{KeyValue, any_value};
 
@@ -40,6 +41,16 @@ pub fn any_value_to_jsonb(value: any_value::Value) -> JsonbValue<'static> {
         }
         any_value::Value::KvlistValue(kv) => key_value_to_jsonb(kv.values),
         any_value::Value::BytesValue(b) => JsonbValue::String(bytes_to_hex_string(&b).into()),
+        // `StringValueStrindex` references the Profiling signal's
+        // `ProfilesDictionary.string_table`, which is unavailable to logs/traces.
+        // Per the OTLP spec, non-Profiling receivers must treat it as a non-fatal
+        // issue and process the value as if it were absent.
+        any_value::Value::StringValueStrindex(_) => {
+            warn!(
+                "encountered a profiling-only `StringValueStrindex` value in a non-profiling signal; ignoring"
+            );
+            JsonbValue::Null
+        }
     }
 }
 

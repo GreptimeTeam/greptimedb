@@ -97,3 +97,56 @@ impl<'a> DatanodeServiceBuilder<'a> {
             .region_server_handler(Arc::new(region_server.clone()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use api::v1::HealthCheckRequest;
+    use api::v1::health_check_client::HealthCheckClient;
+    use servers::grpc::GRPC_SERVER;
+
+    use super::DatanodeServiceBuilder;
+    use crate::config::DatanodeOptions;
+    use crate::tests::mock_region_server;
+
+    #[tokio::test]
+    async fn test_default_grpc_server_health_check_is_reachable() {
+        // Arrange
+        let opts = DatanodeOptions {
+            grpc: servers::grpc::GrpcOptions::default().with_bind_addr("127.0.0.1:0"),
+            ..Default::default()
+        };
+        let region_server = mock_region_server();
+        let mut services = DatanodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(&region_server)
+            .build()
+            .unwrap();
+
+        // Act
+        services.start_all().await.unwrap();
+        let addr = services.addr(GRPC_SERVER).unwrap();
+        let health_check = HealthCheckClient::connect(format!("http://{addr}"))
+            .await
+            .unwrap()
+            .health_check(HealthCheckRequest {})
+            .await;
+        services.shutdown_all().await.unwrap();
+
+        // Assert
+        assert!(health_check.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_service_builder_without_grpc_server_does_not_expose_grpc_address() {
+        // Arrange
+        let opts = DatanodeOptions::default();
+        let mut services = DatanodeServiceBuilder::new(&opts).build().unwrap();
+
+        // Act
+        services.start_all().await.unwrap();
+        let addr = services.addr(GRPC_SERVER);
+        services.shutdown_all().await.unwrap();
+
+        // Assert
+        assert!(addr.is_none());
+    }
+}

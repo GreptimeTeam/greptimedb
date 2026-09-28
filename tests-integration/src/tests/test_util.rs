@@ -42,6 +42,7 @@ use session::context::{QueryContext, QueryContextRef};
 
 use crate::cluster::{GreptimeDbCluster, GreptimeDbClusterBuilder};
 use crate::standalone::{GreptimeDbStandalone, GreptimeDbStandaloneBuilder};
+pub(crate) use crate::test_util::MockInstanceImpl;
 use crate::test_util::StorageType;
 use crate::tests::{MockDistributedInstance, create_distributed_instance};
 
@@ -85,33 +86,9 @@ pub(crate) enum MockInstanceBuilder {
     Distributed(GreptimeDbClusterBuilder),
 }
 
-pub(crate) enum MockInstanceImpl {
-    Standalone(GreptimeDbStandalone),
-    Distributed(GreptimeDbCluster),
-}
-
-impl MockInstanceImpl {
-    pub(crate) fn metasrv(&self) -> &Arc<Metasrv> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.metasrv,
-        }
-    }
-
-    pub(crate) fn datanodes(&self) -> &HashMap<DatanodeId, Datanode> {
-        match self {
-            MockInstanceImpl::Standalone(_) => unreachable!(),
-            MockInstanceImpl::Distributed(instance) => &instance.datanode_instances,
-        }
-    }
-}
-
 impl MockInstance for MockInstanceImpl {
     fn frontend(&self) -> Arc<Instance> {
-        match self {
-            MockInstanceImpl::Standalone(instance) => instance.frontend(),
-            MockInstanceImpl::Distributed(instance) => instance.fe_instance().clone(),
-        }
+        MockInstanceImpl::frontend(self)
     }
 
     fn is_distributed_mode(&self) -> bool {

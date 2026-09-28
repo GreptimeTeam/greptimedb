@@ -171,16 +171,16 @@ impl DatabaseDdlEvent {
         )
     }
 
-    pub(crate) fn create_lifecycle() -> Self {
-        Self::lifecycle(CREATE_DATABASE_EVENT_TYPE)
+    pub(crate) fn create_lifecycle(catalog_name: &str, schema_name: &str) -> Self {
+        Self::lifecycle(CREATE_DATABASE_EVENT_TYPE, catalog_name, schema_name)
     }
 
-    pub(crate) fn alter_lifecycle() -> Self {
-        Self::lifecycle(ALTER_DATABASE_EVENT_TYPE)
+    pub(crate) fn alter_lifecycle(catalog_name: &str, schema_name: &str) -> Self {
+        Self::lifecycle(ALTER_DATABASE_EVENT_TYPE, catalog_name, schema_name)
     }
 
-    pub(crate) fn drop_lifecycle() -> Self {
-        Self::lifecycle(DROP_DATABASE_EVENT_TYPE)
+    pub(crate) fn drop_lifecycle(catalog_name: &str, schema_name: &str) -> Self {
+        Self::lifecycle(DROP_DATABASE_EVENT_TYPE, catalog_name, schema_name)
     }
 
     fn submitted(
@@ -197,11 +197,11 @@ impl DatabaseDdlEvent {
         }
     }
 
-    fn lifecycle(event_type: &'static str) -> Self {
+    fn lifecycle(event_type: &'static str, catalog_name: &str, schema_name: &str) -> Self {
         Self {
             event_type,
-            catalog_name: None,
-            schema_name: None,
+            catalog_name: Some(catalog_name.to_string()),
+            schema_name: Some(schema_name.to_string()),
             payload: None,
         }
     }

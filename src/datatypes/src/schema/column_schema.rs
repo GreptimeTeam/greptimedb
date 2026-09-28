@@ -28,10 +28,12 @@ use crate::data_type::{ConcreteDataType, DataType};
 use crate::error::{
     self, ArrowMetadataSnafu, Error, InvalidFulltextOptionSnafu, ParseExtendedTypeSnafu, Result,
 };
+use crate::extension::json::Json2ExtensionType;
 use crate::schema::TYPE_KEY;
 use crate::schema::constraint::ColumnDefaultConstraint;
 use crate::value::Value;
-use crate::vectors::VectorRef;
+use crate::vectors::json::builder::JsonVectorBuilder;
+use crate::vectors::{MutableVector, VectorRef};
 
 pub type Metadata = HashMap<String, String>;
 
@@ -46,8 +48,6 @@ pub const FULLTEXT_KEY: &str = "greptime:fulltext";
 pub const INVERTED_INDEX_KEY: &str = "greptime:inverted_index";
 /// Key used to store skip options in arrow field's metadata.
 pub const SKIPPING_INDEX_KEY: &str = "greptime:skipping_index";
-/// Key used to store vector index options in arrow field's metadata.
-pub const VECTOR_INDEX_KEY: &str = "greptime:vector_index";
 
 /// Keys used in fulltext options
 pub const COLUMN_FULLTEXT_CHANGE_OPT_KEY_ENABLE: &str = "enable";
@@ -61,13 +61,6 @@ pub const COLUMN_FULLTEXT_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_ra
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_GRANULARITY: &str = "granularity";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_FALSE_POSITIVE_RATE: &str = "false_positive_rate";
 pub const COLUMN_SKIPPING_INDEX_OPT_KEY_TYPE: &str = "type";
-
-/// Keys used in VECTOR index options
-pub const COLUMN_VECTOR_INDEX_OPT_KEY_ENGINE: &str = "engine";
-pub const COLUMN_VECTOR_INDEX_OPT_KEY_METRIC: &str = "metric";
-pub const COLUMN_VECTOR_INDEX_OPT_KEY_CONNECTIVITY: &str = "connectivity";
-pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_ADD: &str = "expansion_add";
-pub const COLUMN_VECTOR_INDEX_OPT_KEY_EXPANSION_SEARCH: &str = "expansion_search";
 
 pub const DEFAULT_GRANULARITY: u32 = 10240;
 
@@ -125,6 +118,21 @@ impl ColumnSchema {
             is_time_index: false,
             default_constraint: None,
             metadata: Metadata::new(),
+        }
+    }
+
+    /// Creates a mutable vector using this column's extension metadata.
+    pub fn create_mutable_vector(&self, capacity: usize) -> Box<dyn MutableVector> {
+        if self.data_type.is_json2()
+            && let Some(extension) = self.extension_type::<Json2ExtensionType>().ok().flatten()
+            && extension.metadata().is_version_2()
+        {
+            Box::new(JsonVectorBuilder::with_settings(
+                extension.metadata().json_settings(),
+                capacity,
+            ))
+        } else {
+            self.data_type.create_mutable_vector(capacity)
         }
     }
 
@@ -236,53 +244,6 @@ impl ColumnSchema {
 
     pub fn has_inverted_index_key(&self) -> bool {
         self.metadata.contains_key(INVERTED_INDEX_KEY)
-    }
-
-    /// Checks if this column has a vector index.
-    pub fn is_vector_indexed(&self) -> bool {
-        match self.vector_index_options() {
-            Ok(opts) => opts.is_some(),
-            Err(e) => {
-                common_telemetry::warn!(
-                    "Failed to deserialize vector_index_options for column '{}': {}",
-                    self.name,
-                    e
-                );
-                false
-            }
-        }
-    }
-
-    /// Gets the vector index options.
-    pub fn vector_index_options(&self) -> Result<Option<VectorIndexOptions>> {
-        match self.metadata.get(VECTOR_INDEX_KEY) {
-            None => Ok(None),
-            Some(json) => {
-                let options =
-                    serde_json::from_str(json).context(error::DeserializeSnafu { json })?;
-                Ok(Some(options))
-            }
-        }
-    }
-
-    /// Sets the vector index options.
-    pub fn set_vector_index_options(&mut self, options: &VectorIndexOptions) -> Result<()> {
-        self.metadata.insert(
-            VECTOR_INDEX_KEY.to_string(),
-            serde_json::to_string(options).context(error::SerializeSnafu)?,
-        );
-        Ok(())
-    }
-
-    /// Removes the vector index options.
-    pub fn unset_vector_index_options(&mut self) {
-        self.metadata.remove(VECTOR_INDEX_KEY);
-    }
-
-    /// Sets vector index options and returns self for chaining.
-    pub fn with_vector_index_options(mut self, options: &VectorIndexOptions) -> Result<Self> {
-        self.set_vector_index_options(options)?;
-        Ok(self)
     }
 
     /// Set default constraint.
@@ -486,7 +447,8 @@ impl ColumnSchema {
         }
     }
 
-    pub fn with_extension_type<E>(&mut self, extension_type: &E) -> Result<()>
+    /// Sets the Arrow extension type metadata for this column.
+    pub fn with_extension_type<E>(&mut self, extension_type: &E)
     where
         E: ExtensionType,
     {
@@ -496,9 +458,10 @@ impl ColumnSchema {
         if let Some(extension_metadata) = extension_type.serialize_metadata() {
             self.metadata
                 .insert(EXTENSION_TYPE_METADATA_KEY.to_string(), extension_metadata);
+        } else {
+            // Replacing an extension must not retain metadata owned by the previous type.
+            self.metadata.remove(EXTENSION_TYPE_METADATA_KEY);
         }
-
-        Ok(())
     }
 
     pub fn is_indexed(&self) -> bool {
@@ -1048,181 +1011,6 @@ impl TryFrom<HashMap<String, String>> for SkippingIndexOptions {
     }
 }
 
-/// Distance metric for vector similarity search.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Visit, VisitMut)]
-#[serde(rename_all = "lowercase")]
-pub enum VectorDistanceMetric {
-    /// Squared Euclidean distance (L2^2).
-    #[default]
-    L2sq,
-    /// Cosine distance (1 - cosine similarity).
-    Cosine,
-    /// Inner product (negative, for maximum inner product search).
-    #[serde(alias = "ip")]
-    InnerProduct,
-}
-
-impl fmt::Display for VectorDistanceMetric {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            VectorDistanceMetric::L2sq => write!(f, "l2sq"),
-            VectorDistanceMetric::Cosine => write!(f, "cosine"),
-            VectorDistanceMetric::InnerProduct => write!(f, "ip"),
-        }
-    }
-}
-
-impl std::str::FromStr for VectorDistanceMetric {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "l2sq" | "l2" | "euclidean" => Ok(VectorDistanceMetric::L2sq),
-            "cosine" | "cos" => Ok(VectorDistanceMetric::Cosine),
-            "inner_product" | "ip" | "dot" => Ok(VectorDistanceMetric::InnerProduct),
-            _ => Err(format!(
-                "Unknown distance metric: {}. Expected: l2sq, cosine, or ip",
-                s
-            )),
-        }
-    }
-}
-
-impl VectorDistanceMetric {
-    /// Returns the metric as u8 for blob serialization.
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            Self::L2sq => 0,
-            Self::Cosine => 1,
-            Self::InnerProduct => 2,
-        }
-    }
-
-    /// Parses metric from u8 (used when reading blob).
-    pub fn try_from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::L2sq),
-            1 => Some(Self::Cosine),
-            2 => Some(Self::InnerProduct),
-            _ => None,
-        }
-    }
-}
-
-/// Default HNSW connectivity parameter.
-const DEFAULT_VECTOR_INDEX_CONNECTIVITY: u32 = 16;
-/// Default expansion factor during index construction.
-const DEFAULT_VECTOR_INDEX_EXPANSION_ADD: u32 = 128;
-/// Default expansion factor during search.
-const DEFAULT_VECTOR_INDEX_EXPANSION_SEARCH: u32 = 64;
-
-fn default_vector_index_connectivity() -> u32 {
-    DEFAULT_VECTOR_INDEX_CONNECTIVITY
-}
-
-fn default_vector_index_expansion_add() -> u32 {
-    DEFAULT_VECTOR_INDEX_EXPANSION_ADD
-}
-
-fn default_vector_index_expansion_search() -> u32 {
-    DEFAULT_VECTOR_INDEX_EXPANSION_SEARCH
-}
-
-/// Supported vector index engine types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Visit, VisitMut)]
-#[serde(rename_all = "lowercase")]
-pub enum VectorIndexEngineType {
-    /// USearch HNSW implementation.
-    #[default]
-    Usearch,
-    // Future: Vsag,
-}
-
-impl VectorIndexEngineType {
-    /// Returns the engine type as u8 for blob serialization.
-    pub fn as_u8(&self) -> u8 {
-        match self {
-            Self::Usearch => 0,
-        }
-    }
-
-    /// Parses engine type from u8 (used when reading blob).
-    pub fn try_from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::Usearch),
-            _ => None,
-        }
-    }
-}
-
-impl fmt::Display for VectorIndexEngineType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Usearch => write!(f, "usearch"),
-        }
-    }
-}
-
-impl std::str::FromStr for VectorIndexEngineType {
-    type Err = String;
-
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "usearch" => Ok(Self::Usearch),
-            _ => Err(format!(
-                "Unknown vector index engine: {}. Expected: usearch",
-                s
-            )),
-        }
-    }
-}
-
-/// Options for vector index (HNSW).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Visit, VisitMut)]
-#[serde(rename_all = "kebab-case")]
-pub struct VectorIndexOptions {
-    /// Vector index engine type (default: usearch).
-    #[serde(default)]
-    pub engine: VectorIndexEngineType,
-    /// Distance metric for similarity search.
-    #[serde(default)]
-    pub metric: VectorDistanceMetric,
-    /// HNSW connectivity parameter (M in the paper).
-    /// Higher values improve recall but increase memory usage.
-    #[serde(default = "default_vector_index_connectivity")]
-    pub connectivity: u32,
-    /// Expansion factor during index construction (ef_construction).
-    /// Higher values improve index quality but slow down construction.
-    #[serde(default = "default_vector_index_expansion_add")]
-    pub expansion_add: u32,
-    /// Expansion factor during search (ef_search).
-    /// Higher values improve recall but slow down search.
-    #[serde(default = "default_vector_index_expansion_search")]
-    pub expansion_search: u32,
-}
-
-impl Default for VectorIndexOptions {
-    fn default() -> Self {
-        Self {
-            engine: VectorIndexEngineType::default(),
-            metric: VectorDistanceMetric::default(),
-            connectivity: DEFAULT_VECTOR_INDEX_CONNECTIVITY,
-            expansion_add: DEFAULT_VECTOR_INDEX_EXPANSION_ADD,
-            expansion_search: DEFAULT_VECTOR_INDEX_EXPANSION_SEARCH,
-        }
-    }
-}
-
-impl fmt::Display for VectorIndexOptions {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "engine={}, metric={}, connectivity={}, expansion_add={}, expansion_search={}",
-            self.engine, self.metric, self.connectivity, self.expansion_add, self.expansion_search
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1230,6 +1018,7 @@ mod tests {
     use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
 
     use super::*;
+    use crate::extension::json::{Json2ExtensionType, JsonExtensionType};
     use crate::types::{StructField, StructType};
     use crate::value::Value;
     use crate::vectors::Int32Vector;
@@ -1244,6 +1033,31 @@ mod tests {
 
         let new_column_schema = ColumnSchema::try_from(&field).unwrap();
         assert_eq!(column_schema, new_column_schema);
+    }
+
+    #[test]
+    fn test_with_extension_type_replaces_metadata() {
+        let mut schema = ColumnSchema::new("j", ConcreteDataType::json_datatype(), true);
+
+        schema.with_extension_type(&Json2ExtensionType::default());
+        assert_eq!(
+            Some(Json2ExtensionType::NAME),
+            schema
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str)
+        );
+        assert!(schema.metadata().contains_key(EXTENSION_TYPE_METADATA_KEY));
+
+        schema.with_extension_type(&JsonExtensionType);
+        assert_eq!(
+            Some(JsonExtensionType::NAME),
+            schema
+                .metadata()
+                .get(EXTENSION_TYPE_NAME_KEY)
+                .map(String::as_str)
+        );
+        assert!(!schema.metadata().contains_key(EXTENSION_TYPE_METADATA_KEY));
     }
 
     #[test]

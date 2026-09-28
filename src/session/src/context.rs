@@ -22,6 +22,7 @@ use api::v1::ExplainOptions;
 use api::v1::region::RegionRequestHeader;
 use arc_swap::ArcSwap;
 use auth::UserInfoRef;
+pub use common_base::protocol::Channel;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
 use common_catalog::{build_db_string, parse_catalog_and_schema_from_db_string};
 use common_recordbatch::cursor::RecordBatchStreamCursor;
@@ -78,9 +79,18 @@ pub struct QueryContext {
     /// The configuration parameter are used to store the parameters that are set by the user
     #[builder(default)]
     configuration_parameter: Arc<ConfigurationVariables>,
+    /// Local-only write batching selection; never transported in protobuf extensions.
+    #[builder(default)]
+    batching_enabled: bool,
+    /// Local-only opt-in for logical metric writes, independent of ordinary-table batching.
+    #[builder(default)]
+    logical_batching_enabled: bool,
     /// Track which protocol the query comes from.
     #[builder(default)]
     channel: Channel,
+    /// Process-local admission for one database in this request. Never sent over the wire.
+    #[builder(setter(skip))]
+    admitted_write: Option<(String, String)>,
     /// Process id for managing on-going queries
     #[builder(default)]
     process_id: u32,
@@ -149,6 +159,15 @@ impl QueryContextBuilder {
             .write()
             .unwrap()
             .explain_options = explain_options;
+        self
+    }
+
+    pub fn skip_wal(mut self, skip_wal: bool) -> Self {
+        self.mutable_session_data
+            .get_or_insert_default()
+            .write()
+            .unwrap()
+            .skip_wal = skip_wal;
         self
     }
 
@@ -250,6 +269,28 @@ impl QueryContext {
         fork
     }
 
+    /// Forks a context for internal writes after admitting the complete request.
+    /// Call only after write admission succeeds for the current database.
+    pub fn with_write_admission(&self) -> Self {
+        let mut ctx = self.fork();
+        ctx.admitted_write = Some((ctx.current_catalog().to_string(), ctx.current_schema()));
+        ctx
+    }
+
+    /// Returns zero for writes covered by this request's database admission.
+    /// Usage accounting and the original protocol channel remain unchanged.
+    pub fn write_rows_to_admit(&self, catalog: &str, schema: &str, rows: u64) -> u64 {
+        if self
+            .admitted_write
+            .as_ref()
+            .is_some_and(|(c, s)| c == catalog && s == schema)
+        {
+            0
+        } else {
+            rows
+        }
+    }
+
     pub fn arc() -> QueryContextRef {
         Arc::new(
             QueryContextBuilder::default()
@@ -347,6 +388,15 @@ impl QueryContext {
         self.mutable_session_data.write().unwrap().timezone = timezone;
     }
 
+    /// Returns whether ordinary inserts in this request should skip WAL.
+    pub fn skip_wal(&self) -> bool {
+        self.mutable_session_data.read().unwrap().skip_wal
+    }
+
+    pub fn set_skip_wal(&self, skip_wal: bool) {
+        self.mutable_session_data.write().unwrap().skip_wal = skip_wal;
+    }
+
     pub fn read_preference(&self) -> ReadPreference {
         self.mutable_session_data.read().unwrap().read_preference
     }
@@ -409,6 +459,26 @@ impl QueryContext {
 
     pub fn configuration_parameter(&self) -> &ConfigurationVariables {
         &self.configuration_parameter
+    }
+
+    /// Whether the local HTTP entry point selected logical-table batching.
+    pub fn logical_batching_enabled(&self) -> bool {
+        self.logical_batching_enabled
+    }
+
+    /// Sets local logical-table batching selection without adding a wire-visible extension.
+    pub fn set_logical_batching_enabled(&mut self, enabled: bool) {
+        self.logical_batching_enabled = enabled;
+    }
+
+    /// Whether the local protocol entry point selected ordinary-table batching.
+    pub fn batching_enabled(&self) -> bool {
+        self.batching_enabled
+    }
+
+    /// Sets local write batching selection without adding a wire-visible extension.
+    pub fn set_batching_enabled(&mut self, enabled: bool) {
+        self.batching_enabled = enabled;
     }
 
     pub fn channel(&self) -> Channel {
@@ -575,6 +645,9 @@ impl QueryContextBuilder {
                 .configuration_parameter
                 .unwrap_or_else(|| Arc::new(ConfigurationVariables::default())),
             channel,
+            batching_enabled: self.batching_enabled.unwrap_or_default(),
+            admitted_write: None,
+            logical_batching_enabled: self.logical_batching_enabled.unwrap_or_default(),
             process_id: self.process_id.unwrap_or_default(),
             conn_info: self.conn_info.unwrap_or_default(),
             protocol_ctx: self.protocol_ctx.unwrap_or_default(),
@@ -618,85 +691,12 @@ impl ConnInfo {
     }
 }
 
-#[derive(Debug, PartialEq, Default, Clone, Copy)]
-#[repr(u8)]
-pub enum Channel {
-    #[default]
-    Unknown = 0,
-
-    Mysql = 1,
-    Postgres = 2,
-    HttpSql = 3,
-    Prometheus = 4,
-    Otlp = 5,
-    Grpc = 6,
-    Influx = 7,
-    Opentsdb = 8,
-    Loki = 9,
-    Elasticsearch = 10,
-    Jaeger = 11,
-    Log = 12,
-    Promql = 13,
-    Splunk = 14,
-}
-
-impl From<u32> for Channel {
-    fn from(value: u32) -> Self {
-        match value {
-            1 => Self::Mysql,
-            2 => Self::Postgres,
-            3 => Self::HttpSql,
-            4 => Self::Prometheus,
-            5 => Self::Otlp,
-            6 => Self::Grpc,
-            7 => Self::Influx,
-            8 => Self::Opentsdb,
-            9 => Self::Loki,
-            10 => Self::Elasticsearch,
-            11 => Self::Jaeger,
-            12 => Self::Log,
-            13 => Self::Promql,
-            14 => Self::Splunk,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-impl Channel {
-    pub fn dialect(&self) -> Arc<dyn Dialect + Send + Sync> {
-        match self {
-            Channel::Mysql => Arc::new(MySqlDialect {}),
-            Channel::Postgres => Arc::new(PostgreSqlDialect {}),
-            _ => Arc::new(GenericDialect {}),
-        }
-    }
-}
-
-impl Display for Channel {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "{}", self.as_ref())
-    }
-}
-
-impl AsRef<str> for Channel {
-    fn as_ref(&self) -> &str {
-        match self {
-            Channel::Mysql => "mysql",
-            Channel::Postgres => "postgres",
-            Channel::HttpSql => "httpsql",
-            Channel::Prometheus => "prometheus",
-            Channel::Otlp => "otlp",
-            Channel::Grpc => "grpc",
-            Channel::Influx => "influx",
-            Channel::Opentsdb => "opentsdb",
-            Channel::Loki => "loki",
-            Channel::Elasticsearch => "elasticsearch",
-            Channel::Jaeger => "jaeger",
-            Channel::Log => "log",
-            Channel::Promql => "promql",
-            Channel::Splunk => "splunk",
-            Channel::Unknown => "unknown",
-        }
+/// Returns the SQL dialect for the given query channel.
+pub fn dialect_for_channel(channel: Channel) -> Arc<dyn Dialect + Send + Sync> {
+    match channel {
+        Channel::Mysql => Arc::new(MySqlDialect {}),
+        Channel::Postgres => Arc::new(PostgreSqlDialect {}),
+        _ => Arc::new(GenericDialect {}),
     }
 }
 
@@ -763,9 +763,8 @@ mod test {
 
     use common_catalog::consts::DEFAULT_CATALOG_NAME;
 
-    use super::*;
     use crate::Session;
-    use crate::context::Channel;
+    use crate::context::{Channel, *};
 
     #[test]
     fn test_session() {
@@ -812,13 +811,64 @@ mod test {
     }
 
     #[test]
+    fn test_skip_wal_default_builder_and_fork() {
+        let default_context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        assert!(!default_context.skip_wal());
+        assert!(!QueryContextBuilder::default().build().skip_wal());
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        assert!(context.skip_wal());
+        let fork = context.fork();
+        assert!(fork.skip_wal());
+        fork.set_skip_wal(false);
+        assert!(context.skip_wal());
+        assert!(!fork.skip_wal());
+        context.set_skip_wal(false);
+        fork.set_skip_wal(true);
+        assert!(!context.skip_wal());
+        assert!(fork.skip_wal());
+    }
+
+    #[test]
+    fn test_write_admission_is_local_and_database_scoped() {
+        let ctx = QueryContext::with_channel("greptime", "public", Channel::Otlp);
+        let admitted = ctx.with_write_admission();
+        assert_eq!(ctx.write_rows_to_admit("greptime", "public", 100), 100);
+        assert_eq!(admitted.write_rows_to_admit("greptime", "public", 100), 0);
+        assert_eq!(admitted.write_rows_to_admit("greptime", "other", 100), 100);
+        assert_eq!(admitted.write_rows_to_admit("other", "public", 100), 100);
+        assert_eq!(admitted.channel(), Channel::Otlp);
+        assert_eq!(
+            admitted
+                .fork()
+                .write_rows_to_admit("greptime", "public", 100),
+            0
+        );
+        let wire: api::v1::QueryContext = admitted.into();
+        let restored = QueryContext::from(wire);
+        assert_eq!(restored.write_rows_to_admit("greptime", "public", 100), 100);
+    }
+
+    #[test]
+    fn test_skip_wal_is_not_serialized_in_query_context() {
+        let context = QueryContextBuilder::default().skip_wal(true).build();
+        let api_context: api::v1::QueryContext = context.into();
+        assert!(
+            !api_context
+                .extensions
+                .contains_key(crate::hints::INSERT_SKIP_WAL_HINT)
+        );
+        let restored: QueryContext = api_context.into();
+        assert!(!restored.skip_wal());
+    }
+
+    #[test]
     fn test_api_query_context_roundtrip_with_sequences() {
         let api_ctx = api::v1::QueryContext {
             current_catalog: "c1".to_string(),
             current_schema: "s1".to_string(),
             timezone: "UTC".to_string(),
             extensions: HashMap::from([("flow.return_region_seq".to_string(), "true".to_string())]),
-            channel: Channel::Grpc as u32,
+            channel: Channel::Internal as u32,
             snapshot_seqs: Some(api::v1::SnapshotSequences {
                 snapshot_seqs: HashMap::from([(1, 100)]),
                 sst_min_sequences: HashMap::from([(1, 90)]),
@@ -882,5 +932,25 @@ mod test {
 
         ctx.set_extension(LIVE_ANALYZE_METRICS_EXTENSION_KEY, "another-query-id");
         assert!(!ctx.live_analyze_metrics_enabled());
+    }
+    #[test]
+    fn test_batching_selection_is_local_only() {
+        let mut ctx = QueryContextBuilder::default().build();
+        assert!(!ctx.batching_enabled());
+        assert!(!ctx.logical_batching_enabled());
+        ctx.set_logical_batching_enabled(true);
+        assert!(ctx.clone().logical_batching_enabled());
+        assert!(ctx.fork().logical_batching_enabled());
+        ctx.set_batching_enabled(true);
+        assert!(ctx.clone().batching_enabled());
+        assert!(ctx.fork().batching_enabled());
+        let wire: api::v1::QueryContext = ctx.into();
+        let restored = QueryContext::from(wire);
+        assert!(!restored.batching_enabled());
+        assert!(!restored.logical_batching_enabled());
+        let ctx = QueryContextBuilder::default()
+            .set_extension("batching_enabled".to_string(), "true".to_string())
+            .build();
+        assert!(!ctx.batching_enabled());
     }
 }

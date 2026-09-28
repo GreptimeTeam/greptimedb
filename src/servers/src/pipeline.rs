@@ -21,7 +21,7 @@ use api::v1::{ColumnDataType, Row, RowInsertRequest, Rows, Value};
 use common_time::timestamp::TimeUnit;
 use pipeline::{
     ContextOpt, ContextReq, DispatchedTo, GREPTIME_INTERNAL_IDENTITY_PIPELINE_NAME, Pipeline,
-    PipelineContext, PipelineDefinition, PipelineExecOutput, SchemaInfo, TransformedOutput,
+    PipelineContext, PipelineDefinition, PipelineProcessOutput, SchemaInfo, TransformedOutput,
     TransformerMode, identity_pipeline, unwrap_or_continue_if_err,
 };
 use session::context::{Channel, QueryContextRef};
@@ -140,10 +140,14 @@ async fn run_custom_pipeline(
 
     let table = handler.get_table(&table_name, query_ctx).await?;
     schema_info.set_table(table);
+    let needs_json_settings = matches!(
+        pipeline.transformer(),
+        TransformerMode::GreptimeTransformer(transformer) if transformer.has_json_transform()
+    );
 
     for pipeline_map in pipeline_maps {
         let result = pipeline
-            .exec_mut(pipeline_map, pipeline_ctx, &mut schema_info)
+            .process_mut(pipeline_map)
             .inspect_err(|_| {
                 METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
                     .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
@@ -151,9 +155,36 @@ async fn run_custom_pipeline(
             })
             .context(PipelineSnafu);
 
-        let r = unwrap_or_continue_if_err!(result, skip_error);
-        match r {
-            PipelineExecOutput::Transformed(TransformedOutput { rows_by_context }) => {
+        match unwrap_or_continue_if_err!(result, skip_error) {
+            PipelineProcessOutput::Processed(value) => {
+                if needs_json_settings {
+                    // JSON2 coercion must use settings from the final routed table.
+                    let values = match &value {
+                        VrlValue::Array(values) => values.as_slice(),
+                        value => std::slice::from_ref(value),
+                    };
+                    for value in values.iter().filter(|value| value.is_object()) {
+                        let table_suffix = pipeline.resolve_table_suffix(value).unwrap_or_default();
+                        if !schema_info.has_table_for_suffix(&table_suffix) {
+                            let destination =
+                                table_suffix_to_table_name(&table_name, &table_suffix);
+                            let table = handler.get_table(&destination, query_ctx).await?;
+                            schema_info.set_table_for_suffix(table_suffix, table);
+                        }
+                    }
+                }
+
+                let result = pipeline
+                    .transform_mut(value, pipeline_ctx, &mut schema_info)
+                    .inspect_err(|_| {
+                        METRIC_HTTP_LOGS_TRANSFORM_ELAPSED
+                            .with_label_values(&[db.as_str(), METRIC_FAILURE_VALUE])
+                            .observe(transform_timer.elapsed().as_secs_f64());
+                    })
+                    .context(PipelineSnafu);
+                let TransformedOutput { rows_by_context } =
+                    unwrap_or_continue_if_err!(result, skip_error);
+
                 // Process each ContextOpt group separately
                 for (opt, rows_with_suffix) in rows_by_context {
                     let rows_by_suffix = transformed_map.entry(opt).or_default();
@@ -166,10 +197,10 @@ async fn run_custom_pipeline(
                     }
                 }
             }
-            PipelineExecOutput::DispatchedTo(dispatched_to, val) => {
+            PipelineProcessOutput::DispatchedTo(dispatched_to, val) => {
                 push_to_map!(dispatched, dispatched_to, val, arr_len);
             }
-            PipelineExecOutput::Filtered => {
+            PipelineProcessOutput::Filtered => {
                 continue;
             }
         }

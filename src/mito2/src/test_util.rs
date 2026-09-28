@@ -33,7 +33,6 @@ use api::v1::column_def::options_from_column_schema;
 use api::v1::helper::row;
 use api::v1::value::ValueData;
 use api::v1::{OpType, Row, Rows, SemanticType};
-use arrow_schema::extension::{EXTENSION_TYPE_NAME_KEY, ExtensionType};
 use common_base::Plugins;
 use common_base::readable_size::ReadableSize;
 use common_datasource::compression::CompressionType;
@@ -45,7 +44,7 @@ use common_telemetry::{debug, warn};
 use common_test_util::temp_dir::{TempDir, create_temp_dir};
 use common_wal::options::{KafkaWalOptions, WAL_OPTIONS_KEY, WalOptions};
 use datatypes::arrow::array::{TimestampMillisecondArray, UInt8Array, UInt64Array};
-use datatypes::extension::json::JsonExtensionType;
+use datatypes::extension::json::{Json2ExtensionType, JsonExtensionType};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::ColumnSchema;
 use log_store::kafka::log_store::KafkaLogStore;
@@ -53,7 +52,9 @@ use log_store::raft_engine::log_store::RaftEngineLogStore;
 use log_store::test_util::log_store_util;
 use moka::future::CacheBuilder;
 use object_store::ObjectStore;
-use object_store::layers::mock::MockLayer;
+use object_store::layers::mock::{
+    Buffer, Deleter, Metadata, MockLayer, MockLayerBuilder, OpDelete, Result as MockResult, Writer,
+};
 use object_store::manager::{ObjectStoreManager, ObjectStoreManagerRef};
 use object_store::services::Fs;
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
@@ -68,6 +69,7 @@ use store_api::region_request::{
     RegionOpenRequest, RegionPutRequest, RegionRequest,
 };
 use store_api::storage::{ColumnId, RegionId};
+use tokio::sync::Notify;
 
 use crate::cache::write_cache::{WriteCache, WriteCacheRef};
 use crate::config::MitoConfig;
@@ -76,6 +78,7 @@ use crate::engine::{MITO_ENGINE_NAME, MitoEngine};
 use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
+use crate::manifest::storage::{is_checkpoint_file, is_delta_file};
 use crate::read::{Batch, BatchBuilder, BatchReader};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::FormatType;
@@ -85,6 +88,133 @@ use crate::sst::index::intermediate::IntermediateManager;
 use crate::sst::index::puffin_manager::PuffinManagerFactory;
 use crate::time_provider::{StdTimeProvider, TimeProviderRef};
 use crate::worker::WorkerGroup;
+
+/// Controls a mock object-store layer that blocks a checkpoint task once.
+#[derive(Clone)]
+pub(crate) struct CheckpointTaskBlocker {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    armed: Arc<AtomicBool>,
+}
+
+impl CheckpointTaskBlocker {
+    /// Blocks normal manifest checkpoint cleanup at batch-delete close.
+    pub(crate) fn block_cleanup() -> (Self, MockLayer) {
+        let blocker = Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let factory_blocker = blocker.clone();
+        let layer = MockLayerBuilder::default()
+            .deleter_factory(Arc::new(move |inner| {
+                Box::new(BlockingCheckpointDeleter {
+                    inner,
+                    blocker: factory_blocker.clone(),
+                    has_manifest_cleanup_target: false,
+                })
+            }))
+            .build()
+            .unwrap();
+        (blocker, layer)
+    }
+
+    /// Blocks publication of `_last_checkpoint` at writer close.
+    pub(crate) fn block_last_checkpoint_write() -> (Self, MockLayer) {
+        let blocker = Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            armed: Arc::new(AtomicBool::new(true)),
+        };
+        let factory_blocker = blocker.clone();
+        let layer = MockLayerBuilder::default()
+            .writer_factory(Arc::new(move |path, _args, inner| {
+                Box::new(BlockingCheckpointWriter {
+                    path: path.to_string(),
+                    inner,
+                    blocker: factory_blocker.clone(),
+                })
+            }))
+            .build()
+            .unwrap();
+        (blocker, layer)
+    }
+
+    pub(crate) async fn wait_until_blocked(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    pub(crate) fn arm_next_close(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+
+    async fn block_once(&self) {
+        if self.armed.swap(false, Ordering::AcqRel) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+}
+
+struct BlockingCheckpointDeleter {
+    inner: Deleter,
+    blocker: CheckpointTaskBlocker,
+    has_manifest_cleanup_target: bool,
+}
+
+impl object_store::layers::mock::Delete for BlockingCheckpointDeleter {
+    async fn delete(&mut self, path: &str, args: OpDelete) -> MockResult<()> {
+        self.inner.delete(path, args).await?;
+        if is_manifest_checkpoint_file(path) {
+            self.has_manifest_cleanup_target = true;
+        }
+        Ok(())
+    }
+
+    async fn close(&mut self) -> MockResult<()> {
+        if self.has_manifest_cleanup_target {
+            self.blocker.block_once().await;
+        }
+        self.inner.close().await
+    }
+}
+
+fn is_manifest_checkpoint_file(path: &str) -> bool {
+    // The mock deleter receives paths relative to the listed manifest
+    // directory, so the normal/staging directory segments are unavailable.
+    let path = Path::new(path);
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    is_delta_file(file_name) || is_checkpoint_file(file_name)
+}
+
+struct BlockingCheckpointWriter {
+    path: String,
+    inner: Writer,
+    blocker: CheckpointTaskBlocker,
+}
+
+impl object_store::layers::mock::Write for BlockingCheckpointWriter {
+    async fn write(&mut self, bs: Buffer) -> MockResult<()> {
+        self.inner.write(bs).await
+    }
+
+    async fn close(&mut self) -> MockResult<Metadata> {
+        if self.path.ends_with("_last_checkpoint") {
+            self.blocker.block_once().await;
+        }
+        self.inner.close().await
+    }
+
+    async fn abort(&mut self) -> MockResult<()> {
+        self.inner.abort().await
+    }
+}
 
 pub(crate) fn new_noop_file_purger() -> FilePurgerRef {
     Arc::new(NoopFilePurger)
@@ -438,7 +568,7 @@ impl TestEnv {
                 .display()
                 .to_string();
             let builder = Fs::default();
-            let object_store = ObjectStore::new(builder.root(&data_path)).unwrap().finish();
+            let object_store = ObjectStore::new(builder.root(&data_path)).unwrap();
             object_store_manager.add(storage_name, object_store);
         }
         let object_store_manager = Arc::new(object_store_manager);
@@ -552,6 +682,7 @@ impl TestEnv {
 
         match log_store {
             LogStoreImpl::RaftEngine(log_store) => WorkerGroup::start(
+                &data_home,
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
@@ -563,6 +694,7 @@ impl TestEnv {
             .await
             .unwrap(),
             LogStoreImpl::Kafka(log_store) => WorkerGroup::start(
+                &data_home,
                 Arc::new(config),
                 log_store,
                 Arc::new(object_store_manager),
@@ -609,19 +741,16 @@ impl TestEnv {
 
         let object_store = if let Some(mock_layer) = self.object_store_mock_layer.as_ref() {
             debug!("create object store with mock layer");
-            ObjectStore::new(builder)
-                .unwrap()
-                .layer(mock_layer.clone())
-                .finish()
+            ObjectStore::new(builder).unwrap().layer(mock_layer.clone())
         } else {
-            ObjectStore::new(builder).unwrap().finish()
+            ObjectStore::new(builder).unwrap()
         };
         ObjectStoreManager::new("default", object_store)
     }
 
     pub(crate) fn create_in_memory_object_store_manager(&self) -> ObjectStoreManager {
         let builder = object_store::services::Memory::default();
-        let object_store = ObjectStore::new(builder).unwrap().finish();
+        let object_store = ObjectStore::new(builder).unwrap();
         ObjectStoreManager::new("memory", object_store)
     }
 
@@ -641,11 +770,8 @@ impl TestEnv {
             ObjectStore::new(builder.root(&manifest_dir))
                 .unwrap()
                 .layer(mock_layer.clone())
-                .finish()
         } else {
-            ObjectStore::new(builder.root(&manifest_dir))
-                .unwrap()
-                .finish()
+            ObjectStore::new(builder.root(&manifest_dir)).unwrap()
         };
 
         // The "manifest_dir" here should be the relative path from the `object_store`'s root.
@@ -866,11 +992,10 @@ impl CreateRequestBuilder {
         for i in 0..self.field_num {
             let mut column_schema =
                 ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
-            if self.field_datatype.is_json() {
-                column_schema.mut_metadata().insert(
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                );
+            if self.field_datatype.is_json2() {
+                column_schema.with_extension_type(&Json2ExtensionType::default());
+            } else if self.field_datatype.is_json() {
+                column_schema.with_extension_type(&JsonExtensionType);
             }
             column_metadatas.push(ColumnMetadata {
                 column_schema,
@@ -931,11 +1056,10 @@ impl CreateRequestBuilder {
         for i in 0..self.field_num {
             let mut column_schema =
                 ColumnSchema::new(format!("field_{i}"), self.field_datatype.clone(), nullable);
-            if self.field_datatype.is_json() {
-                column_schema.mut_metadata().insert(
-                    EXTENSION_TYPE_NAME_KEY.to_string(),
-                    JsonExtensionType::NAME.to_string(),
-                );
+            if self.field_datatype.is_json2() {
+                column_schema.with_extension_type(&Json2ExtensionType::default());
+            } else if self.field_datatype.is_json() {
+                column_schema.with_extension_type(&JsonExtensionType);
             }
             column_metadatas.push(ColumnMetadata {
                 column_schema,
@@ -1229,6 +1353,7 @@ pub async fn put_rows(engine: &MitoEngine, region_id: RegionId, rows: Rows) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows,
                 hint: None,
                 partition_expr_version: None,

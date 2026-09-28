@@ -112,29 +112,36 @@ impl FlowDdlEvent {
         }
     }
 
-    /// Builds a lightweight Create Flow lifecycle event.
-    pub(crate) fn create_lifecycle() -> Self {
-        Self::lifecycle(CREATE_FLOW_EVENT_TYPE)
+    /// Builds a Create Flow lifecycle event with its submitted locator.
+    pub(crate) fn create_lifecycle(catalog_name: &str, flow_name: &str) -> Self {
+        Self::lifecycle(CREATE_FLOW_EVENT_TYPE, catalog_name, flow_name)
     }
 
-    /// Builds a successful Create Flow event containing only a resolved ID.
-    pub(crate) fn create_succeeded(flow_id: Option<u32>) -> Self {
+    /// Builds a successful Create Flow event with its submitted locator and resolved ID.
+    pub(crate) fn create_succeeded(
+        catalog_name: &str,
+        flow_name: &str,
+        flow_id: Option<u32>,
+    ) -> Self {
         Self {
             flow_id,
-            ..Self::lifecycle(CREATE_FLOW_EVENT_TYPE)
+            ..Self::lifecycle(CREATE_FLOW_EVENT_TYPE, catalog_name, flow_name)
         }
     }
 
-    /// Builds a lightweight Drop Flow lifecycle event.
-    pub(crate) fn drop_lifecycle() -> Self {
-        Self::lifecycle(DROP_FLOW_EVENT_TYPE)
+    /// Builds a Drop Flow lifecycle event with its submitted locator.
+    pub(crate) fn drop_lifecycle(catalog_name: &str, flow_name: &str, flow_id: u32) -> Self {
+        Self {
+            flow_id: Some(flow_id),
+            ..Self::lifecycle(DROP_FLOW_EVENT_TYPE, catalog_name, flow_name)
+        }
     }
 
-    fn lifecycle(event_type: &'static str) -> Self {
+    fn lifecycle(event_type: &'static str, catalog_name: &str, flow_name: &str) -> Self {
         Self {
             event_type,
-            catalog_name: None,
-            flow_name: None,
+            catalog_name: Some(catalog_name.to_string()),
+            flow_name: Some(flow_name.to_string()),
             flow_id: None,
             payload: None,
         }

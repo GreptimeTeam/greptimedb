@@ -74,6 +74,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid dense primary key: {}", reason))]
+    InvalidDensePrimaryKey {
+        reason: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Encode null value"))]
     IndexEncodeNull {
         #[snafu(implicit)]
@@ -101,7 +108,9 @@ impl ErrorExt for Error {
                 StatusCode::InvalidArguments
             }
             NotSupportedField { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
-            InvalidSparsePrimaryKey { .. } => StatusCode::InvalidArguments,
+            InvalidSparsePrimaryKey { .. } | InvalidDensePrimaryKey { .. } => {
+                StatusCode::InvalidArguments
+            }
             EvaluateFilter { source, .. } => source.status_code(),
         }
     }

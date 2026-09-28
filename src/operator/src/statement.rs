@@ -19,10 +19,15 @@ mod copy_query_to;
 mod copy_table_from;
 mod copy_table_to;
 mod cursor;
+mod database_copy;
 pub mod ddl;
 mod describe;
 mod dml;
+pub mod export_database;
+pub mod export_logical_tables;
+pub mod import_packed;
 mod kill;
+pub mod semantic_graph;
 mod set;
 mod show;
 mod tql;
@@ -62,7 +67,7 @@ use query::QueryEngineRef;
 use query::parser::QueryStatement;
 use session::context::{Channel, QueryContextBuilder, QueryContextRef};
 use session::table_name::table_idents_to_full_name;
-use set::{set_query_timeout, set_read_preference};
+use set::{set_query_timeout, set_read_preference, set_skip_wal};
 use snafu::{OptionExt, ResultExt, ensure};
 use sql::ast::ObjectNamePartExt;
 use sql::statements::OptionMap;
@@ -80,6 +85,11 @@ use table::requests::{CopyDatabaseRequest, CopyDirection, CopyQueryToRequest, Co
 use table::table_name::TableName;
 use table::table_reference::TableReference;
 
+pub use self::admin::{
+    AdminEventRecorderHandle, AdminFunctionLayer, AdminFunctionLayerRef,
+    AdminFunctionRecordingLayer, AdminFunctionRequest, AdminFunctionResponse, AdminFunctionService,
+    AdminFunctionServiceRef, admin_output_schema,
+};
 use self::set::{
     set_bytea_output, set_datestyle, set_intervalstyle, set_timezone, validate_client_encoding,
 };
@@ -138,6 +148,7 @@ pub struct StatementExecutor {
     inserter: InserterRef,
     process_manager: Option<ProcessManagerRef>,
     origin_frontend_addr: String,
+    admin_function_service: AdminFunctionServiceRef,
     pub(crate) local_file_access: LocalFileAccess,
     #[cfg(feature = "enterprise")]
     create_database_handler: Option<CreateDatabaseHandlerRef>,
@@ -179,6 +190,7 @@ impl StatementExecutor {
         origin_frontend_addr: String,
         local_file_access: LocalFileAccess,
     ) -> Self {
+        let admin_function_service = admin::new_admin_function_service(query_engine.clone());
         Self {
             catalog_manager,
             query_engine,
@@ -191,12 +203,21 @@ impl StatementExecutor {
             inserter,
             process_manager,
             origin_frontend_addr,
+            admin_function_service,
             local_file_access,
             #[cfg(feature = "enterprise")]
             create_database_handler: None,
             #[cfg(feature = "enterprise")]
             trigger_querier: None,
         }
+    }
+
+    /// Adds a layer around the ADMIN function execution service.
+    ///
+    /// The last added layer is the outermost layer.
+    pub fn with_admin_function_layer(mut self, layer: AdminFunctionLayerRef) -> Self {
+        self.admin_function_service = layer.layer(self.admin_function_service);
+        self
     }
 
     #[cfg(feature = "enterprise")]
@@ -259,6 +280,7 @@ impl StatementExecutor {
             Statement::ShowViews(stmt) => self.show_views(stmt, query_ctx).await,
 
             Statement::ShowFlows(stmt) => self.show_flows(stmt, query_ctx).await,
+            Statement::ShowFlowStatus(stmt) => self.show_flow_status(stmt, query_ctx).await,
 
             #[cfg(feature = "enterprise")]
             Statement::ShowTriggers(stmt) => self.show_triggers(stmt, query_ctx).await,
@@ -380,6 +402,7 @@ impl StatementExecutor {
                 self.drop_tables(&table_names[..], stmt.drop_if_exists(), query_ctx.clone())
                     .await
             }
+            #[cfg(feature = "enterprise")]
             Statement::UndropTable(stmt) => {
                 let (catalog, schema, table) =
                     table_idents_to_full_name(stmt.table_name(), &query_ctx)
@@ -515,6 +538,7 @@ impl StatementExecutor {
 
         match var_name.as_str() {
             "READ_PREFERENCE" => set_read_preference(set_var.value, query_ctx)?,
+            "SKIP_WAL" => set_skip_wal(set_var.value, query_ctx)?,
 
             "@@TIME_ZONE" | "@@SESSION.TIME_ZONE" | "TIMEZONE" | "TIME_ZONE" => {
                 set_timezone(set_var.value, query_ctx)?
@@ -847,7 +871,7 @@ fn to_copy_table_request(stmt: CopyTable, query_ctx: QueryContextRef) -> Result<
 
 /// Converts [CopyDatabaseArgument] to [CopyDatabaseRequest].
 /// This function extracts the necessary info including catalog/database name, time range, etc.
-fn to_copy_database_request(
+pub fn to_copy_database_request(
     arg: CopyDatabaseArgument,
     query_ctx: &QueryContextRef,
 ) -> Result<CopyDatabaseRequest> {

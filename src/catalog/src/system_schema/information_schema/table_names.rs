@@ -44,6 +44,7 @@ pub const TABLE_CONSTRAINTS: &str = "table_constraints";
 pub const CLUSTER_INFO: &str = "cluster_info";
 pub const VIEWS: &str = "views";
 pub const FLOWS: &str = "flows";
+pub const FLOW_STATISTICS: &str = "flow_statistics";
 pub const PROCEDURE_INFO: &str = "procedure_info";
 pub const REGION_INFO: &str = "region_info";
 pub const REGION_STATISTICS: &str = "region_statistics";
@@ -54,3 +55,8 @@ pub const SSTS_INDEX_META: &str = "ssts_index_meta";
 pub const TABLE_SEMANTICS: &str = "table_semantics";
 pub const STATISTICS: &str = "statistics";
 pub const RECYCLE_BIN: &str = "recycle_bin";
+pub const PLUGINS: &str = "plugins";
+pub const USER_PRIVILEGES: &str = "user_privileges";
+/// MySQL's session list. GreptimeDB reports its own sessions through [`PROCESS_LIST`];
+/// this table only exists so MySQL tooling finds the name and column shape it expects.
+pub const PROCESSLIST: &str = "processlist";

@@ -254,15 +254,22 @@ mod test {
     use std::sync::Arc;
 
     use api::v1::column_def::try_as_column_schema;
+    use catalog::RegisterTableRequest;
+    use catalog::memory::new_memory_catalog_manager;
+    use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
     use datafusion::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema as ArrowSchema, TimeUnit,
     };
     use datafusion_common::DFSchema;
     use datafusion_expr::logical_plan::EmptyRelation;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::ColumnSchema;
+    use datatypes::schema::{ColumnSchema, Schema};
     use pretty_assertions::assert_eq;
+    use query::options::QueryOptions;
+    use query::{QueryEngineFactory, QueryEngineRef};
     use session::context::QueryContext;
+    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::test_util::EmptyTable;
 
     use super::*;
     use crate::adapter::{AUTO_CREATED_PLACEHOLDER_TS_COL, AUTO_CREATED_UPDATE_AT_TS_COL};
@@ -306,6 +313,120 @@ mod test {
         assert_eq!(ConcreteDataType::string_datatype(), columns[0].data_type);
         assert_eq!(ConcreteDataType::float64_datatype(), columns[1].data_type);
         assert!(columns[2].is_time_index());
+    }
+
+    /// Creates a query engine holding a Prometheus shaped table `http_requests`: tags
+    /// (`host`, `idc`), a single f64 value column (`val`) and a time index (`ts`), so that
+    /// TQL queries can be planned against it.
+    fn create_tql_test_query_engine() -> QueryEngineRef {
+        let catalog_list = new_memory_catalog_manager().unwrap();
+        let table_meta = TableMetaBuilder::empty()
+            .schema(Arc::new(Schema::new(vec![
+                ColumnSchema::new(
+                    "ts",
+                    ConcreteDataType::timestamp_millisecond_datatype(),
+                    false,
+                )
+                .with_time_index(true),
+                ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+                ColumnSchema::new("idc", ConcreteDataType::string_datatype(), true),
+                ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+            ])))
+            // `host` and `idc` are tags, `val` is the value column
+            .primary_key_indices(vec![1, 2])
+            .value_indices(vec![3])
+            .engine("mito".to_string())
+            .next_column_id(1026)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .name("http_requests".to_string())
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: "http_requests".to_string(),
+                    table_id: 1026,
+                    table: EmptyTable::from_table_info(&table_info),
+                })
+                .is_ok()
+        );
+
+        QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
+    /// A TQL `count_values` flow must keep the generated label as a primary key of the auto
+    /// created sink table. `count_values("status_code", http_requests)` groups by the sample
+    /// value column and projects the label as a unary scalar expression of that column
+    /// (`prom_float_to_string(val) AS status_code`), so the label only derives from a group by
+    /// column instead of referencing it directly.
+    ///
+    /// The plan is built with the same path a flow task uses (including the DataFusion
+    /// optimizers, which may rewrite the shape of the alias), and the assertion covers both.
+    #[tokio::test]
+    async fn test_tql_count_values_generated_label_is_primary_key() {
+        let query_engine = create_tql_test_query_engine();
+        let ctx = QueryContext::arc();
+
+        for optimize in [false, true] {
+            let plan = sql_to_df_plan(
+                ctx.clone(),
+                query_engine.clone(),
+                r#"TQL EVAL (0, 15, '5s') count_values("status_code", http_requests)"#,
+                optimize,
+            )
+            .await
+            .unwrap();
+            let plan_display = plan.display_indent_schema().to_string();
+            let expr = create_table_with_expr(
+                &plan,
+                &[
+                    "greptime".to_string(),
+                    "public".to_string(),
+                    "sink".to_string(),
+                ],
+                &QueryType::Tql,
+            )
+            .unwrap();
+            let columns = expr
+                .column_defs
+                .iter()
+                .map(|column| try_as_column_schema(column).unwrap())
+                .collect::<Vec<_>>();
+
+            assert_eq!(
+                vec!["status_code".to_string()],
+                expr.primary_keys,
+                "optimize={optimize}, plan:\n{plan_display}"
+            );
+            assert_eq!(
+                "ts", expr.time_index,
+                "optimize={optimize}, plan:\n{plan_display}"
+            );
+            // the aggregation output is a value column, the generated label is a tag column
+            assert_eq!(
+                "count(http_requests.val)", columns[0].name,
+                "optimize={optimize}, plan:\n{plan_display}"
+            );
+            assert_eq!(ConcreteDataType::float64_datatype(), columns[0].data_type);
+            assert_eq!("ts", columns[1].name);
+            assert!(columns[1].is_time_index());
+            assert_eq!("status_code", columns[2].name);
+            assert_eq!(ConcreteDataType::string_datatype(), columns[2].data_type);
+        }
     }
 
     #[tokio::test]

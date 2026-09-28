@@ -40,10 +40,11 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
--- SQLNESS SLEEP 2s
 ADMIN flush_table('test_ttl');
 
 +-------------------------------+
@@ -67,8 +68,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER TABLE
        test_ttl UNSET 'ttl';
@@ -215,8 +218,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 ALTER TABLE
        test_ttl
@@ -279,8 +284,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 -- to make sure alter back and forth from duration to/from instant wouldn't break anything
 ALTER TABLE
@@ -345,8 +352,10 @@ from
 ORDER BY
        val;
 
-++
-++
++-----+
+| val |
++-----+
++-----+
 
 DROP TABLE test_ttl;
 

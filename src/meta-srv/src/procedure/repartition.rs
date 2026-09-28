@@ -34,6 +34,7 @@ use common_meta::cache_invalidator::CacheInvalidatorRef;
 use common_meta::ddl::DdlContext;
 use common_meta::ddl::allocator::region_routes::RegionRoutesAllocatorRef;
 use common_meta::ddl::allocator::wal_options::WalOptionsAllocatorRef;
+use common_meta::ddl::utils::get_region_wal_options;
 use common_meta::ddl_manager::{RepartitionProcedureFactory, RepartitionSource};
 use common_meta::instruction::CacheIdent;
 use common_meta::key::datanode_table::RegionInfo;
@@ -106,7 +107,7 @@ pub struct PersistentContext {
 }
 
 fn default_timeout() -> Duration {
-    Duration::from_mins(2)
+    Duration::from_secs(2 * 60)
 }
 
 impl PersistentContext {
@@ -402,16 +403,27 @@ impl Context {
         let datanode_table_value =
             get_datanode_table_value(&self.table_metadata_manager, table_id, datanode_id).await?;
 
-        let RegionInfo {
-            region_options,
-            region_wal_options,
-            ..
-        } = &datanode_table_value.region_info;
+        let RegionInfo { region_options, .. } = &datanode_table_value.region_info;
+
+        let mut region_wal_options = get_region_wal_options(
+            &self.table_metadata_manager,
+            current_table_route_value,
+            table_id,
+        )
+        .await
+        .context(error::TableMetadataManagerSnafu)?;
+        // Legacy regions without a persisted WAL option use RaftEngine. Only
+        // existing routes get this default; allocated regions must supply one.
+        for route in current_table_route_value.region_routes().unwrap() {
+            region_wal_options
+                .entry(route.region.id.region_number())
+                .or_default();
+        }
 
         // Merge and validate the new region wal options.
         let validated_region_wal_options =
             crate::procedure::repartition::utils::merge_and_validate_region_wal_options(
-                region_wal_options,
+                &region_wal_options,
                 new_region_wal_options,
                 &new_region_routes,
                 table_id,
@@ -801,7 +813,7 @@ impl Procedure for RepartitionProcedure {
             let start = self.state.as_any().downcast_ref::<RepartitionStart>()?;
             RepartitionEvent::submitted(&self.context.persistent_ctx, start)
         } else {
-            RepartitionEvent::lifecycle()
+            RepartitionEvent::lifecycle(&self.context.persistent_ctx)
         };
         Some(Box::new(event))
     }
@@ -1270,6 +1282,7 @@ mod tests {
                 lifecycle_state: &state,
                 trigger: EventTrigger::Submitted,
                 event_type_filter: all.clone(),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(submitted.event_type(), REPARTITION_EVENT_TYPE);
@@ -1283,6 +1296,7 @@ mod tests {
                 event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                     REPARTITION_EVENT_TYPE.to_string(),
                 ]))),
+                event_context: None,
             })
             .unwrap();
         assert_eq!(allowed.event_type(), REPARTITION_EVENT_TYPE);
@@ -1293,6 +1307,7 @@ mod tests {
                 lifecycle_state: &state,
                 trigger: EventTrigger::Succeeded,
                 event_type_filter: all,
+                event_context: None,
             })
             .unwrap();
         assert_eq!(succeeded.json_payload().unwrap(), serde_json::Value::Null);
@@ -1304,6 +1319,7 @@ mod tests {
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::from([
                 "another_event".to_string()
             ]))),
+            event_context: None,
         });
         assert!(filtered.is_none());
 
@@ -1312,6 +1328,7 @@ mod tests {
             lifecycle_state: &state,
             trigger: EventTrigger::Submitted,
             event_type_filter: Arc::new(EventTypeFilter::Only(HashSet::new())),
+            event_context: None,
         });
         assert!(empty.is_none());
     }

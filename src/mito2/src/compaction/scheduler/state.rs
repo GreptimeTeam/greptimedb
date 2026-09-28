@@ -81,41 +81,69 @@ pub(super) enum CompactionPhase {
     },
 }
 
+/// Describes how the current compaction cycle was triggered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CompactionTrigger {
+    Automatic,
+    Manual,
+}
+
 #[derive(Debug)]
 pub(super) struct ActiveCompaction {
     pub(super) phase: CompactionPhase,
+    trigger: CompactionTrigger,
     /// Waiters satisfied by the current planning or execution cycle. Picking waiters move into
     /// the submitted task; regular triggers coalesced during execution accumulate here.
     pub(super) waiters: Vec<OutputTx>,
-    /// Requests one fresh regular picking cycle after the current cycle finishes. It is kept
-    /// separate because the current picker snapshot may predate the trigger; `Some(empty)` records
-    /// an automatic trigger without an explicit waiter.
-    pub(super) regular_followup_waiters: Option<Vec<OutputTx>>,
+    /// An automatic trigger arrived during this cycle and requires one unrestricted regular
+    /// picking cycle after the current cycle finishes. Recorded in every phase so an external
+    /// trigger always resets the continuation scope, even during local/remote execution.
+    pub(super) automatic_followup_required: bool,
 }
 
 impl ActiveCompaction {
-    pub(super) fn picking(plan_id: u64, waiters: Vec<OutputTx>) -> Self {
+    pub(super) fn picking(
+        plan_id: u64,
+        waiters: Vec<OutputTx>,
+        trigger: CompactionTrigger,
+    ) -> Self {
         Self {
             phase: CompactionPhase::Picking {
                 plan_id,
                 cancelled: false,
             },
+            trigger,
             waiters,
-            regular_followup_waiters: None,
+            automatic_followup_required: false,
         }
     }
 
-    pub(super) fn start_picking(&mut self, plan_id: u64) {
+    pub(super) fn start_picking(&mut self, plan_id: u64, trigger: CompactionTrigger) {
         self.phase = CompactionPhase::Picking {
             plan_id,
             cancelled: false,
         };
+        self.trigger = trigger;
     }
 
     pub(super) fn start_regular_picking(&mut self, plan_id: u64) {
-        self.waiters
-            .extend(self.regular_followup_waiters.take().unwrap_or_default());
-        self.start_picking(plan_id);
+        self.start_picking(plan_id, CompactionTrigger::Automatic);
+    }
+
+    /// Marks an automatic trigger. The trigger is coalesced into a single unrestricted
+    /// follow-up cycle regardless of the current phase.
+    pub(super) fn mark_automatic_trigger(&mut self) {
+        self.automatic_followup_required = true;
+    }
+
+    /// Resets whether an unrestricted follow-up cycle is required and
+    /// return the previous value.
+    pub(super) fn reset_automatic_followup(&mut self) -> bool {
+        std::mem::take(&mut self.automatic_followup_required)
+    }
+
+    pub(super) fn is_manual(&self) -> bool {
+        self.trigger == CompactionTrigger::Manual
     }
 
     pub(super) fn is_picking(&self, expected_plan_id: u64) -> bool {
@@ -157,17 +185,6 @@ impl ActiveCompaction {
             }
             CompactionPhase::Local { state, .. } => state.request_cancel(),
             CompactionPhase::Remote { .. } => RequestCancelResult::TooLateToCancel,
-        }
-    }
-
-    pub(super) fn merge_regular_trigger(&mut self, mut waiter: OptionOutputTx) {
-        if matches!(self.phase, CompactionPhase::Picking { .. }) {
-            let regular_followup_waiters = self.regular_followup_waiters.get_or_insert_default();
-            if let Some(waiter) = waiter.take_inner() {
-                regular_followup_waiters.push(waiter);
-            }
-        } else {
-            self.merge_waiter(waiter);
         }
     }
 
@@ -241,16 +258,12 @@ pub(super) struct CompactionStatus {
     pub(super) version_control: VersionControlRef,
     /// Access layer of the region.
     pub(super) access_layer: AccessLayerRef,
-    /// Current compaction lifecycle. `None` is the existing transient idle state.
-    // TODO: Remove idle statuses and make ActiveCompaction non-optional once chained
-    // scheduling can recreate the status from region context.
-    pub(super) active: Option<ActiveCompaction>,
-    /// Optional range retained by automatic continuations of the current compaction.
-    pub(super) time_range: Option<TimestampRange>,
-    /// Pending compactions that are supposed to run as soon as current compaction task finished.
+    /// Current compaction lifecycle.
+    pub(super) active: ActiveCompaction,
+    /// A manual compaction waiting for the current automatic compaction to finish.
     ///
-    /// This holds strict-window requests and ranged regular requests. An unrestricted regular
-    /// request is instead merged into `ActiveCompaction::regular_followup_waiters` or `waiters`.
+    /// A manual request is rejected if the current compaction is also manual. Automatic requests
+    /// are merged into the active compaction instead of using this slot.
     pub(super) pending_request: Option<PendingCompaction>,
     /// Pending DDL requests that should run when compaction is done.
     ///
@@ -261,76 +274,66 @@ pub(super) struct CompactionStatus {
 }
 
 impl CompactionStatus {
-    /// Creates a new [CompactionStatus]
+    /// Creates a new picking [CompactionStatus].
     pub(super) fn new(
         region_id: RegionId,
         version_control: VersionControlRef,
         access_layer: AccessLayerRef,
+        plan_id: u64,
+        trigger: CompactionTrigger,
     ) -> CompactionStatus {
         CompactionStatus {
             region_id,
             version_control,
             access_layer,
-            active: None,
-            time_range: None,
+            active: ActiveCompaction::picking(plan_id, Vec::new(), trigger),
             pending_request: None,
             pending_ddl_requests: Vec::new(),
         }
     }
 
     #[cfg(test)]
+    pub(super) fn for_test(
+        region_id: RegionId,
+        version_control: VersionControlRef,
+        access_layer: AccessLayerRef,
+    ) -> Self {
+        Self::new(
+            region_id,
+            version_control,
+            access_layer,
+            0,
+            CompactionTrigger::Automatic,
+        )
+    }
+
+    #[cfg(test)]
     pub(super) fn start_picking(&mut self, plan_id: u64) {
-        self.start_picking_with_time_range(plan_id, None);
+        self.start_picking_with_trigger(plan_id, CompactionTrigger::Automatic);
     }
 
-    pub(super) fn start_picking_with_time_range(
-        &mut self,
-        plan_id: u64,
-        time_range: Option<TimestampRange>,
-    ) {
-        self.time_range = time_range;
-        if let Some(active) = &mut self.active {
-            active.start_picking(plan_id);
-        } else {
-            self.active = Some(ActiveCompaction::picking(plan_id, Vec::new()));
-        }
+    pub(super) fn start_picking_with_trigger(&mut self, plan_id: u64, trigger: CompactionTrigger) {
+        self.active.start_picking(plan_id, trigger);
     }
 
-    pub(super) fn start_regular_picking(
-        &mut self,
-        plan_id: u64,
-        active: Option<ActiveCompaction>,
-        time_range: Option<TimestampRange>,
-    ) {
-        self.time_range = time_range;
-        self.active = Some(if let Some(mut active) = active {
-            active.start_regular_picking(plan_id);
-            active
-        } else {
-            ActiveCompaction::picking(plan_id, Vec::new())
-        });
+    pub(super) fn start_regular_picking(&mut self, plan_id: u64) {
+        self.active.start_regular_picking(plan_id);
     }
 
     pub(super) fn is_picking(&self, expected_plan_id: u64) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|active| active.is_picking(expected_plan_id))
+        self.active.is_picking(expected_plan_id)
     }
 
     pub(super) fn accept_plan(&self, expected_plan_id: u64) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|active| active.accept_plan(expected_plan_id))
+        self.active.accept_plan(expected_plan_id)
     }
 
-    pub(super) fn is_busy(&self) -> bool {
-        self.active.is_some()
+    pub(super) fn is_manual_compaction(&self) -> bool {
+        self.active.is_manual()
     }
 
     pub(super) fn matches_execution(&self, execution: &CompactionExecution) -> bool {
-        self.active
-            .as_ref()
-            .is_some_and(|active| active.matches_execution(execution))
+        self.active.matches_execution(execution)
     }
 
     #[cfg(test)]
@@ -341,15 +344,7 @@ impl CompactionStatus {
             state: state.clone(),
             execution,
         };
-        if let Some(active) = &mut self.active {
-            active.phase = phase;
-        } else {
-            self.active = Some(ActiveCompaction {
-                phase,
-                waiters: Vec::new(),
-                regular_followup_waiters: None,
-            });
-        }
+        self.active.phase = phase;
         state
     }
 
@@ -357,72 +352,39 @@ impl CompactionStatus {
     pub(super) fn start_remote_task(&mut self) {
         let execution = CompactionExecution::new(0, CompactingFiles::empty());
         let phase = CompactionPhase::Remote { execution };
-        if let Some(active) = &mut self.active {
-            active.phase = phase;
-        } else {
-            self.active = Some(ActiveCompaction {
-                phase,
-                waiters: Vec::new(),
-                regular_followup_waiters: None,
-            });
-        }
+        self.active.phase = phase;
     }
 
     pub(super) fn request_cancel(&mut self) -> RequestCancelResult {
-        let Some(active) = &mut self.active else {
-            return RequestCancelResult::NotRunning;
-        };
-        active.request_cancel()
+        self.active.request_cancel()
     }
 
-    #[cfg(test)]
-    pub(super) fn clear_running_task(&mut self) -> bool {
-        self.active.take().is_some()
-    }
-
-    pub(super) fn merge_regular_trigger(&mut self, waiter: OptionOutputTx) {
-        if let Some(active) = &mut self.active {
-            active.merge_regular_trigger(waiter);
-        }
+    pub(super) fn mark_automatic_trigger(&mut self) {
+        self.active.mark_automatic_trigger();
     }
 
     /// Merge the waiter to the pending compaction.
     pub(super) fn merge_waiter(&mut self, waiter: OptionOutputTx) {
-        if let Some(active) = &mut self.active {
-            active.merge_waiter(waiter);
-        }
-    }
-
-    pub(super) fn take_active(&mut self) -> Option<ActiveCompaction> {
-        self.active.take()
+        self.active.merge_waiter(waiter);
     }
 
     pub(super) fn take_waiters(&mut self) -> Vec<OutputTx> {
-        self.active
-            .as_mut()
-            .map(|active| std::mem::take(&mut active.waiters))
-            .unwrap_or_default()
+        std::mem::take(&mut self.active.waiters)
     }
 
     pub(super) fn extend_waiters(&mut self, waiters: Vec<OutputTx>) {
-        if let Some(active) = &mut self.active {
-            active.waiters.extend(waiters);
-        }
+        self.active.waiters.extend(waiters);
     }
 
     pub(super) fn append_waiters(&mut self, waiters: &mut Vec<OutputTx>) {
-        if let Some(active) = &mut self.active {
-            active.waiters.append(waiters);
-        }
+        self.active.waiters.append(waiters);
     }
 
     pub(super) fn set_phase(&mut self, phase: CompactionPhase) {
-        if let Some(active) = &mut self.active {
-            active.phase = phase;
-        }
+        self.active.phase = phase;
     }
 
-    /// Set pending compaction request or replace current value if already exist.
+    /// Sets a pending manual compaction request, replacing an older pending request.
     pub(super) fn set_pending_request(&mut self, pending: PendingCompaction) {
         if let Some(prev) = self.pending_request.replace(pending) {
             debug!(
@@ -434,16 +396,10 @@ impl CompactionStatus {
     }
 
     pub(super) fn on_failure(mut self, err: Arc<Error>) {
-        if let Some(mut active) = self.active.take() {
-            for waiter in active
-                .waiters
-                .drain(..)
-                .chain(active.regular_followup_waiters.take().unwrap_or_default())
-            {
-                waiter.send(Err(err.clone()).context(CompactRegionSnafu {
-                    region_id: self.region_id,
-                }));
-            }
+        for waiter in self.active.waiters.drain(..) {
+            waiter.send(Err(err.clone()).context(CompactRegionSnafu {
+                region_id: self.region_id,
+            }));
         }
 
         if let Some(pending_compaction) = self.pending_request {
@@ -465,14 +421,8 @@ impl CompactionStatus {
 
     #[must_use]
     pub(super) fn on_cancel(mut self) -> Vec<SenderDdlRequest> {
-        if let Some(mut active) = self.active.take() {
-            for waiter in active
-                .waiters
-                .drain(..)
-                .chain(active.regular_followup_waiters.take().unwrap_or_default())
-            {
-                waiter.send(CompactionCancelledSnafu.fail());
-            }
+        for waiter in self.active.waiters.drain(..) {
+            waiter.send(CompactionCancelledSnafu.fail());
         }
 
         if let Some(pending_compaction) = self.pending_request {
@@ -516,8 +466,7 @@ impl CompactionStatus {
     }
 }
 
-/// Pending compaction request that is supposed to run after current task is finished,
-/// typically used for manual compactions.
+/// A manual compaction request waiting for an automatic compaction to finish.
 pub(super) struct PendingCompaction {
     /// Compaction options.
     pub(crate) options: compact_request::Options,

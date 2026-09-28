@@ -15,6 +15,7 @@
 pub(crate) mod bare;
 pub(crate) mod compat;
 pub(crate) mod compat_case;
+pub(crate) mod datanode_overlay;
 pub(crate) mod kube;
 
 use std::path::PathBuf;

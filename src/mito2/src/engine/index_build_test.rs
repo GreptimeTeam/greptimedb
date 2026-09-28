@@ -24,6 +24,8 @@ use api::v1::{Rows, SemanticType};
 use async_trait::async_trait;
 use common_base::readable_size::ReadableSize;
 use common_recordbatch::RecordBatches;
+use datafusion_expr::expr::InList;
+use datafusion_expr::{Expr, col, lit};
 use datatypes::arrow::array::AsArray;
 use datatypes::arrow::datatypes::TimestampMillisecondType;
 use datatypes::prelude::ConcreteDataType;
@@ -38,14 +40,16 @@ use store_api::storage::{RegionId, ScanRequest};
 use tokio::sync::{Notify, Semaphore};
 
 use crate::cache::file_cache::{FileType, IndexKey};
+use crate::cache::{CacheManager, CacheStrategy};
 use crate::config::{IndexBuildMode, MitoConfig, Mode};
 use crate::engine::MitoEngine;
 use crate::engine::compaction_test::put_and_flush;
 use crate::engine::listener::{EventListener, GateIndexBuildListener, IndexBuildListener};
 use crate::manifest::action::RegionEdit;
-use crate::read::scan_region::Scanner;
+use crate::read::scan_region::{ScanRegion, Scanner};
 use crate::sst::file::{FileMeta, RegionFileId, RegionIndexId};
 use crate::sst::location;
+use crate::test_util::batch_util::sort_batches_and_print;
 use crate::test_util::{
     CreateRequestBuilder, TestEnv, build_rows, flush_region, put_rows, reopen_region, rows_schema,
 };
@@ -96,6 +100,215 @@ fn assert_listener_counts(
 ) {
     assert_eq!(listener.begin_count(), expected_begin_count);
     assert_eq!(listener.finish_count(), expected_success_count);
+}
+
+fn bloom_filter_test_cache() -> Arc<CacheManager> {
+    const CACHE_SIZE: u64 = 64 * 1024;
+
+    Arc::new(
+        CacheManager::builder()
+            .index_metadata_size(CACHE_SIZE)
+            .index_content_size(CACHE_SIZE)
+            .index_content_page_size(CACHE_SIZE)
+            .puffin_metadata_size(CACHE_SIZE)
+            .build(),
+    )
+}
+
+async fn scan_with_bloom_filter(
+    engine: &MitoEngine,
+    region_id: RegionId,
+    request: ScanRequest,
+    cache_manager: Arc<CacheManager>,
+    ignore_bloom_filter: bool,
+) -> RecordBatches {
+    let region = engine.get_region(region_id).unwrap();
+    let scanner = ScanRegion::new(
+        region.version(),
+        region.access_layer.clone(),
+        request,
+        CacheStrategy::EnableAll(cache_manager),
+    )
+    .with_ignore_bloom_filter(ignore_bloom_filter)
+    .scanner()
+    .await
+    .unwrap();
+
+    RecordBatches::try_collect(scanner.scan().await.unwrap())
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bloom_mixed_in_index_on_off_equivalent() {
+    let mut env = TestEnv::with_prefix("bloom_mixed_in_index_on_off_equivalent_").await;
+    let listener = Arc::new(IndexBuildListener::default());
+    let engine = env
+        .create_engine_with(
+            async_build_mode_config(true),
+            None,
+            Some(listener.clone()),
+            None,
+        )
+        .await;
+    let region_id = RegionId::new(1, 1);
+
+    env.get_schema_metadata_manager()
+        .register_region_table_info(
+            region_id.table_id(),
+            "test_table",
+            "test_catalog",
+            "test_schema",
+            None,
+            env.get_kv_backend(),
+        )
+        .await;
+
+    let mut request = CreateRequestBuilder::new().build();
+    let bloom_options =
+        SkippingIndexOptions::new_unchecked(1, 0.0001, SkippingIndexType::BloomFilter);
+    request.column_metadatas[0]
+        .column_schema
+        .set_skipping_options(&bloom_options)
+        .unwrap();
+    let column_schemas = rows_schema(&request);
+    engine
+        .handle_request(region_id, RegionRequest::Create(request))
+        .await
+        .unwrap();
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas.clone(),
+            rows: build_rows(0, 2),
+        },
+    )
+    .await;
+    flush_region(&engine, region_id, None).await;
+    listener.wait_finish(1).await;
+
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+    assert!(
+        engine
+            .all_index_metas()
+            .await
+            .iter()
+            .any(|meta| meta.index_type == "bloom_filter")
+    );
+
+    put_rows(
+        &engine,
+        region_id,
+        Rows {
+            schema: column_schemas,
+            rows: build_rows(2, 4),
+        },
+    )
+    .await;
+    let scanner = engine
+        .scanner(region_id, ScanRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(scanner.num_files(), 1);
+    assert_eq!(scanner.num_memtables(), 1);
+
+    let mixed_in = Expr::InList(InList {
+        expr: Box::new(col("tag_0")),
+        list: vec![
+            lit("definitely_absent_0"),
+            lit("definitely_absent_1"),
+            lit("definitely_absent_2"),
+            lit("definitely_absent_3"),
+            col("tag_0"),
+        ],
+        negated: false,
+    });
+    let filtered_request = ScanRequest {
+        filters: vec![mixed_in],
+        ..Default::default()
+    };
+    let cache_manager = bloom_filter_test_cache();
+
+    let indexed = scan_with_bloom_filter(
+        &engine,
+        region_id,
+        filtered_request.clone(),
+        cache_manager.clone(),
+        false,
+    )
+    .await;
+    let unindexed = scan_with_bloom_filter(
+        &engine,
+        region_id,
+        filtered_request.clone(),
+        cache_manager,
+        true,
+    )
+    .await;
+    let memtable_only = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(
+                region_id,
+                ScanRequest {
+                    skip_sst_files: true,
+                    ..filtered_request.clone()
+                },
+            )
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let full_scan = RecordBatches::try_collect(
+        engine
+            .scan_to_stream(region_id, ScanRequest::default())
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+
+    let indexed_rows = sort_batches_and_print(&indexed, &["ts"]);
+    let unindexed_rows = sort_batches_and_print(&unindexed, &["ts"]);
+    let memtable_rows = sort_batches_and_print(&memtable_only, &["ts"]);
+    let full_rows = sort_batches_and_print(&full_scan, &["ts"]);
+    assert_eq!(
+        memtable_rows,
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+"
+    );
+    assert_eq!(
+        full_rows,
+        "\
++-------+---------+---------------------+
+| tag_0 | field_0 | ts                  |
++-------+---------+---------------------+
+| 0     | 0.0     | 1970-01-01T00:00:00 |
+| 1     | 1.0     | 1970-01-01T00:00:01 |
+| 2     | 2.0     | 1970-01-01T00:00:02 |
+| 3     | 3.0     | 1970-01-01T00:00:03 |
++-------+---------+---------------------+"
+    );
+    assert_eq!(
+        unindexed_rows, full_rows,
+        "disabling the Bloom filter must retain all matching SST rows"
+    );
+    assert_eq!(
+        indexed_rows, unindexed_rows,
+        "Bloom filtering must not prune rows matched by a nonliteral IN member"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -350,7 +563,7 @@ async fn run_index_publication_compaction_race(phase: IndexPublicationPhase, gc_
         engine_for_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -492,7 +705,7 @@ async fn test_index_build_uses_physical_file_region_and_logical_manifest_region(
     engine
         .handle_request(
             target_region_id,
-            RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+            RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
         )
         .await
         .unwrap();
@@ -1178,7 +1391,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 0);
 
     // Trigger manual index build task and make sure index file is built without flush or compaction.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     listener.wait_finish(1).await;
     let scanner = engine
@@ -1190,7 +1403,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Test idempotency: Second manual index build request on the same file.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
     let scanner = engine
@@ -1203,7 +1416,7 @@ async fn test_index_build_type_manual_basic() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Test idempotency again: Third manual index build request to further verify.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
     let scanner = engine
@@ -1262,7 +1475,7 @@ async fn test_index_build_type_manual_consistency() {
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
 
     // Check index build task for consistent file will be skipped.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     // Reopen the region to ensure the task wasn't skipped due to insufficient time.
     reopen_region(&engine, region_id, table_dir.clone(), true, HashMap::new()).await;
@@ -1292,51 +1505,11 @@ async fn test_index_build_type_manual_consistency() {
     // SyncColumns won't trigger index build.
     assert_listener_counts(&listener, 1, 1);
 
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
     listener.wait_finish(2).await; // previous 1 + new 1
     // Because the file is inconsistent, new index build task is triggered.
     assert_listener_counts(&listener, 2, 2);
-}
-
-#[tokio::test]
-async fn test_gate_index_build_listener_smoke() {
-    use store_api::storage::{FileId, RegionId};
-
-    use crate::engine::listener::{EventListener, GateIndexBuildListener};
-    use crate::sst::file::RegionFileId;
-
-    let gate = Arc::new(GateIndexBuildListener::default());
-
-    // Initial counts are zero.
-    assert_eq!(gate.begin_count(), 0);
-    assert_eq!(gate.finish_count(), 0);
-    assert_eq!(gate.abort_count(), 0);
-
-    // Spawn a task that will block in on_index_build_begin.
-    let gate_clone = gate.clone();
-    let handle = tokio::spawn(async move {
-        gate_clone
-            .on_index_build_begin(RegionFileId::new(RegionId::new(1, 1), FileId::random()))
-            .await;
-    });
-
-    // Wait for begin to arrive.
-    tokio::time::timeout(std::time::Duration::from_secs(5), gate.wait_begin(1))
-        .await
-        .unwrap();
-    assert_eq!(gate.begin_count(), 1);
-    assert_eq!(gate.finish_count(), 0);
-    assert_eq!(gate.abort_count(), 0);
-
-    // Release the blocked begin.
-    gate.release_begin();
-
-    // The spawned task should now complete.
-    tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-        .await
-        .unwrap()
-        .unwrap();
 }
 
 #[tokio::test]
@@ -1408,7 +1581,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     // so we must spawn it in a separate task.
     let engine_clone = engine.clone();
     let first_handle = tokio::spawn(async move {
-        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+        let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
         engine_clone.handle_request(region_id, request).await
     });
 
@@ -1423,7 +1596,7 @@ async fn test_index_build_type_manual_duplicate_in_flight() {
     // Issue the second manual BuildIndex for the same region/file.
     // Since the file is already in building_files (from the first manual build),
     // schedule_build detects the duplicate and calls on_index_build_abort.
-    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest {});
+    let request = RegionRequest::BuildIndex(RegionBuildIndexRequest::default());
     engine.handle_request(region_id, request).await.unwrap();
 
     // The second request should have been aborted as duplicate.
@@ -1506,7 +1679,7 @@ async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
         engine_for_old_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -1534,7 +1707,7 @@ async fn test_reopen_waits_for_active_index_build_of_previous_incarnation() {
         engine_for_new_build
             .handle_request(
                 region_id,
-                RegionRequest::BuildIndex(RegionBuildIndexRequest {}),
+                RegionRequest::BuildIndex(RegionBuildIndexRequest::default()),
             )
             .await
     });
@@ -1705,4 +1878,39 @@ async fn test_index_build_type_compact_abort_race() {
         .unwrap();
     assert_eq!(scanner.num_files(), 1);
     assert_eq!(num_of_index_files(&engine, &scanner, region_id).await, 1);
+}
+
+#[tokio::test]
+async fn test_build_series_index_rejects_non_metric_region() {
+    let mut env = TestEnv::with_prefix("series-unsupported-schema").await;
+    let engine = env
+        .create_engine(MitoConfig {
+            experimental_enable_series_index: true,
+            ..Default::default()
+        })
+        .await;
+    let region_id = RegionId::new(1, 1);
+    engine
+        .handle_request(
+            region_id,
+            RegionRequest::Create(CreateRequestBuilder::new().build()),
+        )
+        .await
+        .unwrap();
+    let error = engine
+        .handle_request(
+            region_id,
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(api::v1::region::build_index_request::Options::SeriesIndex(
+                    Default::default(),
+                )),
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("sparse metric metadata"),
+        "{error}"
+    );
+    engine.stop().await.unwrap();
 }

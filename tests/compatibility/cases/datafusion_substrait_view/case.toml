@@ -1,0 +1,8 @@
+name = "datafusion_substrait_view"
+reason = "Verify persisted CREATE VIEW Substrait plans remain executable across DataFusion upgrades."
+introduced_by = "DataFusion 54 upgrade"
+topologies = ["distributed"]
+from_range = ["*"]
+to_range = ["*"]
+features = ["view", "substrait", "table", "query"]
+owner = "query"

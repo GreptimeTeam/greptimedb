@@ -27,6 +27,9 @@ jsonb.workspace = true
 num = "0.4"
 num-traits = "0.2"
 ordered-float.workspace = true
+parquet-variant.workspace = true
+parquet-variant-compute.workspace = true
+parquet-variant-json.workspace = true
 paste.workspace = true
 regex.workspace = true
 serde.workspace = true
@@ -34,3 +37,8 @@ serde_json.workspace = true
 snafu.workspace = true
 sqlparser.workspace = true
 sqlparser_derive = "0.1"
+
+[package.metadata.cargo-shear]
+# `sqlparser` is required by `sqlparser_derive`: the generated code references
+# `::sqlparser` paths, so it must stay a direct dependency.
+ignored = ["sqlparser"]

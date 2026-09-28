@@ -1,0 +1,8 @@
+name = "twcs_active_window_options"
+reason = "Verify current binaries can reopen tables whose TWCS trigger option was written by old binaries."
+introduced_by = "feat: introduce compaction active window"
+topologies = ["distributed", "standalone"]
+from_range = ["=v1.1.4"]
+to_range = [">=v1.3.0"]
+features = ["table", "metadata", "compaction", "twcs"]
+owner = "storage"

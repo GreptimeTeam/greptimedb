@@ -26,6 +26,7 @@ use meta_srv::procedure::wal_prune::{Context as WalPruneContext, WalPruneProcedu
 use rskafka::client::partition::{Compression, UnknownTopicHandling};
 use rskafka::record::Record;
 use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+use tests_integration::test_util::test_event_recorder_options;
 
 use crate::event_recorder_test_util::assert_single_event;
 
@@ -35,6 +36,7 @@ async fn test_standalone_wal_prune_event() {
     common_telemetry::init_default_ut_logging();
 
     let standalone = GreptimeDbStandaloneBuilder::new("test_standalone_wal_prune_event")
+        .with_event_recorder_options(test_event_recorder_options())
         .build()
         .await;
     let topic_name = format!("test_standalone_wal_prune_event-{}", uuid::Uuid::new_v4());
@@ -100,6 +102,7 @@ WHERE type = 'wal_prune'
   AND procedure_id = '{procedure_id}'
   AND procedure_state = 'Done'
   AND json_path_match(procedure_trigger, '$.type == "Succeeded"')
+  AND actor IS NULL
   AND topic_name = '{topic_name}'
   AND prunable_entry_id = {pruned_entry_id}
   AND latest_offset = 3

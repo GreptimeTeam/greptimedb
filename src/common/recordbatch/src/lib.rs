@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![feature(never_type)]
-
 pub mod adapter;
 pub mod cursor;
 pub mod error;
@@ -44,8 +42,10 @@ pub use datatypes::arrow::record_batch::RecordBatch as DfRecordBatch;
 use datatypes::arrow::util::display::{
     ArrayFormatter, ArrayFormatterFactory, DisplayIndex, FormatOptions, FormatResult,
 };
-use datatypes::arrow::util::pretty::pretty_format_batches_with_options;
-use datatypes::extension::json::is_json_extension_type;
+use datatypes::arrow::util::pretty::{
+    pretty_format_batches_with_options, pretty_format_batches_with_schema,
+};
+use datatypes::extension::json::is_any_json_extension_type;
 use datatypes::prelude::{ConcreteDataType, DataType, VectorRef};
 use datatypes::schema::{ColumnSchema, Schema, SchemaRef};
 use datatypes::types::{JsonFormat, StructField, StructType, jsonb_to_string};
@@ -396,12 +396,19 @@ impl RecordBatches {
             .iter()
             .map(|x| x.df_record_batch().clone())
             .collect::<Vec<_>>();
-        let options =
-            FormatOptions::default().with_formatter_factory(Some(&BinaryFormatterFactory));
-        let result =
-            pretty_format_batches_with_options(df_batches, &options).context(error::FormatSnafu)?;
+        let result: String = if df_batches.is_empty() {
+            pretty_format_batches_with_schema(self.schema.arrow_schema().clone(), df_batches)
+                .context(error::FormatSnafu)?
+                .to_string()
+        } else {
+            let options =
+                FormatOptions::default().with_formatter_factory(Some(&BinaryFormatterFactory));
+            pretty_format_batches_with_options(df_batches, &options)
+                .context(error::FormatSnafu)?
+                .to_string()
+        };
 
-        Ok(result.to_string())
+        Ok(result)
     }
 
     pub fn try_new(schema: SchemaRef, batches: Vec<RecordBatch>) -> Result<Self> {
@@ -455,7 +462,7 @@ impl ArrayFormatterFactory for BinaryFormatterFactory {
         Ok(Some(ArrayFormatter::new(
             Box::new(BinaryFormatter {
                 array,
-                is_json: field.is_some_and(is_json_extension_type),
+                is_json: field.is_some_and(is_any_json_extension_type),
                 default: ArrayFormatter::try_new(array, options)?,
                 null: options.null(),
             }),
@@ -485,7 +492,7 @@ impl DisplayIndex for BinaryFormatter<'_> {
                 ArrowDataType::Binary => self.array.as_binary::<i32>().value(idx),
                 ArrowDataType::LargeBinary => self.array.as_binary::<i64>().value(idx),
                 ArrowDataType::BinaryView => self.array.as_binary_view().value(idx),
-                _ => unreachable!(),
+                _ => return Ok(self.default.value(idx).write(f)?),
             };
             let value =
                 jsonb_to_string(bytes).map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
@@ -1080,6 +1087,35 @@ mod tests {
         let expected = vec![RecordBatch::new(schema.clone(), vec![v.clone()]).unwrap()];
         let r = RecordBatches::try_from_columns(schema, vec![v]).unwrap();
         assert_eq!(r.take(), expected);
+    }
+
+    #[tokio::test]
+    async fn test_recordbatches_pretty_print_empty_batches_preserves_schema() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new("unit", ConcreteDataType::string_datatype(), false),
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "lhs.degrees(val) + rhs.radians(val)",
+                ConcreteDataType::float64_datatype(),
+                false,
+            ),
+        ]));
+        let batches =
+            RecordBatches::try_collect(Box::pin(EmptyRecordBatchStream::new(schema.clone())))
+                .await
+                .unwrap();
+
+        assert_eq!(schema, batches.schema());
+        let expected = "\
++------+----+-------------------------------------+
+| unit | ts | lhs.degrees(val) + rhs.radians(val) |
++------+----+-------------------------------------+
++------+----+-------------------------------------+";
+        assert_eq!(expected, batches.pretty_print().unwrap());
     }
 
     #[test]

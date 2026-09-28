@@ -124,6 +124,7 @@ mod tests {
             .submit(ProcedureWithId {
                 id: procedure_id,
                 procedure: Box::new(MockProcedure { error: true }),
+                context: Default::default(),
             })
             .await
             .unwrap();

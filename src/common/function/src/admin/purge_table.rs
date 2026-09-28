@@ -1,16 +1,13 @@
-// Copyright 2023 Greptime Team
+// Copyright 2023-2026 GrepTime Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This file is part of the GreptimeDB Enterprise Edition and is licensed under
+// the GreptimeDB Enterprise License. You may not use this file except in
+// compliance with that license. A copy of the license is available at the root
+// of this repository in the file LICENSE-ENTERPRISE.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing, this software is
+// distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied.
 
 use arrow::datatypes::DataType as ArrowDataType;
 use common_error::ext::BoxedError;
@@ -67,8 +64,8 @@ pub(crate) async fn purge_table(
 
     procedure_service_handler
         .purge_table(
-            TableName::new(catalog_name, schema_name, table_name),
             query_ctx.clone(),
+            TableName::new(catalog_name, schema_name, table_name),
         )
         .await?;
     Ok(Value::from(0_u64))
@@ -134,8 +131,8 @@ mod tests {
     impl ProcedureServiceHandler for RecordingHandler {
         async fn purge_table(
             &self,
-            table_name: TableName,
             query_ctx: QueryContextRef,
+            table_name: TableName,
         ) -> Result<()> {
             if self.fail {
                 return InvalidFuncArgsSnafu {
@@ -147,7 +144,11 @@ mod tests {
             Ok(())
         }
 
-        async fn migrate_region(&self, _: MigrateRegionRequest) -> Result<Option<String>> {
+        async fn migrate_region(
+            &self,
+            _: QueryContextRef,
+            _: MigrateRegionRequest,
+        ) -> Result<Option<String>> {
             unreachable!()
         }
         async fn reconcile(&self, _: ReconcileRequest) -> Result<Option<String>> {
@@ -162,10 +163,10 @@ mod tests {
         fn catalog_manager(&self) -> &CatalogManagerRef {
             unreachable!()
         }
-        async fn gc_regions(&self, _: GcRegionsRequest) -> Result<GcResponse> {
+        async fn gc_regions(&self, _: QueryContextRef, _: GcRegionsRequest) -> Result<GcResponse> {
             unreachable!()
         }
-        async fn gc_table(&self, _: GcTableRequest) -> Result<GcResponse> {
+        async fn gc_table(&self, _: QueryContextRef, _: GcTableRequest) -> Result<GcResponse> {
             unreachable!()
         }
     }

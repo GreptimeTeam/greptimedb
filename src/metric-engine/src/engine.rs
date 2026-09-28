@@ -51,7 +51,7 @@ use store_api::region_engine::{
 };
 use store_api::region_request::{
     AffectedRows, BatchRegionDdlRequest, RegionCatchupRequest, RegionOpenRequest, RegionPutRequest,
-    RegionRequest,
+    RegionRequest, RegionTruncateRequest,
 };
 use store_api::storage::{RegionId, ScanRequest, SequenceNumber};
 
@@ -271,7 +271,28 @@ impl RegionEngine for MetricEngine {
                     UnsupportedRegionRequestSnafu { request }.fail()
                 }
             }
-            RegionRequest::Truncate(_) => UnsupportedRegionRequestSnafu { request }.fail(),
+            RegionRequest::Truncate(RegionTruncateRequest::Unflushed) => {
+                if self.inner.is_physical_region(region_id) {
+                    self.inner
+                        .mito
+                        .handle_request(
+                            utils::to_data_region_id(region_id),
+                            RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                        )
+                        .await
+                        .context(error::MitoTruncateOperationSnafu)
+                        .map(|response| response.affected_rows)
+                } else {
+                    UnsupportedRegionRequestSnafu {
+                        request: RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+                    }
+                    .fail()
+                }
+            }
+            RegionRequest::Truncate(request) => UnsupportedRegionRequestSnafu {
+                request: RegionRequest::Truncate(request),
+            }
+            .fail(),
             RegionRequest::Delete(delete) => self.inner.delete_region(region_id, delete).await,
             RegionRequest::Catchup(_) => {
                 let mut response = self
@@ -574,6 +595,8 @@ mod test {
     use std::assert_matches;
     use std::collections::HashMap;
 
+    use api::v1::Rows;
+    use common_recordbatch::RecordBatches;
     use common_telemetry::info;
     use common_wal::options::{KafkaWalOptions, WalOptions};
     use mito2::sst::location::region_dir_from_table_dir;
@@ -582,12 +605,119 @@ mod test {
     use store_api::mito_engine_options::WAL_OPTIONS_KEY;
     use store_api::region_request::{
         PathType, RegionCleanUpRequest, RegionCloseRequest, RegionDropRequest, RegionFlushRequest,
-        RegionOpenRequest, RegionRequest,
+        RegionOpenRequest, RegionPutRequest, RegionRequest, RegionTruncateRequest,
     };
 
     use super::*;
     use crate::maybe_skip_kafka_log_store_integration_test;
-    use crate::test_util::{TestEnv, create_logical_region_request};
+    use crate::test_util::{
+        TestEnv, build_rows, create_logical_region_request, row_schema_with_tags,
+    };
+
+    #[tokio::test]
+    async fn test_build_series_index_forwarding() {
+        use api::v1::region::build_index_request;
+        use store_api::region_request::RegionBuildIndexRequest;
+
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+        let request = || {
+            RegionRequest::BuildIndex(RegionBuildIndexRequest {
+                options: Some(build_index_request::Options::SeriesIndex(Default::default())),
+            })
+        };
+        // Default Mito config disables series indexes: reaching that error proves forwarding.
+        let error = env
+            .metric()
+            .handle_request(env.default_physical_region_id(), request())
+            .await
+            .unwrap_err();
+        let error = format!("{error:?}");
+        assert!(error.contains("series index is disabled"), "{error}");
+        let error = env
+            .metric()
+            .handle_request(env.default_logical_region_id(), request())
+            .await
+            .unwrap_err();
+        assert_eq!(
+            common_error::status_code::StatusCode::Unsupported,
+            error.status_code()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discard_unflushed_data_only() {
+        let env = TestEnv::new().await;
+        env.init_metric_region().await;
+
+        let engine = env.metric();
+        let mito = env.mito();
+        let physical_region_id = env.default_physical_region_id();
+        let logical_region_id = env.default_logical_region_id();
+        let data_region_id = utils::to_data_region_id(physical_region_id);
+        let metadata_region_id = utils::to_metadata_region_id(physical_region_id);
+
+        let metadata_memtable_size = mito
+            .region_statistic(metadata_region_id)
+            .unwrap()
+            .memtable_size;
+        assert!(metadata_memtable_size > 0);
+
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Put(RegionPutRequest {
+                    skip_wal: false,
+                    rows: Rows {
+                        schema: row_schema_with_tags(&["job"]),
+                        rows: build_rows(1, 5),
+                    },
+                    hint: None,
+                    partition_expr_version: None,
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(mito.region_statistic(data_region_id).unwrap().memtable_size > 0);
+
+        engine
+            .handle_request(
+                physical_region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            0,
+            mito.region_statistic(data_region_id).unwrap().memtable_size
+        );
+        assert_eq!(
+            metadata_memtable_size,
+            mito.region_statistic(metadata_region_id)
+                .unwrap()
+                .memtable_size
+        );
+
+        let stream = engine
+            .scan_to_stream(logical_region_id, ScanRequest::default())
+            .await
+            .unwrap();
+        let batches = RecordBatches::try_collect(stream).await.unwrap();
+        assert_eq!(
+            0,
+            batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
+        );
+
+        // This maintenance operation applies to a physical region group only.
+        engine
+            .handle_request(
+                logical_region_id,
+                RegionRequest::Truncate(RegionTruncateRequest::Unflushed),
+            )
+            .await
+            .unwrap_err();
+    }
 
     #[tokio::test]
     async fn close_open_regions() {

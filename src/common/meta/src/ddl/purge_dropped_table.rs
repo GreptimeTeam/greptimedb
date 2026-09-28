@@ -1,16 +1,13 @@
-// Copyright 2023 Greptime Team
+// Copyright 2023-2026 GrepTime Inc.
 //
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
+// This file is part of the GreptimeDB Enterprise Edition and is licensed under
+// the GreptimeDB Enterprise License. You may not use this file except in
+// compliance with that license. A copy of the license is available at the root
+// of this repository in the file LICENSE-ENTERPRISE.
 //
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Unless required by applicable law or agreed to in writing, this software is
+// distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND,
+// either express or implied.
 
 use std::collections::HashMap;
 
@@ -221,6 +218,20 @@ impl PurgeDroppedTableProcedure {
     fn executor(&self) -> DropTableExecutor {
         DropTableExecutor::new(self.data.table_name().clone(), self.data.table_id(), false)
     }
+
+    fn event_locator(&self) -> TableDdlLocator {
+        let table_id = self.data.task.table_id;
+        let Some(table_name) = self.data.table_name.as_ref() else {
+            return TableDdlLocator::from_table_id(table_id);
+        };
+
+        TableDdlLocator::new(
+            &table_name.catalog_name,
+            &table_name.schema_name,
+            &table_name.table_name,
+        )
+        .with_table_id(table_id)
+    }
 }
 
 #[async_trait]
@@ -266,14 +277,12 @@ impl Procedure for PurgeDroppedTableProcedure {
         {
             return None;
         }
-        let event = match &ctx.trigger {
-            EventTrigger::Submitted => {
-                let locator = TableDdlLocator::from_table_id(self.data.task.table_id);
-                TableDdlEvent::purge_dropped_table_submitted(locator)
-            }
-            _ => TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable),
+        let locator = self.event_locator();
+        let event = if ctx.trigger == EventTrigger::Submitted {
+            TableDdlEvent::purge_dropped_table_submitted(locator)
+        } else {
+            TableDdlEvent::lifecycle(TableDdlEventType::PurgeDroppedTable, [locator])
         };
-
         Some(Box::new(event))
     }
 }

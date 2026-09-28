@@ -31,9 +31,12 @@ use sqlx::{Connection, Executor, Row};
 use tests_integration::test_util::{
     StorageType, setup_mysql_server, setup_mysql_server_with_slow_query_threshold,
     setup_mysql_server_with_user_provider, setup_pg_server,
-    setup_pg_server_with_slow_query_threshold, setup_pg_server_with_user_provider,
+    setup_pg_server_with_prom_native_histogram, setup_pg_server_with_slow_query_threshold,
+    setup_pg_server_with_user_provider,
 };
 use tokio_postgres::{Client, NoTls, SimpleQueryMessage};
+
+use crate::event_recorder_test_util::assert_procedure_actor_by_table;
 
 #[macro_export]
 macro_rules! sql_test {
@@ -83,11 +86,17 @@ macro_rules! sql_tests {
                 test_postgres_datestyle,
                 test_postgres_intervalstyle,
                 test_postgres_parameter_inference,
+                test_postgres_regclass_bind_parameter,
                 test_postgres_uint64_parameter,
                 test_postgres_explain_bind_parameter,
                 test_postgres_array_types,
                 test_mysql_prepare_stmt_insert_timestamp,
+                test_mysql_prepare_stmt_timezone,
                 test_mysql_federated_prepare_stmt,
+                test_mysql_prepare_tql_and_show,
+                test_postgres_extended_query_row_returning_statements,
+                test_postgres_native_histogram,
+                test_postgres_struct_types,
                 test_declare_fetch_close_cursor,
                 test_alter_update_on,
             );
@@ -148,6 +157,7 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+    let read_pool = conn_re.unwrap();
 
     // 4. readonly user
     let conn_re = MySqlPoolOptions::new()
@@ -181,6 +191,19 @@ pub async fn test_mysql_auth(store_type: StorageType) {
         .execute("CREATE TABLE test (ts timestamp time index)")
         .await
         .unwrap();
+    let actor_query_pool = &read_pool;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "test",
+        "writeonly_user",
+        |query| async move {
+            sqlx::query_scalar::<_, bool>(&query)
+                .fetch_one(actor_query_pool)
+                .await
+                .unwrap_or(false)
+        },
+    )
+    .await;
     let err = pool.execute("SHOW TABLES").await.unwrap_err();
     assert!(
         err.to_string()
@@ -466,8 +489,10 @@ pub async fn test_mysql_timezone(store_type: StorageType) {
 }
 
 pub async fn test_postgres_auth(store_type: StorageType) {
-    let user_provider =
-        user_provider_from_option("static_user_provider:cmd:greptime_user=greptime_pwd").unwrap();
+    let user_provider = user_provider_from_option(
+        "static_user_provider:cmd:greptime_user=greptime_pwd,writeonly_user:wo=writeonly_pwd",
+    )
+    .unwrap();
 
     let (mut guard, fe_pg_server) =
         setup_pg_server_with_user_provider(store_type, "sql_crud", Some(user_provider)).await;
@@ -518,6 +543,32 @@ pub async fn test_postgres_auth(store_type: StorageType) {
         .await;
 
     assert!(conn_re.is_ok());
+    let read_pool = conn_re.unwrap();
+
+    let write_pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!(
+            "postgres://writeonly_user:writeonly_pwd@{addr}/public"
+        ))
+        .await
+        .unwrap();
+    write_pool
+        .execute("CREATE TABLE postgres_auth_actor (ts timestamp time index)")
+        .await
+        .unwrap();
+    let actor_query_pool = &read_pool;
+    assert_procedure_actor_by_table(
+        "create_table",
+        "postgres_auth_actor",
+        "writeonly_user",
+        |query| async move {
+            sqlx::query_scalar::<_, bool>(&query)
+                .fetch_one(actor_query_pool)
+                .await
+                .unwrap_or(false)
+        },
+    )
+    .await;
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
@@ -658,16 +709,16 @@ pub async fn test_postgres_crud(store_type: StorageType) {
 
         let expected_j = serde_json::json!({
             "code": i,
-            "success": true,
             "payload": {
                 "features": [
                     "serde",
                     "json"
                 ],
                 "homepage": null
-            }
+            },
+            "success": true
         });
-        assert_eq!(json.to_string(), expected_j.to_string());
+        assert_eq!(json, expected_j);
     }
 
     let rows = sqlx::query("select i from demo where i=$1")
@@ -823,6 +874,234 @@ pub async fn test_postgres_bytea(store_type: StorageType) {
         .unwrap();
     let val: Vec<u8> = row.get("b");
     assert_eq!(val, [97, 98, 99, 107, 108, 109, 42, 169, 84]);
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_native_histogram(store_type: StorageType) {
+    use api::greptime_proto::io::prometheus::write::v2::histogram::{Count, ZeroCount};
+    use api::greptime_proto::io::prometheus::write::v2::{BucketSpan, Histogram};
+    use axum::http::StatusCode;
+    use prost::Message;
+    use servers::http::test_helpers::TestClient;
+    use servers::prom_remote_write::v2::test_util as remote_write_v2;
+    use servers::prom_store;
+
+    let (mut guard, app, fe_pg_server) =
+        setup_pg_server_with_prom_native_histogram(store_type, "test_postgres_native_histogram")
+            .await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+    let http_client = TestClient::new(app).await;
+
+    // Ingest one integer-count and one float-count native histogram via
+    // prometheus remote-write v2.
+    let write_request = remote_write_v2::request_with_labels_and_histograms(
+        vec![
+            (prom_store::METRIC_NAME_LABEL, "pg_native_histogram_seconds"),
+            ("job", "api"),
+            ("instance", "localhost:9090"),
+        ],
+        vec![
+            Histogram {
+                count: Some(Count::CountInt(8)),
+                sum: 10.0,
+                schema: 1,
+                zero_threshold: 0.001,
+                zero_count: Some(ZeroCount::ZeroCountInt(1)),
+                negative_spans: vec![BucketSpan {
+                    offset: -2,
+                    length: 1,
+                }],
+                negative_deltas: vec![1],
+                positive_spans: vec![BucketSpan {
+                    offset: 0,
+                    length: 3,
+                }],
+                positive_deltas: vec![1, 2, -1],
+                reset_hint: 2,
+                timestamp: 3000,
+                start_timestamp: 1500,
+                ..Default::default()
+            },
+            Histogram {
+                count: Some(Count::CountFloat(6.0)),
+                sum: 20.0,
+                schema: 2,
+                zero_threshold: 0.002,
+                zero_count: Some(ZeroCount::ZeroCountFloat(0.5)),
+                positive_spans: vec![BucketSpan {
+                    offset: 3,
+                    length: 2,
+                }],
+                positive_counts: vec![2.0, 3.5],
+                reset_hint: 3,
+                timestamp: 4000,
+                start_timestamp: 2500,
+                ..Default::default()
+            },
+        ],
+    );
+    let compressed = prom_store::snappy_compress(&write_request.encode_to_vec()).unwrap();
+    let res = http_client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header(
+            "Content-Type",
+            "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+        )
+        .body(compressed)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    let rows = client
+        .simple_query(
+            "select greptime_native_histogram from pg_native_histogram_seconds order by greptime_timestamp",
+        )
+        .await
+        .unwrap();
+    let jsons: Vec<&str> = rows
+        .iter()
+        .filter_map(|message| match message {
+            SimpleQueryMessage::Row(row) => row.get(0),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(jsons.len(), 2);
+
+    // The struct column is encoded as a JSON object, matching the HTTP query
+    // output for the same histograms. Before the fix every row was encoded as
+    // an empty struct (`{}`).
+    let histogram: serde_json::Value = serde_json::from_str(jsons[0]).unwrap();
+    assert_eq!(
+        histogram,
+        serde_json::json!({
+            "count_f64": null,
+            "count_i64": 8,
+            "custom_values": [],
+            "negative_buckets_f64": [],
+            "negative_buckets_i64": [1],
+            "negative_span_lengths": [1],
+            "negative_span_offsets": [-2],
+            "positive_buckets_f64": [],
+            "positive_buckets_i64": [1, 3, 2],
+            "positive_span_lengths": [3],
+            "positive_span_offsets": [0],
+            "reset_hint": 2,
+            "schema": 1,
+            "start_timestamp": 1500,
+            "sum": 10.0,
+            "zero_count_f64": null,
+            "zero_count_i64": 1,
+            "zero_threshold": 0.001
+        })
+    );
+
+    let histogram: serde_json::Value = serde_json::from_str(jsons[1]).unwrap();
+    assert_eq!(
+        histogram,
+        serde_json::json!({
+            "count_f64": 6.0,
+            "count_i64": null,
+            "custom_values": [],
+            "negative_buckets_f64": [],
+            "negative_buckets_i64": [],
+            "negative_span_lengths": [],
+            "negative_span_offsets": [],
+            "positive_buckets_f64": [2.0, 3.5],
+            "positive_buckets_i64": [],
+            "positive_span_lengths": [2],
+            "positive_span_offsets": [3],
+            "reset_hint": 3,
+            "schema": 2,
+            "start_timestamp": 2500,
+            "sum": 20.0,
+            "zero_count_f64": 0.5,
+            "zero_count_i64": null,
+            "zero_threshold": 0.002
+        })
+    );
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_postgres_struct_types(store_type: StorageType) {
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_postgres_struct_types").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    async fn query_one(client: &Client, sql: &str) -> String {
+        let messages = client.simple_query(sql).await.unwrap();
+        messages
+            .iter()
+            .filter_map(|message| match message {
+                SimpleQueryMessage::Row(row) => row.get(0).map(|v| v.to_string()),
+                _ => None,
+            })
+            .next()
+            .unwrap()
+    }
+
+    // Struct and list-of-struct columns are serialized as JSON. View-typed
+    // struct fields must not fail row extraction, and a null struct inside a
+    // list stays null instead of becoming a struct of null fields.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
+
+    // '0102' casts to its UTF-8 bytes when interpreted as BinaryView.
+    let row = query_one(&client, "SELECT struct(arrow_cast('0102', 'BinaryView'))").await;
+    assert_eq!(row, "{\"c0\":[48,49,48,50]}");
+
+    let row = query_one(&client, "SELECT struct([struct(1), NULL])").await;
+    assert_eq!(row, "{\"c0\":[{\"c0\":1},null]}");
+
+    // Top-level control: the same null element in a bare list stays null too.
+    let row = query_one(&client, "SELECT [struct(1), NULL]").await;
+    assert_eq!(row, "[{\"c0\":1},null]");
+
+    // Unsupported arrow field types surface as query errors instead of
+    // dropping the connection.
+    let error = client
+        .simple_query("SELECT struct(arrow_cast('1', 'Decimal256(38, 10)'))")
+        .await
+        .unwrap_err();
+    let message = match error.as_db_error() {
+        Some(db_error) => db_error.message().to_string(),
+        None => error.to_string(),
+    };
+    assert!(
+        message.contains("Unsupported arrow data type"),
+        "unexpected error message: {message}"
+    );
+
+    // The connection stays usable after the error.
+    let row = query_one(&client, "SELECT struct(arrow_cast('abc', 'Utf8View'))").await;
+    assert_eq!(row, "{\"c0\":\"abc\"}");
 
     drop(client);
     rx.await.unwrap();
@@ -1323,6 +1602,115 @@ pub async fn test_postgres_parameter_inference(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_postgres_regclass_bind_parameter(store_type: StorageType) {
+    let (mut guard, fe_pg_server) =
+        setup_pg_server(store_type, "test_postgres_regclass_bind_parameter").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .simple_query(
+            "CREATE TABLE test_adbc_app_logs (\"service\" STRING, \"message\" STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+
+    let pgadbc_query = "SELECT attr.attname FROM pg_catalog.pg_class AS cls \
+        INNER JOIN pg_catalog.pg_attribute AS attr ON cls.oid = attr.attrelid \
+        INNER JOIN pg_catalog.pg_type AS typ ON attr.atttypid = typ.oid \
+        WHERE attr.attnum >= 0 AND cls.oid = $1::regclass::oid ORDER BY attr.attnum";
+    let pgadbc_statement = client.prepare(pgadbc_query).await.unwrap();
+
+    for table_name in [
+        "test_adbc_app_logs",
+        "\"test_adbc_app_logs\"",
+        "public.test_adbc_app_logs",
+        "\"public\".\"test_adbc_app_logs\"",
+    ] {
+        let rows = client
+            .query(&pgadbc_statement, &[&table_name])
+            .await
+            .unwrap();
+        assert!(!rows.is_empty(), "{table_name} should resolve to a table");
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.get::<_, String>(0))
+                .collect::<Vec<_>>(),
+            ["service", "message", "ts"]
+        );
+    }
+
+    let relname_statement = client
+        .prepare("SELECT cls.oid FROM pg_catalog.pg_class AS cls WHERE cls.relname = $1")
+        .await
+        .unwrap();
+    let rows = client
+        .query(&relname_statement, &[&"\"test_adbc_app_logs\""])
+        .await
+        .unwrap();
+    assert!(rows.is_empty(), "quoted text is not a relation name");
+
+    client
+        .simple_query("CREATE DATABASE adbc_override")
+        .await
+        .unwrap();
+    client
+        .simple_query(
+            "CREATE TABLE adbc_override.test_adbc_app_logs (override_column STRING, ts TIMESTAMP TIME INDEX)",
+        )
+        .await
+        .unwrap();
+    client
+        .simple_query("SET search_path TO adbc_override, public")
+        .await
+        .unwrap();
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"test_adbc_app_logs"])
+        .await
+        .unwrap();
+    assert_eq!(rows[0].get::<_, String>(0), "override_column");
+
+    let rows = client
+        .query(&pgadbc_statement, &[&"public.test_adbc_app_logs"])
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.get::<_, String>(0))
+            .collect::<Vec<_>>(),
+        ["service", "message", "ts"]
+    );
+
+    client
+        .simple_query("SET search_path TO public")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP TABLE adbc_override.test_adbc_app_logs")
+        .await
+        .unwrap();
+    client
+        .simple_query("DROP DATABASE adbc_override")
+        .await
+        .unwrap();
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_postgres_uint64_parameter(store_type: StorageType) {
     let (mut guard, fe_pg_server) =
         setup_pg_server(store_type, "test_postgres_uint64_parameter").await;
@@ -1440,6 +1828,280 @@ fn assert_pg_numeric_range_error(error: tokio_postgres::Error) {
     let error = error.as_db_error().expect("expected PostgreSQL user error");
     assert_eq!("22023", error.code().code());
     assert_eq!("numeric_value_out_of_range", error.message());
+}
+
+pub async fn test_postgres_extended_query_row_returning_statements(store_type: StorageType) {
+    // Regression test for the tokio-postgres >= 0.7.14 DataRow/RowDescription
+    // mismatch: statements answered with NoData at Describe but emitting
+    // DataRows at Execute must describe their real output schema.
+    let (mut guard, fe_pg_server) = setup_pg_server(store_type, "test_pg_extended_row_stmts").await;
+    let addr = fe_pg_server.bind_addr().unwrap().to_string();
+
+    let (client, connection) = tokio_postgres::connect(&format!("postgres://{addr}/public"), NoTls)
+        .await
+        .unwrap();
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        connection.await.unwrap();
+        tx.send(()).unwrap();
+    });
+
+    client
+        .execute(
+            "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key skipping index)",
+            &[],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "INSERT INTO demo_metrics (ts, host, val) VALUES (1000, 'host-a', 1.0), (2000, 'host-b', 2.0)",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // ---- SHOW DATABASES: single `Database` column ----
+    let rows = client.query("SHOW DATABASES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(1, rows[0].columns().len());
+    assert_eq!("Database", rows[0].columns()[0].name());
+    assert!(rows.iter().any(|r| r.get::<_, String>(0) == "public"));
+
+    // ---- SHOW FULL DATABASES: `Database` + `Options` columns ----
+    let rows = client.query("SHOW FULL DATABASES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+    assert_eq!("Database", rows[0].columns()[0].name());
+    assert_eq!("Options", rows[0].columns()[1].name());
+    assert!(rows.iter().any(|r| r.get::<_, String>(0) == "public"));
+
+    // ---- SHOW TABLES: single `Tables_in_<schema>` column ----
+    let rows = client.query("SHOW TABLES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(1, rows[0].columns().len());
+    assert_eq!("Tables_in_public", rows[0].columns()[0].name());
+    assert!(rows.iter().any(|r| r.get::<_, String>(0) == "demo_metrics"));
+
+    // ---- SHOW FULL TABLES: `Tables_in_<schema>` + `Table_type` columns ----
+    let rows = client.query("SHOW FULL TABLES", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+    assert_eq!("Tables_in_public", rows[0].columns()[0].name());
+    assert_eq!("Table_type", rows[0].columns()[1].name());
+
+    // ---- SHOW VIEWS / SHOW FLOWS: empty results, still described with one column ----
+    let rows = client.query("SHOW VIEWS", &[]).await.unwrap();
+    assert!(rows.is_empty());
+    let stmt = client.prepare("SHOW VIEWS").await.unwrap();
+    assert_eq!(1, stmt.columns().len());
+    assert_eq!("Views", stmt.columns()[0].name());
+    let rows = client.query("SHOW FLOWS", &[]).await.unwrap();
+    assert!(rows.is_empty());
+    let stmt = client.prepare("SHOW FLOWS").await.unwrap();
+    assert_eq!(1, stmt.columns().len());
+    assert_eq!("Flows", stmt.columns()[0].name());
+
+    // ---- SHOW TABLE STATUS: fixed eighteen-column schema ----
+    let rows = client.query("SHOW TABLE STATUS", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        vec![
+            "Name",
+            "Engine",
+            "Version",
+            "Row_format",
+            "Rows",
+            "Avg_row_length",
+            "Data_length",
+            "Max_data_length",
+            "Index_length",
+            "Data_free",
+            "Auto_increment",
+            "Create_time",
+            "Update_time",
+            "Check_time",
+            "Collation",
+            "Checksum",
+            "Create_options",
+            "Comment",
+        ],
+        names
+    );
+
+    // ---- SHOW COLUMNS / SHOW FULL COLUMNS ----
+    let rows = client
+        .query("SHOW COLUMNS FROM demo_metrics", &[])
+        .await
+        .unwrap();
+    assert_eq!(3, rows.len());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        vec![
+            "Field",
+            "Type",
+            "Null",
+            "Key",
+            "Default",
+            "Extra",
+            "Greptime_type"
+        ],
+        names
+    );
+    let rows = client
+        .query("SHOW FULL COLUMNS FROM demo_metrics", &[])
+        .await
+        .unwrap();
+    assert_eq!(10, rows[0].columns().len());
+
+    // ---- SHOW CHARSET / SHOW COLLATION ----
+    let rows = client.query("SHOW CHARSET", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(4, rows[0].columns().len());
+    let rows = client.query("SHOW COLLATION", &[]).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(6, rows[0].columns().len());
+
+    // ---- SHOW INDEX: fixed fifteen-column schema ----
+    let rows = client
+        .query("SHOW INDEX IN demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        vec![
+            "Table",
+            "Non_unique",
+            "Key_name",
+            "Seq_in_index",
+            "Column_name",
+            "Collation",
+            "Cardinality",
+            "Sub_part",
+            "Packed",
+            "Null",
+            "Index_type",
+            "Comment",
+            "Index_comment",
+            "Visible",
+            "Expression",
+        ],
+        names
+    );
+
+    // ---- SHOW REGION ----
+    let rows = client
+        .query("SHOW REGION IN demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(4, rows[0].columns().len());
+
+    // ---- SHOW SEARCH_PATH: single string column ----
+    let rows = client.query("SHOW SEARCH_PATH", &[]).await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(1, rows[0].columns().len());
+    assert_eq!("search_path", rows[0].columns()[0].name());
+    assert_eq!("public", rows[0].get::<_, String>(0));
+
+    // ---- SHOW VARIABLES: single column named after the variable ----
+    let rows = client.query("SHOW VARIABLES timezone", &[]).await.unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(1, rows[0].columns().len());
+    assert_eq!("TIMEZONE", rows[0].columns()[0].name());
+    let _ = rows[0].get::<_, String>(0);
+
+    // ---- DESCRIBE TABLE: fixed six-column string schema ----
+    let rows = client
+        .query("DESCRIBE TABLE demo_metrics", &[])
+        .await
+        .unwrap();
+    assert_eq!(3, rows.len());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(
+        vec!["Column", "Type", "Key", "Null", "Default", "Semantic Type"],
+        names
+    );
+    // first column of each row is the column name; ensure values decode as TEXT
+    let columns: Vec<String> = rows.iter().map(|r| r.get::<_, String>(0)).collect();
+    assert!(columns.contains(&"ts".to_string()));
+    assert!(columns.contains(&"val".to_string()));
+    assert!(columns.contains(&"host".to_string()));
+
+    // ---- ADMIN function: single column named after the statement ----
+    let rows = client
+        .query("ADMIN flush_table('demo_metrics')", &[])
+        .await
+        .unwrap();
+    assert_eq!(1, rows.len());
+    assert_eq!(1, rows[0].columns().len());
+    assert!(rows[0].columns()[0].name().contains("flush_table"));
+
+    // ---- TQL EVAL / EXPLAIN / ANALYZE: described from the planned query ----
+    let rows = client
+        .query("TQL EVAL (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let names: Vec<&str> = rows[0].columns().iter().map(|c| c.name()).collect();
+    assert_eq!(vec!["ts", "val", "host"], names);
+
+    let rows = client
+        .query("TQL EXPLAIN (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+
+    let rows = client
+        .query("TQL ANALYZE (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(3, rows[0].columns().len());
+
+    // FORMAT JSON variants keep working through the plan-based execution path
+    let rows = client
+        .query("TQL EXPLAIN FORMAT JSON (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    let rows = client
+        .query("TQL ANALYZE FORMAT JSON (0, 3000, '1s') demo_metrics", &[])
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+
+    // ---- the same statements also work over the simple query protocol ----
+    for sql in [
+        "SHOW DATABASES",
+        "SHOW FULL TABLES",
+        "SHOW TABLE STATUS",
+        "SHOW COLUMNS FROM demo_metrics",
+        "SHOW CHARSET",
+        "SHOW COLLATION",
+        "SHOW INDEX IN demo_metrics",
+        "SHOW REGION IN demo_metrics",
+        "SHOW SEARCH_PATH",
+        "DESCRIBE TABLE demo_metrics",
+        "ADMIN flush_table('demo_metrics')",
+        "TQL EVAL (0, 3000, '1s') demo_metrics",
+    ] {
+        let msgs = client.simple_query(sql).await.unwrap();
+        assert!(
+            msgs.iter().any(|m| matches!(m, SimpleQueryMessage::Row(_))),
+            "simple query {sql} should return rows"
+        );
+    }
+
+    drop(client);
+    rx.await.unwrap();
+
+    let _ = fe_pg_server.shutdown().await;
+    guard.remove_all().await;
 }
 
 pub async fn test_postgres_explain_bind_parameter(store_type: StorageType) {
@@ -1735,6 +2397,77 @@ pub async fn test_mysql_prepare_stmt_insert_timestamp(store_type: StorageType) {
     guard.remove_all().await;
 }
 
+pub async fn test_mysql_prepare_stmt_timezone(store_type: StorageType) {
+    let (mut guard, server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_stmt_timezone").await;
+    let addr = server.bind_addr().unwrap().to_string();
+
+    let mut conn = MySqlConnection::connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    conn.execute("create table demo(i bigint, ts timestamp time index)")
+        .await
+        .unwrap();
+    conn.execute("SET time_zone = 'Asia/Shanghai'")
+        .await
+        .unwrap();
+
+    // Server-side prepared statement: the binary DATETIME parameter must be
+    // interpreted in the session timezone.
+    sqlx::query("insert into demo values(?, ?)")
+        .bind(1)
+        .bind(
+            NaiveDate::from_ymd_opt(2026, 8, 13)
+                .and_then(|x| x.and_hms_opt(8, 0, 0))
+                .unwrap(),
+        )
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    // Text protocol with an equivalent timezone-less literal one hour later.
+    sqlx::query("insert into demo values(2, '2026-08-13 09:00:00')")
+        .execute(&mut conn)
+        .await
+        .unwrap();
+
+    // Timestamps are read back in the session timezone, and sqlx parses the
+    // timezone-less wire representation as UTC.
+    let rows = sqlx::query("select i, ts from demo order by i")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2);
+    let ts: DateTime<Utc> = rows[0].get("ts");
+    assert_eq!(ts.to_string(), "2026-08-13 08:00:00 UTC");
+    let ts: DateTime<Utc> = rows[1].get("ts");
+    assert_eq!(ts.to_string(), "2026-08-13 09:00:00 UTC");
+
+    // The prepared predicate compares the same instant as the text literal.
+    let rows = sqlx::query("select i from demo where ts = ? order by i")
+        .bind(
+            NaiveDate::from_ymd_opt(2026, 8, 13)
+                .and_then(|x| x.and_hms_opt(8, 0, 0))
+                .unwrap(),
+        )
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<i64, _>("i"), 1);
+
+    let rows = sqlx::query("select i from demo where ts = '2026-08-13 08:00:00'")
+        .fetch_all(&mut conn)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<i64, _>("i"), 1);
+
+    let _ = server.shutdown().await;
+    guard.remove_all().await;
+}
+
 pub async fn test_mysql_federated_prepare_stmt(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
 
@@ -1769,6 +2502,73 @@ pub async fn test_mysql_federated_prepare_stmt(store_type: StorageType) {
     assert_eq!(rows.len(), 1);
     let val: String = rows[0].get(0);
     assert_eq!(val, "REPEATABLE-READ");
+
+    let _ = fe_mysql_server.shutdown().await;
+    guard.remove_all().await;
+}
+
+pub async fn test_mysql_prepare_tql_and_show(store_type: StorageType) {
+    // `do_describe` now plans TQL and information-schema-backed SHOW
+    // statements, so MySQL prepared statements derive their column metadata
+    // from the planned query and execute the plan directly. This exercises
+    // that path end-to-end.
+    common_telemetry::init_default_ut_logging();
+
+    let (mut guard, fe_mysql_server) =
+        setup_mysql_server(store_type, "test_mysql_prepare_tql_and_show").await;
+    let addr = fe_mysql_server.bind_addr().unwrap().to_string();
+
+    let pool = MySqlPoolOptions::new()
+        .max_connections(2)
+        .connect(&format!("mysql://{addr}/public"))
+        .await
+        .unwrap();
+
+    sqlx::query(
+        "CREATE TABLE demo_metrics (ts timestamp time index, val double, host string primary key)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO demo_metrics (ts, host, val) VALUES (1000, 'host-a', 1.0), (2000, 'host-b', 2.0)")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // sqlx::query uses the binary prepared statement protocol
+    // (COM_STMT_PREPARE + COM_STMT_EXECUTE).
+    let rows = sqlx::query("TQL EVAL (0, 3000, '1s') demo_metrics")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(3, rows[0].columns().len());
+
+    let rows = sqlx::query("TQL ANALYZE (0, 3000, '1s') demo_metrics")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+
+    // SHOW statements share the same describe path; prepared SHOW FULL
+    // TABLES must report both columns.
+    let rows = sqlx::query("SHOW TABLES").fetch_all(&pool).await.unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(1, rows[0].columns().len());
+
+    let rows = sqlx::query("SHOW FULL TABLES")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(2, rows[0].columns().len());
+
+    let rows = sqlx::query("SHOW DATABASES")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(!rows.is_empty());
+    assert_eq!(1, rows[0].columns().len());
 
     let _ = fe_mysql_server.shutdown().await;
     guard.remove_all().await;
@@ -1871,4 +2671,185 @@ pub async fn test_declare_fetch_close_cursor(store_type: StorageType) {
 
     let _ = fe_pg_server.shutdown().await;
     guard.remove_all().await;
+}
+
+/// Keeps SQL and input rows fixed while changing only the selected batching protocols.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_sql_batcher_alignment() {
+    use common_telemetry::{dump_metrics, info, init_default_ut_logging};
+    use frontend::server::Services;
+    use frontend::service_config::BatcherOptions;
+    use servers::batcher::BatchingProtocol;
+    use servers::mysql::server::MYSQL_SERVER;
+    use tests_integration::standalone::GreptimeDbStandaloneBuilder;
+
+    fn flushes() -> u64 {
+        dump_metrics()
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("greptime_table_batcher_flush_total ")
+                    .map(|value| value.parse().unwrap())
+            })
+            .unwrap_or(0)
+    }
+
+    init_default_ut_logging();
+    for protocols in [
+        vec![],
+        vec![BatchingProtocol::Mysql],
+        vec![BatchingProtocol::Postgres],
+        vec![BatchingProtocol::Mysql, BatchingProtocol::Postgres],
+    ] {
+        let mysql_enabled = protocols.contains(&BatchingProtocol::Mysql);
+        let pg_enabled = protocols.contains(&BatchingProtocol::Postgres);
+        let mut instance = GreptimeDbStandaloneBuilder::new("sql_batcher_alignment")
+            .with_table_batcher(BatcherOptions {
+                protocols,
+                pending_rows_flush_interval: Duration::from_millis(10),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let mut opts = instance.opts.clone();
+        opts.http.addr = "127.0.0.1:0".into();
+        opts.grpc.bind_addr = "127.0.0.1:0".into();
+        opts.mysql.addr = "127.0.0.1:0".into();
+        opts.postgres.addr = "127.0.0.1:0".into();
+        let mut servers = Services::new(opts, instance.fe_instance().clone(), Default::default())
+            .build()
+            .unwrap();
+        servers.start_all().await.unwrap();
+        let mysql_url = format!("mysql://{}/public", servers.addr(MYSQL_SERVER).unwrap());
+        let mut mysql = MySqlConnection::connect(&mysql_url).await.unwrap();
+        let (pg, connection) = tokio_postgres::connect(
+            &format!(
+                "postgres://{}/public",
+                servers.addr("POSTGRES_SERVER").unwrap()
+            ),
+            NoTls,
+        )
+        .await
+        .unwrap();
+        let pg_task = tokio::spawn(async move { connection.await.unwrap() });
+
+        for round in 0..2 {
+            mysql.execute("CREATE TABLE batch_sql (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val INT DEFAULT 7)").await.unwrap();
+            let started = std::time::Instant::now();
+            let before = flushes();
+            // COM_QUERY and COM_STMT_EXECUTE must both opt in.
+            assert_eq!(
+                mysql
+                    .execute("INSERT INTO batch_sql (ts, host) VALUES (0, 'a')")
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                1
+            );
+            assert_eq!(
+                sqlx::query("INSERT INTO batch_sql VALUES (0, ?, ?)")
+                    .persistent(false)
+                    .bind("b")
+                    .bind(8_i32)
+                    .execute(&mut mysql)
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                1
+            );
+            assert_eq!(flushes() - before, if mysql_enabled { 2 } else { 0 });
+
+            let before = flushes();
+            let result = pg
+                .simple_query("INSERT INTO batch_sql (ts, host) VALUES (0, 'c')")
+                .await
+                .unwrap();
+            assert!(matches!(
+                result.as_slice(),
+                [SimpleQueryMessage::CommandComplete(1)]
+            ));
+            let statement = pg
+                .prepare("INSERT INTO batch_sql VALUES (0, $1, $2)")
+                .await
+                .unwrap();
+            assert_eq!(pg.execute(&statement, &[&"d", &9_i32]).await.unwrap(), 1);
+            assert_eq!(flushes() - before, if pg_enabled { 2 } else { 0 });
+
+            // Independent connections can submit to the same worker concurrently.
+            let (mysql_result, pg_result) = tokio::join!(
+                mysql.execute("INSERT INTO batch_sql VALUES (0, 'e', 10)"),
+                pg.simple_query("INSERT INTO batch_sql VALUES (0, 'f', 11)")
+            );
+            assert_eq!(mysql_result.unwrap().rows_affected(), 1);
+            assert!(matches!(
+                pg_result.unwrap().as_slice(),
+                [SimpleQueryMessage::CommandComplete(1)]
+            ));
+
+            // Errors must reach the client without affecting later requests.
+            assert!(
+                mysql
+                    .execute("INSERT INTO batch_sql (missing) VALUES (1)")
+                    .await
+                    .is_err()
+            );
+            assert!(
+                pg.simple_query("INSERT INTO batch_sql (missing) VALUES (1)")
+                    .await
+                    .is_err()
+            );
+            let expected = vec![
+                ("a".to_string(), 7_i32),
+                ("b".to_string(), 8),
+                ("c".to_string(), 7),
+                ("d".to_string(), 9),
+                ("e".to_string(), 10),
+                ("f".to_string(), 11),
+            ];
+            // No polling: successful protocol responses guarantee visibility.
+            let rows: Vec<(String, i32)> =
+                sqlx::query_as("SELECT host, val FROM batch_sql ORDER BY host")
+                    .persistent(false)
+                    .fetch_all(&mut mysql)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, expected);
+            let rows: Vec<(String, i32)> = pg
+                .query("SELECT host, val FROM batch_sql ORDER BY host", &[])
+                .await
+                .unwrap()
+                .iter()
+                .map(|row| (row.get(0), row.get(1)))
+                .collect();
+            assert_eq!(rows, expected);
+
+            mysql.execute("CREATE TABLE batch_copy (ts TIMESTAMP TIME INDEX, host STRING PRIMARY KEY, val INT)").await.unwrap();
+            assert_eq!(
+                mysql
+                    .execute("INSERT INTO batch_copy SELECT * FROM batch_sql")
+                    .await
+                    .unwrap()
+                    .rows_affected(),
+                6
+            );
+            let rows: Vec<(String, i32)> =
+                sqlx::query_as("SELECT host, val FROM batch_copy ORDER BY host")
+                    .persistent(false)
+                    .fetch_all(&mut mysql)
+                    .await
+                    .unwrap();
+            assert_eq!(rows, expected);
+            info!(
+                "sql_batcher_alignment mysql={mysql_enabled} postgres={pg_enabled} round={round} elapsed={:?}",
+                started.elapsed()
+            );
+            mysql.execute("DROP TABLE batch_sql").await.unwrap();
+            mysql.execute("DROP TABLE batch_copy").await.unwrap();
+        }
+        mysql.close().await.unwrap();
+        drop(pg);
+        pg_task.await.unwrap();
+        servers.shutdown_all().await.unwrap();
+        instance.guard.remove_all().await;
+    }
 }

@@ -368,9 +368,9 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("Failed to deserialize from json: {}", input))]
+    #[snafu(display("Failed to deserialize from json payload of length {}", input_len))]
     DeserializeFromJson {
-        input: String,
+        input_len: usize,
         #[snafu(source)]
         error: serde_json::error::Error,
         #[snafu(implicit)]

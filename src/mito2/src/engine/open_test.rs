@@ -478,6 +478,7 @@ async fn test_engine_open_readonly_with_format(flat_format: bool) {
         .handle_request(
             region_id,
             RegionRequest::Put(RegionPutRequest {
+                skip_wal: false,
                 rows: rows.clone(),
                 hint: None,
                 partition_expr_version: None,

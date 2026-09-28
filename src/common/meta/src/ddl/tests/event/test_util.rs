@@ -25,6 +25,7 @@ pub(crate) fn assert_event_filter(procedure: &dyn Procedure, event_type: &str) {
         lifecycle_state: &state,
         trigger: EventTrigger::Submitted,
         event_type_filter: Arc::new(event_type_filter),
+        event_context: None,
     };
 
     let allowed = procedure

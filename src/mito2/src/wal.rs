@@ -115,7 +115,8 @@ impl<S: LogStore> Wal<S> {
             Provider::RaftEngine(_) => Box::new(LogStoreEntryReader::new(
                 LogStoreRawEntryReader::new(self.store.clone()),
             )),
-            Provider::Kafka(_) => {
+            // Entries of many regions share one namespace, so the reader filters by region.
+            Provider::Kafka(_) | Provider::ObjectStore(_) => {
                 let reader = if let Some(location_id) = location_id {
                     LogStoreRawEntryReader::new(self.store.clone())
                         .with_wal_index(WalIndex::new(region_id, location_id))

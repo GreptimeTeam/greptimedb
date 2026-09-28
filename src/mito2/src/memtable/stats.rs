@@ -30,6 +30,8 @@ pub(crate) struct WriteMetrics {
     pub(crate) num_rows: usize,
     /// Max sequence number written.
     pub(crate) max_sequence: SequenceNumber,
+    /// Min sequence number written.
+    pub(crate) min_sequence: SequenceNumber,
 }
 
 impl Default for WriteMetrics {
@@ -41,6 +43,7 @@ impl Default for WriteMetrics {
             max_ts: i64::MIN,
             num_rows: 0,
             max_sequence: SequenceNumber::MIN,
+            min_sequence: SequenceNumber::MAX,
         }
     }
 }
