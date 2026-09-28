@@ -25,7 +25,7 @@
 
 """Build the query-regression ECS custom image (manual ops tool).
 
-Boots a temporary pay-as-you-go ECS instance from a public Ubuntu 24.04 image,
+Boots a temporary pay-as-you-go ECS instance from a public Ubuntu LTS image (26.04, kept in sync with the Verify pins),
 builds the existing runner container image (the Dockerfile in the parent
 directory remains the single source of the tool contract), materializes the
 tool directories onto the host filesystem so the workflow's "Verify runner
@@ -61,7 +61,7 @@ CONSOLE_POLL_INTERVAL_SECONDS = 30
 BUILD_TIMEOUT_SECONDS = 60 * 60
 
 # Same apt package contract as the runner Dockerfile; the base
-# actions-runner image is Ubuntu 24.04, so an Ubuntu 24.04 host resolves the
+# the base resolves the
 # same tool versions (protoc 3.21.12, mold 2.40.4, Python 3.14.4).
 # Docker itself comes from Docker's official repository (docker-ce), not the
 # distribution-packaged docker.io.
@@ -238,20 +238,25 @@ def call_api_with_retry(fn, description: str, attempts: int = 5):
 
 
 def resolve_base_image_id(client, region_id: str) -> str:
-    """Resolve the latest public Ubuntu 24.04 x86_64 system image.
+    """Resolve the latest public Ubuntu LTS x86_64 system image.
 
     Used as the default for --base-image-id: the runner Dockerfile pins
-    every tool version itself, so a current stock Ubuntu 24.04 base is all
+    every tool version itself, so a current stock Ubuntu LTS base is all
     the builder needs. Pass --base-image-id (or ALIYUN_ECS_BASE_IMAGE_ID)
     to pin a specific base image deterministically.
     """
     from alibabacloud_ecs20140526 import models as ecs_models
 
-    def _is_ubuntu_2404(image) -> bool:
-        # osname is localized (e.g. "Ubuntu 24.04 64位"), osname_en the
+    # Keep in sync with the tool-version pins asserted by the Verify step in
+    # query-regression.yml (e.g. python3 3.14 comes from 26.04, protoc from
+    # the same archive); changing this may require updating those pins.
+    ubuntu_version = "26.04"
+
+    def _is_target_ubuntu(image) -> bool:
+        # osname is localized (e.g. "Ubuntu 26.04 64位"), osname_en the
         # English form; accept either.
         for os_name in (image.osname_en, image.osname):
-            if os_name and "Ubuntu" in os_name and "24.04" in os_name:
+            if os_name and "Ubuntu" in os_name and ubuntu_version in os_name:
                 return True
         return False
 
@@ -277,10 +282,10 @@ def resolve_base_image_id(client, region_id: str) -> str:
             break
         page_number += 1
 
-    candidates = [image for image in images if _is_ubuntu_2404(image)]
+    candidates = [image for image in images if _is_target_ubuntu(image)]
     if not candidates:
         raise SystemExit(
-            "No public Ubuntu 24.04 x86_64 system image found in region "
+            f"No public Ubuntu {ubuntu_version} x86_64 system image found in region "
             f"{region_id}; pass --base-image-id explicitly"
         )
     candidates.sort(key=lambda image: image.creation_time or "", reverse=True)
@@ -324,7 +329,7 @@ def main() -> int:
     from alibabacloud_ecs20140526 import models as ecs_models
 
     client = make_ecs_client(args.region_id)
-    # --base-image-id is optional: default to the latest public Ubuntu 24.04
+    # --base-image-id is optional: default to the latest public Ubuntu LTS
     # image in the region (the Dockerfile pins every tool version itself, so
     # base drift is low-risk; pass --base-image-id or set
     # ALIYUN_ECS_BASE_IMAGE_ID to pin deterministically).

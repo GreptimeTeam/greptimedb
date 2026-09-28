@@ -101,11 +101,11 @@ The manual fallback (also what the workflow runs):
 ALIBABA_CLOUD_ACCESS_KEY_ID=... ALIBABA_CLOUD_ACCESS_KEY_SECRET=... \
 uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
   --region-id <region> --vswitch-id <vsw-...> --security-group-id <sg-...> \
-  [--base-image-id <ubuntu-24.04-image-id>]
+  [--base-image-id <ubuntu-lts-image-id>]
 ```
 
 `--base-image-id` is optional: the script defaults to the latest public
-Ubuntu 24.04 image in the region (the Dockerfile pins every tool version
+Ubuntu LTS image in the region (the Dockerfile pins every tool version
 itself, so base drift is low-risk); pass it — or set the
 `ALIYUN_ECS_BASE_IMAGE_ID` repo variable consumed by the automated job —
 to pin a specific base image.
@@ -177,7 +177,7 @@ the image-baked Rust toolchain matching `rust-toolchain.toml` (the image
 parses the pin from the toml at build time, and the workflow asserts it
 dynamically at run time — there is no separately pinned toolchain version).
 `mold` and `python3`
-come from apt at image-build time (not Ubuntu 24.04's default 3.12); if the
+come from apt at image-build time (not the oldest LTS default python); if the
 Ubuntu archive ships a newer package revision between rebuilds, the Verify
 step fails with the observed version — bump those pins in `query-regression.yml`
 when that happens. Everything else (toolchain, uv, sccache, otelgen, rustup,
