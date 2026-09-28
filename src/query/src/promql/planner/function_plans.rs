@@ -39,14 +39,14 @@ use promql_parser::label::MatchOp;
 use promql_parser::parser::{Expr as PromExpr, FunctionArgs as PromFunctionArgs};
 use snafu::{OptionExt, ResultExt, ensure};
 
-use super::{
-    LE_COLUMN_NAME, PromPlanner, SCALAR_FUNCTION, SPECIAL_ABSENT_FUNCTION,
-    SPECIAL_HISTOGRAM_FRACTION, SPECIAL_HISTOGRAM_QUANTILE, SPECIAL_TIME_FUNCTION,
-    SPECIAL_VECTOR_FUNCTION,
-};
 use crate::promql::error::{
     DataFusionPlanningSnafu, FunctionInvalidArgumentSnafu, MultiFieldsNotSupportedSnafu,
     PromqlPlanNodeSnafu, Result, TimeIndexNotFoundSnafu, ValueNotFoundSnafu,
+};
+use crate::promql::planner::{
+    LE_COLUMN_NAME, PromPlanner, SCALAR_FUNCTION, SPECIAL_ABSENT_FUNCTION,
+    SPECIAL_HISTOGRAM_FRACTION, SPECIAL_HISTOGRAM_QUANTILE, SPECIAL_TIME_FUNCTION,
+    SPECIAL_VECTOR_FUNCTION,
 };
 use crate::query_engine::QueryEngineState;
 

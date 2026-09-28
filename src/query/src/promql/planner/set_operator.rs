@@ -28,11 +28,13 @@ use promql_parser::parser::{BinModifier, LabelModifier, VectorMatchCardinality};
 use snafu::{OptionExt, ResultExt, ensure};
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
-use super::{OR_FLOAT_FIELD_PREFIX, OR_HISTOGRAM_FIELD_PREFIX, PromPlanner, PromPlannerContext};
 use crate::promql::error::{
     ColumnNotFoundSnafu, CombineTableColumnMismatchSnafu, DataFusionPlanningSnafu,
     MultiFieldsNotSupportedSnafu, Result, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu,
     UnexpectedTokenSnafu, UnsupportedVectorMatchSnafu,
+};
+use crate::promql::planner::{
+    OR_FLOAT_FIELD_PREFIX, OR_HISTOGRAM_FIELD_PREFIX, PromPlanner, PromPlannerContext,
 };
 
 impl PromPlanner {

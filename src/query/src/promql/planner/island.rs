@@ -31,8 +31,8 @@ use promql_parser::parser::{
 };
 use snafu::ResultExt;
 
-use super::{PromPlanner, PromPlannerContext};
 use crate::promql::error::{DataFusionPlanningSnafu, Result};
+use crate::promql::planner::{PromPlanner, PromPlannerContext};
 
 /// Prefix for generated binary island leaf aliases.
 const BINARY_ISLAND_LEAF_ALIAS_PREFIX: &str = "__prom_v";
