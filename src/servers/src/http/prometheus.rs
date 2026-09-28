@@ -1378,7 +1378,9 @@ fn promql_expr_to_metric_name(expr: &PromqlExpr) -> Option<String> {
 /// Follows Prometheus' `shouldDropMetricName` and `resultMetric`: set operators
 /// and comparisons keep the name, while arithmetic operators drop it. A
 /// comparison also drops it when it returns a bool or is a one-to-one
-/// `on(...)` match, which keeps only the listed labels.
+/// `on(...)` match that does not keep `__name__`. Prometheus narrows such a
+/// result to the `on(...)` labels via `lb.Keep(matching.MatchingLabels...)`, so
+/// listing `__name__` preserves the metric name.
 fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> bool {
     if op.is_set_operator() {
         return true;
@@ -1397,12 +1399,34 @@ fn binary_keeps_metric_name(op: &TokenType, modifier: Option<&BinModifier>) -> b
     }
 
     if m.card == VectorMatchCardinality::OneToOne
-        && let Some(LabelModifier::Include(_)) = &m.matching
+        && let Some(LabelModifier::Include(labels)) = &m.matching
+        && !labels.labels.contains(&METRIC_NAME.to_string())
     {
         return false;
     }
 
     true
+}
+
+/// The operand whose labels supply the result metric name of a binary
+/// operation.
+///
+/// Prometheus builds the result from the "one" side of the match: `group_right`
+/// makes the right-hand operand that side, and a scalar left-hand operand (for
+/// example `0.5 < a`) leaves the vector on the right. Every other case takes the
+/// left-hand operand.
+fn binary_metric_name_side<'a>(
+    lhs: &'a PromqlExpr,
+    rhs: &'a PromqlExpr,
+    modifier: Option<&BinModifier>,
+) -> &'a PromqlExpr {
+    let group_right =
+        modifier.is_some_and(|m| matches!(m.card, VectorMatchCardinality::OneToMany(_)));
+    if group_right || matches!(lhs.value_type(), ValueType::Scalar | ValueType::String) {
+        rhs
+    } else {
+        lhs
+    }
 }
 
 /// Recursively collect all metric names from a PromQL expression
@@ -1428,10 +1452,15 @@ fn collect_metric_names(expr: &PromqlExpr, metric_names: &mut HashSet<String>) {
         }
         PromqlExpr::Unary(UnaryExpr { .. }) => metric_names.clear(),
         PromqlExpr::Binary(BinaryExpr {
-            lhs, op, modifier, ..
+            lhs,
+            op,
+            rhs,
+            modifier,
+            ..
         }) => {
             if binary_keeps_metric_name(op, modifier.as_ref()) {
-                collect_metric_names(lhs, metric_names)
+                let side = binary_metric_name_side(lhs, rhs, modifier.as_ref());
+                collect_metric_names(side, metric_names)
             } else {
                 metric_names.clear()
             }
@@ -3255,10 +3284,14 @@ mod tests {
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
-            // Comparisons keep the left-hand metric name, except when they return
-            // a bool or are a one-to-one `on(...)` match, which keeps only the
-            // listed labels. A `group_left`/`group_right` modifier does not reduce
-            // the labels, so the name is kept.
+            // Comparisons keep the metric name from the "one" side of the
+            // match: normally the left operand, but `group_right` takes it from
+            // the right operand and a scalar left operand leaves the vector on
+            // the right. The name is dropped when the comparison returns a bool
+            // or is a one-to-one `on(...)` match that does not keep `__name__`;
+            // such a match keeps only the listed labels, so listing `__name__`
+            // preserves the name. A `group_left`/`group_right` modifier does not
+            // reduce the labels, so the name is kept.
             TestCase {
                 name: "bool comparison between metrics",
                 promql: "a > bool b",
@@ -3276,6 +3309,13 @@ mod tests {
             TestCase {
                 name: "comparison with scalar",
                 promql: "a > 0.5",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with scalar on the left",
+                promql: "0.5 < a",
                 expected_metric: Some("a"),
                 expected_type: ValueType::Vector,
                 should_error: false,
@@ -3309,9 +3349,23 @@ mod tests {
                 should_error: false,
             },
             TestCase {
+                name: "comparison with on keeping __name__",
+                promql: "a > on(__name__) b",
+                expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
                 name: "comparison with on and group_left",
                 promql: "a > on(x) group_left b",
                 expected_metric: Some("a"),
+                expected_type: ValueType::Vector,
+                should_error: false,
+            },
+            TestCase {
+                name: "comparison with on and group_right",
+                promql: "a > on(x) group_right b",
+                expected_metric: Some("b"),
                 expected_type: ValueType::Vector,
                 should_error: false,
             },
