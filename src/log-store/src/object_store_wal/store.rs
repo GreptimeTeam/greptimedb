@@ -4731,16 +4731,25 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let wait = {
-            let store = store.clone();
-            tokio::spawn(async move { store.wait_durable(&provider(region_a), id(3, 1)).await })
-        };
-        for _ in 0..16 {
-            tokio::task::yield_now().await;
-        }
-        assert!(!wait.is_finished());
+        // A wait for id(3, 1) itself is answered only once object 3 is
+        // indexed; the round trip orders the check after the actor handled it.
+        let (response_tx, mut response_rx) = oneshot::channel();
+        store
+            .command_tx
+            .send(Command::WaitDurable {
+                region_id: region_a,
+                entry_id: id(3, 1),
+                response: response_tx,
+            })
+            .await
+            .unwrap();
+        round_trip_actor(&store).await;
+        assert!(matches!(
+            response_rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
         release.send(true).unwrap();
-        timeout(WAIT, wait).await.unwrap().unwrap().unwrap();
+        timeout(WAIT, response_rx).await.unwrap().unwrap().unwrap();
     }
 
     #[tokio::test]
