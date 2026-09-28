@@ -20,6 +20,7 @@ use std::future::Future;
 
 use common_datasource::file_format::Format;
 use common_datasource::object_store::{FILE_SCHEMA, FS_SCHEMA, build_backend_for_write, parse_url};
+use common_datasource::packed_writer::{PackedTableWriter, PackedWriter};
 use common_meta::key::table_route::TableRouteValue;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
@@ -70,7 +71,13 @@ impl StatementExecutor {
         req: CopyDatabaseRequest,
         tables: Vec<TableRef>,
     ) -> Result<PreparedDatabaseExport> {
-        validate_database_export_layout(&req.with)?;
+        if req
+            .with
+            .get("metric_data_layout")
+            .is_none_or(|v| v != "packed")
+        {
+            validate_database_export_layout(&req.with)?;
+        }
         validate_database_directory(&req.location)?;
         let format = Format::try_from(&req.with).context(error::ParseFileFormatSnafu)?;
         ensure!(
@@ -205,9 +212,27 @@ impl StatementExecutor {
         let req = &plan.request;
         let parallelism = parse_parallelism_from_option_map(&req.with);
         let budget = ExportWriteBudget::new(parallelism);
+        let packed = if req
+            .with
+            .get("metric_data_layout")
+            .is_some_and(|v| v == "packed")
+        {
+            let store =
+                build_backend_for_write(&req.location, &req.connection, &self.local_file_access)
+                    .await
+                    .context(error::BuildBackendSnafu)?;
+            Some(
+                PackedWriter::new(store).context(error::WriteStreamToFileSnafu {
+                    path: &req.location,
+                })?,
+            )
+        } else {
+            None
+        };
         let rows = run_database_export_jobs(plan.jobs, parallelism, cancellation, |job, token| {
             let ctx = ctx.clone();
             let budget = budget.clone();
+            let packed = packed.clone();
             async move {
                 match job {
                     DatabaseExportJob::Metric(unit) => self
@@ -220,6 +245,7 @@ impl StatementExecutor {
                             &token,
                             ctx,
                             budget,
+                            packed,
                         )
                         .await
                         .map(|summary| summary.rows),
@@ -238,19 +264,57 @@ impl StatementExecutor {
                             limit: None,
                         };
                         let _permit = budget.writer(&token).await?;
+                        let destination = packed.map(|shared| {
+                            PackedTableWriter::new(shared, info.name.clone(), info.table_id(), true)
+                        });
                         self.copy_captured_table_to_managed(
                             table,
                             copy,
                             ctx,
                             Some((&budget, &token)),
+                            destination,
                         )
                         .await
                     }
                 }
             }
         })
-        .await?;
-        Ok(DatabaseExportSummary { rows, output_files })
+        .await;
+        if let Some(packed) = packed {
+            let mut packed = packed.lock().await;
+            let result = match rows {
+                Ok(rows) => packed
+                    .finish(cancellation)
+                    .await
+                    .context(error::WriteStreamToFileSnafu {
+                        path: &req.location,
+                    })
+                    .and_then(|files| {
+                        Ok(DatabaseExportSummary {
+                            rows,
+                            output_files: files
+                                .into_iter()
+                                .map(|file| {
+                                    DatabaseExportFile::new(&req.location, &file, "")
+                                        .map(|f| f.location)
+                                })
+                                .collect::<Result<_>>()?,
+                        })
+                    }),
+                Err(error) => Err(error),
+            };
+            if result.is_err()
+                && let Err(error) = packed.abort().await
+            {
+                common_telemetry::warn!(error; "Failed to abort Metric pack");
+            }
+            result
+        } else {
+            Ok(DatabaseExportSummary {
+                rows: rows?,
+                output_files,
+            })
+        }
     }
 }
 
