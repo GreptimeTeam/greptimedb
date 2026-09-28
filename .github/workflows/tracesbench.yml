@@ -1,0 +1,323 @@
+name: Tracesbench
+on:
+  workflow_dispatch:
+    inputs:
+      dataset:
+        description: Dataset profile (main is experimental; native queries may exceed memory limits)
+        type: choice
+        options: [sanity, preflight, main]
+        default: sanity
+        required: true
+      runtime_image:
+        description: Aliyun runtime image (tag or digest reference)
+        type: string
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260928-4e52d0b0@sha256:39d2d87593788e0c47a54768f6323679b8e03d7dc72a8158a9b22cf29f883baa
+        required: true
+      provider:
+        description: Cloud provider for the benchmark runner
+        type: choice
+        options: [Aliyun, AWS]
+        default: Aliyun
+        required: true
+      instance_type:
+        description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
+        type: string
+        default: auto
+        required: true
+      benchmark_root:
+        description: Absolute disk-backed work directory (outside the o11ybench checkout)
+        type: string
+        default: /home/runner/benchmark-data
+        required: true
+      system_disk_gib:
+        description: 'System disk GiB: auto (or 0) = 40 for sanity/preflight, 200 for main; enter 20..2048 to override'
+        type: string
+        default: auto
+        required: true
+      benchmark_timeout_minutes:
+        description: Benchmark job timeout in minutes (1..360)
+        type: number
+        default: 360
+        required: true
+      janitor_ttl_hours:
+        description: Instance lifetime before janitor eligibility (1..168 hours; at least timeout + 2h)
+        type: number
+        default: 8
+        required: true
+      db_cpus:
+        description: CPU limit per DB container
+        type: string
+        default: '8'
+        required: true
+      db_memory:
+        description: Memory limit per DB container
+        type: string
+        default: 16g
+        required: true
+      runtime_cpus:
+        description: CPU limit per runtime container
+        type: string
+        default: '2'
+        required: true
+      runtime_memory:
+        description: Memory limit per runtime container (separate from DB memory)
+        type: string
+        default: 4g
+        required: true
+permissions:
+  contents: read
+env:
+  DATASET: ${{ inputs.dataset }}
+  RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
+  RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
+  BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  PROVIDER: ${{ inputs.provider }}
+  REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
+  SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
+  BENCHMARK_TIMEOUT_MINUTES: ${{ inputs.benchmark_timeout_minutes }}
+  JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+  DB_CPUS: ${{ inputs.db_cpus }}
+  DB_MEMORY: ${{ inputs.db_memory }}
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      instance_type: ${{ steps.runner.outputs.instance_type }}
+      system_disk_gib: ${{ steps.runtime.outputs.system_disk_gib }}
+      runtime_image: ${{ steps.runtime.outputs.runtime_image }}
+      o11ybench_ref: ${{ steps.runtime.outputs.o11ybench_ref }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Resolve CI runner
+      id: runner
+      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
+    - name: Validate budgets and shared runtime
+      id: runtime
+      run: |
+        set -euo pipefail
+        [[ "$BENCHMARK_ROOT" == /* && "$BENCHMARK_ROOT" != / && "$BENCHMARK_ROOT" != */ ]]
+        [[ "$BENCHMARK_ROOT" != /tmp && "$BENCHMARK_ROOT" != /tmp/* && "$BENCHMARK_ROOT" != *,* ]]
+        [[ "$BENCHMARK_ROOT" != *$'\n'* && "$BENCHMARK_ROOT" != *$'\r'* ]]
+        [[ "/${BENCHMARK_ROOT#/}/" != */../* && "/${BENCHMARK_ROOT#/}/" != */./* ]]
+        case "$DATASET" in sanity|preflight|main) ;; *) echo "Unknown dataset"; exit 1;; esac
+        if [[ "$SYSTEM_DISK_GIB" == auto || "$SYSTEM_DISK_GIB" == 0 ]]; then
+          if [[ "$DATASET" == main ]]; then SYSTEM_DISK_GIB=200; else SYSTEM_DISK_GIB=40; fi
+        fi
+        for value in "$SYSTEM_DISK_GIB" "$BENCHMARK_TIMEOUT_MINUTES" "$JANITOR_TTL_HOURS"; do
+          [[ "$value" =~ ^[1-9][0-9]{0,3}$ ]] || { echo 'Resource budgets must be positive integers'; exit 1; }
+        done
+        ((SYSTEM_DISK_GIB >= 20 && SYSTEM_DISK_GIB <= 2048))
+        ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
+        ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
+        [[ "$DB_CPUS" =~ ^[1-9][0-9]*$ && "$DB_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
+        [[ "$RUNTIME_CPUS" =~ ^[1-9][0-9]*$ && "$RUNTIME_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+        docker pull "$RUNTIME_IMAGE"
+        metadata=$(docker image inspect "$RUNTIME_IMAGE")
+        resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
+        revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
+        [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+        # Refuse runtimes without the trace runner and its validated dataset/report contract.
+        help=$(docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/run_tracesbench_docker.py --help)
+        grep -F -- '--dataset {sanity,preflight,main}' <<< "$help"
+        grep -F -- '--runtime-cpus' <<< "$help"
+        grep -F -- '--runtime-memory' <<< "$help"
+        docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/check_run_tracesbench_docker.py
+        printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
+  provision:
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      label: ${{ steps.ecs.outputs.label || steps.aws.outputs.label }}
+      instance_id: ${{ steps.ecs.outputs.instance_id || steps.aws.outputs.instance_id }}
+      runner_name: ${{ steps.ecs.outputs.runner_name || steps.aws.outputs.runner_name }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Create ephemeral ECS runner
+      if: inputs.provider == 'Aliyun'
+      id: ecs
+      uses: ./greptimedb/.github/actions/aliyun-ecs-create
+      with:
+        access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+        access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+        github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+        vswitch-id: ${{ vars.ALIYUN_ECS_VSWITCH_ID }}
+        security-group-id: ${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}
+        image-id: ${{ vars.QUERY_REGRESSION_ECS_IMAGE_ID }}
+        instance-type: ${{ needs.validate.outputs.instance_type }}
+        enable-docker: 'true'
+        system-disk-gib: ${{ needs.validate.outputs.system_disk_gib }}
+        ttl-hours: ${{ inputs.janitor_ttl_hours }}
+        resource-group-id: ${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}
+        runner-uid: ${{ vars.QUERY_REGRESSION_RUNNER_UID || '1001' }}
+        runner-gid: ${{ vars.QUERY_REGRESSION_RUNNER_GID || '1001' }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      if: inputs.provider == 'AWS'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+      if: inputs.provider == 'AWS'
+    - name: Create ephemeral EC2 runner
+      if: inputs.provider == 'AWS'
+      id: aws
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_IMAGE_ID: ${{ vars.BENCHMARK_EC2_IMAGE_ID || 'auto' }}
+        AWS_EC2_INSTANCE_TYPE: ${{ needs.validate.outputs.instance_type }}
+        AWS_EC2_SUBNET_ID: ${{ vars.EC2_RUNNER_SUBNET_ID }}
+        AWS_EC2_SECURITY_GROUP_ID: ${{ vars.EC2_RUNNER_SECURITY_GROUP_ID }}
+        AWS_EC2_SYSTEM_DISK_GIB: ${{ needs.validate.outputs.system_disk_gib }}
+        AWS_EC2_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-provision.py
+  benchmark:
+    needs:
+    - validate
+    - provision
+    runs-on: ${{ needs.provision.outputs.label }}
+    timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
+    env:
+      RESOLVED_RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
+      RESOLVED_O11YBENCH_REF: ${{ needs.validate.outputs.o11ybench_ref }}
+      RUN_ROOT: ${{ inputs.benchmark_root }}/tracesbench-${{ github.run_id }}-${{ github.run_attempt }}
+      OWNER: o11ybench-traces-${{ github.run_id }}-${{ github.run_attempt }}
+      METADATA_ROOT: ${{ github.workspace }}/tracesbench-metadata
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Set up benchmark dependencies
+      uses: ./greptimedb/.github/actions/setup-benchmark
+    - name: Checkout matching benchmark tools
+      uses: actions/checkout@v4
+      with:
+        repository: GreptimeTeam/o11ybench
+        token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        ref: ${{ env.RESOLVED_O11YBENCH_REF }}
+        path: o11ybench
+        persist-credentials: false
+    - name: Check runner and runtime identity
+      id: runtime
+      run: |
+        set -euo pipefail
+        test "$(git -C o11ybench rev-parse HEAD)" = "$RESOLVED_O11YBENCH_REF"
+        mkdir -p "$BENCHMARK_ROOT" "$METADATA_ROOT"
+        test "$(stat -f -c %T "$BENCHMARK_ROOT")" != tmpfs || { echo 'Benchmark root must be disk-backed'; exit 1; }
+        df -h "$BENCHMARK_ROOT" /var/lib/docker
+        minimum_gib=10
+        if [[ "$DATASET" == main ]]; then minimum_gib=100; fi
+        for path in "$BENCHMARK_ROOT" /var/lib/docker; do
+          available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
+          ((available >= minimum_gib * 1024 * 1024)) || { echo "Need at least $minimum_gib GiB free on $path"; exit 1; }
+        done
+        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
+        test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
+    # Preserve the pinned catalog images and require all three targets in the report.
+    - name: Generate selected dataset once
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage generate \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: GreptimeDB load, correctness and benchmark
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: VictoriaTraces load, correctness and benchmark
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target victoriatraces --port 19428 \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Tempo load, correctness and benchmark
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target tempo --port 13200 \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Validate and render report
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Clean up owned containers
+      if: always() && steps.runtime.outcome == 'success'
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Stage benchmark artifacts
+      if: always()
+      run: |
+        mkdir -p "$RUNNER_TEMP/tracesbench-artifacts"
+        if [[ -d "$METADATA_ROOT" ]]; then
+          rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/tracesbench-artifacts/"
+        fi
+        for entry in runs report report.json report.md; do
+          if [[ -e "$RUN_ROOT/$entry" ]]; then
+            rsync -a --no-owner --no-group "$RUN_ROOT/$entry" "$RUNNER_TEMP/tracesbench-artifacts/"
+          fi
+        done
+    - name: Upload HTML and results (no corpus)
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: tracesbench-${{ inputs.dataset }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/tracesbench-artifacts
+        if-no-files-found: warn
+        retention-days: 14
+  teardown:
+    needs:
+    - provision
+    - benchmark
+    if: ${{ always() && (needs.provision.outputs.instance_id != '' || (inputs.provider == 'AWS' && needs.provision.result != 'skipped')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        path: greptimedb
+        persist-credentials: false
+    - name: Delete ECS and unregister runner
+      if: inputs.provider == 'Aliyun'
+      uses: ./greptimedb/.github/actions/aliyun-ecs-delete
+      with:
+        access-key-id: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+        access-key-secret: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+        github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        region-id: ${{ vars.ALIYUN_ECS_REGION_ID }}
+        instance-id: ${{ needs.provision.outputs.instance_id }}
+        runner-name: ${{ needs.provision.outputs.runner_name }}
+    - uses: aws-actions/configure-aws-credentials@v4
+      if: inputs.provider == 'AWS'
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ vars.EC2_RUNNER_REGION }}
+    - uses: astral-sh/setup-uv@v6
+      if: inputs.provider == 'AWS'
+    - name: Delete EC2 and unregister runner
+      if: inputs.provider == 'AWS'
+      env:
+        GH_PERSONAL_ACCESS_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        AWS_REGION: ${{ vars.EC2_RUNNER_REGION }}
+        AWS_EC2_INSTANCE_ID: ${{ needs.provision.outputs.instance_id }}
+        AWS_EC2_RUNNER_NAME: ${{ needs.provision.outputs.runner_name }}
+        AWS_EC2_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      run: uv run greptimedb/.github/scripts/aws-ec2-runner-teardown.py
