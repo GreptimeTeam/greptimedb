@@ -14,6 +14,7 @@
 
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use fastbloom::BloomFilter;
 use greptime_proto::v1::index::BloomFilterMeta;
@@ -38,7 +39,7 @@ pub struct InListPredicate {
 
 pub struct BloomFilterApplier {
     reader: Box<dyn BloomFilterReader + Send>,
-    meta: BloomFilterMeta,
+    meta: Arc<BloomFilterMeta>,
 }
 
 impl BloomFilterApplier {
@@ -401,7 +402,7 @@ mod tests {
         async fn metadata(
             &self,
             metrics: Option<&mut BloomFilterReadMetrics>,
-        ) -> Result<BloomFilterMeta> {
+        ) -> Result<Arc<BloomFilterMeta>> {
             self.inner.metadata(metrics).await
         }
     }
