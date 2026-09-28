@@ -2566,6 +2566,8 @@ manifest_cache_size = "256MiB"
 sst_write_buffer_size = "8MiB"
 max_concurrent_scan_files = 384
 allow_stale_entries = false
+scan_memory_limit = "25%"
+scan_memory_mode = "basic"
 scan_memory_on_exhausted = "fail"
 min_compaction_interval = "0s"
 schedule_compaction_after_edit = true
@@ -2657,7 +2659,6 @@ fn drop_lines_with_inconsistent_results(input: String) -> String {
         "cache_path =",
         "cache_capacity =",
         "memory_pool_size =",
-        "scan_memory_limit =",
         "sas_token =",
         "scope =",
         "num_workers =",

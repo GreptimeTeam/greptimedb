@@ -22,9 +22,9 @@ use std::time::Instant;
 
 use api::v1::SemanticType;
 use common_error::ext::BoxedError;
-use common_recordbatch::SendableRecordBatchStream;
 use common_recordbatch::adapter::RegionQueryStatCounters;
 use common_recordbatch::filter::SimpleFilterEvaluator;
+use common_recordbatch::{QueryMemoryTracker, SendableRecordBatchStream};
 use common_telemetry::tracing::Instrument;
 use common_telemetry::{debug, error, tracing, warn};
 use common_time::range::TimestampRange;
@@ -244,6 +244,7 @@ pub(crate) struct ScanRegion {
     max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     scan_memory_pool: Arc<dyn MemoryPool>,
+    scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Whether to enable the experimental two-phase metric series scan.
     experimental_series_scan_v2: bool,
     /// Whether to ignore range indexes during scans.
@@ -283,6 +284,7 @@ impl ScanRegion {
             cache_strategy,
             max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
             scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+            scan_memory_tracker: None,
             experimental_series_scan_v2: false,
             ignore_range_index: false,
             ignore_inverted_index: false,
@@ -321,6 +323,11 @@ impl ScanRegion {
         max_concurrent_scan_files: usize,
     ) -> Self {
         self.max_concurrent_scan_files = max_concurrent_scan_files;
+        self
+    }
+
+    pub(crate) fn with_scan_memory_tracker(mut self, tracker: QueryMemoryTracker) -> Self {
+        self.scan_memory_tracker = Some(tracker);
         self
     }
 
@@ -582,6 +589,7 @@ impl ScanRegion {
             .with_fulltext_index_appliers(fulltext_index_appliers)
             .with_max_concurrent_scan_files(self.max_concurrent_scan_files)
             .with_scan_memory_pool(self.scan_memory_pool)
+            .with_scan_memory_tracker(self.scan_memory_tracker)
             .with_start_time(self.start_time)
             .with_append_mode(self.version.options.append_mode)
             .with_filter_deleted(self.filter_deleted)
@@ -946,6 +954,8 @@ pub struct ScanInput {
     pub(crate) max_concurrent_scan_files: usize,
     /// Memory pool shared by internal scan operators across all queries.
     pub(crate) scan_memory_pool: Arc<dyn MemoryPool>,
+    /// Shared query quota for projected SST row groups; absent during compaction.
+    scan_memory_tracker: Option<QueryMemoryTracker>,
     /// Index appliers.
     inverted_index_appliers: [Option<InvertedIndexApplierRef>; 2],
     bloom_filter_index_appliers: [Option<BloomFilterIndexApplierRef>; 2],
@@ -1025,6 +1035,7 @@ impl ScanInput {
                 ignore_file_not_found: false,
                 max_concurrent_scan_files: DEFAULT_MAX_CONCURRENT_SCAN_FILES,
                 scan_memory_pool: Arc::new(UnboundedMemoryPool::default()),
+                scan_memory_tracker: None,
                 inverted_index_appliers: [None, None],
                 bloom_filter_index_appliers: [None, None],
                 fulltext_index_appliers: [None, None],
@@ -1117,6 +1128,9 @@ impl ScanInputBuilder {
     /// Builds a finalized [ScanInput] and computes its scan analysis.
     #[must_use]
     pub(crate) fn build(mut self) -> ScanInput {
+        if self.input.compaction {
+            self.input.scan_memory_tracker = None;
+        }
         let input = &self.input;
         let eligible = !input.compaction
             && !input.files.is_empty()
@@ -1273,6 +1287,11 @@ impl ScanInputBuilder {
         self
     }
 
+    pub(crate) fn with_scan_memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
+        self.input.scan_memory_tracker = tracker;
+        self
+    }
+
     /// Sets the memory pool shared by internal scan operators.
     #[must_use]
     pub(crate) fn with_scan_memory_pool(mut self, scan_memory_pool: Arc<dyn MemoryPool>) -> Self {
@@ -1413,6 +1432,16 @@ impl ScanInputBuilder {
 }
 
 impl ScanInput {
+    pub(crate) fn uses_scan_memory_limit(&self) -> bool {
+        let covered = self
+            .scan_memory_tracker
+            .as_ref()
+            .is_some_and(|tracker| tracker.limit() > 0);
+        #[cfg(feature = "enterprise")]
+        let covered = covered && self.extension_ranges.is_empty();
+        covered
+    }
+
     /// Builds memtable ranges to scan by `index`.
     pub(crate) fn build_mem_ranges(&self, index: RowGroupIndex) -> SmallVec<[MemtableRange; 2]> {
         let memtable = &self.memtables[index.index];
@@ -1545,6 +1574,7 @@ impl ScanInput {
                     .clone()
                     .filter(|_| !self.ignore_range_index),
             )
+            .memory_tracker(self.scan_memory_tracker.clone())
             .predicate(predicate)
             .projection(Some(self.read_cols.clone()))
             .json2_rewrite_targets(self.json2_rewrite_targets.clone())
@@ -1658,12 +1688,19 @@ impl ScanInput {
                     // the channel with the permit held.
                     let maybe_batch = {
                         // Safety: We never close the semaphore.
-                        let _permit = semaphore.acquire().await.unwrap();
-                        input.next().await
+                        tokio::select! {
+                            _ = sender.closed() => break,
+                            batch = async {
+                                let _permit = semaphore.acquire().await.unwrap();
+                                input.next().await
+                            } => batch,
+                        }
                     };
                     match maybe_batch {
                         Some(Ok(batch)) => {
-                            let _ = sender.send(Ok(batch)).await;
+                            if sender.send(Ok(batch)).await.is_err() {
+                                break;
+                            }
                         }
                         Some(Err(e)) => {
                             let _ = sender.send(Err(e)).await;

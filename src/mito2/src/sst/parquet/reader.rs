@@ -22,6 +22,7 @@ use api::v1::SemanticType;
 use arrow_schema::extension::{
     EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY, ExtensionType,
 };
+use common_recordbatch::QueryMemoryTracker;
 use common_recordbatch::filter::{SimpleFilterEvaluator, TimestampUnitCast};
 use common_telemetry::{debug, error, tracing, warn};
 use datafusion::physical_plan::PhysicalExpr;
@@ -226,9 +227,17 @@ pub struct ParquetReaderBuilder {
     defer_optional_page_index: bool,
     /// Scan-wide hint for rows in a decoded batch.
     batch_size: usize,
+    /// Optional shared quota for projected row-group decoding.
+    memory_tracker: Option<QueryMemoryTracker>,
 }
 
 impl ParquetReaderBuilder {
+    /// Sets the quota used while decoding row groups.
+    pub(crate) fn memory_tracker(mut self, tracker: Option<QueryMemoryTracker>) -> Self {
+        self.memory_tracker = tracker;
+        self
+    }
+
     /// Returns a new [ParquetReaderBuilder] to read specific SST.
     pub fn new(
         table_dir: String,
@@ -238,6 +247,7 @@ impl ParquetReaderBuilder {
     ) -> ParquetReaderBuilder {
         ParquetReaderBuilder {
             series_index: None,
+            memory_tracker: None,
             table_dir,
             path_type,
             file_handle,
@@ -656,6 +666,7 @@ impl ParquetReaderBuilder {
             .collect::<Result<HashMap<_, _>>>()?;
 
         let reader_builder = RowGroupReaderBuilder {
+            memory_tracker: self.memory_tracker.clone(),
             file_handle: self.file_handle.clone(),
             file_path,
             parquet_meta,
@@ -1768,6 +1779,8 @@ pub(crate) struct RowGroupReaderBuilder {
     prefilter_builder: Option<PrefilterContextBuilder>,
     /// Hint for rows in a decoded batch.
     batch_size: usize,
+    /// Optional shared quota for projected row-group decoding.
+    memory_tracker: Option<QueryMemoryTracker>,
 }
 
 /// Context passed to [RowGroupReaderBuilder::build()] carrying all information
@@ -1956,7 +1969,8 @@ impl RowGroupReaderBuilder {
             self.cache_strategy.clone(),
             row_group_idx,
             fetch_metrics.cloned(),
-        );
+        )
+        .with_memory_tracker(self.memory_tracker.clone());
 
         build_sst_parquet_record_batch_stream(
             self.arrow_metadata.clone(),
