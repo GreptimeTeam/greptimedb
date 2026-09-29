@@ -2626,6 +2626,8 @@ flight_compression = "arrow_ipc"
 runtime_size = 8
 http2_keep_alive_interval = "10s"
 http2_keep_alive_timeout = "3s"
+enable_cors = false
+cors_allowed_origins = []
 
 [grpc.tls]
 mode = "disable"

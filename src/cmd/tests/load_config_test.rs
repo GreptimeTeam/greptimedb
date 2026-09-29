@@ -275,7 +275,6 @@ fn test_load_frontend_example_config() {
             grpc: GrpcOptions {
                 bind_addr: "127.0.0.1:4001".to_string(),
                 server_addr: "127.0.0.1:4001".to_string(),
-                cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
             internal_grpc: Some(GrpcOptions::internal_default()),
@@ -465,10 +464,7 @@ fn test_load_standalone_example_config() {
                 cors_allowed_origins: vec!["https://example.com".to_string()],
                 ..Default::default()
             },
-            grpc: GrpcOptions {
-                cors_allowed_origins: vec!["https://example.com".to_string()],
-                ..Default::default()
-            },
+            grpc: GrpcOptions::default(),
             query: QueryOptions {
                 memory_pool_size: MemoryLimit::Percentage(50),
                 ..Default::default()
