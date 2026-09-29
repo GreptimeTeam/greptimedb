@@ -18,6 +18,8 @@ import html
 import math
 from pathlib import Path
 
+from benchmark_resource_summary import render_resources
+
 TARGETS = ('greptimedb', 'victoriatraces', 'tempo')
 
 
@@ -115,7 +117,7 @@ def benchmark(report, runs):
     return '\n'.join(lines)
 
 
-def lifecycle(report, runs):
+def lifecycle(report, runs, root):
     rows = []
     for target in TARGETS:
         selected = [r for r in runs if r.get('target') == target] or [{}]
@@ -141,7 +143,9 @@ def lifecycle(report, runs):
                        table(['DB', 'Dataset', 'Loaded spans', 'Total', 'Ingest',
                               'Write success', 'Write errors', 'Load workers', 'Max in flight',
                               'DB CPU', 'DB memory', 'Running after load', 'OOM after load',
-                              'Container removed'], rows)])
+                              'Container removed'], rows), '',
+                       render_resources([('dataset', root / 'runs' / 'generate')] +
+                                        [(t, root / 'runs' / t) for t in TARGETS], table)])
 
 
 def main():
@@ -150,7 +154,7 @@ def main():
     parser.add_argument('--section', choices=('benchmark', 'lifecycle'), required=True)
     args = parser.parse_args()
     report, runs = load(args.root)
-    print((benchmark if args.section == 'benchmark' else lifecycle)(report, runs))
+    print(benchmark(report, runs) if args.section == 'benchmark' else lifecycle(report, runs, args.root))
 
 
 if __name__ == '__main__':
