@@ -25,7 +25,7 @@ provides sub-second querying at PB scale with high cost efficiency.
 | Lint | `make clippy` (= `cargo clippy --workspace --all-targets --all-features -- -D warnings`) |
 | Type check | `make check` |
 
-Toolchain: Rust nightly, Protobuf compiler (>= 3.15), C/C++ build essentials.
+Toolchain: Rust (stable, pinned by `rust-toolchain.toml`), Protobuf compiler (>= 3.15), C/C++ build essentials.
 Install the test runner with `cargo install cargo-nextest --locked`.
 
 ## Repo map

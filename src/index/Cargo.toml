@@ -8,6 +8,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ahash.workspace = true
 async-trait.workspace = true
 asynchronous-codec = "0.7.0"
 bytemuck.workspace = true
@@ -56,4 +57,8 @@ harness = false
 
 [[bench]]
 name = "bytes_to_u64_vec"
+harness = false
+
+[[bench]]
+name = "index_build_bench"
 harness = false

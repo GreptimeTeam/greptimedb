@@ -1,4 +1,4 @@
-name: Release dev-builder images
+name: Release builder images
 
 on:
   push:
@@ -7,6 +7,7 @@ on:
     paths:
       - rust-toolchain.toml
       - 'docker/dev-builder/**'
+      - '.github/runner-scale-sets/query-regression/**'
   workflow_dispatch: # Allows you to run this workflow manually.
     inputs:
       release_dev_builder_ubuntu_image:
@@ -29,6 +30,11 @@ on:
         description: Release dev-builder-riscv64 image
         required: false
         default: false
+      release_query_regression_runner_image:
+        type: boolean
+        description: Rebuild the query-regression ECS runner image (and update QUERY_REGRESSION_ECS_IMAGE_ID + RUNNER_IMAGE_EPOCH)
+        required: false
+        default: false
       update_dev_builder_image_tag:
         type: boolean
         description: Update the DEV_BUILDER_IMAGE_TAG in Makefile and create a PR
@@ -36,12 +42,55 @@ on:
         default: false
 
 jobs:
+  changes:
+    name: Detect changed components
+    runs-on: ubuntu-latest
+    outputs:
+      dev-builder: ${{ steps.filter.outputs.dev-builder }}
+      query-regression-runner: ${{ steps.filter.outputs.query-regression-runner }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Filter changes
+        id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.before }}"
+          head="${{ github.sha }}"
+          if [[ "${{ github.event_name }}" != "push" ]] || [[ -z "${base}" ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            # Dispatch, or an unknown base (new branch/force-push): treat
+            # everything as changed so gating falls back to job inputs.
+            echo "dev-builder=true" >> "$GITHUB_OUTPUT"
+            echo "query-regression-runner=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files="$(git diff --name-only "${base}" "${head}")"
+          dev_builder=false
+          query_regression_runner=false
+          if grep -qx 'rust-toolchain.toml' <<<"${files}"; then
+            dev_builder=true
+            query_regression_runner=true
+          fi
+          if grep -q '^docker/dev-builder/' <<<"${files}"; then
+            dev_builder=true
+          fi
+          if grep -q '^\.github/runner-scale-sets/query-regression/' <<<"${files}"; then
+            query_regression_runner=true
+          fi
+          echo "dev-builder=${dev_builder}" >> "$GITHUB_OUTPUT"
+          echo "query-regression-runner=${query_regression_runner}" >> "$GITHUB_OUTPUT"
+
   release-dev-builder-images:
     name: Release dev builder images
     # The jobs are triggered by the following events:
     # 1. Manually triggered workflow_dispatch event
     # 2. Push event when the PR that modifies the `rust-toolchain.toml` or `docker/dev-builder/**` is merged to main
-    if: ${{ github.event_name == 'push' || inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image || inputs.release_dev_builder_riscv64_image }}
+    needs: [changes]
+    if: ${{ (github.event_name == 'push' && needs.changes.outputs.dev-builder == 'true') || inputs.release_dev_builder_ubuntu_image || inputs.release_dev_builder_centos_image || inputs.release_dev_builder_android_image || inputs.release_dev_builder_riscv64_image }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.set-version.outputs.version }}
@@ -281,3 +330,96 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ./.github/scripts/update-dev-builder-version.sh ${{ needs.release-dev-builder-images.outputs.version }}
+
+  rebuild-query-regression-runner-image:
+    # Rebuilds the query-regression ECS runner image via the ops tool in
+    # .github/runner-scale-sets/query-regression/ecs-image/: boots a
+    # temporary pay-as-you-go ECS builder, snapshots a new custom image,
+    # then completes the documented lockstep updates in order:
+    #   1. bumps RUNNER_IMAGE_EPOCH in query-regression.yml (target-cache
+    #      invalidation) and pushes the commit to main, and only then
+    #   2. points the repo variable QUERY_REGRESSION_ECS_IMAGE_ID at the
+    #      new image, so the next regression run picks up image and epoch
+    #      together.
+    #
+    # Required repository configuration (same names the provisioning job
+    # uses): vars ALIYUN_ECS_REGION_ID, ALIYUN_ECS_VSWITCH_ID,
+    # ALIYUN_ECS_SECURITY_GROUP_ID, optionally ALIYUN_ECS_RESOURCE_GROUP_ID
+    # and ALIYUN_ECS_BASE_IMAGE_ID (deterministic base-image pin; otherwise
+    # the rebuild auto-resolves the latest public Ubuntu 24.04 image).
+    # Secrets: ALICLOUD_ECS_ACCESS_KEY_ID, ALICLOUD_ECS_ACCESS_KEY_SECRET,
+    # GH_PERSONAL_ACCESS_TOKEN (repo push + actions-variable write).
+    name: Rebuild query-regression runner image
+    needs: [changes]
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && ((github.event_name == 'push' && needs.changes.outputs.query-regression-runner == 'true') || inputs.release_query_regression_runner_image) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          # Keep the PAT credential for the epoch-bump push below.
+          persist-credentials: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Rebuild the runner image
+        id: rebuild
+        env:
+          ALIBABA_CLOUD_ACCESS_KEY_ID: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_ID }}
+          ALIBABA_CLOUD_ACCESS_KEY_SECRET: ${{ secrets.ALICLOUD_ECS_ACCESS_KEY_SECRET }}
+        run: |
+          set -euo pipefail
+          args=(
+            --region-id "${{ vars.ALIYUN_ECS_REGION_ID }}"
+            --vswitch-id "${{ vars.ALIYUN_ECS_VSWITCH_ID }}"
+            --security-group-id "${{ vars.ALIYUN_ECS_SECURITY_GROUP_ID }}"
+            --base-image-id "${{ vars.ALIYUN_ECS_BASE_IMAGE_ID }}"
+          )
+          if [[ -n "${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}" ]]; then
+            args+=(--resource-group-id "${{ vars.ALIYUN_ECS_RESOURCE_GROUP_ID }}")
+          fi
+          uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
+            "${args[@]}" 2>&1 | tee rebuild.log
+          image_id="$(sed -n 's/^Custom image ready: \([^ ]*\) .*/\1/p' rebuild.log | tail -n1)"
+          if [[ -z "${image_id}" ]]; then
+            echo "Error: no image id found in build output" >&2
+            exit 1
+          fi
+          echo "image_id=${image_id}" >> "$GITHUB_OUTPUT"
+          echo "## Rebuilt runner image" >> "$GITHUB_STEP_SUMMARY"
+          echo "New image: \`${image_id}\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Bump RUNNER_IMAGE_EPOCH and update the image id variable
+        env:
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+          image_id="${{ steps.rebuild.outputs.image_id }}"
+          old_epoch="$(grep -oE 'readonly RUNNER_IMAGE_EPOCH="[0-9]+"' \
+            .github/workflows/query-regression.yml | grep -oE '[0-9]+' | head -n1)"
+          if [[ -z "${old_epoch}" ]]; then
+            echo "Error: RUNNER_IMAGE_EPOCH not found in query-regression.yml" >&2
+            exit 1
+          fi
+          new_epoch=$((old_epoch + 1))
+          sed -i "s/readonly RUNNER_IMAGE_EPOCH=\"${old_epoch}\"/readonly RUNNER_IMAGE_EPOCH=\"${new_epoch}\"/" \
+            .github/workflows/query-regression.yml
+
+          git config user.name "greptimedb-ci"
+          git config user.email "greptimedb-ci@users.noreply.github.com"
+          git add .github/workflows/query-regression.yml
+          git commit -m "ci(query-regression): bump RUNNER_IMAGE_EPOCH to ${new_epoch} for image ${image_id} [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+          # Only point the variable at the new image after the epoch commit
+          # landed, so the next run picks up image and epoch together.
+          gh api -X PATCH "repos/${{ github.repository }}/actions/variables/QUERY_REGRESSION_ECS_IMAGE_ID" \
+            -f value="${image_id}"
+
+          echo "## Lockstep updates" >> "$GITHUB_STEP_SUMMARY"
+          echo "- QUERY_REGRESSION_ECS_IMAGE_ID → \`${image_id}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- RUNNER_IMAGE_EPOCH → \`${new_epoch}\` (committed to main)" >> "$GITHUB_STEP_SUMMARY"

@@ -682,11 +682,15 @@ async fn create_datanode_client(datanode: &Datanode) -> (String, Client) {
 
     (
         addr.to_string(),
-        Client::with_manager_and_urls(channel_manager, [addr]),
+        // The mock connector pool lives on this single manager, so both lanes
+        // intentionally share it (same semantics as the legacy constructor).
+        Client::with_query_and_control_managers(channel_manager.clone(), channel_manager, [addr]),
     )
 }
 
+// Mock connectors are registered on a shared channel manager.
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use api::v1::flow::FlowRequest;
     use api::v1::region::{

@@ -643,7 +643,11 @@ max_batch_rows = 25
         expected: std::result::Result<&str, (StatusCode, &str)>,
     ) {
         let addr = frontend.server_handlers().addr(GRPC_SERVER).unwrap();
-        let client = Client::with_urls([addr.to_string()]);
+        let client = Client::with_query_and_control_managers(
+            ChannelManager::new(),
+            ChannelManager::new(),
+            [addr.to_string()],
+        );
         let client = Database::new(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, client);
         let response = client.sql("SELECT 1").await;
 
