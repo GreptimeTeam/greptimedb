@@ -106,6 +106,7 @@ pub async fn run() {
 fn run_plan(args: PlanArgs) -> Result<(), Box<dyn std::error::Error>> {
     let case_text = fs::read_to_string(&args.case)?;
     let mut case: CaseFile = toml::from_str(&case_text)?;
+    validate_queries(case.scenario.queries())?;
     if let Scenario::PromRemoteWriteThenQuery(s) = &mut case.scenario
         && let Some(storage) = &mut s.remote_write.storage
     {

@@ -36,16 +36,16 @@ pub(super) fn load_plan(generator: &PathBuf, case_path: &PathBuf) -> Result<Valu
 }
 
 pub(super) fn normalize_scenario(scenario: Scenario) -> Result<(Vec<Table>, Vec<Query>)> {
-    match scenario {
+    let (tables, queries) = match scenario {
         Scenario::DirectReadableSst {
             tables,
             layout,
             queries,
-        } => Ok((validate_direct_tables(tables, layout)?, queries)),
+        } => (validate_direct_tables(tables, layout)?, queries),
         Scenario::PromRemoteWriteThenQuery {
             remote_write,
             queries,
-        } => Ok((
+        } => (
             vec![Table {
                 database: remote_write.database,
                 name: remote_write.metric,
@@ -58,11 +58,29 @@ pub(super) fn normalize_scenario(scenario: Scenario) -> Result<(Vec<Table>, Vec<
                 validate_show_create_engine: false,
             }],
             queries,
-        )),
+        ),
         Scenario::OtlpTraceLoad { .. } => {
-            Err("measure requires a query scenario, not otlp_trace_load".into())
+            return Err("measure requires a query scenario, not otlp_trace_load".into());
+        }
+    };
+    validate_query_formats(&queries)?;
+    Ok((tables, queries))
+}
+
+/// Rejects a query-local `response_format` on `kind = "prom_http"` queries
+/// before any request is sent.
+pub(super) fn validate_query_formats(queries: &[Query]) -> Result<()> {
+    for (index, query) in queries.iter().enumerate() {
+        if query.response_format.is_some() && query.kind.as_deref() == Some("prom_http") {
+            let name = query.name.as_deref().unwrap_or("<unnamed>");
+            return Err(format!(
+                "query {name} (index {index}) is kind = \"prom_http\"; \
+                 response_format is only supported for SQL queries"
+            )
+            .into());
         }
     }
+    Ok(())
 }
 
 pub(super) fn validate_direct_tables(tables: Vec<Table>, layout: Layout) -> Result<Vec<Table>> {
@@ -117,6 +135,45 @@ pub(super) fn normalized_otlp_load(
         Scenario::OtlpTraceLoad { load } => Ok((case_path, load.load)),
         Scenario::DirectReadableSst { .. } | Scenario::PromRemoteWriteThenQuery { .. } => {
             Err("OTLP command requires scenario kind otlp_trace_load".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::Map;
+
+    use super::*;
+    use crate::query_regression_runner::model::ResponseFormat;
+
+    fn query(kind: &str, response_format: Option<ResponseFormat>) -> Query {
+        Query {
+            name: Some("q".to_string()),
+            kind: Some(kind.to_string()),
+            response_format,
+            query: "SELECT 1".to_string(),
+            start: None,
+            end: None,
+            step: None,
+            warmup: 0,
+            iterations: 1,
+            thresholds: Map::new(),
+        }
+    }
+
+    #[test]
+    fn response_format_is_rejected_on_prom_http_only() {
+        let error =
+            validate_query_formats(&[query("prom_http", Some(ResponseFormat::GreptimedbV1))])
+                .unwrap_err();
+        assert!(error.to_string().contains("prom_http"), "{error}");
+
+        for (kind, format) in [
+            ("prom_http", None),
+            ("sql", None),
+            ("sql", Some(ResponseFormat::GreptimedbV1)),
+        ] {
+            validate_query_formats(&[query(kind, format)]).unwrap();
         }
     }
 }

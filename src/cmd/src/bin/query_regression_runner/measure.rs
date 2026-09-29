@@ -19,9 +19,13 @@ use std::{fs, io};
 use reqwest::Client;
 use serde_json::{Map, Value, json};
 
-use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
+use crate::query_regression_runner::model::{
+    Measurement, Query, QueryResult, ResponseFormat, Scenario, Table,
+};
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
-use crate::query_regression_runner::sql::{http_post_prom_range_query, http_post_sql, sql_ident};
+use crate::query_regression_runner::sql::{
+    http_post_prom_range_query, http_post_sql, http_post_sql_with_format, sql_ident,
+};
 use crate::query_regression_runner::{MeasureArgs, Result};
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
@@ -109,6 +113,8 @@ fn target_report(name: &str, http_port: u16, result: QueryResult) -> Value {
 /// Routes a configured query to the right endpoint: `prom_http` queries hit
 /// the Prometheus HTTP range API (which exercises the Prometheus JSON response
 /// builder), everything else goes through `/v1/sql` (including `TQL ANALYZE`).
+/// SQL queries forward their configured `response_format`; SQL text is
+/// unchanged.
 async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Value {
     if query.kind.as_deref() == Some("prom_http") {
         http_post_prom_range_query(
@@ -122,7 +128,14 @@ async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Valu
         )
         .await
     } else {
-        http_post_sql(client, port, &query.query, db).await
+        http_post_sql_with_format(
+            client,
+            port,
+            &query.query,
+            db,
+            query.response_format.unwrap_or(ResponseFormat::Json),
+        )
+        .await
     }
 }
 
@@ -137,6 +150,7 @@ async fn run_target(
         queries.push(Query {
             name: Some("count_all".to_string()),
             kind: Some("sql".to_string()),
+            response_format: None,
             query: format!("SELECT count(*) FROM {}", sql_ident(&tables[0].name)),
             start: None,
             end: None,
@@ -435,6 +449,7 @@ mod tests {
         let query = Query {
             name: Some("q".to_string()),
             kind: None,
+            response_format: None,
             query: "SELECT 1".to_string(),
             start: None,
             end: None,
@@ -473,5 +488,119 @@ mod tests {
             "base median latency is missing or zero"
         );
         assert_eq!(results[1]["reason"], "unsupported threshold");
+    }
+
+    const MULTI_STATEMENT_SQL: &str = "INSERT INTO opt02_fulltext_flush (ts, msg) SELECT greptime_timestamp, concat('disk pressure on ', instance, ', value ', cast(greptime_value AS STRING)) FROM opt02_fulltext_source; ADMIN FLUSH_TABLE('opt02_fulltext_flush')";
+
+    fn batch_query(response_format: Option<ResponseFormat>) -> Query {
+        Query {
+            name: Some("insert_flush".to_string()),
+            kind: Some("sql".to_string()),
+            response_format,
+            query: MULTI_STATEMENT_SQL.to_string(),
+            start: None,
+            end: None,
+            step: None,
+            warmup: 0,
+            iterations: 1,
+            thresholds: Map::new(),
+        }
+    }
+
+    fn form_fields(request: &str) -> std::collections::HashMap<String, String> {
+        let body = request.split_once("\r\n\r\n").unwrap().1;
+        reqwest::Url::parse(&format!("http://localhost/?{body}"))
+            .unwrap()
+            .query_pairs()
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect()
+    }
+
+    /// Minimal in-test HTTP server: one canned response body per request, the
+    /// captured requests returned for wire assertions. No new HTTP framework.
+    async fn spawn_sql_server(
+        responses: Vec<String>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for body in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0; 1024];
+                loop {
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "client closed before sending its body");
+                    request.extend_from_slice(&chunk[..read]);
+                    let Some(end) = request.windows(4).position(|w| w == b"\r\n\r\n") else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    if request.len() >= end + 4 + length {
+                        break;
+                    }
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        (port, server)
+    }
+
+    #[tokio::test]
+    async fn post_query_forwards_one_unchanged_batch_with_the_configured_format() {
+        let (port, server) = spawn_sql_server(vec![
+            json!({"output": [{"affectedrows": 32768}, {"affectedrows": 0}], "execution_time_ms": 12})
+                .to_string(),
+            json!({"data": [], "affected_rows": 0, "execution_time_ms": 3}).to_string(),
+        ])
+        .await;
+        let client = Client::new();
+
+        let native = post_query(
+            &client,
+            port,
+            &batch_query(Some(ResponseFormat::GreptimedbV1)),
+            "public",
+        )
+        .await;
+        assert!(native["ok"].as_bool().unwrap(), "{native}");
+        // The unchanged native envelope, both statement outputs, is kept.
+        assert_eq!(native["response"]["output"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            native["response"]["output"][0]["affectedrows"],
+            json!(32768)
+        );
+        assert_eq!(native["response"]["execution_time_ms"], json!(12));
+
+        // No response_format keeps the historical flat default.
+        let flat = post_query(&client, port, &batch_query(None), "public").await;
+        assert!(flat["ok"].as_bool().unwrap(), "{flat}");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for (index, expected_format) in ["greptimedb_v1", "json"].into_iter().enumerate() {
+            let fields = form_fields(&requests[index]);
+            // The measured SQL text reaches the wire byte-for-byte, unchanged.
+            assert_eq!(fields["sql"], MULTI_STATEMENT_SQL);
+            assert_eq!(fields["format"], expected_format);
+            assert_eq!(fields["db"], "public");
+        }
     }
 }

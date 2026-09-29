@@ -443,6 +443,8 @@ pub(super) fn default_parallelism() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -496,6 +498,61 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
             ]
         );
     }
+
+    #[test]
+    fn queries_preserve_response_format_in_the_normalized_plan() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+metric = "metric"
+
+[[scenario.queries]]
+name = "insert_flush"
+kind = "sql"
+query = "INSERT INTO t (ts, msg) SELECT ts, msg FROM src; ADMIN FLUSH_TABLE('t')"
+warmup = 2
+iterations = 9
+response_format = "greptimedb_v1"
+
+[[scenario.queries]]
+name = "count"
+kind = "sql"
+query = "SELECT count(*) FROM t"
+"#,
+        )
+        .unwrap();
+        let plan = serde_json::to_value(&case.scenario).unwrap();
+        assert_eq!(
+            plan["queries"][0]["query"],
+            "INSERT INTO t (ts, msg) SELECT ts, msg FROM src; ADMIN FLUSH_TABLE('t')"
+        );
+        assert_eq!(plan["queries"][0]["response_format"], "greptimedb_v1");
+        assert_eq!(plan["queries"][0]["warmup"], 2);
+        assert_eq!(plan["queries"][0]["iterations"], 9);
+        // Queries that do not opt in keep the historical plan shape.
+        assert!(plan["queries"][1].get("response_format").is_none());
+
+        // Minimal plan-time validation: invalid values fail before any request.
+        for value in [json!("csv"), json!(5), json!(true)] {
+            assert!(
+                validate_queries(&[
+                    json!({"kind": "sql", "query": "SELECT 1", "response_format": value})
+                ])
+                .is_err()
+            );
+        }
+        assert!(
+            validate_queries(&[
+                json!({"kind": "prom_http", "query": "x", "response_format": "json"})
+            ])
+            .is_err()
+        );
+        validate_queries(&[json!({"kind": "sql", "query": "SELECT 1", "response_format": "json"})])
+            .unwrap();
+    }
 }
 
 impl Scenario {
@@ -507,12 +564,54 @@ impl Scenario {
         }
     }
 
+    pub(super) fn queries(&self) -> &[serde_json::Value] {
+        match self {
+            Scenario::DirectReadableSst(scenario) => &scenario.queries,
+            Scenario::PromRemoteWriteThenQuery(scenario) => &scenario.queries,
+            Scenario::OtlpTraceLoad(_) => &[],
+        }
+    }
+
     pub(super) fn direct_readable_sst(&self) -> &DirectReadableSstScenario {
         match self {
             Scenario::DirectReadableSst(scenario) => scenario,
             _ => panic!("scenario is not direct_readable_sst"),
         }
     }
+}
+
+/// Response formats the query-regression runner accepts for
+/// `[[scenario.queries]].response_format`.
+pub(super) const QUERY_RESPONSE_FORMATS: [&str; 2] = ["json", "greptimedb_v1"];
+
+/// Minimal validation of a query field the runner consumes; queries stay
+/// `serde_json::Value`, so this only rejects what the runner cannot honor.
+pub(super) fn validate_queries(queries: &[serde_json::Value]) -> Result<(), String> {
+    for (index, query) in queries.iter().enumerate() {
+        let Some(object) = query.as_object() else {
+            return Err(format!("scenario.queries[{index}] must be a table"));
+        };
+        let Some(format) = object.get("response_format") else {
+            continue;
+        };
+        let Some(format) = format.as_str() else {
+            return Err(format!(
+                "scenario.queries[{index}].response_format must be a string"
+            ));
+        };
+        if !QUERY_RESPONSE_FORMATS.contains(&format) {
+            return Err(format!(
+                "scenario.queries[{index}].response_format must be one of {}",
+                QUERY_RESPONSE_FORMATS.join(", ")
+            ));
+        }
+        if object.get("kind").and_then(serde_json::Value::as_str) == Some("prom_http") {
+            return Err(format!(
+                "scenario.queries[{index}].response_format is not supported for kind = \"prom_http\""
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
