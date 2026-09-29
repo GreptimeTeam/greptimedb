@@ -71,9 +71,13 @@ jobs:
           files="$(git diff --name-only "${base}" "${head}")"
           dev_builder=false
           query_regression_runner=false
+          # rust-toolchain.toml only gates the dev-builder images: they bake
+          # the workspace toolchain. The query-regression runner toolchain is
+          # pinned inside its Dockerfile (nightly-2026-03-21) and must NOT
+          # follow the workspace pin, so its rebuild triggers only on changes
+          # under its own directory.
           if grep -qx 'rust-toolchain.toml' <<<"${files}"; then
             dev_builder=true
-            query_regression_runner=true
           fi
           if grep -q '^docker/dev-builder/' <<<"${files}"; then
             dev_builder=true
