@@ -344,9 +344,10 @@ pub async fn handle_get_trace(
     let _timer = METRIC_JAEGER_QUERY_ELAPSED
         .with_label_values(&[&ctx.get_db_string(), "/api/v3/traces/{trace_id}"])
         .start_timer();
+    // API v3 time bounds locate a trace; they must not truncate its spans.
     trace_response(
         handler
-            .get_trace(Arc::new(ctx), &trace_id, start, end, None)
+            .get_trace(Arc::new(ctx), &trace_id, None, None, None)
             .await,
     )
     .await

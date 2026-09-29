@@ -11628,6 +11628,16 @@ pub async fn test_jaeger_v3_query_api(
             for path in [
                 "traces/00000000000000AB".to_string(),
                 format!(
+                    "traces/00000000000000AB?startTime={}",
+                    timestamp(start + 1000)
+                ),
+                format!("traces/00000000000000AB?endTime={}", timestamp(start + 500)),
+                format!(
+                    "traces/00000000000000AB?start_time={}&end_time={}",
+                    timestamp(start + 500),
+                    timestamp(start + 999)
+                ),
+                format!(
                     "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=10",
                     timestamp(start + 1000),
                     timestamp(start + 2000)
