@@ -14,6 +14,7 @@
 
 mod analyzer;
 mod commutativity;
+mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
 mod merge_scan;
@@ -28,6 +29,7 @@ pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
 pub(crate) use commutativity::region_local_node;
 #[cfg(test)]
 pub(crate) use commutativity::{Categorizer, Commutativity};
+pub use dist_join_planner::DistJoinPlanner;
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::{MergeSortExec, MergeSortLogicalPlan};
