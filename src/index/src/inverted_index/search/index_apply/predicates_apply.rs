@@ -213,6 +213,15 @@ mod tests {
         bytemuck::cast::<_, u64>([offset, size])
     }
 
+    /// Builds an `FstMap` sharing its backing bytes with an owned buffer.
+    fn create_fst_map<K: AsRef<[u8]>>(items: &[(K, u64)]) -> FstMap {
+        let mut builder = fst::MapBuilder::memory();
+        for (key, value) in items {
+            builder.insert(key, *value).unwrap();
+        }
+        FstMap::new(bytes::Bytes::from(builder.into_inner().unwrap())).unwrap()
+    }
+
     #[tokio::test]
     async fn test_index_applier_apply_get_key() {
         // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
@@ -226,9 +235,7 @@ mod tests {
             .expect_metadata()
             .returning(|_| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_ranges, _metrics| {
-            Ok(vec![
-                FstMap::from_iter([(b"tag-0_value-0", fst_value(2, 1))]).unwrap(),
-            ])
+            Ok(vec![create_fst_map(&[(b"tag-0_value-0", fst_value(2, 1))])])
         });
 
         mock_reader
@@ -259,9 +266,7 @@ mod tests {
             .expect_metadata()
             .returning(|_| Ok(mock_metas([("tag-0", 0)])));
         mock_reader.expect_fst_vec().returning(|_range, _metrics| {
-            Ok(vec![
-                FstMap::from_iter([(b"tag-0_value-1", fst_value(2, 1))]).unwrap(),
-            ])
+            Ok(vec![create_fst_map(&[(b"tag-0_value-1", fst_value(2, 1))])])
         });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader, None)
@@ -289,10 +294,8 @@ mod tests {
             let mut output = vec![];
             for range in ranges {
                 match range.start {
-                    0 => output
-                        .push(FstMap::from_iter([(b"tag-0_value-0", fst_value(1, 1))]).unwrap()),
-                    1 => output
-                        .push(FstMap::from_iter([(b"tag-1_value-a", fst_value(2, 1))]).unwrap()),
+                    0 => output.push(create_fst_map(&[(b"tag-0_value-0", fst_value(1, 1))])),
+                    1 => output.push(create_fst_map(&[(b"tag-1_value-a", fst_value(2, 1))])),
                     _ => unreachable!(),
                 }
             }

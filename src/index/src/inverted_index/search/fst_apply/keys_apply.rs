@@ -173,21 +173,22 @@ impl TryFrom<Vec<Predicate>> for KeysFstApplier {
 
 #[cfg(test)]
 mod tests {
-    use fst::Map as FstMap;
-
     use super::*;
     use crate::inverted_index::error::Error;
     use crate::inverted_index::search::predicate::{
         Bound, InListPredicate, Predicate, Range, RangePredicate, RegexMatchPredicate,
     };
 
-    fn create_fst_map(items: &[(&[u8], u64)]) -> FstMap<Vec<u8>> {
+    /// Builds an `FstMap` sharing its backing bytes with an owned buffer.
+    fn create_fst_map(items: &[(&[u8], u64)]) -> FstMap {
         let mut items = items
             .iter()
             .map(|(k, v)| (k.to_vec(), *v))
             .collect::<Vec<_>>();
         items.sort();
-        FstMap::from_iter(items).unwrap()
+        let mut builder = fst::MapBuilder::memory();
+        builder.extend_iter(items).unwrap();
+        FstMap::new(bytes::Bytes::from(builder.into_inner().unwrap())).unwrap()
     }
 
     fn b(s: &str) -> Vec<u8> {

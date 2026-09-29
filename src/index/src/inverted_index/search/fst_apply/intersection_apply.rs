@@ -201,9 +201,18 @@ mod tests {
         })])
     }
 
+    /// Builds an `FstMap` sharing its backing bytes with an owned buffer.
+    fn create_fst_map<K: AsRef<[u8]>>(items: &[(K, u64)]) -> FstMap {
+        let mut builder = fst::MapBuilder::memory();
+        for (key, value) in items {
+            builder.insert(key, *value).unwrap();
+        }
+        FstMap::new(bytes::Bytes::from(builder.into_inner().unwrap())).unwrap()
+    }
+
     #[test]
     fn test_intersection_fst_applier_with_ranges() {
-        let test_fst = FstMap::from_iter([("aa", 1), ("bb", 2), ("cc", 3)]).unwrap();
+        let test_fst = create_fst_map(&[("aa", 1), ("bb", 2), ("cc", 3)]);
 
         let applier_inclusive_lower = create_applier_from_range(Range {
             lower: Some(Bound {
@@ -280,7 +289,7 @@ mod tests {
 
     #[test]
     fn test_intersection_fst_applier_with_valid_pattern() {
-        let test_fst = FstMap::from_iter([("123", 1), ("abc", 2)]).unwrap();
+        let test_fst = create_fst_map(&[("123", 1), ("abc", 2)]);
 
         let cases = vec![
             ("1", vec![1]),
@@ -345,7 +354,7 @@ mod tests {
 
     #[test]
     fn test_intersection_fst_applier_with_composite_predicates() {
-        let test_fst = FstMap::from_iter([("aa", 1), ("bb", 2), ("cc", 3)]).unwrap();
+        let test_fst = create_fst_map(&[("aa", 1), ("bb", 2), ("cc", 3)]);
 
         let applier = IntersectionFstApplier::try_from(vec![
             Predicate::Range(RangePredicate {

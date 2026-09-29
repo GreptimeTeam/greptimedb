@@ -129,7 +129,8 @@ pub trait InvertedIndexReader: Send + Sync {
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<FstMap> {
         let fst_data = self.range_read(offset, size, metrics).await?;
-        FstMap::new(fst_data).context(DecodeFstSnafu)
+        // `Bytes::from` takes ownership of the buffer without copying it.
+        FstMap::new(Bytes::from(fst_data)).context(DecodeFstSnafu)
     }
 
     /// Retrieves the multiple finite state transducer (FST) maps from the given ranges.
@@ -138,10 +139,12 @@ pub trait InvertedIndexReader: Send + Sync {
         ranges: &[Range<u64>],
         metrics: Option<&'a mut InvertedIndexReadMetrics>,
     ) -> Result<Vec<FstMap>> {
+        // The read buffers are reference-counted, so building the maps directly
+        // from them avoids copying each FST payload again.
         self.read_vec(ranges, metrics)
             .await?
             .into_iter()
-            .map(|bytes| FstMap::new(bytes.to_vec()).context(DecodeFstSnafu))
+            .map(|bytes| FstMap::new(bytes).context(DecodeFstSnafu))
             .collect::<Result<Vec<_>>>()
     }
 
@@ -175,5 +178,92 @@ pub trait InvertedIndexReader: Send + Sync {
                 Bitmap::deserialize_from(&bytes, bitmap_type).context(DecodeBitmapSnafu)
             })
             .collect::<Result<VecDeque<_>>>()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use async_trait::async_trait;
+    use fst::MapBuilder;
+
+    use super::*;
+    use crate::inverted_index::error::Error;
+
+    /// A reader whose `read_vec` returns the byte buffers it was created with.
+    struct BytesReader(Vec<Bytes>);
+
+    #[async_trait]
+    impl InvertedIndexReader for BytesReader {
+        async fn range_read<'a>(
+            &self,
+            _offset: u64,
+            _size: u32,
+            _metrics: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Vec<u8>> {
+            unimplemented!("only `read_vec` is used by the tests")
+        }
+
+        async fn read_vec<'a>(
+            &self,
+            _ranges: &[Range<u64>],
+            _metrics: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Vec<Bytes>> {
+            Ok(self.0.clone())
+        }
+
+        async fn metadata<'a>(
+            &self,
+            _metrics: Option<&'a mut InvertedIndexReadMetrics>,
+        ) -> Result<Arc<InvertedIndexMetas>> {
+            unimplemented!("only `read_vec` is used by the tests")
+        }
+    }
+
+    fn mock_fst_bytes() -> Vec<u8> {
+        let mut build = MapBuilder::memory();
+        build.insert("key1".as_bytes(), 1).unwrap();
+        build.insert("key2".as_bytes(), 2).unwrap();
+        build.into_inner().unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_fst_vec_shares_the_reader_bytes() {
+        let fst_bytes = Bytes::from(mock_fst_bytes());
+        let data_ptr = fst_bytes.as_ptr();
+
+        let mut reader = BytesReader(vec![fst_bytes.clone()]);
+        let ranges = [0..fst_bytes.len() as u64];
+        let mut metrics = InvertedIndexReadMetrics::default();
+        let fsts = reader.fst_vec(&ranges, Some(&mut metrics)).await.unwrap();
+
+        assert_eq!(fsts.len(), 1);
+        let fst = &fsts[0];
+        // The map is backed by the exact buffer the reader returned instead of
+        // a copy of the FST payload: the pointer is compared while the caller
+        // side handle is still alive, so a copy could not alias it.
+        assert_eq!(fst.as_fst().as_inner().as_ptr(), data_ptr);
+        assert_eq!(fst.as_fst().as_bytes().as_ptr(), data_ptr);
+        assert_eq!(fst.as_fst().as_bytes().len(), fst_bytes.len());
+        assert_eq!(fst.get("key1"), Some(1));
+        assert_eq!(fst.get("key2"), Some(2));
+
+        // Dropping the caller-side references keeps the map usable: the map
+        // holds a shared handle to the same allocation.
+        drop(reader);
+        drop(fst_bytes);
+        assert_eq!(fst.get("key1"), Some(1));
+        assert_eq!(fst.get("key2"), Some(2));
+        assert_eq!(fst.get("key3"), None);
+    }
+
+    #[tokio::test]
+    async fn test_fst_vec_rejects_empty_and_malformed_bytes() {
+        for payload in [vec![], b"not an fst".to_vec()] {
+            let size = payload.len() as u64;
+            let mut reader = BytesReader(vec![Bytes::from(payload)]);
+            let mut metrics = InvertedIndexReadMetrics::default();
+            let result = reader.fst_vec(&[0..size], Some(&mut metrics)).await;
+            assert!(matches!(result, Err(Error::DecodeFst { .. })));
+        }
     }
 }

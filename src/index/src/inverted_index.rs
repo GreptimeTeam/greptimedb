@@ -17,4 +17,7 @@ pub mod error;
 pub mod format;
 pub mod search;
 
-pub type FstMap = fst::Map<Vec<u8>>;
+/// A finite state transducer map that shares ownership of its backing bytes
+/// with the reader that produced it, so the FST payload is not copied into
+/// the map.
+pub type FstMap = fst::Map<bytes::Bytes>;
