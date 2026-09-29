@@ -11,7 +11,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:a918e1404e17@sha256:e65f7f4fc4786093f31d0b7d8f8f3613c9290d9a8e08f6b3968e80860fb41d01
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:9b412587973c@sha256:78ea59e644dff5e5cb03b8a425fd2d91a465c3ea61994040179c376068cf28e1
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -55,7 +55,7 @@ on:
         default: 32g
         required: true
       load_workers:
-        description: CPU workers for parallel import preparation (currently VT pre-import scan; separate from write concurrency)
+        description: CPU workers for parallel import reading/parsing across all engines (separate from write concurrency)
         type: number
         default: 4
         required: true
