@@ -660,25 +660,26 @@ TQL EVAL (0, 120, '60s') timestamp(at_modifier_gauge @ 300 offset 1m);
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 
-+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                       |
-+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                            |
-|               | Projection: at_modifier_gauge.ts, value AS value, at_modifier_gauge.host                                                                                                                   |
-|               |   Projection: at_modifier_gauge.ts, __promql_timestamp_value_ AS value, at_modifier_gauge.host                                                                                             |
-|               |     PromInstantManipulate: range=[0..240000], lookback=[240001], interval=[60000], time index=[ts]                                                                                         |
-|               |       PromInstantManipulate: range=[0..0], lookback=[300000], interval=[60000], time index=[ts]                                                                                            |
-|               |         Projection: at_modifier_gauge.ts, at_modifier_gauge.val, at_modifier_gauge.host, CAST(CAST(at_modifier_gauge.ts AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ |
-|               |           PromSeriesNormalize: offset=[-300000], time index=[ts], filter NaN: [false]                                                                                                      |
-|               |             PromSeriesDivide: tags=["host"]                                                                                                                                                |
-|               |               Sort: at_modifier_gauge.host ASC NULLS FIRST, at_modifier_gauge.ts ASC NULLS FIRST                                                                                           |
-|               |                 Filter: at_modifier_gauge.ts >= TimestampMillisecond(1, None) AND at_modifier_gauge.ts <= TimestampMillisecond(300000, None)                                               |
-|               |                   TableScan: at_modifier_gauge, partial_filters=[at_modifier_gauge.ts >= TimestampMillisecond(1, None), at_modifier_gauge.ts <= TimestampMillisecond(300000, None)]        |
-|               | ]]                                                                                                                                                                                         |
-| physical_plan | CooperativeExec                                                                                                                                                                            |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                         |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                              |
+|               | Projection: at_modifier_gauge.ts, value AS value, at_modifier_gauge.host                                                                                                                     |
+|               |   Projection: at_modifier_gauge.ts, __promql_timestamp_value_ AS value, at_modifier_gauge.host                                                                                               |
+|               |     Filter: at_modifier_gauge.val IS NOT NULL                                                                                                                                                |
+|               |       PromInstantManipulate: range=[0..240000], lookback=[240001], interval=[60000], time index=[ts]                                                                                         |
+|               |         PromInstantManipulate: range=[0..0], lookback=[300000], interval=[60000], time index=[ts]                                                                                            |
+|               |           Projection: at_modifier_gauge.ts, at_modifier_gauge.val, at_modifier_gauge.host, CAST(CAST(at_modifier_gauge.ts AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ |
+|               |             PromSeriesNormalize: offset=[-300000], time index=[ts], filter NaN: [false]                                                                                                      |
+|               |               PromSeriesDivide: tags=["host"]                                                                                                                                                |
+|               |                 Sort: at_modifier_gauge.host ASC NULLS FIRST, at_modifier_gauge.ts ASC NULLS FIRST                                                                                           |
+|               |                   Filter: at_modifier_gauge.ts >= TimestampMillisecond(1, None) AND at_modifier_gauge.ts <= TimestampMillisecond(300000, None)                                               |
+|               |                     TableScan: at_modifier_gauge, partial_filters=[at_modifier_gauge.ts >= TimestampMillisecond(1, None), at_modifier_gauge.ts <= TimestampMillisecond(300000, None)]        |
+|               | ]]                                                                                                                                                                                           |
+| physical_plan | CooperativeExec                                                                                                                                                                              |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                            |
-+---------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                              |
++---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- 11. `label_join` above an anchored selector. The call rewrites the label the input series are
 -- told apart by (`host` becomes `a-a` and `b-b`), so it is never promoted: it must stay above the

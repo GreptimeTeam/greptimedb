@@ -51,6 +51,26 @@ tql eval (60, 60, '1s') timestamp((timestamp_test offset 30s));
 -- The result of a function is sampled at the evaluation time
 tql eval (90, 90, '1s') timestamp(abs(timestamp_test));
 
+-- A row whose fields are all NULL holds no sample and gets no timestamp; a row with any
+-- non-NULL field does.
+create table timestamp_null (ts timestamp time index, host string primary key, a double, b double);
+
+insert into timestamp_null values
+  (0, 'none', NULL, NULL),
+  (0, 'only_a', 1.0, NULL),
+  (0, 'only_b', NULL, 2.0);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(timestamp_null);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(-timestamp_null);
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (60, 60, '1s') timestamp(abs(timestamp_null));
+
+drop table timestamp_null;
+
 -- Test timestamp() with multiple metrics
 create table timestamp_test2 (ts timestamp time index, val double);
 

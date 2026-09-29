@@ -1815,6 +1815,9 @@ impl PromPlanner {
         input: LogicalPlan,
         timestamp_value: DfExpr,
     ) -> Result<LogicalPlan> {
+        // A row whose fields are all NULL holds no sample, so it must not get a timestamp. The
+        // check reads the input fields, which the projection below replaces.
+        let has_sample = self.create_empty_values_filter_expr(true)?;
         let time_expr = timestamp_value.alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
@@ -1823,6 +1826,8 @@ impl PromPlanner {
         project_exprs.extend(self.create_tag_column_exprs()?);
 
         LogicalPlanBuilder::from(input)
+            .filter(has_sample)
+            .context(DataFusionPlanningSnafu)?
             .project(project_exprs)
             .context(DataFusionPlanningSnafu)?
             .build()
