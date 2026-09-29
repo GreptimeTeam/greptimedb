@@ -228,7 +228,6 @@ impl PrometheusJsonResponse {
     /// Convert from `Result<Output>`
     pub async fn from_query_result(
         result: Result<Output>,
-        metric_name: Option<String>,
         result_type: ValueType,
         query_id: Option<&str>,
     ) -> Self {
@@ -236,19 +235,18 @@ impl PrometheusJsonResponse {
         let collector = query_id.and_then(get_promql_annotation_collector);
         let response: Result<Self> = async {
             let result = result?;
-            let mut resp =
-                match result.data {
-                    OutputData::RecordBatches(batches) => Self::success(
-                        Self::record_batches_to_data(batches, metric_name, result_type)?,
-                    ),
-                    OutputData::Stream(stream) => Self::success(
-                        Self::consume_stream_to_data(stream, metric_name, result_type).await?,
-                    ),
-                    OutputData::AffectedRows(_) => Self::error(
-                        StatusCode::Unexpected,
-                        "expected data result, but got affected rows",
-                    ),
-                };
+            let mut resp = match result.data {
+                OutputData::RecordBatches(batches) => {
+                    Self::success(Self::record_batches_to_data(batches, result_type)?)
+                }
+                OutputData::Stream(stream) => {
+                    Self::success(Self::consume_stream_to_data(stream, result_type).await?)
+                }
+                OutputData::AffectedRows(_) => Self::error(
+                    StatusCode::Unexpected,
+                    "expected data result, but got affected rows",
+                ),
+            };
 
             if let Some(physical_plan) = result.meta.plan {
                 let mut result_map = HashMap::new();
@@ -293,7 +291,6 @@ impl PrometheusJsonResponse {
     /// Convert [RecordBatches] to [PromData]
     fn record_batches_to_data(
         batches: RecordBatches,
-        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Result<PrometheusResponse> {
         // Return empty result if no batches
@@ -308,7 +305,7 @@ impl PrometheusJsonResponse {
         let mut buffer = IndexMap::<Vec<(String, String)>, PromSeriesSamples>::new();
 
         for batch in batches.iter() {
-            merge_batch(&mut buffer, &layout, batch, metric_name.as_deref())?;
+            merge_batch(&mut buffer, &layout, batch)?;
         }
 
         samples_to_data(buffer, result_type)
@@ -321,7 +318,6 @@ impl PrometheusJsonResponse {
     /// never coexist in memory.
     async fn consume_stream_to_data(
         mut stream: SendableRecordBatchStream,
-        metric_name: Option<String>,
         result_type: ValueType,
     ) -> Result<PrometheusResponse> {
         // An empty stream carries no batch to infer the column roles from, and
@@ -336,12 +332,12 @@ impl PrometheusJsonResponse {
         // Tag order matters, e.g., after sorc and sort_desc, the output order must be kept.
         let mut buffer = IndexMap::<Vec<(String, String)>, PromSeriesSamples>::new();
 
-        merge_batch(&mut buffer, &layout, &first_batch, metric_name.as_deref())?;
+        merge_batch(&mut buffer, &layout, &first_batch)?;
         // Release the batch before polling the next one.
         drop(first_batch);
 
         while let Some(batch) = stream.try_next().await.context(CollectRecordbatchSnafu)? {
-            merge_batch(&mut buffer, &layout, &batch, metric_name.as_deref())?;
+            merge_batch(&mut buffer, &layout, &batch)?;
         }
 
         samples_to_data(buffer, result_type)
@@ -435,13 +431,25 @@ impl ColumnLayout {
             .fail();
         }
 
-        if metric_name_column_index.is_some() {
-            tag_column_indices.retain(|index| schema.column_name_by_index(*index) != METRIC_NAME);
-        }
-
+        // Only the marked identity supplies `__name__`; retain an ordinary physical
+        // column under an unoccupied label so distinct series are never merged.
         let tag_names = tag_column_indices
             .iter()
-            .map(|index| schema.column_name_by_index(*index).to_string())
+            .map(|index| {
+                let name = schema.column_name_by_index(*index);
+                if name != METRIC_NAME {
+                    return name.to_string();
+                }
+                let mut exported = "exported_name".to_string();
+                while schema
+                    .column_schemas()
+                    .iter()
+                    .any(|column| column.name == exported)
+                {
+                    exported.push('_');
+                }
+                exported
+            })
             .collect::<Vec<_>>();
 
         Ok(Self {
@@ -481,7 +489,6 @@ fn merge_batch(
     buffer: &mut IndexMap<Vec<(String, String)>, PromSeriesSamples>,
     layout: &ColumnLayout,
     batch: &RecordBatch,
-    metric_name: Option<&str>,
 ) -> Result<()> {
     // Scratch buffer of the labels of the series being read, borrowed from
     // `batch` and `layout` and refilled for every series that is not in
@@ -576,14 +583,7 @@ fn merge_batch(
                     let marked_name = metric_name_column
                         .and_then(|column| string_array_value_at_index(column, row_index))
                         .filter(|name| !name.is_empty());
-                    // A schema with the marker takes the name from the marked
-                    // column alone; a null or empty marker never falls back to
-                    // the caller-provided name.
-                    let name = if metric_name_column.is_some() {
-                        marked_name
-                    } else {
-                        metric_name
-                    };
+                    let name = marked_name;
                     if let Some(name) = name {
                         tags.push((METRIC_NAME, name));
                     }
@@ -820,7 +820,7 @@ mod tests {
         let stream = RecordBatches::try_new(schema, vec![]).unwrap().as_stream();
 
         let response =
-            PrometheusJsonResponse::consume_stream_to_data(stream, None, ValueType::Matrix).await;
+            PrometheusJsonResponse::consume_stream_to_data(stream, ValueType::Matrix).await;
 
         assert!(matches!(
             response.unwrap(),
@@ -843,10 +843,9 @@ mod tests {
     }
 
     #[test]
-    fn marked_metric_name_overrides_external_fallback_and_ordinary_name_tag() {
-        // The marked column is the renamed physical identity, while both the
-        // caller-provided name and an ordinary `__name__` label column would
-        // otherwise supply the metric name.
+    fn marked_metric_name_overrides_ordinary_name_tag() {
+        // The marked column is the renamed physical identity; the ordinary `__name__`
+        // label column must not override it.
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
@@ -871,7 +870,6 @@ mod tests {
         .unwrap();
         let response = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, vec![batch]).unwrap(),
-            Some("external_fallback".to_string()),
             ValueType::Vector,
         )
         .unwrap();
@@ -891,6 +889,108 @@ mod tests {
             series[0].metric.get("host").map(String::as_str),
             Some("host-a")
         );
+        assert_eq!(
+            series[0].metric.get("exported_name").map(String::as_str),
+            Some("ordinary_name")
+        );
+    }
+
+    #[tokio::test]
+    async fn unmarked_ordinary_name_never_restores_metric_identity() {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("__name__", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("exported_name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000, 1_000])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some("physical_a"),
+                    Some("physical_b"),
+                ])) as _,
+                Arc::new(StringVector::from(vec![Some("other"), Some("other")])) as _,
+                Arc::new(Float64Vector::from_values([1.0, 2.0])) as _,
+            ],
+        )
+        .unwrap();
+        for result_type in [ValueType::Vector, ValueType::Matrix] {
+            let buffered = PrometheusJsonResponse::record_batches_to_data(
+                RecordBatches::try_new(schema.clone(), vec![batch.clone()]).unwrap(),
+                result_type,
+            )
+            .unwrap();
+            let streamed = PrometheusJsonResponse::consume_stream_to_data(
+                RecordBatches::try_new(
+                    schema.clone(),
+                    vec![batch.slice(0, 1).unwrap(), batch.slice(1, 1).unwrap()],
+                )
+                .unwrap()
+                .as_stream(),
+                result_type,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&buffered).unwrap(),
+                serde_json::to_value(&streamed).unwrap()
+            );
+            let PrometheusResponse::PromData(PromData { result, .. }) = buffered else {
+                panic!("expected Prometheus data");
+            };
+            let (metrics, values) = match &result {
+                PromQueryResult::Vector(series) => (
+                    series
+                        .iter()
+                        .map(|series| &series.metric)
+                        .collect::<Vec<_>>(),
+                    series
+                        .iter()
+                        .map(|series| series.value.as_ref().unwrap().1.clone())
+                        .collect::<Vec<_>>(),
+                ),
+                PromQueryResult::Matrix(series) => (
+                    series
+                        .iter()
+                        .map(|series| &series.metric)
+                        .collect::<Vec<_>>(),
+                    series
+                        .iter()
+                        .map(|series| {
+                            serde_json::to_value(&series.values[0].1)
+                                .unwrap()
+                                .as_str()
+                                .unwrap()
+                                .to_string()
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+                _ => panic!("expected vector or matrix"),
+            };
+            assert_eq!(metrics.len(), 2);
+            for metric in &metrics {
+                assert!(!metric.contains_key(METRIC_NAME));
+                assert_eq!(
+                    metric.get("exported_name").map(String::as_str),
+                    Some("other")
+                );
+            }
+            assert_eq!(
+                metrics[0].get("exported_name_").map(String::as_str),
+                Some("physical_a")
+            );
+            assert_eq!(
+                metrics[1].get("exported_name_").map(String::as_str),
+                Some("physical_b")
+            );
+            assert_eq!(values, vec!["1.0", "2.0"]);
+        }
     }
 
     #[tokio::test]
@@ -925,16 +1025,12 @@ mod tests {
         )
         .unwrap();
         let batches = RecordBatches::try_new(schema.clone(), vec![batch.clone()]).unwrap();
-        let streamed = PrometheusJsonResponse::consume_stream_to_data(
-            batches.as_stream(),
-            None,
-            ValueType::Matrix,
-        )
-        .await
-        .unwrap();
+        let streamed =
+            PrometheusJsonResponse::consume_stream_to_data(batches.as_stream(), ValueType::Matrix)
+                .await
+                .unwrap();
         let eager = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, vec![batch]).unwrap(),
-            None,
             ValueType::Matrix,
         )
         .unwrap();
@@ -963,8 +1059,8 @@ mod tests {
     }
 
     #[test]
-    fn marked_null_or_empty_metric_name_does_not_restore_fallback() {
-        // Both rows share their ordinary labels, so a fallback name would merge
+    fn marked_null_or_empty_metric_name_is_not_emitted() {
+        // Both rows share their ordinary labels; a fabricated name would merge
         // them into one named series instead of leaving the name unset.
         let schema = Arc::new(Schema::new(vec![
             ColumnSchema::new(
@@ -988,7 +1084,6 @@ mod tests {
         .unwrap();
         let response = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, vec![batch]).unwrap(),
-            Some("fallback".to_string()),
             ValueType::Matrix,
         )
         .unwrap();
@@ -1093,14 +1188,12 @@ mod tests {
             RecordBatches::try_new(schema.clone(), batches.clone())
                 .unwrap()
                 .as_stream(),
-            Some("metric".to_string()),
             ValueType::Matrix,
         )
         .await
         .unwrap();
         let eager = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, batches).unwrap(),
-            Some("metric".to_string()),
             ValueType::Matrix,
         )
         .unwrap();
@@ -1187,14 +1280,12 @@ mod tests {
             RecordBatches::try_new(schema.clone(), vec![first.clone(), second.clone()])
                 .unwrap()
                 .as_stream(),
-            Some("mixed_metric".to_string()),
             ValueType::Vector,
         )
         .await
         .unwrap();
         let eager = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, vec![first, second]).unwrap(),
-            Some("mixed_metric".to_string()),
             ValueType::Vector,
         )
         .unwrap();
@@ -1310,12 +1401,9 @@ mod tests {
         ]));
         let stream = LazyDropCheckingStream::new(schema);
 
-        let response = PrometheusJsonResponse::consume_stream_to_data(
-            Box::pin(stream),
-            None,
-            ValueType::Matrix,
-        )
-        .await;
+        let response =
+            PrometheusJsonResponse::consume_stream_to_data(Box::pin(stream), ValueType::Matrix)
+                .await;
 
         assert!(matches!(
             response.unwrap(),
@@ -1334,7 +1422,6 @@ mod tests {
         left.record_info("left info");
         let mut response = PrometheusJsonResponse::from_query_result(
             Ok(Output::new_with_record_batches(RecordBatches::empty())),
-            None,
             ValueType::Vector,
             Some(query_id),
         )
@@ -1528,7 +1615,6 @@ mod tests {
         .unwrap();
         let actual = PrometheusJsonResponse::from_query_result(
             Ok(Output::new_with_record_batches(batches)),
-            None,
             ValueType::Matrix,
             None,
         )
@@ -1577,8 +1663,7 @@ mod tests {
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
         let response =
-            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
-                .unwrap();
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Matrix).unwrap();
         let PrometheusResponse::PromData(data) = response else {
             panic!("expected Prometheus data response");
         };
@@ -1623,8 +1708,7 @@ mod tests {
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
         let response =
-            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
-                .unwrap();
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Matrix).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Matrix(series),
             ..
@@ -1684,8 +1768,7 @@ mod tests {
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
         let response =
-            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
-                .unwrap();
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Matrix).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Matrix(series),
             ..
@@ -1742,12 +1825,8 @@ mod tests {
         .unwrap();
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
-        let response = PrometheusJsonResponse::record_batches_to_data(
-            batches,
-            Some("metric".to_string()),
-            ValueType::Vector,
-        )
-        .unwrap();
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Vector).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Vector(series),
             ..
@@ -1833,7 +1912,6 @@ mod tests {
         }
         let response = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, batches).unwrap(),
-            None,
             ValueType::Matrix,
         )
         .unwrap();
@@ -1910,7 +1988,6 @@ mod tests {
 
         let response = PrometheusJsonResponse::record_batches_to_data(
             RecordBatches::try_new(schema, batches).unwrap(),
-            None,
             ValueType::Matrix,
         )
         .unwrap();
@@ -2007,7 +2084,6 @@ mod tests {
             }
             let response = PrometheusJsonResponse::record_batches_to_data(
                 RecordBatches::try_new(schema.clone(), batches).unwrap(),
-                Some("metric".to_string()),
                 ValueType::Matrix,
             )
             .unwrap();
@@ -2032,11 +2108,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&clustered[..4]).unwrap(),
             serde_json::json!([
-                {"metric": {"__name__": "metric"}, "values": [[6.0, "6.0"], [8.0, "8.0"]]},
-                {"metric": {"__name__": "metric", "host": ""}, "values": [[7.0, "7.0"]]},
-                {"metric": {"__name__": "metric", "host": "a"},
+                {"metric": {}, "values": [[6.0, "6.0"], [8.0, "8.0"]]},
+                {"metric": {"host": ""}, "values": [[7.0, "7.0"]]},
+                {"metric": {"host": "a"},
                  "values": [[4.0, "4.0"], [5.0, "5.0"]]},
-                {"metric": {"__name__": "metric", "host": "a", "rack": "r"},
+                {"metric": {"host": "a", "rack": "r"},
                  "values": [[1.0, "1.0"], [2.0, "2.0"], [3.0, "3.0"]]},
             ])
         );
@@ -2075,12 +2151,8 @@ mod tests {
         .unwrap();
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
-        let response = PrometheusJsonResponse::record_batches_to_data(
-            batches,
-            Some("mixed_metric".to_string()),
-            ValueType::Vector,
-        )
-        .unwrap();
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Vector).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Vector(series),
             ..
@@ -2138,12 +2210,8 @@ mod tests {
         .unwrap();
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
-        let response = PrometheusJsonResponse::record_batches_to_data(
-            batches,
-            Some("label_replace_repro".to_string()),
-            ValueType::Vector,
-        )
-        .unwrap();
+        let response =
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Vector).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Vector(series),
             ..
@@ -2153,7 +2221,7 @@ mod tests {
         };
 
         assert_eq!(series.len(), 1);
-        assert_eq!(series[0].metric["__name__"], "label_replace_repro");
+        assert!(!series[0].metric.contains_key(METRIC_NAME));
         assert_eq!(series[0].metric["host"], "server-01");
         assert_eq!(series[0].metric["host_copy"], "server-01");
         assert_eq!(series[0].value, Some((1.0, "1.0".to_string())));
@@ -2184,8 +2252,7 @@ mod tests {
         let batches = RecordBatches::try_new(schema, vec![batch]).unwrap();
 
         let response =
-            PrometheusJsonResponse::record_batches_to_data(batches, None, ValueType::Matrix)
-                .unwrap();
+            PrometheusJsonResponse::record_batches_to_data(batches, ValueType::Matrix).unwrap();
         let PrometheusResponse::PromData(PromData {
             result: PromQueryResult::Matrix(series),
             ..
