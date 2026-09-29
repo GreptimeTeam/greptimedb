@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use axum::http::StatusCode;
 use opentelemetry_proto::tonic::common::v1::{
@@ -36,6 +36,13 @@ use crate::otlp::trace::{
 
 /// Converts stored trace rows directly to OTLP, without the legacy microsecond conversion.
 pub fn traces_from_records(records: HttpRecordsOutput) -> Result<TracesData, ApiError> {
+    let binary_columns: HashSet<_> = records
+        .schema
+        .column_schemas
+        .iter()
+        .filter(|column| column.data_type == "Binary")
+        .map(|column| column.name.as_str())
+        .collect();
     let mut resource_spans = Vec::with_capacity(records.rows.len());
     for row in &records.rows {
         let cells: HashMap<_, _> = records
@@ -66,7 +73,7 @@ pub fn traces_from_records(records: HttpRecordsOutput) -> Result<TracesData, Api
                 as i32,
             start_time_unix_nano: timestamp(TIMESTAMP_COLUMN)?,
             end_time_unix_nano: timestamp(TIMESTAMP_END_COLUMN)?,
-            attributes: attributes(&cells, SPAN_ATTRIBUTES_COLUMN)?,
+            attributes: attributes(&cells, SPAN_ATTRIBUTES_COLUMN, &binary_columns)?,
             events: events(cells.get(SPAN_EVENTS_COLUMN).copied())?,
             links: links(cells.get(SPAN_LINKS_COLUMN).copied())?,
             status: Some(Status {
@@ -76,7 +83,8 @@ pub fn traces_from_records(records: HttpRecordsOutput) -> Result<TracesData, Api
             }),
             ..Default::default()
         };
-        let mut resource_attributes = attributes(&cells, RESOURCE_ATTRIBUTES_COLUMN)?;
+        let mut resource_attributes =
+            attributes(&cells, RESOURCE_ATTRIBUTES_COLUMN, &binary_columns)?;
         if !resource_attributes
             .iter()
             .any(|attr| attr.key == KEY_SERVICE_NAME)
@@ -103,7 +111,7 @@ pub fn traces_from_records(records: HttpRecordsOutput) -> Result<TracesData, Api
                 scope: Some(InstrumentationScope {
                     name: string(SCOPE_NAME_COLUMN).into(),
                     version: string(SCOPE_VERSION_COLUMN).into(),
-                    attributes: attributes(&cells, SCOPE_ATTRIBUTES_COLUMN)?,
+                    attributes: attributes(&cells, SCOPE_ATTRIBUTES_COLUMN, &binary_columns)?,
                     ..Default::default()
                 }),
                 spans: vec![span],
@@ -130,22 +138,37 @@ fn decode_id(value: &str, length: usize) -> Result<Vec<u8>, ApiError> {
     Ok(bytes)
 }
 
-fn attributes(cells: &HashMap<&str, &Value>, name: &str) -> Result<Vec<KeyValue>, ApiError> {
+fn attributes(
+    cells: &HashMap<&str, &Value>,
+    name: &str,
+    binary_columns: &HashSet<&str>,
+) -> Result<Vec<KeyValue>, ApiError> {
     if let Some(value) = cells.get(name) {
         return object_attributes(value);
     }
     let prefix = format!("{name}.");
     let mut attrs = cells
         .iter()
-        .filter_map(|(key, value)| {
-            key.strip_prefix(&prefix)
+        .filter_map(|(column, value)| {
+            column
+                .strip_prefix(&prefix)
                 .filter(|_| !value.is_null())
-                .map(|key| (key, *value))
+                .map(|key| (key, *value, binary_columns.contains(column)))
         })
-        .map(|(key, value)| {
+        .map(|(key, value, is_binary)| {
+            let value = if is_binary {
+                AnyValue {
+                    value: Some(any_value::Value::BytesValue(
+                        serde_json::from_value(value.clone())
+                            .map_err(|_| invalid_data("Invalid stored binary attribute"))?,
+                    )),
+                }
+            } else {
+                any_value(value)?
+            };
             Ok(KeyValue {
                 key: key.into(),
-                value: Some(any_value(value)?),
+                value: Some(value),
                 ..Default::default()
             })
         })

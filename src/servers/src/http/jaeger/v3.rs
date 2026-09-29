@@ -157,10 +157,15 @@ impl FindTracesParams {
                 "query.startTimeMin must be before query.startTimeMax",
             ));
         }
-        let limit = self.search_depth.unwrap_or(100);
-        if limit <= 0 {
-            return Err(ApiError::invalid("query.searchDepth must be positive"));
-        }
+        let limit = match self.search_depth.unwrap_or(0) {
+            0 => 100,
+            limit @ 1..=10_000 => limit,
+            _ => {
+                return Err(ApiError::invalid(
+                    "query.searchDepth must be between 0 and 10000",
+                ));
+            }
+        };
         let tags = self
             .attributes
             .map(|attributes| {
@@ -455,6 +460,17 @@ mod tests {
         let query = params.into_query().unwrap();
         assert_eq!(query.service_name, None);
         assert_eq!(query.limit, Some(100));
+        for name in [
+            "query.searchDepth",
+            "query.search_depth",
+            "query.num_traces",
+        ] {
+            for (depth, expected) in [(0, 100), (1, 1), (10_000, 10_000)] {
+                let uri = format!("/api/v3/traces?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-01T01:00:00Z&{name}={depth}").parse().unwrap();
+                let Query(params) = Query::<FindTracesParams>::try_from_uri(&uri).unwrap();
+                assert_eq!(params.into_query().unwrap().limit, Some(expected));
+            }
+        }
     }
 
     #[test]
@@ -490,7 +506,8 @@ mod tests {
     fn test_invalid_find_traces_parameters() {
         for extra in [
             "query.searchDepth=-1",
-            "query.searchDepth=0",
+            "query.searchDepth=10001",
+            "query.searchDepth=2147483647",
             "query.durationMin=-1s",
             "query.durationMin=2s&query.durationMax=1s",
             "query.durationMax=999999999999h",

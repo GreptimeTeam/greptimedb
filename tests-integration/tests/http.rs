@@ -10153,6 +10153,8 @@ pub async fn test_jaeger_v3_query_api(
         "traces/not-hex",
         "traces/0000000000000001?startTime=invalid",
         "traces/0000000000000001?rawTraces=invalid",
+        "traces?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+        "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
     ] {
         let response = client
             .get(&format!("/v1/jaeger/api/v3/{path}"))
@@ -10174,15 +10176,17 @@ pub async fn test_jaeger_v3_query_api(
     };
     let request: ExportTraceServiceRequest = serde_json::from_value(json!({"resourceSpans":[
         {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","one")]},
-         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value")]},"spans":[{
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
             "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000001", "name":"parent", "kind":2,
             "startTimeUnixNano":start.to_string(), "endTimeUnixNano":(start+2000).to_string()
          }]}]},
-        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","two")]},
-         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value")]},"spans":[{
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","two"), {"key":"resource.bytes","value":{"bytesValue":"AQID/w=="}}]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
             "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000002", "parentSpanId":"0000000000000001", "name":"child", "kind":3,
             "traceState":"vendor=value", "startTimeUnixNano":(start+1000).to_string(), "endTimeUnixNano":(start+1999).to_string(),
             "attributes":[make_int_attr("http.status_code",500),make_bool_attr("failed",true),
+                {"key":"bytes","value":{"bytesValue":"AQID/w=="}},
+                {"key":"integers","value":{"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}}},
                 {"key":"nested","value":{"arrayValue":{"values":[{"intValue":"9223372036854775807"},{"kvlistValue":{"values":[make_string_attr("key","value")]}}]}}}],
             "events":[{"name":"exception","timeUnixNano":(start+1011).to_string(),"attributes":[make_string_attr("message","failure")]}],
             "links":[{"traceId":"000000000000000000000000000000cd","spanId":"0000000000000003","traceState":"link=value","attributes":[make_bool_attr("remote",true)]}],
@@ -10280,7 +10284,7 @@ pub async fn test_jaeger_v3_query_api(
                     timestamp(start + 999)
                 ),
                 format!(
-                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=10",
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=0",
                     timestamp(start + 1000),
                     timestamp(start + 2000)
                 ),
@@ -10341,6 +10345,25 @@ pub async fn test_jaeger_v3_query_api(
                     nested["value"]["arrayValue"]["values"][0]["intValue"],
                     "9223372036854775807"
                 );
+                let attribute = |values: &Value, key: &str| {
+                    values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|attr| attr["key"] == key)
+                        .unwrap()["value"]
+                        .clone()
+                };
+                assert_eq!(
+                    attribute(&child["attributes"], "integers"),
+                    json!({"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}})
+                );
+                if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                    assert_eq!(
+                        attribute(&child["attributes"], "bytes"),
+                        json!({"bytesValue":"AQID/w=="})
+                    );
+                }
                 for resource in resources {
                     let span = &resource["scopeSpans"][0]["spans"][0];
                     let attrs = resource["resource"]["attributes"].as_array().unwrap();
@@ -10356,10 +10379,23 @@ pub async fn test_jaeger_v3_query_api(
                             "two"
                         }
                     );
+                    let scope_attrs = &resource["scopeSpans"][0]["scope"]["attributes"];
                     assert_eq!(
-                        resource["scopeSpans"][0]["scope"]["attributes"][0]["value"]["stringValue"],
-                        "value"
+                        attribute(scope_attrs, "scope.key"),
+                        json!({"stringValue":"value"})
                     );
+                    if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                        assert_eq!(
+                            attribute(scope_attrs, "scope.bytes"),
+                            json!({"bytesValue":"AQID/w=="})
+                        );
+                        if span["name"] == "child" {
+                            assert_eq!(
+                                attribute(&resource["resource"]["attributes"], "resource.bytes"),
+                                json!({"bytesValue":"AQID/w=="})
+                            );
+                        }
+                    }
                 }
             }
         }
