@@ -27,6 +27,7 @@ use tokio::sync::Semaphore;
 use tokio::time::Instant;
 
 use crate::common::{ObjectStoreConfig, new_fs_object_store};
+use crate::data::schema_export::append_schema_ddl;
 use crate::data::storage_export::{
     AzblobBackend, FsBackend, GcsBackend, OssBackend, S3Backend, StorageExport, StorageType,
 };
@@ -335,32 +336,6 @@ impl Export {
         ))
     }
 
-    async fn show_create(
-        &self,
-        show_type: &str,
-        catalog: &str,
-        schema: &str,
-        table: Option<&str>,
-    ) -> Result<String> {
-        let sql = match table {
-            Some(table) => format!(
-                r#"SHOW CREATE {} "{}"."{}"."{}""#,
-                show_type, catalog, schema, table
-            ),
-            None => format!(r#"SHOW CREATE {} "{}"."{}""#, show_type, catalog, schema),
-        };
-        let records = self
-            .database_client
-            .sql_in_public(&sql)
-            .await?
-            .context(EmptyResultSnafu)?;
-        let Value::String(create) = &records[0][1] else {
-            unreachable!()
-        };
-
-        Ok(format!("{};\n", create))
-    }
-
     async fn export_create_database(&self) -> Result<()> {
         let timer = Instant::now();
         let db_names = self.get_db_names().await?;
@@ -368,9 +343,15 @@ impl Export {
         let operator = self.build_prefer_fs_operator().await?;
 
         for schema in db_names {
-            let create_database = self
-                .show_create("DATABASE", &self.catalog, &schema, None)
-                .await?;
+            let mut create_database = String::new();
+            append_schema_ddl(
+                &self.database_client,
+                &self.catalog,
+                &schema,
+                std::iter::once(("DATABASE", None)),
+                &mut create_database,
+            )
+            .await?;
 
             let file_path = self.get_file_path(&schema, "create_database.sql");
             self.write_to_storage(&operator, &file_path, create_database.into_bytes())
@@ -415,23 +396,28 @@ impl Export {
                 }
 
                 let file_path = export_self.get_file_path(&schema, "create_tables.sql");
-                let mut content = Vec::new();
-
-                // Add table creation SQL
-                for (c, s, t) in metric_physical_tables.iter().chain(&remaining_tables) {
-                    let create_table = export_self.show_create("TABLE", c, s, Some(t)).await?;
-                    content.extend_from_slice(create_table.as_bytes());
-                }
-
-                // Add view creation SQL
-                for (c, s, v) in &views {
-                    let create_view = export_self.show_create("VIEW", c, s, Some(v)).await?;
-                    content.extend_from_slice(create_view.as_bytes());
-                }
+                let mut content = String::new();
+                let objects = metric_physical_tables
+                    .iter()
+                    .chain(&remaining_tables)
+                    .map(|(_, _, table)| ("TABLE", Some(table.as_str())))
+                    .chain(
+                        views
+                            .iter()
+                            .map(|(_, _, view)| ("VIEW", Some(view.as_str()))),
+                    );
+                append_schema_ddl(
+                    &export_self.database_client,
+                    &export_self.catalog,
+                    &schema,
+                    objects,
+                    &mut content,
+                )
+                .await?;
 
                 // Write to storage
                 export_self
-                    .write_to_storage(&operator, &file_path, content)
+                    .write_to_storage(&operator, &file_path, content.into_bytes())
                     .await?;
 
                 info!(

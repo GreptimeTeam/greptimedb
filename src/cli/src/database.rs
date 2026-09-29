@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine;
@@ -37,6 +38,7 @@ pub struct DatabaseClient {
     timeout: Duration,
     proxy: Option<reqwest::Proxy>,
     no_proxy: bool,
+    client: Arc<tokio::sync::OnceCell<reqwest::Client>>,
 }
 
 pub fn parse_proxy_opts(
@@ -86,6 +88,7 @@ impl DatabaseClient {
             timeout,
             proxy,
             no_proxy,
+            client: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -109,15 +112,7 @@ impl DatabaseClient {
 
     async fn require_packed_capability(&self, capability: &str) -> Result<()> {
         let url = format!("http://{}/v1/capabilities", self.addr);
-        let mut builder = reqwest::Client::builder().timeout(self.timeout);
-        if let Some(proxy) = self.proxy.clone() {
-            builder = builder.proxy(proxy);
-        }
-        if self.no_proxy {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().context(BuildClientSnafu)?;
-        let mut request = client.get(&url);
+        let mut request = self.http_client().await?.get(&url).timeout(self.timeout);
         if let Some(auth) = &self.auth_header {
             request = request.header("Authorization", auth);
         }
@@ -173,15 +168,9 @@ impl DatabaseClient {
             ("db", format!("{}-{}", self.catalog, schema)),
             ("sql", sql.to_string()),
         ];
-        let mut builder = reqwest::Client::builder();
-        if let Some(proxy) = self.proxy.clone() {
-            builder = builder.proxy(proxy);
-        }
-        if self.no_proxy {
-            builder = builder.no_proxy();
-        }
-        let client = builder.build().context(BuildClientSnafu)?;
-        let mut request = client
+        let mut request = self
+            .http_client()
+            .await?
             .post(&url)
             .form(&params)
             .header("Content-Type", "application/x-www-form-urlencoded");
@@ -197,17 +186,62 @@ impl DatabaseClient {
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
             reason: format!("bad url: {}", url),
         })?;
-        let response = response
-            .error_for_status()
-            .with_context(|_| HttpQuerySqlSnafu {
-                reason: format!("query failed: {}", sql),
-            })?;
-
+        let status = response.status();
         let text = response.text().await.with_context(|_| HttpQuerySqlSnafu {
             reason: "cannot get response text".to_string(),
         })?;
+        let value: Value = serde_json::from_str(&text).map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                msg: format!("invalid SQL response for {sql}: {text}"),
+            }
+            .build()
+        })?;
+        if !status.is_success()
+            || value.get("error").is_some()
+            || value
+                .get("code")
+                .is_some_and(|code| code.as_u64() != Some(0))
+        {
+            return crate::error::UnexpectedSnafu {
+                msg: format!("SQL request failed ({status}) for {sql}: {value}"),
+            }
+            .fail();
+        }
+        if let Some(outputs) = value.get("output").and_then(Value::as_array) {
+            for (index, output) in outputs.iter().enumerate() {
+                if output.get("error").is_some()
+                    || output
+                        .get("code")
+                        .is_some_and(|code| code.as_u64() != Some(0))
+                {
+                    return crate::error::UnexpectedSnafu {
+                        msg: format!("SQL statement {} failed in {sql}: {output}", index + 1),
+                    }
+                    .fail();
+                }
+            }
+        }
+        serde_json::from_value(value).map_err(|_| {
+            crate::error::UnexpectedSnafu {
+                msg: format!("invalid SQL response for {sql}: {text}"),
+            }
+            .build()
+        })
+    }
 
-        serde_json::from_str::<GreptimedbV1Response>(&text).context(SerdeJsonSnafu)
+    async fn http_client(&self) -> Result<&reqwest::Client> {
+        self.client
+            .get_or_try_init(|| async {
+                let mut builder = reqwest::Client::builder();
+                if let Some(proxy) = self.proxy.clone() {
+                    builder = builder.proxy(proxy);
+                }
+                if self.no_proxy {
+                    builder = builder.no_proxy();
+                }
+                builder.build().context(BuildClientSnafu)
+            })
+            .await
     }
 }
 
