@@ -160,10 +160,10 @@ mod tests {
 
     #[test]
     fn batch_limits_include_quoted_utf8_and_separators() {
-        let special = show_create_sql("TABLE", "cat.alog", "s\";库", Some("ta.\";表"));
+        let special = show_create_sql("TABLE", "cat.name", "s\";库", Some("ta.\";表"));
         assert_eq!(
             special,
-            "SHOW CREATE TABLE \"cat.alog\".\"s\"\";库\".\"ta.\"\";表\";\n"
+            "SHOW CREATE TABLE \"cat.name\".\"s\"\";库\".\"ta.\"\";表\";\n"
         );
         let mut statements = std::iter::repeat_n(special.clone(), 129).peekable();
         assert_eq!(
