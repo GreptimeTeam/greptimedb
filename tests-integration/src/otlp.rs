@@ -16,9 +16,14 @@
 mod test {
     use std::sync::Arc;
 
+    use TimeUnit as ArrowTimeUnit;
     use client::{DEFAULT_CATALOG_NAME, OutputData};
     use common_recordbatch::RecordBatches;
     use datatypes::arrow::array::AsArray;
+    use datatypes::arrow::datatypes::{
+        DataType, TimeUnit, TimestampMicrosecondType, TimestampMillisecondType,
+        TimestampNanosecondType, TimestampSecondType,
+    };
     use frontend::instance::Instance;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
@@ -37,6 +42,7 @@ mod test {
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
+    use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
@@ -501,6 +507,268 @@ WITH(
             "{sql}"
         );
         Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_logical_batcher_non_millisecond_physical_table() {
+        // Microsecond and nanosecond physical tables must both use the
+        // logical batcher: requests are converted to the physical table's
+        // unit during batch alignment
+        // (<https://github.com/GreptimeTeam/greptimedb/issues/9342>).
+        run_otlp_logical_batcher_non_millisecond_physical_table(
+            "us",
+            "TIMESTAMP(6)",
+            ArrowTimeUnit::Microsecond,
+            [60_000_000, 120_000_000],
+        )
+        .await;
+        run_otlp_logical_batcher_non_millisecond_physical_table(
+            "ns",
+            "TIMESTAMP(9)",
+            ArrowTimeUnit::Nanosecond,
+            [60_000_000_000, 120_000_000_000],
+        )
+        .await;
+    }
+
+    async fn run_otlp_logical_batcher_non_millisecond_physical_table(
+        suite: &str,
+        sql_ts_type: &str,
+        unit: ArrowTimeUnit,
+        expected: [i64; 2],
+    ) {
+        use std::time::Duration;
+
+        use common_base::Plugins;
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::{TimestampMicrosecondType, TimestampNanosecondType};
+        use frontend::server::Services;
+        use frontend::service_config::pending_rows_batcher::BatcherOptions;
+        use prost::Message;
+        use servers::batcher::BatchingProtocol;
+        use servers::http::test_helpers::TestClient;
+        use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+        let standalone =
+            GreptimeDbStandaloneBuilder::new(&format!("otlp_logical_{suite}_physical"))
+                .with_logical_batcher(BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    pending_rows_flush_interval: Duration::from_millis(5),
+                    ..Default::default()
+                })
+                .build()
+                .await;
+        let instance = standalone.fe_instance();
+        let options = standalone.opts.clone();
+        let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+        let server = services
+            .http_server_builder(
+                &options.frontend_options(),
+                services.server_memory_limiter.clone(),
+            )
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_logical_batching_enabled(true);
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+
+        // Pre-create the physical metric table with a non-millisecond time
+        // index BEFORE any ingestion, so the batcher's bulk path must
+        // handle it.
+        let mut output = instance
+            .do_query(
+                &format!(
+                    "CREATE TABLE greptime_physical_table (\
+                 greptime_timestamp {sql_ts_type} NOT NULL, \
+                 greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+                ),
+                ctx.clone(),
+            )
+            .await;
+        assert!(output.remove(0).is_ok());
+
+        // submit_build_and_align counts every batcher submission in both
+        // acknowledgement modes, so the assertion detects a regression that
+        // disables non-millisecond batching.
+        let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            .with_label_values(&["submit_build_and_align"]);
+        let before = submissions.get_sample_count();
+        for (ts, value) in [(60, 10), (120, 20)] {
+            let request = build_sum_request(
+                "non.ms.alignment",
+                AggregationTemporality::Cumulative,
+                &[(ts, value)],
+            );
+            let response = client
+                .post("/v1/otlp/v1/metrics")
+                .header("content-type", "application/x-protobuf")
+                .body(request.encode_to_vec())
+                .send()
+                .await;
+            assert_eq!(response.status().as_u16(), 200);
+        }
+        assert_eq!(
+            submissions.get_sample_count() - before,
+            2,
+            "non-millisecond physical tables must use the logical batcher"
+        );
+
+        // The rows land on the non-millisecond physical table, converted
+        // from the nanosecond encoding.
+        let sql = "SELECT greptime_timestamp, greptime_value FROM non_ms_alignment_total ORDER BY greptime_timestamp";
+        let batches = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                if batches.iter().map(|batch| batch.num_rows()).sum::<usize>() == 2 {
+                    break batches;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let batch = &batches.take()[0];
+        let stored = |row: usize| match unit {
+            ArrowTimeUnit::Microsecond => batch
+                .column(0)
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(row),
+            ArrowTimeUnit::Nanosecond => batch
+                .column(0)
+                .as_primitive::<TimestampNanosecondType>()
+                .value(row),
+            _ => unreachable!("covered units only"),
+        };
+        assert_eq!(stored(0), expected[0]);
+        assert_eq!(stored(1), expected[1]);
+        let values = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<datatypes::arrow::array::Float64Array>()
+            .unwrap_or_else(|| panic!("expected f64 values"));
+        assert_eq!(values.value(0), 10.0);
+        assert_eq!(values.value(1), 20.0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_otlp_logical_batcher_fallback_for_cross_physical_destination() {
+        use std::time::Duration;
+
+        use common_base::Plugins;
+        use datatypes::arrow::array::AsArray;
+        use datatypes::arrow::datatypes::TimestampMicrosecondType;
+        use frontend::server::Services;
+        use frontend::service_config::pending_rows_batcher::BatcherOptions;
+        use prost::Message;
+        use servers::batcher::BatchingProtocol;
+        use servers::http::test_helpers::TestClient;
+        use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+
+        // With the logical batcher enabled, an OTLP request targeting an
+        // existing logical table bound to ANOTHER physical table must fall
+        // back to the ordinary insert path (the bulk eligibility check
+        // rejects the destination binding), which converts the request to
+        // the destination's unit. This covers the case previously guarded
+        // by the removed OTLP pre-gate alignment.
+        let standalone = GreptimeDbStandaloneBuilder::new("otlp_logical_cross_physical")
+            .with_logical_batcher(BatcherOptions {
+                protocols: vec![BatchingProtocol::Otlp],
+                pending_rows_flush_interval: Duration::from_millis(5),
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let options = standalone.opts.clone();
+        let services = Services::new(options.clone(), instance.clone(), Plugins::default());
+        let server = services
+            .http_server_builder(
+                &options.frontend_options(),
+                services.server_memory_limiter.clone(),
+            )
+            .build();
+        let client = TestClient::new(server.build(server.make_app()).unwrap()).await;
+
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+        ctx.set_logical_batching_enabled(true);
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+
+        // A physical table with a microsecond time index and a logical table
+        // bound to it; OTLP requests always select the default
+        // (millisecond) physical table, so the destination binding differs.
+        for sql in [
+            "CREATE TABLE phy_us (\
+             greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+             TIME INDEX (greptime_timestamp)) \
+             ENGINE = metric WITH ('physical_metric_table' = 'true')",
+            "CREATE TABLE cross_alignment_total (\
+             greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+             \"stream\" STRING NULL, TIME INDEX (greptime_timestamp), PRIMARY KEY (\"stream\")) \
+             ENGINE = metric WITH ('on_physical_table' = 'phy_us')",
+        ] {
+            let mut output = instance.do_query(sql, ctx.clone()).await;
+            let result = output.remove(0);
+            assert!(result.is_ok(), "setup ddl failed: {result:?} — {sql}");
+        }
+
+        let submissions = servers::metrics::PENDING_ROWS_BATCH_INGEST_STAGE_ELAPSED
+            .with_label_values(&["submit_build_and_align"]);
+        let before = submissions.get_sample_count();
+        let request = build_sum_request(
+            "cross.alignment",
+            AggregationTemporality::Cumulative,
+            &[(60, 10)],
+        );
+        let response = client
+            .post("/v1/otlp/v1/metrics")
+            .header("content-type", "application/x-protobuf")
+            .body(request.encode_to_vec())
+            .send()
+            .await;
+        assert_eq!(response.status().as_u16(), 200);
+        // The request must NOT enter the logical batcher.
+        assert_eq!(
+            submissions.get_sample_count() - before,
+            0,
+            "cross-physical destinations must fall back to the ordinary insert path"
+        );
+
+        // The row lands on the microsecond logical table, converted from the
+        // nanosecond encoding: 60s -> 60_000_000us.
+        let sql = "SELECT greptime_timestamp, greptime_value FROM cross_alignment_total";
+        let batches = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let output = instance.do_query(sql, ctx.clone()).await.remove(0).unwrap();
+                let OutputData::Stream(stream) = output.data else {
+                    panic!("expected stream")
+                };
+                let batches = RecordBatches::try_collect(stream).await.unwrap();
+                if batches.iter().map(|batch| batch.num_rows()).sum::<usize>() == 1 {
+                    break batches;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let batch = &batches.take()[0];
+        let timestamps = batch.column(0).as_primitive::<TimestampMicrosecondType>();
+        assert_eq!(timestamps.value(0), 60_000_000);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1162,6 +1430,162 @@ WITH(
 | testserver | 1970-01-01T00:00:00 | 4.0            |
 +------------+---------------------+----------------+",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_microsecond_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_us_physical")
+            .build()
+            .await;
+
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(6)",
+            TimeUnit::Microsecond,
+            1_704_067_200_123_456,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_microsecond_physical_table_on_distributed() {
+        let instance = tests::create_distributed_instance("test_otlp_us_physical_dist").await;
+
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            &instance.frontend(),
+            "TIMESTAMP(6)",
+            TimeUnit::Microsecond,
+            1_704_067_200_123_456,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_seconds_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_s_physical")
+            .build()
+            .await;
+
+        // Narrowing truncates: 1704067200123456789ns -> 1704067200s.
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(0)",
+            TimeUnit::Second,
+            1_704_067_200,
+        )
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    pub async fn test_otlp_metrics_into_nanoseconds_physical_table_on_standalone() {
+        let standalone = GreptimeDbStandaloneBuilder::new("test_otlp_ns_physical")
+            .build()
+            .await;
+
+        // Same unit: the full nanosecond precision is kept verbatim.
+        test_otlp_metrics_into_non_millisecond_physical_table(
+            standalone.fe_instance(),
+            "TIMESTAMP(9)",
+            TimeUnit::Nanosecond,
+            1_704_067_200_123_456_789,
+        )
+        .await;
+    }
+
+    /// Regression test for <https://github.com/GreptimeTeam/greptimedb/issues/9231>:
+    /// a physical metric table pre-created with a non-millisecond time index
+    /// accepts OTLP ingestion; the nanosecond samples are converted to the
+    /// physical table's unit (kept verbatim for a nanosecond table,
+    /// truncating the sub-unit part for micro/second tables).
+    async fn test_otlp_metrics_into_non_millisecond_physical_table(
+        instance: &Arc<Instance>,
+        sql_ts_type: &str,
+        expected_unit: TimeUnit,
+        expected_value: i64,
+    ) {
+        let db = "otlp_non_ms_physical";
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, db);
+        // Route the request to the metric engine, like the OTLP HTTP handler
+        // does with the default `prom_store.with_metric_engine = true`.
+        ctx.set_protocol_ctx(ProtocolCtx::OtlpMetric(OtlpMetricCtx {
+            with_metric_engine: true,
+            ..Default::default()
+        }));
+        let ctx = Arc::new(ctx);
+        assert!(
+            SqlQueryHandler::do_query(
+                instance.as_ref(),
+                &format!("CREATE DATABASE IF NOT EXISTS {db}"),
+                ctx.clone(),
+            )
+            .await
+            .first()
+            .unwrap()
+            .is_ok()
+        );
+
+        let mut output = instance
+            .do_query(
+                &format!(
+                    "CREATE TABLE greptime_physical_table (\
+                 greptime_timestamp {sql_ts_type} NOT NULL, \
+                 greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')"
+                ),
+                ctx.clone(),
+            )
+            .await;
+        assert!(output.remove(0).is_ok());
+
+        let request = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: "my_gauge".to_string(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                attributes: vec![keyvalue("host", "h1")],
+                                time_unix_nano: 1_704_067_200_123_456_789,
+                                value: Some(Value::AsDouble(1.0)),
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        instance.metrics(request, ctx.clone()).await.unwrap();
+
+        let mut output = instance
+            .do_query("SELECT greptime_timestamp FROM my_gauge", ctx.clone())
+            .await;
+        let OutputData::Stream(stream) = output.remove(0).unwrap().data else {
+            unreachable!()
+        };
+        let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+        assert_eq!(batches[0].num_rows(), 1);
+        // The logical table's time index keeps the physical table's unit.
+        let ts_column = batches[0].column(0);
+        assert_eq!(
+            ts_column.data_type(),
+            &DataType::Timestamp(expected_unit, None),
+            "unexpected time index type"
+        );
+        let stored = match expected_unit {
+            TimeUnit::Second => ts_column.as_primitive::<TimestampSecondType>().value(0),
+            TimeUnit::Millisecond => ts_column
+                .as_primitive::<TimestampMillisecondType>()
+                .value(0),
+            TimeUnit::Microsecond => ts_column
+                .as_primitive::<TimestampMicrosecondType>()
+                .value(0),
+            TimeUnit::Nanosecond => ts_column.as_primitive::<TimestampNanosecondType>().value(0),
+        };
+        assert_eq!(stored, expected_value);
     }
 
     fn build_request() -> ExportMetricsServiceRequest {

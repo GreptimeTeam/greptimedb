@@ -51,7 +51,6 @@ FROM
 
 SELECT number FROM distinct_basic;
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 -- Recover the persisted streaming DISTINCT flow, then replan its first write
@@ -158,7 +157,6 @@ FROM
 
 SELECT number FROM distinct_basic;
 
--- SQLNESS SLEEP 6s
 ADMIN FLUSH_TABLE('distinct_basic');
 
 INSERT INTO

@@ -40,6 +40,7 @@ use datafusion_expr::{
 };
 use datafusion_functions::datetime::date_bin;
 use datafusion_functions::datetime::expr_fn::now;
+use datafusion_functions::unicode::expr_fn::substring;
 use datatypes::data_type::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
 use futures::Stream;
@@ -995,6 +996,40 @@ fn expand_proj_alias_aliased_part_col_aggr() {
         "  Projection: t.number, pk3 AS pk42, pk4 AS pk43",
         "    Projection: t.number, t.pk1 AS pk3, t.pk2 AS pk4",
         "      TableScan: t",
+        "]]",
+    ]
+    .join("\n");
+    assert_eq!(expected, result.to_string());
+}
+
+/// `substr(pk1, 1, 1)` maps rows from different partitions to the same group, so the
+/// aggregate has to be merged on the frontend even though it references `pk1`.
+#[test]
+fn expand_expr_over_part_col_aggr() {
+    init_default_ut_logging();
+    let test_table = TestTable::table_with_name(0, "t".to_string());
+    let table_source = Arc::new(DefaultTableSource::new(Arc::new(
+        DfTableProviderAdapter::new(test_table),
+    )));
+    let plan = LogicalPlanBuilder::scan_with_filters("t", table_source, None, vec![])
+        .unwrap()
+        .aggregate(
+            vec![substring(col("pk1"), lit(1i64), lit(1i64)), col("pk2")],
+            vec![min(col("number"))],
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let config = ConfigOptions::default();
+    let result = DistPlannerAnalyzer {}.analyze(plan, &config).unwrap();
+
+    let expected = [
+        "Projection: substr(t.pk1,Int64(1),Int64(1)), t.pk2, min(t.number)",
+        "  Aggregate: groupBy=[[substr(t.pk1,Int64(1),Int64(1)), t.pk2]], aggr=[[__min_merge(__min_state(t.number)) AS min(t.number)]]",
+        "    MergeScan [is_placeholder=false, remote_input=[",
+        "Aggregate: groupBy=[[substr(t.pk1, Int64(1), Int64(1)), t.pk2]], aggr=[[__min_state(t.number)]]",
+        "  TableScan: t",
         "]]",
     ]
     .join("\n");

@@ -17,13 +17,14 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use api::v1::region::build_index_request;
 use common_telemetry::{debug, error, warn};
 use store_api::region_request::RegionBuildIndexRequest;
 use store_api::storage::{FileId, RegionId};
 use tokio::sync::mpsc;
 
 use crate::cache::CacheStrategy;
-use crate::error::Result;
+use crate::error::{InvalidRequestSnafu, Result, WorkerStoppedSnafu};
 use crate::manifest::action::RegionEdit;
 use crate::metrics::INDEX_PUBLICATION_STALE_TOTAL;
 use crate::region::version::VersionRef;
@@ -96,18 +97,56 @@ impl<S> RegionWorkerLoop<S> {
     pub(crate) async fn handle_build_index_request(
         &mut self,
         region_id: RegionId,
-        _req: RegionBuildIndexRequest,
+        req: RegionBuildIndexRequest,
         sender: OptionOutputTx,
     ) {
-        self.handle_rebuild_index(
-            BuildIndexRequest {
-                region_id,
-                build_type: IndexBuildType::Manual,
-                file_metas: Vec::new(),
-            },
-            sender,
-        )
-        .await;
+        match req.options {
+            Some(build_index_request::Options::SeriesIndex(_)) => {
+                self.handle_build_series_index_request(region_id, sender);
+            }
+            None | Some(build_index_request::Options::SstIndex(_)) => {
+                self.handle_rebuild_index(
+                    BuildIndexRequest {
+                        region_id,
+                        build_type: IndexBuildType::Manual,
+                        file_metas: Vec::new(),
+                    },
+                    sender,
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Submits manual reconciliation without blocking the region worker on index I/O.
+    fn handle_build_series_index_request(&self, region_id: RegionId, mut sender: OptionOutputTx) {
+        let Some(region) = self.regions.writable_region_or(region_id, &mut sender) else {
+            return;
+        };
+        let Some(state) = &self.series_index_task_state else {
+            sender.send(
+                InvalidRequestSnafu {
+                    region_id,
+                    reason: "series index is disabled; enable experimental_enable_series_index",
+                }
+                .fail(),
+            );
+            return;
+        };
+        let receiver = match state.try_reconcile(region) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                sender.send(Err(error));
+                return;
+            }
+        };
+        let worker_id = self.id;
+        common_runtime::spawn_global(async move {
+            let result = receiver
+                .await
+                .unwrap_or_else(|_| WorkerStoppedSnafu { id: worker_id }.fail());
+            sender.send(result.map(|_| 0));
+        });
     }
 
     pub(crate) async fn handle_rebuild_index(

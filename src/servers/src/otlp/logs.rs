@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 
 use ahash::{HashMap, HashMapExt};
-use api::helper::ColumnDataTypeWrapper;
+use api::helper::{ColumnDataTypeWrapper, timestamp_unit};
 use api::v1::column_data_type_extension::TypeExt;
 use api::v1::column_def::options_from_column_schema;
 use api::v1::value::ValueData;
@@ -896,16 +896,6 @@ fn align_timestamp_value(
 
 fn is_timestamp_type(datatype: ColumnDataType) -> bool {
     timestamp_unit(datatype).is_some()
-}
-
-fn timestamp_unit(datatype: ColumnDataType) -> Option<TimeUnit> {
-    match datatype {
-        ColumnDataType::TimestampSecond => Some(TimeUnit::Second),
-        ColumnDataType::TimestampMillisecond => Some(TimeUnit::Millisecond),
-        ColumnDataType::TimestampMicrosecond => Some(TimeUnit::Microsecond),
-        ColumnDataType::TimestampNanosecond => Some(TimeUnit::Nanosecond),
-        _ => None,
-    }
 }
 
 fn parse_export_logs_service_request_to_rows(

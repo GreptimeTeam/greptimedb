@@ -836,7 +836,6 @@ impl RegionFlushTask {
             metadata: version.metadata.clone(),
             source,
             cache_manager: self.cache_manager.clone(),
-            storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),
             sst_write_format: if flat_format {
                 FormatType::Flat

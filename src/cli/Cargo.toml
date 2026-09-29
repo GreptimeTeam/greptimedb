@@ -71,3 +71,4 @@ common-test-util.workspace = true
 object-store = { workspace = true, features = ["testing"] }
 serde.workspace = true
 tempfile.workspace = true
+tokio-util.workspace = true

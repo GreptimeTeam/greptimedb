@@ -145,6 +145,10 @@ impl OpenBatch {
         self.entries.is_empty()
     }
 
+    pub(crate) fn holds_region(&self, region_id: RegionId) -> bool {
+        self.positions.contains_key(&region_id)
+    }
+
     /// Returns the estimated size of the admitted entries.
     pub(crate) fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
