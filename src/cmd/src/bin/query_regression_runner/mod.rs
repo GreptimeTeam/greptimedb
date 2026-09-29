@@ -99,6 +99,14 @@ struct RenderRemoteConfigArgs {
     fixture_generator: PathBuf,
     #[arg(long, value_name = "PATH")]
     output: PathBuf,
+    #[arg(long, value_enum, default_value = "frontend")]
+    target: RemoteConfigTarget,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum RemoteConfigTarget {
+    Frontend,
+    Datanode,
 }
 
 #[derive(Debug, Parser)]
