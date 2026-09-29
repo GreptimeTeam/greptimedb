@@ -122,7 +122,6 @@ fn bench_prometheus_response(c: &mut Criterion) {
                         Ok(Output::new_with_record_batches(
                             RecordBatches::try_new(schema.clone(), batches.clone()).unwrap(),
                         )),
-                        Some("metric".to_string()),
                         ValueType::Matrix,
                         None,
                     ))
@@ -137,8 +136,7 @@ fn bench_prometheus_response(c: &mut Criterion) {
                 };
                 assert_eq!(series.len(), SERIES);
                 for (index, series) in series.iter().enumerate() {
-                    assert_eq!(series.metric.len(), labels + 1);
-                    assert_eq!(series.metric["__name__"], "metric");
+                    assert_eq!(series.metric.len(), labels);
                     for label in 0..labels {
                         assert_eq!(
                             series.metric[&format!("label_{label}")],
@@ -181,7 +179,6 @@ fn bench_prometheus_single_point(c: &mut Criterion) {
                     Ok(Output::new_with_record_batches(
                         RecordBatches::try_new(schema.clone(), batches.clone()).unwrap(),
                     )),
-                    Some("metric".to_string()),
                     result_type,
                     None,
                 ))
@@ -195,7 +192,7 @@ fn bench_prometheus_single_point(c: &mut Criterion) {
                 PromQueryResult::Matrix(series) => {
                     assert_eq!(series.len(), series_count);
                     assert!(series.iter().all(|series| {
-                        series.metric.len() == LABELS + 1
+                        series.metric.len() == LABELS
                             && series.values.len() == 1
                             && series.values[0].0 == 0.0
                             && matches!(series.values[0].1, PromSampleValue::Number(0.0))
@@ -205,7 +202,7 @@ fn bench_prometheus_single_point(c: &mut Criterion) {
                 PromQueryResult::Vector(series) => {
                     assert_eq!(series.len(), series_count);
                     assert!(series.iter().all(|series| {
-                        series.metric.len() == LABELS + 1
+                        series.metric.len() == LABELS
                             && series.value.as_ref().is_some_and(|(timestamp, value)| {
                                 *timestamp == 0.0 && value == "0.0"
                             })

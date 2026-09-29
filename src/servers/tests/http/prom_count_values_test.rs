@@ -152,7 +152,7 @@ async fn count_values_generated_label_is_reported_as_a_prometheus_label() {
     let output = query_engine.execute(plan, query_ctx).await.unwrap();
 
     let response =
-        PrometheusJsonResponse::from_query_result(Ok(output), None, ValueType::Vector, None).await;
+        PrometheusJsonResponse::from_query_result(Ok(output), ValueType::Vector, None).await;
     let PrometheusResponse::PromData(PromData {
         result: PromQueryResult::Vector(series),
         ..

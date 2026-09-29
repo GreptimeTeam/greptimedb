@@ -134,7 +134,7 @@ impl PrometheusGatewayService {
                 return PrometheusJsonResponse::error(err.status_code(), err.output_msg());
             }
         };
-        let (metric_name, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
+        let (_, mut result_type) = retrieve_metric_name_and_result_type(query.expr());
         let query_id = ctx.remote_query_id().map(str::to_string);
         // A range query only returns a matrix, and matrix serialization sorts
         // samples and series, so execution order never reaches the response.
@@ -146,12 +146,6 @@ impl PrometheusGatewayService {
         };
         let result = self.handler.do_query_parsed(query, ctx).await;
 
-        PrometheusJsonResponse::from_query_result(
-            result,
-            metric_name,
-            result_type,
-            query_id.as_deref(),
-        )
-        .await
+        PrometheusJsonResponse::from_query_result(result, result_type, query_id.as_deref()).await
     }
 }
