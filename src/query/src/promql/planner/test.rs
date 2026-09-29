@@ -36,7 +36,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::Extension;
+use datafusion::logical_expr::{Extension, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use promql::extension_plan::HistogramFold;
@@ -1210,8 +1210,10 @@ fn classic_and_native_histogram_table_provider(
     let table_name = "mixed_histogram";
     let catalog = MemoryCatalogManager::with_default_setup();
     let schema = Arc::new(Schema::new(vec![
+        // A dotted tag name guards the mixed histogram_quantile projection
+        // against qualified-name parsing (#9390).
         ColumnSchema::new(
-            "tag".to_string(),
+            "service.name".to_string(),
             ConcreteDataType::string_datatype(),
             false,
         ),
@@ -4386,7 +4388,7 @@ async fn mixed_histogram_helpers_execute_classic_and_native_samples() {
             .iter()
             .flat_map(|batch| {
                 let tags = batch
-                    .column_by_name("tag")
+                    .column_by_name("service.name")
                     .unwrap()
                     .as_any()
                     .downcast_ref::<StringArray>()

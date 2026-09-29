@@ -41,7 +41,7 @@ use datafusion::physical_plan::{
     SendableRecordBatchStream, StatisticsArgs,
 };
 use datafusion::prelude::{Column, Expr};
-use datafusion_expr::{EmptyRelation, col};
+use datafusion_expr::{EmptyRelation, ident};
 use datatypes::arrow_array::string_array_value_at_index;
 use datatypes::prelude::{ConcreteDataType, DataType as GtDataType};
 use datatypes::value::{OrderedF64, Value, ValueRef};
@@ -141,14 +141,14 @@ impl UserDefinedLogicalNodeCore for HistogramFold {
         }
 
         let mut exprs = vec![
-            col(&self.le_column),
-            col(&self.ts_column),
-            col(&self.field_column),
+            ident(&self.le_column),
+            ident(&self.ts_column),
+            ident(&self.field_column),
         ];
         exprs.extend(self.input.schema().fields().iter().filter_map(|f| {
             let name = f.name();
             if name != &self.le_column && name != &self.ts_column && name != &self.field_column {
-                Some(col(name))
+                Some(ident(name))
             } else {
                 None
             }

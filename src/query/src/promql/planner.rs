@@ -58,7 +58,7 @@ use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
 use datafusion_expr::utils::{conjunction, disjunction};
-use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, col, lit};
+use datafusion_expr::{ExprSchemable, Literal, SortExpr, TableSource, ident, lit};
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
 use datatypes::data_type::{ConcreteDataType, DataType as GreptimeDataType};
@@ -646,7 +646,7 @@ impl PromPlanner {
                         .cloned()
                         .chain(prev_field_exprs.clone())
                         .collect::<Vec<_>>();
-                    group_exprs.push(col(label));
+                    group_exprs.push(ident(label));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
@@ -766,10 +766,10 @@ impl PromPlanner {
                     ),
                     self.promql_annotations.clone(),
                 )),
-                args: vec![col(&histogram_column)],
+                args: vec![ident(&histogram_column)],
             });
-            let keep_float = when(col(&histogram_column).is_not_null(), drop_histogram)
-                .otherwise(col(&float_column).is_not_null())
+            let keep_float = when(ident(&histogram_column).is_not_null(), drop_histogram)
+                .otherwise(ident(&float_column).is_not_null())
                 .context(DataFusionPlanningSnafu)?;
             input = LogicalPlanBuilder::from(input)
                 .filter(keep_float)
@@ -820,7 +820,7 @@ impl PromPlanner {
             .iter()
             .fold(None, |expr, rank| {
                 let predicate = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col(rank)),
+                    left: Box::new(ident(rank)),
                     op: Operator::LtEq,
                     right: Box::new(val.clone()),
                 });
@@ -836,7 +836,7 @@ impl PromPlanner {
             })
             .unwrap();
 
-        let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
+        let rank_columns: Vec<_> = rank_columns.into_iter().map(ident).collect();
 
         let mut new_group_exprs = group_exprs.clone();
         // Order by ranks
@@ -889,10 +889,12 @@ impl PromPlanner {
             if Self::field_column_is_native_histogram(&input_schema, col) {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramNeg::scalar_udf()),
-                    args: vec![DfExpr::Column(col.into())],
+                    args: vec![DfExpr::Column(Column::from_name(col))],
                 }))
             } else {
-                Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
+                Ok(DfExpr::Negative(Box::new(DfExpr::Column(
+                    Column::from_name(col),
+                ))))
             }
         })
     }
@@ -1002,7 +1004,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let rhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let rhs = DfExpr::Column(col.into());
+                    let rhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         expr.clone(),
@@ -1069,7 +1071,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let lhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let lhs = DfExpr::Column(col.into());
+                    let lhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         lhs.clone(),
@@ -1721,7 +1723,7 @@ impl PromPlanner {
             // `timestamp()` preserves the shifted selector timeline even though
             // SeriesNormalize now retains raw native timestamp storage. Decimal
             // arithmetic shifts before truncating to milliseconds.
-            let unit_factor = match col(&time_index_column)
+            let unit_factor = match ident(&time_index_column)
                 .get_type(normalize.schema())
                 .context(DataFusionPlanningSnafu)?
             {
@@ -1731,7 +1733,7 @@ impl PromPlanner {
                 ArrowDataType::Timestamp(ArrowTimeUnit::Nanosecond, _) => (1, 7, 6),
                 _ => unreachable!("time index is a timestamp"),
             };
-            let sample_time = col(&time_index_column)
+            let sample_time = ident(&time_index_column)
                 .cast_to(&ArrowDataType::Int64, normalize.schema())
                 .context(DataFusionPlanningSnafu)?
                 .cast_to(&ArrowDataType::Decimal128(19, 0), normalize.schema())
@@ -1845,7 +1847,7 @@ impl PromPlanner {
         input: LogicalPlan,
         timestamp_value_column: &str,
     ) -> Result<LogicalPlan> {
-        let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
+        let time_expr = ident(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
@@ -2475,7 +2477,7 @@ impl PromPlanner {
                 // collect remaining fields and convert to col expr
                 let mut exprs = all_fields
                     .into_iter()
-                    .map(|c| DfExpr::Column(Column::from(c)))
+                    .map(|c| DfExpr::Column(Column::from_name(c)))
                     .collect::<Vec<_>>();
 
                 // add timestamp column
@@ -4742,7 +4744,7 @@ impl PromPlanner {
             .map(|col| {
                 let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
                 // Order by value in the specific order
-                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, true));
+                sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
@@ -5515,7 +5517,7 @@ impl PromPlanner {
             .collect::<Vec<_>>();
         let assert_expr = DfExpr::ScalarFunction(ScalarFunction {
             func: Arc::new(UniqueMatchGroup::scalar_udf(group_labels, violation)),
-            args: std::iter::once(col(count_column.as_str()))
+            args: std::iter::once(ident(count_column.as_str()))
                 .chain(group_exprs)
                 .collect(),
         });
@@ -6154,7 +6156,7 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let input_expr = datafusion::logical_expr::col(
+        let input_expr = datafusion::logical_expr::ident(
             self.ctx
                 .time_index_column
                 .as_ref()
