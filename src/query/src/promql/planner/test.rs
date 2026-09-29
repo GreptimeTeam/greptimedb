@@ -7668,6 +7668,9 @@ async fn test_mixed_binary_operator_reports_only_dropped_samples() {
             0,
         ),
         ("(lf or on(tag) lh) % on(tag) lh", 0, 1),
+        // A non-bool comparison drops its unsupported pairs through the standalone annotation
+        // filter, not through the lane, so the dropped samples are still reported.
+        ("(lf or on(tag) lh) > on(tag) lh", 0, 1),
     ] {
         let state = build_query_engine_state();
         let annotations = PromqlAnnotationCollector::default();
