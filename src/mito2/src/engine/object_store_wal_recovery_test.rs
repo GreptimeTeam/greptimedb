@@ -390,10 +390,8 @@ async fn test_reopen_after_abrupt_drop_replays_durable_entries_once(#[case] ack_
     assert_eq!(entry_id(1, 1), latest(&store, REGION_A));
     let rows_before = scan_rows(&engine, REGION_A).await;
 
-    // Drops the engine without stopping it, like a crashed process.
-    drop(engine);
     drop(writer);
-    drop(store);
+    crash(engine, store).await;
 
     let store = open_store(&object_store, ack_mode).await;
     let engine = new_engine(&mut env, store.clone()).await;
@@ -719,6 +717,33 @@ fn spawn_seal(
     tokio::spawn(async move { store.seal_open_batch().await })
 }
 
+/// Waits until a testing hook of the store observes the state it waits for.
+async fn wait_for(hook: impl Future<Output = log_store::error::Result<()>>) {
+    tokio::time::timeout(WAIT, hook)
+        .await
+        .expect("the store must reach the state")
+        .unwrap();
+}
+
+/// Tears the engine and its store down as a crash of the process would: the
+/// store writes nothing more and fails every caller still waiting for it,
+/// then the engine stops. Returns once nothing holds the store any more, so a
+/// store reopened on the prefix never runs beside the old one.
+async fn crash(engine: MitoEngine, store: Arc<ObjectStoreLogStore>) {
+    store.crash().await;
+    engine.stop().await.unwrap();
+    drop(engine);
+    let released = Arc::downgrade(&store);
+    drop(store);
+    tokio::time::timeout(WAIT, async {
+        while released.strong_count() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("nothing may hold the crashed store");
+}
+
 #[tokio::test]
 async fn test_flush_waits_until_the_wal_is_durable() {
     let mut env = TestEnv::with_prefix("object-store-wal-flush-barrier").await;
@@ -745,7 +770,8 @@ async fn test_flush_waits_until_the_wal_is_durable() {
     // before it records the entry as flushed in the manifest.
     let flush = spawn_flush(&engine, REGION_A);
     let seal = spawn_seal(&store);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
     assert!(!seal.is_finished());
     assert_eq!(
@@ -797,7 +823,8 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     );
     let flush = spawn_flush(&engine, REGION_A);
     let seal = spawn_seal(&store);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
     assert_eq!(
         0,
@@ -805,11 +832,12 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     );
     assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
-    // The process dies with the create still held.
-    drop(engine);
-    drop(store);
-    flush.abort();
-    seal.abort();
+    // The process dies with the create still held: the waiting flush and
+    // the seal fail, and the object is never written.
+    store.crash().await;
+    assert!(flush.await.unwrap().is_err());
+    assert!(seal.await.unwrap().is_err());
+    crash(engine, store).await;
     assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
     // Nothing is durable, so nothing replays. The restart writes start
@@ -834,9 +862,8 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     assert_eq!(vec![0, 1, 2], wal_object_seqs(&object_store).await);
     let rows_before = scan_rows(&engine, REGION_A).await;
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
-    drop(engine);
     drop(writer);
-    drop(store);
+    crash(engine, store).await;
 
     // The second restart replays the entry that became durable and skips
     // nothing: the manifest never named an entry that was not durable.
@@ -872,7 +899,8 @@ async fn test_drop_cancels_a_flush_waiting_for_wal_durability() {
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     let flush = spawn_flush(&engine, REGION_A);
     let seal = spawn_seal(&store);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!flush.is_finished());
 
     // The drop cancels the flush instead of waiting behind the upload.
@@ -939,18 +967,20 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
         })
     };
     let seal = spawn_seal(&store);
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
     assert!(!truncate.is_finished());
     let manifest = region(&engine, REGION_A).manifest_ctx.manifest().await;
     assert_eq!(0, manifest.flushed_entry_id);
     assert_eq!(None, manifest.truncated_entry_id);
     assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
-    // The process dies with the create still held.
-    drop(engine);
-    drop(store);
-    truncate.abort();
-    seal.abort();
+    // The process dies with the create still held: the waiting truncate and
+    // the seal fail.
+    store.crash().await;
+    assert!(truncate.await.unwrap().is_err());
+    assert!(seal.await.unwrap().is_err());
+    crash(engine, store).await;
 
     // Nothing is durable and the manifest names no entry, so the region
     // starts over after start object 1, and its next entry becomes durable
@@ -967,9 +997,8 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
         .await;
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     let rows_before = scan_rows(&engine, REGION_A).await;
-    drop(engine);
     drop(writer);
-    drop(store);
+    crash(engine, store).await;
 
     // The second restart replays the durable entry instead of skipping it.
     let store = open_store(&object_store, AckMode::Enqueued).await;
@@ -989,6 +1018,76 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
 
+#[rstest]
+#[case(RegionTruncateRequest::All)]
+#[case(RegionTruncateRequest::Unflushed)]
+#[tokio::test]
+async fn test_enqueued_truncate_completes_once_the_wal_is_durable(
+    #[case] request: RegionTruncateRequest,
+) {
+    let mut env = TestEnv::with_prefix("object-store-wal-truncate-durable").await;
+    let object_store = memory_store();
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    let (table_dir, schema) = create_region(&engine, REGION_A, &[]).await;
+    let truncated_entry_id =
+        matches!(request, RegionTruncateRequest::All).then_some(entry_id(1, 1));
+
+    // The truncate waits for the acknowledged entry, then records it once
+    // its object is created.
+    store.hold_creates();
+    put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
+    let truncate = {
+        let engine = engine.clone();
+        tokio::spawn(async move {
+            engine
+                .handle_request(REGION_A, RegionRequest::Truncate(request))
+                .await
+                .map(|_| ())
+        })
+    };
+    let seal = spawn_seal(&store);
+    wait_for(store.wait_for_parked_creates(1)).await;
+    wait_for(store.wait_for_durability_waits(1)).await;
+    assert!(!truncate.is_finished());
+    store.release_creates();
+    tokio::time::timeout(WAIT, seal)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    tokio::time::timeout(WAIT, truncate)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let manifest = region(&engine, REGION_A).manifest_ctx.manifest().await;
+    assert_eq!(entry_id(1, 1), manifest.flushed_entry_id);
+    assert_eq!(truncated_entry_id, manifest.truncated_entry_id);
+    assert_eq!(0, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+    engine.stop().await.unwrap();
+    drop(engine);
+    drop(store);
+
+    // The restart replays nothing: the discarded rows stay discarded.
+    let store = open_store(&object_store, AckMode::Enqueued).await;
+    let engine = new_engine(&mut env, store.clone()).await;
+    open_region(&engine, REGION_A, &table_dir, &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        EntryIds {
+            flushed_entry_id: entry_id(1, 1),
+            last_entry_id: entry_id(1, 1),
+            topic_latest_entry_id: entry_id(1, 1),
+            manifest_flushed_entry_id: entry_id(1, 1),
+            memtable_rows: 0,
+        },
+        entry_ids(&engine, REGION_A).await
+    );
+    assert_eq!(0, engine.get_region_statistic(REGION_A).unwrap().num_rows);
+}
+
 #[tokio::test]
 async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
     let mut env = TestEnv::with_prefix("object-store-wal-lost-backlog").await;
@@ -1003,7 +1102,7 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
     store.fail_creates();
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     let seal = spawn_seal(&store);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    wait_for(store.wait_for_parked_creates(1)).await;
     store.begin_stop();
     store.release_creates();
     assert!(

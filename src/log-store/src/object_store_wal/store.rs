@@ -106,6 +106,10 @@ pub struct ObjectStoreLogStore {
     creates_fail: Arc<AtomicBool>,
     #[cfg(any(test, feature = "testing"))]
     next_create_fails_after_write: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    parked_creates: watch::Receiver<usize>,
+    #[cfg(any(test, feature = "testing"))]
+    durability_waits: watch::Receiver<usize>,
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
@@ -207,6 +211,10 @@ impl ObjectStoreLogStore {
         let creates_fail = Arc::new(AtomicBool::new(false));
         #[cfg(any(test, feature = "testing"))]
         let next_create_fails_after_write = Arc::new(AtomicBool::new(false));
+        #[cfg(any(test, feature = "testing"))]
+        let (parked_creates_tx, parked_creates_rx) = watch::channel(0);
+        #[cfg(any(test, feature = "testing"))]
+        let (durability_waits_tx, durability_waits_rx) = watch::channel(0);
 
         let actor = Actor {
             io: io.clone(),
@@ -243,6 +251,10 @@ impl ObjectStoreLogStore {
             creates_fail: creates_fail.clone(),
             #[cfg(any(test, feature = "testing"))]
             next_create_fails_after_write: next_create_fails_after_write.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            parked_creates: Arc::new(parked_creates_tx),
+            #[cfg(any(test, feature = "testing"))]
+            durability_waits: durability_waits_tx,
         };
         common_runtime::spawn_global(actor.run());
         Ok(Arc::new(Self {
@@ -263,6 +275,10 @@ impl ObjectStoreLogStore {
             creates_fail,
             #[cfg(any(test, feature = "testing"))]
             next_create_fails_after_write,
+            #[cfg(any(test, feature = "testing"))]
+            parked_creates: parked_creates_rx,
+            #[cfg(any(test, feature = "testing"))]
+            durability_waits: durability_waits_rx,
         }))
     }
 
@@ -411,6 +427,49 @@ impl ObjectStoreLogStore {
     pub fn fail_next_create_after_write(&self) {
         self.next_create_fails_after_write
             .store(true, Ordering::Release);
+    }
+
+    /// Waits until at least `expected` creates have been parked by
+    /// [`hold_creates`](Self::hold_creates) since the store was built.
+    pub async fn wait_for_parked_creates(&self, expected: usize) -> Result<()> {
+        self.parked_creates
+            .clone()
+            .wait_for(|count| *count >= expected)
+            .await
+            .ok()
+            .map(|_| ())
+            .context(ObjectStoreWalStoppedSnafu)
+    }
+
+    /// Waits until at least `expected` calls of
+    /// [`wait_durable`](LogStore::wait_durable) have had to wait for an entry
+    /// that is not durable since the store was built.
+    pub async fn wait_for_durability_waits(&self, expected: usize) -> Result<()> {
+        self.durability_waits
+            .clone()
+            .wait_for(|count| *count >= expected)
+            .await
+            .ok()
+            .map(|_| ())
+            .context(ObjectStoreWalStoppedSnafu)
+    }
+
+    /// Ends the actor the way a crash of the process would: nothing more is
+    /// written, creates that have not completed are dropped, and every caller
+    /// still waiting for the store fails. Returns once the actor has exited.
+    pub async fn crash(&self) {
+        self.stopped.store(true, Ordering::Release);
+        let (response_tx, response_rx) = oneshot::channel();
+        if self
+            .command_tx
+            .send(Command::Crash {
+                response: response_tx,
+            })
+            .await
+            .is_ok()
+        {
+            let _ = response_rx.await;
+        }
     }
 
     /// Sets the stopped flag without sending the stop command, which is the
@@ -692,6 +751,8 @@ enum Command {
     Seal {
         response: oneshot::Sender<Result<()>>,
     },
+    #[cfg(any(test, feature = "testing"))]
+    Crash { response: oneshot::Sender<()> },
 }
 
 /// An append waiting for the object that holds its entries.
@@ -829,6 +890,10 @@ struct Actor {
     creates_fail: Arc<AtomicBool>,
     #[cfg(any(test, feature = "testing"))]
     next_create_fails_after_write: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    parked_creates: Arc<watch::Sender<usize>>,
+    #[cfg(any(test, feature = "testing"))]
+    durability_waits: watch::Sender<usize>,
 }
 
 impl Actor {
@@ -866,6 +931,12 @@ impl Actor {
                     #[cfg(any(test, feature = "testing"))]
                     Some(Command::Seal { response }) => {
                         self.handle_seal(response);
+                    }
+                    #[cfg(any(test, feature = "testing"))]
+                    Some(Command::Crash { response }) => {
+                        self.handle_crash();
+                        let _ = response.send(());
+                        return;
                     }
                     // Every sender is gone: the store was dropped without
                     // `stop`. The creates in flight are dropped with the actor.
@@ -1110,12 +1181,18 @@ impl Actor {
             let creates_fail = self.creates_fail.clone();
             #[cfg(any(test, feature = "testing"))]
             let next_create_fails_after_write = self.next_create_fails_after_write.clone();
+            #[cfg(any(test, feature = "testing"))]
+            let parked_creates = self.parked_creates.clone();
             self.creates.push(Box::pin(async move {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
                 }
                 // The store was dropped while the create was parked: it never
                 // runs.
+                #[cfg(any(test, feature = "testing"))]
+                if *creates_held.borrow() {
+                    parked_creates.send_modify(|count| *count += 1);
+                }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_held.wait_for(|held| !*held).await.is_err() {
                     return (object_seq, Err(ObjectStoreWalStoppedSnafu.build()));
@@ -1383,6 +1460,8 @@ impl Actor {
             entry_id,
             response,
         });
+        #[cfg(any(test, feature = "testing"))]
+        self.durability_waits.send_modify(|count| *count += 1);
     }
 
     /// Makes sure no id of the region at or below `entry_id` is assigned
@@ -1516,6 +1595,21 @@ impl Actor {
         }
         let result = terminal(&self.terminal_error).map_or(Ok(()), |error| Err(shared(&error)));
         let _ = response.send(result);
+    }
+
+    /// Fails every caller that waits for the store; the creates are
+    /// dropped with the actor.
+    #[cfg(any(test, feature = "testing"))]
+    fn handle_crash(&mut self) {
+        let stopped = || ObjectStoreWalStoppedSnafu.build();
+        for batch in self.sealed.drain(..) {
+            batch.fail(stopped);
+        }
+        self.reset_open_batch();
+        self.fail_unacknowledged(stopped);
+        for response in self.stop.drain(..) {
+            let _ = response.send(Err(stopped()));
+        }
     }
 
     fn is_stopped(&self) -> bool {
@@ -2789,6 +2883,8 @@ mod tests {
             creates_held: watch::channel(false).0,
             creates_fail: Arc::default(),
             next_create_fails_after_write: Arc::default(),
+            parked_creates: watch::channel(0).1,
+            durability_waits: watch::channel(0).1,
         };
         (store, command_rx)
     }
@@ -4010,6 +4106,37 @@ mod tests {
         );
         assert_eq!(vec![0, 1, 2], object_seqs(store.io.as_ref()).await);
         store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_hooks_observe_parked_creates_waits_and_crash() {
+        let store = open(memory_store(), &enqueued(eager())).await;
+        let region_id = region(1);
+
+        // The append is acknowledged and its create parks; a wait for its
+        // entry has to wait.
+        store.hold_creates();
+        append(&store, region_id, "a1").await.unwrap();
+        timeout(WAIT, store.wait_for_parked_creates(1))
+            .await
+            .unwrap()
+            .unwrap();
+        let wait = {
+            let store = store.clone();
+            tokio::spawn(async move { store.wait_durable(&provider(region_id), id(1, 1)).await })
+        };
+        timeout(WAIT, store.wait_for_durability_waits(1))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!wait.is_finished());
+
+        // The crash fails the waiter and the store, and the parked create
+        // never writes its object.
+        store.crash().await;
+        assert_stopped(&timeout(WAIT, wait).await.unwrap().unwrap().unwrap_err());
+        assert_stopped(&append(&store, region_id, "a2").await.unwrap_err());
+        assert_eq!(vec![0], object_seqs(store.io.as_ref()).await);
     }
 
     #[tokio::test]
