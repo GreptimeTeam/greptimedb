@@ -1440,21 +1440,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_affected_rows_without_inline_metrics_becomes_ready_after_trailer() {
+        // Hold the trailer until the not-ready state has been observed.
+        let (trailer_tx, trailer_rx) = oneshot::channel();
+        let trailer = futures_util::stream::once(trailer_rx).map(|ready| {
+            ready.unwrap();
+            Ok(FlightMessage::Metrics(terminal_metrics_json()))
+        });
         let output = output_from_flight_message_stream(
             "test-peer".to_string(),
-            futures_util::stream::iter(vec![
-                Ok(FlightMessage::AffectedRows {
-                    rows: 3,
-                    metrics: None,
-                }),
-                Ok(FlightMessage::Metrics(terminal_metrics_json())),
-            ] as Vec<Result<FlightMessage>>),
+            futures_util::stream::iter(vec![Ok(FlightMessage::AffectedRows {
+                rows: 3,
+                metrics: None,
+            })])
+            .chain(trailer),
         )
         .await
         .unwrap();
 
         assert!(!output.metrics.is_ready());
-        output.metrics.wait_ready().await;
+        trailer_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(1), output.metrics.wait_ready())
+            .await
+            .expect("terminal metrics must become ready once the trailer arrives");
         assert!(output.metrics.completion_error().is_none());
         assert_eq!(
             output.metrics.region_watermark_map(),
@@ -1522,14 +1529,18 @@ mod tests {
                 if let Some(message) = self.first.take() {
                     return Poll::Ready(Some(message));
                 }
-                self.polled.take().unwrap().send(()).unwrap();
+                if let Some(polled) = self.polled.take() {
+                    let _ = polled.send(());
+                }
                 Poll::Pending
             }
         }
 
         impl Drop for DropProbe {
             fn drop(&mut self) {
-                self.dropped.take().unwrap().send(()).unwrap();
+                if let Some(dropped) = self.dropped.take() {
+                    let _ = dropped.send(());
+                }
             }
         }
 
@@ -1550,7 +1561,11 @@ mod tests {
         .unwrap();
         polled_rx.await.unwrap();
         drop(output);
-        dropped_rx.await.unwrap();
+        // Require cancellation before the five-second compatibility timeout.
+        tokio::time::timeout(Duration::from_secs(1), dropped_rx)
+            .await
+            .expect("the compatibility reader must be dropped once the output is dropped")
+            .unwrap();
     }
 
     #[tokio::test]
