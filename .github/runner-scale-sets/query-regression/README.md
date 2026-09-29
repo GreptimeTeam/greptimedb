@@ -88,12 +88,17 @@ sweep.
 The runner `Dockerfile` in the parent directory stays the single source of the
 tool contract. The image is rebuilt **automatically** by the
 `rebuild-query-regression-runner-image` job in
-`.github/workflows/release-dev-builder-images.yaml` whenever
-`rust-toolchain.toml` or anything under this directory changes on main (or via
-manual dispatch): it runs the ops tool below, then bumps
-`RUNNER_IMAGE_EPOCH` in `query-regression.yml` and points the
-`QUERY_REGRESSION_ECS_IMAGE_ID` repo variable at the new image, so the next
-regression run picks up image and epoch together.
+`.github/workflows/release-dev-builder-images.yaml` whenever anything under
+this directory changes on main (or via manual dispatch): it runs the ops tool
+below, opens an epoch-bump PR for `RUNNER_IMAGE_EPOCH` in
+`query-regression.yml`, and points the `QUERY_REGRESSION_ECS_IMAGE_ID` repo
+variable at the new image.
+
+The runner toolchain is **pinned inside the Dockerfile** to
+`nightly-2026-03-21` and deliberately does NOT follow the workspace
+`rust-toolchain.toml`: the benchmark also compiles the BASE checkout (the
+previous nightly build), which may predate the stable-toolchain migration and
+still require a nightly compiler.
 
 The manual fallback (also what the workflow runs):
 
@@ -105,10 +110,10 @@ uv run .github/runner-scale-sets/query-regression/ecs-image/build-ecs-image.py \
 ```
 
 `--base-image-id` is optional: the script defaults to the latest public
-Ubuntu 24.04 image in the region (the Dockerfile pins every tool version
-itself, so base drift is low-risk); pass it — or set the
-`ALIYUN_ECS_BASE_IMAGE_ID` repo variable consumed by the automated job —
-to pin a specific base image.
+Ubuntu 26.04 image in the region (26.04 matches the tool-version pins the
+Verify step asserts, e.g. python3 3.14; keep the two in sync); pass it — or
+set the `ALIYUN_ECS_BASE_IMAGE_ID` repo variable consumed by the automated
+job — to pin a specific base image.
 
 The script boots a temporary builder instance, `docker build`s the runner
 image, materializes `/opt/rustup`, `/opt/cargo`, `/usr/local/bin` tools, and
@@ -173,11 +178,10 @@ overridable via `QUERY_REGRESSION_RUNNER_UID`/`QUERY_REGRESSION_RUNNER_GID`)
 and exact tool versions: `libprotoc 3.21.12`, `uv 0.11.26`, `mold 2.40.4`,
 `Python 3.14.4`, `sccache 0.16.0`, `otelgen` commit
 `863a3f395d062c7322cc1de08a38774b7fdaa6c8`, root-owned `rustup 1.29.0`, and
-the image-baked Rust toolchain matching `rust-toolchain.toml` (the image
-parses the pin from the toml at build time, and the workflow asserts it
-dynamically at run time — there is no separately pinned toolchain version).
+the image-baked Rust toolchain `nightly-2026-03-21` pinned in the runner
+Dockerfile (deliberately independent of `rust-toolchain.toml` — see above).
 `mold` and `python3`
-come from apt at image-build time (not Ubuntu 24.04's default 3.12); if the
+come from apt at image-build time; if the
 Ubuntu archive ships a newer package revision between rebuilds, the Verify
 step fails with the observed version — bump those pins in `query-regression.yml`
 when that happens. Everything else (toolchain, uv, sccache, otelgen, rustup,
