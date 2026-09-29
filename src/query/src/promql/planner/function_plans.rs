@@ -465,8 +465,11 @@ impl PromPlanner {
             ),
         });
 
-        // The absent series carries the equality matchers as labels, not the input's
-        // tags or value fields, so the input's field grouping labels no longer apply.
+        // Absent emits deduplicated matcher labels after the time and value fields.
+        self.ctx.tag_columns = absent_plan.schema().fields()[2..]
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
         self.ctx.aggregation_field_labels.clear();
         Ok(absent_plan)
     }
