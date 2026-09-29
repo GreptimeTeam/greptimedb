@@ -3597,6 +3597,7 @@ impl PromPlanner {
                 let (concat_expr, dst_label) = Self::build_concat_labels_expr(
                     &mut other_input_exprs,
                     &self.ctx,
+                    input_schema,
                     query_engine_state,
                 )?;
 
@@ -4005,13 +4006,7 @@ impl PromPlanner {
             return Ok(Some((lit(value).alias(&dst_label), dst_label)));
         }
 
-        let src = DfExpr::Column(Column::from_name(src_label))
-            .cast_to(&ArrowDataType::Utf8, input_schema)
-            .context(DataFusionPlanningSnafu)?;
-        let src = DfExpr::ScalarFunction(ScalarFunction {
-            func: coalesce(),
-            args: vec![src, lit("")],
-        });
+        let src = Self::label_value_expr(&src_label, input_schema)?;
         let matched = DfExpr::ScalarFunction(ScalarFunction {
             func: datafusion_functions::regex::regexp_like(),
             args: vec![src.clone(), lit(anchored.clone())],
@@ -4038,6 +4033,7 @@ impl PromPlanner {
     fn build_concat_labels_expr(
         other_input_exprs: &mut VecDeque<DfExpr>,
         ctx: &PromPlannerContext,
+        input_schema: &DFSchemaRef,
         query_engine_state: &QueryEngineState,
     ) -> Result<(DfExpr, String)> {
         // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
@@ -4069,7 +4065,8 @@ impl PromPlanner {
         let src_labels = other_input_exprs
             .iter()
             .map(|expr| {
-                // Cast source label into column or null literal
+                // `concat_ws` skips NULL arguments together with their separator, while an
+                // absent label joins as the empty string.
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
@@ -4078,11 +4075,9 @@ impl PromPlanner {
                             }
                             .fail()
                         } else if available_columns.contains(label.as_str()) {
-                            // Label exists in the table schema
-                            Ok(DfExpr::Column(Column::from_name(label)))
+                            Self::label_value_expr(label, input_schema)
                         } else {
-                            // Label doesn't exist, treat as empty string (null)
-                            Ok(DfExpr::Literal(ScalarValue::Null, None))
+                            Ok(lit(""))
                         }
                     }
                     other => UnexpectedPlanExprSnafu {
@@ -4119,6 +4114,18 @@ impl PromPlanner {
             .alias(&dst_label),
             dst_label,
         ))
+    }
+
+    /// The value of `label` as a string, where NULL (the series has no such label) reads as the
+    /// empty string, as in PromQL.
+    fn label_value_expr(label: &str, input_schema: &DFSchemaRef) -> Result<DfExpr> {
+        let value = DfExpr::Column(Column::from_name(label))
+            .cast_to(&ArrowDataType::Utf8, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        Ok(DfExpr::ScalarFunction(ScalarFunction {
+            func: coalesce(),
+            args: vec![value, lit("")],
+        }))
     }
 
     /// An empty label value means the label is absent in PromQL. Label functions represent it

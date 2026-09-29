@@ -28,6 +28,9 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "host");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host");
 
+-- Absent labels join as empty strings and keep their separators --
+TQL EVAL (0, 15, '5s') label_join(label_join(vector(1), "a", "", "missing"), "b", "-", "a", "a");
+
 -- An empty source label name is invalid --
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 
@@ -60,7 +63,6 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "idc", "$2", "idc", "(.
 TQL EVAL (0, 15, '5s') label_replace(test, "host", "x", "host", ".*");
 
 -- test the empty source label --
--- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
@@ -85,6 +87,10 @@ TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "host2", "insta
 -- Empty regex with not existing source label, but replacement is empty
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "", "instance", "");
+
+-- An empty replacement removes an existing label --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{idc="idc1"}, "idc", "", "instance", "");
 
 -- Empty regex and different label value
 -- SQLNESS SORT_RESULT 3 1

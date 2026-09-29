@@ -77,6 +77,18 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host"
 | 1970-01-01T00:00:15 | 7   | idc4:zone3-host1 | idc4:zone3 |
 +---------------------+-----+------------------+------------+
 
+-- Absent labels join as empty strings and keep their separators --
+TQL EVAL (0, 15, '5s') label_join(label_join(vector(1), "a", "", "missing"), "b", "-", "a", "a");
+
++---------------------+----------------+---+---+
+| time                | greptime_value | b | a |
++---------------------+----------------+---+---+
+| 1970-01-01T00:00:00 | 1.0            | - |   |
+| 1970-01-01T00:00:05 | 1.0            | - |   |
+| 1970-01-01T00:00:10 | 1.0            | - |   |
+| 1970-01-01T00:00:15 | 1.0            | - |   |
++---------------------+----------------+---+---+
+
 -- An empty source label name is invalid --
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 
@@ -210,7 +222,6 @@ TQL EVAL (0, 15, '5s') label_replace(test, "host", "x", "host", ".*");
 Error: 3001(EngineExecuteQuery), Execution error: vector cannot contain metrics with the same labelset
 
 -- test the empty source label --
--- TODO(dennis): we can't remove the label currently --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc2", "", "", "");
 
@@ -314,6 +325,23 @@ TQL EVAL(0, 15, '5s') label_replace(test{host="host1"}, "host2", "", "instance",
 | 1970-01-01T00:00:15 | 5   | host1 | idc3:zone2 |
 | 1970-01-01T00:00:15 | 7   | host1 | idc4:zone3 |
 +---------------------+-----+-------+------------+
+
+-- An empty replacement removes an existing label --
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{idc="idc1"}, "idc", "", "instance", "");
+
++---------------------+-----+-----+-------+
+| ts                  | val | idc | host  |
++---------------------+-----+-----+-------+
+| 1970-01-01T00:00:00 | 1   |     | host1 |
+| 1970-01-01T00:00:00 | 2   |     | host2 |
+| 1970-01-01T00:00:05 | 1   |     | host1 |
+| 1970-01-01T00:00:05 | 2   |     | host2 |
+| 1970-01-01T00:00:10 | 1   |     | host1 |
+| 1970-01-01T00:00:10 | 2   |     | host2 |
+| 1970-01-01T00:00:15 | 1   |     | host1 |
+| 1970-01-01T00:00:15 | 2   |     | host2 |
++---------------------+-----+-----+-------+
 
 -- Empty regex and different label value
 -- SQLNESS SORT_RESULT 3 1
