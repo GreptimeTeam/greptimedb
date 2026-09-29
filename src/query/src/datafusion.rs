@@ -20,10 +20,11 @@ mod pg_oid_alias_expr_planner;
 mod planner;
 
 use std::any::Any;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use catalog::kvbackend::KvBackendCatalogManager;
 use common_base::Plugins;
 use common_catalog::consts::is_readonly_table;
 use common_error::ext::BoxedError;
@@ -56,7 +57,9 @@ use tracing::Span;
 use crate::analyze::DistAnalyzeExec;
 pub use crate::datafusion::planner::DfContextProviderAdapter;
 use crate::dist_plan::{
-    DistPlannerOptions, MergeScanLogicalPlan, RemoteDynFilterReceiverInjectorRef,
+    DIST_JOIN_PLANNER_RULE_NAME, DistJoinStats, DistPlannerOptions, MergeScanLogicalPlan,
+    RemoteDynFilterReceiverInjectorRef, aggregate_region_stats, candidate_joins,
+    expected_region_ids,
 };
 use crate::error::{
     CatalogSnafu, CreateRecordBatchSnafu, MissingTableMutationHandlerSnafu,
@@ -147,6 +150,121 @@ pub struct DatafusionQueryEngine {
 impl DatafusionQueryEngine {
     pub fn new(state: Arc<QueryEngineState>, plugins: Plugins) -> Self {
         Self { state, plugins }
+    }
+
+    /// Statistics of the candidate tables of `logical_plan`, or `None` when the nested broadcast
+    /// join rewrite has to keep the existing plan.
+    ///
+    /// Gated by the session opt-in and the registered distributed rules; the manual build table
+    /// option selects the build side by name and never consults statistics.
+    ///
+    /// The candidate tables are resolved to their physical routes before the statistics of the
+    /// query are fetched: the route must still describe the table the plan captured and at least
+    /// one candidate pair must have usable routes, otherwise this is `None` without any
+    /// `region_stats` call. The region sizes of the resolved tables then come from one
+    /// `region_stats` call of the information extension, so the result belongs to this query only
+    /// and never reaches the shared engine state. The rewrite is an optimization, so a table
+    /// whose statistics are unusable (missing, duplicate, zero-sized or overflowing) is left out
+    /// instead of failing the query.
+    async fn dist_join_stats(
+        &self,
+        ctx: &QueryEngineContext,
+        logical_plan: &LogicalPlan,
+    ) -> Option<DistJoinStats> {
+        if !ctx
+            .query_ctx()
+            .configuration_parameter()
+            .experimental_dist_join()
+        {
+            return None;
+        }
+
+        let state = ctx.state();
+        if !state
+            .analyzer()
+            .rules
+            .iter()
+            .any(|rule| rule.name() == DIST_JOIN_PLANNER_RULE_NAME)
+        {
+            return None;
+        }
+        if state
+            .config()
+            .options()
+            .extensions
+            .get::<DistPlannerOptions>()
+            .and_then(|options| options.nested_broadcast_join_build_table.as_ref())
+            .is_some()
+        {
+            return None;
+        }
+
+        let candidates = candidate_joins(logical_plan);
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let catalog_manager = self
+            .state
+            .catalog_manager()
+            .as_any()
+            .downcast_ref::<KvBackendCatalogManager>()?;
+        let partition_manager = catalog_manager.partition_manager();
+
+        // Resolve the routes before fetching the statistics: a table whose route does not
+        // describe the id the plan captured is not priced, and without one candidate pair whose
+        // two sides both have usable routes the statistics cannot decide the rewrite.
+        let mut routes = BTreeMap::new();
+        for table_id in candidates
+            .iter()
+            .flat_map(|candidate| [candidate.probe, candidate.build])
+            .collect::<BTreeSet<_>>()
+        {
+            let Ok((physical_table_id, route)) = partition_manager
+                .find_physical_table_route_with_id(table_id)
+                .await
+            else {
+                continue;
+            };
+            // A logical table resolves to the route of its physical table; pricing its regions
+            // under the captured id would describe another table.
+            if physical_table_id != table_id {
+                continue;
+            }
+            let Some(regions) = expected_region_ids(physical_table_id, &route.region_routes) else {
+                continue;
+            };
+
+            routes.insert(table_id, regions);
+        }
+        let has_usable_pair = candidates.iter().any(|candidate| {
+            routes.contains_key(&candidate.probe) && routes.contains_key(&candidate.build)
+        });
+        if !has_usable_pair {
+            return None;
+        }
+
+        let reports = match catalog_manager.information_extension().region_stats().await {
+            Ok(reports) => reports,
+            Err(err) => {
+                common_telemetry::debug!(
+                    err = %err,
+                    "Failed to fetch the region statistics of the nested broadcast join, keeping the existing plan"
+                );
+                return None;
+            }
+        };
+
+        let mut stats = DistJoinStats::default();
+        for (table_id, regions) in routes {
+            let Some(table_stats) = aggregate_region_stats(&regions, &reports) else {
+                continue;
+            };
+
+            stats.tables.insert(table_id, table_stats);
+        }
+
+        (!stats.tables.is_empty()).then_some(stats)
     }
 
     #[tracing::instrument(skip_all)]
@@ -389,9 +507,21 @@ impl DatafusionQueryEngine {
         };
 
         let _timer = metrics::CREATE_PHYSICAL_ELAPSED.start_timer();
-        let state = ctx.state();
 
         common_telemetry::debug!("Create physical plan, input plan: {logical_plan}");
+
+        // The nested broadcast join rewrite reads its statistics from a query-local config
+        // extension. This has to happen before the EXPLAIN branch below: the input of an EXPLAIN
+        // plan is analyzed by the physical planner of DataFusion, i.e. outside this function.
+        if let Some(stats) = self.dist_join_stats(ctx, logical_plan).await {
+            ctx.state_mut()
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(stats);
+        }
+
+        let state = ctx.state();
 
         // special handle EXPLAIN plan
         if matches!(logical_plan, DfLogicalPlan::Explain(_)) {
@@ -745,20 +875,37 @@ impl QueryExecutor for DatafusionQueryEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::fmt;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
     use api::v1::SemanticType;
-    use arrow::array::{ArrayRef, UInt64Array};
+    use arrow::array::{ArrayRef, StringArray, UInt64Array};
     use arrow_schema::SortOptions;
     use async_trait::async_trait;
     use catalog::RegisterTableRequest;
+    use catalog::information_schema::{
+        DatanodeInspectRequest, InformationExtension, InformationExtensionRef,
+    };
+    use catalog::kvbackend::KvBackendCatalogManagerBuilder;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
     use common_error::ext::BoxedError;
+    use common_meta::cache::{
+        CacheRegistryBuilder, LayeredCacheRegistryBuilder, new_table_route_cache,
+    };
+    use common_meta::cluster::NodeInfo;
+    use common_meta::datanode::{RegionManifestInfo, RegionStat};
+    use common_meta::key::flow::flow_state::FlowStat;
+    use common_meta::key::table_route::{TableRouteManager, TableRouteValue};
+    use common_meta::kv_backend::TxnService;
+    use common_meta::kv_backend::memory::MemoryKvBackend;
+    use common_meta::rpc::router::{Region, RegionRoute};
+    use common_procedure::ProcedureInfo;
     use common_recordbatch::{
         EmptyRecordBatchStream, RecordBatch, SendableRecordBatchStream, util,
     };
+    use datafusion::datasource::DefaultTableSource;
     use datafusion::physical_plan::display::{DisplayAs, DisplayFormatType};
     use datafusion::physical_plan::expressions::PhysicalSortExpr;
     use datafusion::physical_plan::joins::{HashJoinExec, JoinOn, PartitionMode};
@@ -766,19 +913,25 @@ mod tests {
     use datafusion::physical_plan::{ExecutionPlan, PhysicalExpr};
     use datafusion::prelude::{col, lit};
     use datafusion_common::{JoinType, NullEquality, ScalarValue};
+    use datafusion_expr::LogicalPlanBuilder;
     use datafusion_physical_expr::expressions::Column;
     use datatypes::prelude::ConcreteDataType;
-    use datatypes::schema::{ColumnSchema, SchemaRef};
+    use datatypes::schema::{ColumnSchema, SchemaBuilder, SchemaRef};
     use datatypes::vectors::{Helper, UInt32Vector, VectorRef};
+    use partition::cache::new_partition_info_cache;
     use session::context::{QueryContext, QueryContextBuilder};
     use store_api::metadata::{ColumnMetadata, RegionMetadataBuilder, RegionMetadataRef};
     use store_api::region_engine::{
-        PartitionRange, PrepareRequest, QueryScanContext, RegionScanner, ScannerProperties,
+        PartitionRange, PrepareRequest, QueryScanContext, RegionRole, RegionScanner,
+        ScannerProperties,
     };
     use store_api::storage::{RegionId, ScanRequest};
-    use table::metadata::{TableInfoBuilder, TableMetaBuilder};
+    use table::metadata::{TableId, TableInfoBuilder, TableMetaBuilder};
+    use table::table::adapter::DfTableProviderAdapter;
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
     use table::table::scan::RegionScanExec;
+    use table::test_util::EmptyTable;
+    use table::test_util::table_info::test_table_info;
 
     use super::*;
     use crate::options::QueryOptions;
@@ -1700,5 +1853,578 @@ mod tests {
                 value
             );
         }
+    }
+
+    /// The table ids of the two tables of the join of the automatic tests.
+    const PROBE_TABLE_ID: TableId = 1024;
+    const BUILD_TABLE_ID: TableId = 1025;
+
+    /// The physical table id a logical candidate table resolves to in the route gating test.
+    const LOGICAL_PHYSICAL_TABLE_ID: TableId = 1026;
+
+    /// An information extension with fixed region statistics and a counter of its `region_stats`
+    /// calls.
+    #[derive(Debug)]
+    struct TestInformationExtension {
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl InformationExtension for TestInformationExtension {
+        type Error = catalog::error::Error;
+
+        async fn nodes(&self) -> std::result::Result<Vec<NodeInfo>, Self::Error> {
+            Ok(vec![])
+        }
+
+        async fn procedures(
+            &self,
+        ) -> std::result::Result<Vec<(String, ProcedureInfo)>, Self::Error> {
+            Ok(vec![])
+        }
+
+        async fn region_stats(&self) -> std::result::Result<Vec<RegionStat>, Self::Error> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.reports.clone())
+        }
+
+        async fn flow_stats(&self) -> std::result::Result<Option<FlowStat>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn inspect_datanode(
+            &self,
+            _request: DatanodeInspectRequest,
+        ) -> std::result::Result<SendableRecordBatchStream, Self::Error> {
+            Ok(common_recordbatch::RecordBatches::empty().as_stream())
+        }
+    }
+
+    /// A region report with `bytes` approximate disk bytes and `role`.
+    fn region_stat(region_id: RegionId, bytes: u64, role: RegionRole) -> RegionStat {
+        RegionStat {
+            id: region_id,
+            rcus: 0,
+            wcus: 0,
+            approximate_bytes: bytes,
+            engine: "mito".to_string(),
+            role,
+            num_rows: 0,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
+            sst_num: 0,
+            index_size: 0,
+            region_manifest: RegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id: 0,
+                file_removed_cnt: 0,
+            },
+            written_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+        }
+    }
+
+    /// The region statistics of a complete query: the probe table has two regions of 4_000 and
+    /// 6_000 bytes, the build table one region of 1_000 bytes.
+    fn dist_join_reports() -> Vec<RegionStat> {
+        vec![
+            region_stat(RegionId::new(PROBE_TABLE_ID, 1), 4_000, RegionRole::Leader),
+            region_stat(RegionId::new(PROBE_TABLE_ID, 2), 6_000, RegionRole::Leader),
+            region_stat(RegionId::new(BUILD_TABLE_ID, 1), 1_000, RegionRole::Leader),
+        ]
+    }
+
+    /// Two-column schema (`number`, `host`) of the tables of the join of the tests.
+    fn dist_join_test_schema() -> SchemaRef {
+        let schema = SchemaBuilder::try_from_columns(vec![
+            ColumnSchema::new("number", ConcreteDataType::uint32_datatype(), true),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+        ])
+        .unwrap()
+        .build()
+        .unwrap();
+        Arc::new(schema)
+    }
+
+    /// Base table `name` with `table_id`, backed by an empty table provider.
+    fn dist_join_test_table(table_id: TableId, name: &str) -> table::TableRef {
+        let info = test_table_info(
+            table_id,
+            name,
+            DEFAULT_SCHEMA_NAME,
+            DEFAULT_CATALOG_NAME,
+            dist_join_test_schema(),
+        );
+        EmptyTable::from_table_info(&info)
+    }
+
+    /// A scan of one of the tables of the join of the tests.
+    fn dist_join_test_scan(alias: &str, table_id: TableId, name: &str) -> LogicalPlan {
+        let source = Arc::new(DefaultTableSource::new(Arc::new(
+            DfTableProviderAdapter::new(dist_join_test_table(table_id, name)),
+        )));
+        LogicalPlanBuilder::scan_with_filters(alias, source, None, vec![])
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// `probe INNER JOIN build ON probe.number = build.number`: the shape `DistPlannerAnalyzer`
+    /// wraps in `MergeScan` and `DistJoinPlanner` can then nest.
+    fn dist_join_test_plan() -> LogicalPlan {
+        LogicalPlanBuilder::from(dist_join_test_scan("probe", PROBE_TABLE_ID, "probe"))
+            .join_on(
+                dist_join_test_scan("build", BUILD_TABLE_ID, "build"),
+                JoinType::Inner,
+                vec![col("probe.number").eq(col("build.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// A query context with or without the session opt-in of the rewrite.
+    fn dist_join_query_ctx(opt_in: bool) -> QueryContextRef {
+        let query_ctx = QueryContextBuilder::default().build();
+        query_ctx
+            .configuration_parameter()
+            .set_experimental_dist_join(opt_in);
+        Arc::new(query_ctx)
+    }
+
+    /// The physical route of the table `table_id` with the given region numbers.
+    fn dist_join_physical_route(
+        table_id: TableId,
+        region_numbers: &[u32],
+    ) -> (TableId, TableRouteValue) {
+        let routes = region_numbers
+            .iter()
+            .map(|region_number| RegionRoute {
+                region: Region {
+                    id: RegionId::new(table_id, *region_number),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .collect();
+        (table_id, TableRouteValue::physical(routes))
+    }
+
+    /// The physical routes of the tables of the join of the tests: the probe table has the regions
+    /// 1 and 2, the build table the region 1.
+    fn dist_join_test_routes() -> Vec<(TableId, TableRouteValue)> {
+        vec![
+            dist_join_physical_route(PROBE_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[1]),
+        ]
+    }
+
+    /// A catalog manager whose KV backend holds the given table routes. Its region statistics are
+    /// the given reports.
+    async fn dist_join_catalog_manager(
+        routes: Vec<(TableId, TableRouteValue)>,
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+    ) -> Arc<KvBackendCatalogManager> {
+        let kv_backend = Arc::new(MemoryKvBackend::default());
+        let table_route_manager = TableRouteManager::new(kv_backend.clone());
+        for (table_id, table_route) in routes {
+            let (txn, _) = table_route_manager
+                .table_route_storage()
+                .build_create_txn(table_id, &table_route)
+                .unwrap();
+            assert!(kv_backend.txn(txn).await.unwrap().succeeded);
+        }
+
+        let table_route_cache = Arc::new(new_table_route_cache(
+            "test_table_route".to_string(),
+            moka::future::Cache::new(16),
+            kv_backend.clone(),
+        ));
+        let partition_info_cache = Arc::new(new_partition_info_cache(
+            "test_partition_info".to_string(),
+            moka::future::Cache::new(16),
+            table_route_cache.clone(),
+        ));
+        let cache_registry = LayeredCacheRegistryBuilder::default()
+            .add_cache_registry(
+                CacheRegistryBuilder::default()
+                    .add_cache(table_route_cache)
+                    .add_cache(partition_info_cache)
+                    .build(),
+            )
+            .build();
+        let information_extension: InformationExtensionRef =
+            Arc::new(TestInformationExtension { reports, calls });
+
+        KvBackendCatalogManagerBuilder::new(
+            information_extension,
+            kv_backend,
+            Arc::new(cache_registry),
+        )
+        .build()
+    }
+
+    /// A query engine over the catalog manager of the tests, with the distributed rules when
+    /// `with_dist_planner` is set.
+    async fn dist_join_engine(
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+        with_dist_planner: bool,
+    ) -> QueryEngineRef {
+        dist_join_engine_with_routes(dist_join_test_routes(), reports, calls, with_dist_planner)
+            .await
+    }
+
+    /// A query engine over a catalog manager with the given table `routes`.
+    async fn dist_join_engine_with_routes(
+        routes: Vec<(TableId, TableRouteValue)>,
+        reports: Vec<RegionStat>,
+        calls: Arc<AtomicUsize>,
+        with_dist_planner: bool,
+    ) -> QueryEngineRef {
+        let catalog_manager = dist_join_catalog_manager(routes, reports, calls).await;
+        QueryEngineFactory::new_with_plugins(
+            catalog_manager.clone(),
+            Some(catalog_manager.partition_manager()),
+            None,
+            None,
+            None,
+            None,
+            with_dist_planner,
+            Plugins::new(),
+            QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
+    /// The optimized logical plan of the EXPLAIN output of `plan`, as the query engine produces
+    /// it: `DatafusionQueryEngine::create_physical_plan` handles EXPLAIN, whose input plan is
+    /// analyzed and optimized (i.e. the distributed rules including `DistJoinPlanner` run on it)
+    /// before its stages are printed.
+    async fn explain_logical_plan(
+        engine: &DatafusionQueryEngine,
+        ctx: &mut QueryEngineContext,
+        plan: &LogicalPlan,
+    ) -> String {
+        let explain_plan = LogicalPlanBuilder::from(plan.clone())
+            .explain(false, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        let physical = engine
+            .create_physical_plan(ctx, &explain_plan)
+            .await
+            .unwrap();
+        let batches = datafusion::physical_plan::collect(physical, ctx.build_task_ctx())
+            .await
+            .unwrap();
+
+        for batch in &batches {
+            let plan_types = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let plans = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                if plan_types.value(row) == "logical_plan" {
+                    return plans.value(row).to_string();
+                }
+            }
+        }
+
+        panic!("the EXPLAIN output has no logical plan: {batches:?}");
+    }
+
+    /// Whether an EXPLAIN of a join shows the nested rewrite: the join sits inside a `MergeScan`,
+    /// so the enclosing boundary appears before the join in the plan text. The join of two
+    /// boundaries, i.e. the plan without the rewrite, shows the join first.
+    fn nests_join_in_merge_scan(plan: &str) -> bool {
+        match (plan.find("Join:"), plan.find("MergeScan")) {
+            (Some(join), Some(merge_scan)) => merge_scan < join,
+            _ => false,
+        }
+    }
+
+    /// The automatic path of the statistics of the nested broadcast join rewrite: the engine
+    /// resolves the candidate tables to their physical routes, fetches the region statistics of
+    /// the query once, and the EXPLAIN of the same query then shows the nested rewrite.
+    #[tokio::test]
+    async fn test_dist_join_stats_from_physical_routes() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan = dist_join_test_plan();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(
+            BTreeMap::from([
+                (
+                    PROBE_TABLE_ID,
+                    crate::dist_plan::DistJoinTableStats {
+                        total_bytes: 10_000,
+                        region_count: 2,
+                    }
+                ),
+                (
+                    BUILD_TABLE_ID,
+                    crate::dist_plan::DistJoinTableStats {
+                        total_bytes: 1_000,
+                        region_count: 1,
+                    }
+                ),
+            ]),
+            stats.tables
+        );
+        assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+        assert_eq!(
+            1,
+            calls.load(Ordering::SeqCst),
+            "the statistics of one query must come from one region stats call"
+        );
+
+        // The same query through the EXPLAIN path of the engine.
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            nests_join_in_merge_scan(&explained),
+            "the EXPLAIN must show the nested rewrite, got:\n{explained}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// The gating of the automatic path: without the session opt-in, without the distributed
+    /// rules, with the manual build table option or without a candidate join the engine does not
+    /// fetch any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_gating() {
+        common_telemetry::init_default_ut_logging();
+
+        // Without the session opt-in.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let plan = dist_join_test_plan();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(false));
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // Without the distributed rules.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), false).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // With the manual build table option, which selects the build side by name.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        ctx.state_mut()
+            .config_mut()
+            .options_mut()
+            .extensions
+            .insert(DistPlannerOptions {
+                nested_broadcast_join_build_table: Some("build".to_string()),
+                ..Default::default()
+            });
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // Without a candidate join.
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let scan_plan = dist_join_test_scan("probe", PROBE_TABLE_ID, "probe");
+        assert!(
+            query_engine
+                .dist_join_stats(&ctx, &scan_plan)
+                .await
+                .is_none()
+        );
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The same plan runs through the EXPLAIN path without the opt-in: the join keeps its two
+        // boundaries.
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(false));
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "without the opt-in the join must keep its two MergeScan boundaries, got:\n{explained}"
+        );
+    }
+
+    /// An incomplete description of a candidate table (here a follower report instead of the
+    /// leader of the build table) leaves the table out of the statistics, so the EXPLAIN of the
+    /// same query keeps the existing plan.
+    #[tokio::test]
+    async fn test_dist_join_stats_missing_description_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut reports = dist_join_reports();
+        reports[2].role = RegionRole::Follower;
+        let engine = dist_join_engine(reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan = dist_join_test_plan();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(1, stats.tables.len());
+        assert!(!stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "an incomplete description must keep the existing plan, got:\n{explained}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// A candidate table that resolves to another physical table id is not priced under the id the
+    /// plan captured: the engine keeps the existing plan without fetching any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_logical_route_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        // The probe table is logical and resolves to the physical table LOGICAL_PHYSICAL_TABLE_ID,
+        // whose regions the reports describe; the build table is a usable physical table. Pricing
+        // the resolved regions under the captured probe id would make the pair usable, so the
+        // engine must reject the resolution and fetch nothing.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            (
+                PROBE_TABLE_ID,
+                TableRouteValue::logical(LOGICAL_PHYSICAL_TABLE_ID),
+            ),
+            dist_join_physical_route(LOGICAL_PHYSICAL_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[1]),
+        ];
+        let reports = vec![
+            region_stat(
+                RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 1),
+                4_000,
+                RegionRole::Leader,
+            ),
+            region_stat(
+                RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 2),
+                6_000,
+                RegionRole::Leader,
+            ),
+            region_stat(RegionId::new(BUILD_TABLE_ID, 1), 1_000, RegionRole::Leader),
+        ];
+        let engine = dist_join_engine_with_routes(routes, reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan = dist_join_test_plan();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The logical probe is the only candidate table with a route: the pair is still unusable.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            (
+                PROBE_TABLE_ID,
+                TableRouteValue::logical(LOGICAL_PHYSICAL_TABLE_ID),
+            ),
+            dist_join_physical_route(LOGICAL_PHYSICAL_TABLE_ID, &[1, 2]),
+        ];
+        let engine = dist_join_engine_with_routes(
+            routes,
+            vec![
+                region_stat(
+                    RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 1),
+                    4_000,
+                    RegionRole::Leader,
+                ),
+                region_stat(
+                    RegionId::new(LOGICAL_PHYSICAL_TABLE_ID, 2),
+                    6_000,
+                    RegionRole::Leader,
+                ),
+            ],
+            calls.clone(),
+            true,
+        )
+        .await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// A candidate pair with a missing or empty build route is left alone: the engine keeps the
+    /// existing plan without fetching any statistics.
+    #[tokio::test]
+    async fn test_dist_join_stats_unusable_route_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        // The build table has no route.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![dist_join_physical_route(PROBE_TABLE_ID, &[1, 2])];
+        let engine =
+            dist_join_engine_with_routes(routes, dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan = dist_join_test_plan();
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+
+        // The build table route has no region.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let routes = vec![
+            dist_join_physical_route(PROBE_TABLE_ID, &[1, 2]),
+            dist_join_physical_route(BUILD_TABLE_ID, &[]),
+        ];
+        let engine =
+            dist_join_engine_with_routes(routes, dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(0, calls.load(Ordering::SeqCst));
     }
 }

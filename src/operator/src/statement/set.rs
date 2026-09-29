@@ -278,6 +278,33 @@ pub fn set_allow_query_fallback(exprs: Vec<Expr>, ctx: QueryContextRef) -> Resul
     }
 }
 
+/// Sets the session `experimental_dist_join` configuration parameter (disabled by default).
+pub fn set_experimental_dist_join(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
+    let Some((dist_join_expr, [])) = exprs.split_first() else {
+        return NotSupportedSnafu {
+            feat: "Set variable value must have one and only one value for experimental_dist_join",
+        }
+        .fail();
+    };
+    match dist_join_expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::Boolean(enabled),
+            span: _,
+        }) => {
+            ctx.configuration_parameter()
+                .set_experimental_dist_join(*enabled);
+            Ok(())
+        }
+        expr => NotSupportedSnafu {
+            feat: format!(
+                "Unsupported experimental dist join expr {} in set variable statement",
+                expr
+            ),
+        }
+        .fail(),
+    }
+}
+
 pub fn set_intervalstyle(exprs: Vec<Expr>, ctx: QueryContextRef) -> Result<()> {
     let Some((var_value, [])) = exprs.split_first() else {
         return NotSupportedSnafu {
@@ -415,7 +442,7 @@ mod test {
     use sql::ast::{Expr, Value};
 
     use super::set_skip_wal;
-    use crate::statement::set::parse_pg_query_timeout_input;
+    use crate::statement::set::{parse_pg_query_timeout_input, set_experimental_dist_join};
 
     #[test]
     fn test_set_skip_wal() {
@@ -460,6 +487,52 @@ mod test {
             assert!(session.new_query_context().skip_wal());
             assert!(!other.new_query_context().skip_wal());
         }
+    }
+
+    #[test]
+    fn test_set_experimental_dist_join() {
+        let session = Session::new(None, Channel::Mysql, Default::default(), 0);
+        let other = Session::new(None, Channel::Mysql, Default::default(), 1);
+        let dist_join = |session: &Session| {
+            session
+                .new_query_context()
+                .configuration_parameter()
+                .experimental_dist_join()
+        };
+        assert!(!dist_join(&session));
+
+        set_experimental_dist_join(
+            vec![Expr::Value(Value::Boolean(true).into())],
+            session.new_query_context(),
+        )
+        .unwrap();
+        // The value belongs to the session: later statements see it, other sessions do not.
+        assert!(dist_join(&session));
+        assert!(!dist_join(&other));
+
+        set_experimental_dist_join(
+            vec![Expr::Value(Value::Boolean(false).into())],
+            session.new_query_context(),
+        )
+        .unwrap();
+        assert!(!dist_join(&session));
+
+        for values in [
+            vec![],
+            vec![Expr::Value(Value::Number("1".to_string(), false).into())],
+            vec![Expr::Value(
+                Value::SingleQuotedString("true".to_string()).into(),
+            )],
+            // `true` first: if multiple values were accepted, the session would be
+            // mutated and the final assertion below would catch it.
+            vec![
+                Expr::Value(Value::Boolean(true).into()),
+                Expr::Value(Value::Boolean(false).into()),
+            ],
+        ] {
+            assert!(set_experimental_dist_join(values, session.new_query_context()).is_err());
+        }
+        assert!(!dist_join(&session));
     }
 
     #[test]

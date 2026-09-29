@@ -319,8 +319,6 @@ async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation
     }
 }
 
-/// A failing inner region makes the whole query fail: the datanode must not return the rows of the
-/// inner regions that succeed.
 /// The distributed rules produce the nested plan of the join SQL, the frontend plans the outer
 /// `MergeScan` of that plan to the *selected* probe regions, and the datanodes execute it.
 ///
@@ -356,7 +354,25 @@ async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
     )
     .await;
 
-    let sql = rewritten_join_sql();
+    // The SQL under test: the projection reorders the columns of the join, the join keys `10` of
+    // the build table are duplicated, the residual join filter rejects the join partners whose
+    // values sum to at most `105` (the probe row `100` sums up to `101` and `102`), and the probe
+    // predicate selects the first probe region.
+    let sql = format!(
+        "SELECT p.probe_v, p.a_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_id < 100"
+    );
+    // The rows of the SQL as `(probe_v, a_id, build_v)`: the probe row `(4, 10, 600)` joins the two
+    // build rows of the duplicated key `10` (`600 + 1` and `600 + 2`), the probe row `(2, 20, 200)`
+    // joins `(3, 20, 3)`, the residual filter rejects the probe row `(1, 10, 100)` (`100 + 1` and
+    // `100 + 2` are not greater than `105`), and the NULL join keys of both sides match nothing.
+    let expected = multiset(vec![
+        vec!["200".to_string(), "2".to_string(), "3".to_string()],
+        vec!["600".to_string(), "4".to_string(), "1".to_string()],
+        vec!["600".to_string(), "4".to_string(), "2".to_string()],
+    ]);
     let query_ctx = query_ctx();
 
     // The reference: the frontend executes the same SQL with its default distributed plan, i.e.
@@ -364,13 +380,28 @@ async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
     let reference = query_pretty(&frontend, &sql, query_ctx.clone()).await;
     info!("reference result of the frontend:\n{reference}");
     assert_eq!(
-        expected_rewritten_join_rows(),
+        expected,
         multiset(table_cells(&reference)),
         "unexpected result of the join on the frontend:\n{reference}"
     );
 
-    // The plan of the rules, not a hand-built plan.
-    let plan = rewritten_join_plan(&frontend, &query_ctx, &sql).await;
+    // The plan of the rules, not a hand-built plan: `DistPlannerAnalyzer` wraps the table scans of
+    // the join in `MergeScan`, and `DistJoinPlanner` (opted in for the build table) nests the build
+    // side into the probe side's scan.
+    let plan = plan_sql(&frontend, &sql, &query_ctx).await;
+    info!("logical plan of the join SQL:\n{plan}");
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        nested_broadcast_join_build_table: Some(BUILD_TABLE.to_string()),
+        ..Default::default()
+    });
+    let plan = DistPlannerAnalyzer {}
+        .analyze(plan, &config)
+        .expect("the distributed plan of the join must be analyzable");
+    let plan = DistJoinPlanner {}
+        .analyze(plan, &config)
+        .expect("the nested broadcast join rewrite must not fail");
+    info!("plan of the distributed rules:\n{plan}");
     let outer = outer_merge_scan(&plan).unwrap_or_else(|| {
         panic!("the rules must nest the join into the probe side's MergeScan, got: {plan}")
     });
@@ -420,7 +451,7 @@ async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
     .expect("the result of the nested plan must be printable");
     info!("result of the rule-produced nested plan:\n{actual}");
     assert_eq!(
-        expected_rewritten_join_rows(),
+        expected,
         multiset(table_cells(&actual)),
         "the nested plan returned an unexpected multiset of rows:\n{actual}"
     );
@@ -429,62 +460,6 @@ async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
         multiset(table_cells(&actual)),
         "the nested plan returned a different multiset of rows than the frontend:\n{actual}"
     );
-}
-
-/// The SQL of [`test_nested_broadcast_join_rewrite_executes_on_probe_regions`], over the columns of
-/// [`expected_rewritten_join_rows`] in order.
-///
-/// The projection reorders the columns of the join, the join keys `10` of the build table are
-/// duplicated, the residual join filter rejects the join partners whose values sum to at most
-/// `105` (the probe row `100` sum up to `101` and `102`), and the probe predicate selects the
-/// first probe region.
-fn rewritten_join_sql() -> String {
-    format!(
-        "SELECT p.probe_v, p.a_id, b.build_v
-         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
-         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
-         WHERE p.a_id < 100"
-    )
-}
-
-/// The rows of [`rewritten_join_sql`] as `(probe_v, a_id, build_v)`: the probe row `(4, 10, 600)`
-/// joins the two build rows of the duplicated key `10` (`600 + 1` and `600 + 2`), the probe row
-/// `(2, 20, 200)` joins `(3, 20, 3)`, the residual filter rejects the probe row `(1, 10, 100)`
-/// (`100 + 1` and `100 + 2` are not greater than `105`), and the NULL join keys of both sides
-/// match nothing.
-fn expected_rewritten_join_rows() -> Vec<Vec<String>> {
-    multiset(vec![
-        vec!["200".to_string(), "2".to_string(), "3".to_string()],
-        vec!["600".to_string(), "4".to_string(), "1".to_string()],
-        vec!["600".to_string(), "4".to_string(), "2".to_string()],
-    ])
-}
-
-/// Plans `sql` on the frontend and applies the distributed rules of the frontend: the
-/// [`DistPlannerAnalyzer`], which wraps the table scans of both sides of the join in `MergeScan`,
-/// and the [`DistJoinPlanner`] opted in for the build table.
-async fn rewritten_join_plan(
-    frontend: &Arc<Instance>,
-    query_ctx: &QueryContextRef,
-    sql: &str,
-) -> LogicalPlan {
-    let plan = plan_sql(frontend, sql, query_ctx).await;
-    info!("logical plan of the join SQL:\n{plan}");
-
-    let mut config = ConfigOptions::default();
-    config.extensions.insert(DistPlannerOptions {
-        nested_broadcast_join_build_table: Some(BUILD_TABLE.to_string()),
-        ..Default::default()
-    });
-    let plan = DistPlannerAnalyzer {}
-        .analyze(plan, &config)
-        .expect("the distributed plan of the join must be analyzable");
-    let plan = DistJoinPlanner {}
-        .analyze(plan, &config)
-        .expect("the nested broadcast join rewrite must not fail");
-    info!("plan of the distributed rules:\n{plan}");
-
-    plan
 }
 
 /// Returns the outermost `MergeScan` of `plan`, descending through projections.
@@ -537,6 +512,276 @@ fn find_merge_scan_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&MergeScanExec>
     }
 
     plan.children().into_iter().find_map(find_merge_scan_exec)
+}
+
+/// The join keys of [`BUILD_ROWS`], so the extra probe rows of
+/// [`test_experimental_dist_join_setting_activates_rewrite`] match every build key.
+const BUILD_JOIN_KEYS: &[i32] = &[10, 20, 30, 40];
+
+/// The number of extra rows of [`extra_probe_rows`]: enough for the cost heuristic of the rewrite
+/// to favor the build side of the join by a wide margin, see
+/// [`test_experimental_dist_join_setting_activates_rewrite`].
+const EXTRA_PROBE_ROWS: i32 = 4_000;
+
+/// `(a_id, probe_key, probe_v, a_ts)` of the extra probe rows: `a_id` alternates between the two
+/// partitions of the probe table and `probe_key` cycles the build keys, so every build key is
+/// matched.
+fn extra_probe_rows() -> Vec<(i32, i32, i32, i64)> {
+    (0..EXTRA_PROBE_ROWS)
+        .map(|i| {
+            (
+                if i % 2 == 0 { i } else { 1_000 + i },
+                BUILD_JOIN_KEYS[i as usize % BUILD_JOIN_KEYS.len()],
+                i,
+                i as i64 + 10_000,
+            )
+        })
+        .collect()
+}
+
+/// Inserts the extra probe rows of [`extra_probe_rows`] in batches.
+async fn insert_extra_probe_rows(frontend: &Arc<Instance>) {
+    for chunk in extra_probe_rows().chunks(500) {
+        let values = chunk
+            .iter()
+            .map(|(a_id, probe_key, probe_v, a_ts)| {
+                format!("({a_id}, {probe_key}, {probe_v}, {a_ts})")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        execute_sql(
+            frontend,
+            &format!("INSERT INTO {PROBE_TABLE}(a_id, probe_key, probe_v, a_ts) VALUES {values}"),
+        )
+        .await;
+    }
+}
+
+/// Whether `plan` contains a hash join, the physical node of the join of the rewrite.
+fn contains_hash_join(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.name().contains("HashJoin") || plan.children().into_iter().any(contains_hash_join)
+}
+
+/// The region statistics of `table`: `(leader reports, summed disk bytes, minimal disk bytes)`.
+///
+/// A region that has not reported yet, reports zero bytes, or is not served by a leader makes the
+/// cost heuristic of the rewrite skip the table, so a test that expects the rewrite has to wait
+/// until every region of every table has an ordinary leader report. A missing or NULL aggregate
+/// counts as `0`, i.e. as "not reported yet".
+async fn region_statistics(frontend: &Arc<Instance>, table: &str) -> (u64, u64, u64) {
+    let sql = format!(
+        "SELECT count(*) AS regions, sum(disk_size) AS bytes, min(disk_size) AS min_bytes
+         FROM information_schema.region_statistics
+         WHERE table_id IN (SELECT table_id FROM information_schema.tables
+                            WHERE table_schema = 'public' AND table_name = '{table}')
+           AND region_role = 'Leader'"
+    );
+    let pretty = query_pretty(frontend, &sql, query_ctx()).await;
+    let cells = table_cells(&pretty);
+    let row = cells.first().cloned().unwrap_or_default();
+    let parse = |index: usize| {
+        row.get(index)
+            .and_then(|cell| cell.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+
+    (parse(0), parse(1), parse(2))
+}
+
+/// Waits until both tables of the join have one ordinary leader report per region with a non-zero
+/// size, and returns the summed disk bytes of the probe and of the build table.
+///
+/// The frontend reads these statistics from the region statistics that the datanodes report to
+/// metasrv, so they appear a few heartbeats after the tables are created.
+async fn wait_for_region_statistics(frontend: &Arc<Instance>) -> (u64, u64) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
+    loop {
+        let mut stats = Vec::new();
+        for table in [PROBE_TABLE, BUILD_TABLE] {
+            stats.push(region_statistics(frontend, table).await);
+        }
+        let probe = stats[0];
+        let build = stats[1];
+        info!("region statistics of {PROBE_TABLE}: {probe:?}, of {BUILD_TABLE}: {build:?}");
+        if probe.0 == 2 && probe.2 > 0 && build.0 == 2 && build.2 > 0 {
+            return (probe.1, build.1);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the region statistics of {PROBE_TABLE} {probe:?} and {BUILD_TABLE} {build:?} must be \
+             reported"
+        );
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Whether the logical plan text of an EXPLAIN of the join shows the nested rewrite: the outer
+/// `MergeScan` of the rewritten plan wraps the join, so the boundary appears before the join,
+/// while the plan without the rewrite starts at the join of the two boundaries.
+fn nests_join_in_merge_scan(explained: &str) -> bool {
+    match (explained.find("Join:"), explained.find("MergeScan")) {
+        (Some(join), Some(merge_scan)) => merge_scan < join,
+        _ => false,
+    }
+}
+
+/// `SET experimental_dist_join` is the session opt-in of the cost heuristic: with the setting, the
+/// frontend nests the build side of a join into the probe side's `MergeScan` when the region
+/// statistics favor it, and executes that plan; without it, the join of the two boundaries stays.
+///
+/// The fixture makes the heuristic favor the build side by a wide margin: the probe table gets
+/// [`EXTRA_PROBE_ROWS`] extra rows while the build table keeps the rows of [`BUILD_ROWS`], and the
+/// test asserts the region statistics it reads really satisfy `regions * build_bytes <
+/// probe_bytes`. The query of the test selects the rows of the fixture it can predict by hand, so
+/// the parity of the execution with and without the opt-in is checked on the full multiset of the
+/// projected rows, not on a row count: a rewritten plan that loses, duplicates or mixes up values
+/// fails the comparison.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_experimental_dist_join_setting_activates_rewrite() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster = build_cluster("test_experimental_dist_join_setting_activates_rewrite").await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+    insert_extra_probe_rows(&frontend).await;
+
+    // The join of the test: the projection reorders the columns, and the equality and the residual
+    // filter of the `ON` clause stay in the join. The predicate on the time index of the probe
+    // table is what keeps the result readable by hand: `10000::TIMESTAMP` is the raw `10000` of
+    // the (millisecond) time index, so it keeps the rows that [`prepare_tables`] inserted (raw
+    // timestamps `1000` to `4000`) and drops every row of [`insert_extra_probe_rows`] (raw
+    // timestamps `10000` and above). The fixture is not changed, and the heuristic reads the
+    // region statistics of the whole tables anyway.
+    let sql = format!(
+        "SELECT p.a_id, p.probe_v, b.b_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_ts < 10000::TIMESTAMP"
+    );
+    // The rows of the join as `(a_id, probe_v, b_id, build_v)`: the probe row `(2, 20, 200)` joins
+    // `(3, 20, 3)`, the probe row `(120, 30, 300)` joins `(120, 30, 4)`, the probe row
+    // `(121, 10, 400)` joins the two build rows of the duplicated key `10` (`400 + 1` and
+    // `400 + 2`), and the residual filter rejects the probe row `(1, 10, 100)` (`100 + 1` and
+    // `100 + 2` are not greater than `105`).
+    let expected = multiset(vec![
+        vec![
+            "2".to_string(),
+            "200".to_string(),
+            "3".to_string(),
+            "3".to_string(),
+        ],
+        vec![
+            "120".to_string(),
+            "300".to_string(),
+            "120".to_string(),
+            "4".to_string(),
+        ],
+        vec![
+            "121".to_string(),
+            "400".to_string(),
+            "1".to_string(),
+            "1".to_string(),
+        ],
+        vec![
+            "121".to_string(),
+            "400".to_string(),
+            "2".to_string(),
+            "2".to_string(),
+        ],
+    ]);
+    let query_ctx = query_ctx();
+
+    let reference = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let plan = reference
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the query must carry its physical plan");
+    info!("the physical plan of the join without the opt-in:\n{plan:?}");
+    assert!(
+        contains_hash_join(&plan),
+        "without the opt-in the join must run on the frontend, got:\n{plan:?}"
+    );
+    let reference = reference.data.pretty_print().await;
+    info!("the join without the opt-in returns:\n{reference}");
+    assert_eq!(
+        expected,
+        multiset(table_cells(&reference)),
+        "unexpected result of the join without the opt-in:\n{reference}"
+    );
+    // The heuristic is off by default: the EXPLAIN of the same join keeps the join of the two
+    // boundaries.
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx.clone()).await;
+    info!("EXPLAIN without the opt-in:\n{explained}");
+    assert!(
+        !nests_join_in_merge_scan(&explained),
+        "without `SET experimental_dist_join = true` the join must keep its two MergeScan \
+         boundaries:\n{explained}"
+    );
+
+    // The statistics the heuristic reads: every region of both tables has a leader report with a
+    // non-zero size, and broadcasting the build table to the probe regions is much cheaper than
+    // the probe table itself.
+    let (probe_bytes, build_bytes) = wait_for_region_statistics(&frontend).await;
+    assert!(
+        2 * build_bytes < probe_bytes,
+        "the fixture must make the heuristic favor the build side, actual region statistics: \
+         probe {probe_bytes} bytes in 2 regions, build {build_bytes} bytes in 2 regions"
+    );
+
+    // The session opt-in of the next statement.
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = true",
+        query_ctx.clone(),
+    )
+    .await;
+
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx.clone()).await;
+    info!("EXPLAIN with the opt-in:\n{explained}");
+    assert!(
+        nests_join_in_merge_scan(&explained),
+        "with `SET experimental_dist_join = true` the EXPLAIN must show the nested rewrite:\n\
+         {explained}"
+    );
+
+    let rewritten = run_sql(&frontend, &sql, query_ctx.clone()).await;
+    let plan = rewritten
+        .meta
+        .plan
+        .clone()
+        .expect("the output of the query must carry its physical plan");
+    info!("the physical plan of the join with the opt-in:\n{plan:?}");
+    assert!(
+        !contains_hash_join(&plan) && find_merge_scan_exec(&plan).is_some(),
+        "the executed plan of the opted-in join must read the join through a MergeScan instead of \
+         joining on the frontend, got:\n{plan:?}"
+    );
+    let rewritten = rewritten.data.pretty_print().await;
+    info!("the join with the opt-in returns:\n{rewritten}");
+    assert_eq!(
+        multiset(table_cells(&reference)),
+        multiset(table_cells(&rewritten)),
+        "the executed plan of the opted-in join must return the same multiset of rows as the \
+         frontend without the opt-in:\nfrontend:\n{reference}\nrewritten:\n{rewritten}"
+    );
+
+    // Turning the setting off restores the existing plan for the same session.
+    run_sql(
+        &frontend,
+        "SET experimental_dist_join = false",
+        query_ctx.clone(),
+    )
+    .await;
+
+    let explained = query_pretty(&frontend, &format!("EXPLAIN {sql}"), query_ctx).await;
+    info!("EXPLAIN after turning the opt-in off:\n{explained}");
+    assert!(
+        !nests_join_in_merge_scan(&explained),
+        "`SET experimental_dist_join = false` must restore the join of the two boundaries:\n\
+         {explained}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
