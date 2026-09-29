@@ -69,11 +69,12 @@ impl BloomFilterFulltextIndexCreator {
             config,
         }
     }
-}
 
-#[async_trait]
-impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
-    async fn push_text(&mut self, text: &str) -> Result<()> {
+    /// Pushes a text to the index.
+    ///
+    /// [`FulltextIndexCreator::push_text`] just delegates to this inherent method so
+    /// callers holding the concrete creator skip the boxed future of the trait method.
+    pub async fn push_text(&mut self, text: &str) -> Result<()> {
         let mut token_buf = Vec::new();
         let hashes = self.analyzer.analyze_text_hashes(text, &mut token_buf);
         self.inner
@@ -84,6 +85,13 @@ impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
             .map_err(BoxedError::new)
             .context(ExternalSnafu)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
+    async fn push_text(&mut self, text: &str) -> Result<()> {
+        Self::push_text(self, text).await
     }
 
     async fn finish(
@@ -142,5 +150,145 @@ impl FulltextIndexCreator for BloomFilterFulltextIndexCreator {
             .as_ref()
             .map(|i| i.memory_usage())
             .unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use futures::AsyncReadExt;
+    use greptime_proto::v1::index::BloomFilterMeta;
+    use prost::Message;
+
+    use super::*;
+    use crate::external_provider::MockExternalTempFileProvider;
+
+    /// A `PuffinWriter` that collects the blob written by `put_blob`.
+    #[derive(Default)]
+    struct CollectBlobPuffinWriter {
+        blob: Vec<u8>,
+    }
+
+    #[async_trait]
+    impl PuffinWriter for CollectBlobPuffinWriter {
+        async fn put_blob<R>(
+            &mut self,
+            _key: &str,
+            raw_data: R,
+            _options: PutOptions,
+            _properties: HashMap<String, String>,
+        ) -> puffin::error::Result<u64>
+        where
+            R: futures::AsyncRead + Send,
+        {
+            futures::pin_mut!(raw_data);
+            raw_data.read_to_end(&mut self.blob).await.unwrap();
+            Ok(self.blob.len() as u64)
+        }
+
+        async fn put_dir(
+            &mut self,
+            _key: &str,
+            _dir: PathBuf,
+            _options: PutOptions,
+            _properties: HashMap<String, String>,
+        ) -> puffin::error::Result<u64> {
+            unreachable!()
+        }
+
+        fn set_footer_lz4_compressed(&mut self, _lz4_compressed: bool) {
+            unreachable!()
+        }
+
+        async fn finish(self) -> puffin::error::Result<u64> {
+            Ok(0)
+        }
+    }
+
+    /// Pushes a text through the `FulltextIndexCreator` trait.
+    async fn push_via_trait(creator: &mut impl FulltextIndexCreator, text: &str) {
+        creator.push_text(text).await.unwrap();
+    }
+
+    /// Builds the bloom filter blob for `texts`.
+    ///
+    /// If `via_trait` is true, texts are pushed through the `FulltextIndexCreator` trait
+    /// instead of the inherent method.
+    async fn build_blob(texts: &[&str], rows_per_segment: usize, via_trait: bool) -> Vec<u8> {
+        let mut creator = BloomFilterFulltextIndexCreator::new(
+            Config::default(),
+            rows_per_segment,
+            0.01,
+            Arc::new(MockExternalTempFileProvider::new()),
+            Arc::new(AtomicUsize::new(0)),
+            None,
+        );
+
+        for text in texts {
+            if via_trait {
+                push_via_trait(&mut creator, text).await;
+            } else {
+                creator.push_text(text).await.unwrap();
+            }
+        }
+
+        let mut writer = CollectBlobPuffinWriter::default();
+        creator
+            .finish(&mut writer, "bloom", PutOptions::default())
+            .await
+            .unwrap();
+        writer.blob
+    }
+
+    /// Decodes the `BloomFilterMeta` trailer of a bloom filter blob.
+    fn blob_meta(blob: &[u8]) -> BloomFilterMeta {
+        let meta_size_offset = blob.len() - size_of::<u32>();
+        let meta_size = u32::from_le_bytes(blob[meta_size_offset..].try_into().unwrap()) as usize;
+        BloomFilterMeta::decode(&blob[meta_size_offset - meta_size..meta_size_offset]).unwrap()
+    }
+
+    /// Compile-time check: `push_text` is callable without `FulltextIndexCreator` in scope,
+    /// so a call on the concrete creator resolves to the inherent method and not to the
+    /// boxed future of the trait method.
+    mod push_text_is_inherent {
+        use crate::fulltext_index::create::BloomFilterFulltextIndexCreator;
+
+        #[allow(dead_code)]
+        async fn push(creator: &mut BloomFilterFulltextIndexCreator, text: &str) {
+            creator.push_text(text).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_push_text_inherent_and_trait_match() {
+        // Empty strings stand for NULL values and for columns that are absent from the
+        // batch: both still count as one row per text.
+        let texts = [
+            "hello world",
+            "",
+            "greptime",
+            "foo bar",
+            "",
+            "hello greptime",
+        ];
+
+        // `1` finalizes a segment for every text, `4` crosses a segment boundary.
+        for rows_per_segment in [1, 4] {
+            let direct = build_blob(&texts, rows_per_segment, false).await;
+            let via_trait = build_blob(&texts, rows_per_segment, true).await;
+
+            assert!(!direct.is_empty());
+            assert_eq!(direct.len(), via_trait.len());
+            assert!(direct == via_trait, "blobs differ");
+
+            let meta = blob_meta(&direct);
+            assert_eq!(meta.rows_per_segment, rows_per_segment as u64);
+            assert_eq!(meta.row_count, texts.len() as u64);
+            assert_eq!(
+                meta.segment_count,
+                texts.len().div_ceil(rows_per_segment) as u64
+            );
+        }
     }
 }
