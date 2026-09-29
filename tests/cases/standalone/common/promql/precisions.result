@@ -143,21 +143,23 @@ TQL EVAL (0, 15, '5s') avg_over_time(host_sec{host="host1"}[5s]) + avg_over_time
 -- SQLNESS REPLACE host_nano.__table_id\s*=\s*UInt32\(\d+\) host_nano.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') host_micro{host="host1"};
 
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                              |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                   |
-|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
-|               |   PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
-|               |     Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                          |
-|               |       Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                  |
-|               |         Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-300000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
-|               |           TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-300000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
-|               | ]]                                                                                                                                                                                                |
-| physical_plan | CooperativeExec                                                                                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
+|               | Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                            |
+|               |   Projection: host_micro.val, host_micro.host, host_micro.ts, Utf8("host_micro") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name                             |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
+|               |       PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
+|               |         Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                          |
+|               |           Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                  |
+|               |             Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-300000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
+|               |               TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-300000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
+|               | ]]                                                                                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                                                                                       |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                   |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- The same exclusive-lower, inclusive-upper window applies to nanosecond indexes.
 -- Expected native bounds: ts_ns > -300000000000ns AND ts_ns <= 10000000000ns.
@@ -168,21 +170,23 @@ TQL EXPLAIN (0, 10, '5s') host_micro{host="host1"};
 -- SQLNESS REPLACE host_nano.__table_id\s*=\s*UInt32\(\d+\) host_nano.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                              |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                   |
-|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
-|               |   PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
-|               |     Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                            |
-|               |       Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                     |
-|               |         Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-300000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
-|               |           TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-300000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
-|               | ]]                                                                                                                                                                                                |
-| physical_plan | CooperativeExec                                                                                                                                                                                   |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                  |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
+|               | Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                               |
+|               |   Projection: host_nano.val, host_nano.host, host_nano.ts, Utf8("host_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name                                 |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts]                                                                                                      |
+|               |       PromSeriesDivide: tags=["host"]                                                                                                                                                                 |
+|               |         Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                            |
+|               |           Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                     |
+|               |             Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-300000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
+|               |               TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-300000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
+|               | ]]                                                                                                                                                                                                    |
+| physical_plan | CooperativeExec                                                                                                                                                                                       |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                   |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                       |
++---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Range selectors use their range window instead of the default lookback.
 -- Native range selector filter for [5s]:
@@ -194,24 +198,26 @@ TQL EXPLAIN (0, 10, '5s') host_nano{host="host1"};
 -- SQLNESS REPLACE host_micro.__table_id\s*=\s*UInt32\(\d+\) host_micro.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') avg_over_time(host_micro{host="host1"}[5s]);
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                  |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
-|               | Filter: prom_avg_over_time(ts_range,val) IS NOT NULL                                                                                                                                                  |
-|               |   Projection: host_micro.ts, prom_avg_over_time(ts_range, val) AS prom_avg_over_time(ts_range,val), host_micro.host                                                                                   |
-|               |     PromRangeManipulate: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts], values=["val"]                                                                                    |
-|               |       PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
-|               |         PromSeriesDivide: tags=["host"]                                                                                                                                                               |
-|               |           Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                        |
-|               |             Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                |
-|               |               Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-5000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
-|               |                 TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-5000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
-|               | ]]                                                                                                                                                                                                    |
-| physical_plan | CooperativeExec                                                                                                                                                                                       |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                           |
+|               | Projection: host_micro.ts, prom_avg_over_time(ts_range,val), host_micro.host                                                                                                                              |
+|               |   Filter: prom_avg_over_time(ts_range,val) IS NOT NULL                                                                                                                                                    |
+|               |     Projection: host_micro.ts, prom_avg_over_time(ts_range, val) AS prom_avg_over_time(ts_range,val), host_micro.host, __promql_metric_name                                                               |
+|               |       Projection: val, host_micro.host, host_micro.ts, ts_range, Utf8("host_micro") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name                              |
+|               |         PromRangeManipulate: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts], values=["val"]                                                                                    |
+|               |           PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
+|               |             PromSeriesDivide: tags=["host"]                                                                                                                                                               |
+|               |               Sort: host_micro.host ASC NULLS FIRST, host_micro.ts ASC NULLS FIRST                                                                                                                        |
+|               |                 Projection: host_micro.val, host_micro.host, host_micro.ts                                                                                                                                |
+|               |                   Filter: host_micro.host = Utf8("host1") AND host_micro.ts > TimestampMicrosecond(-5000000, None) AND host_micro.ts <= TimestampMicrosecond(10000000, None)                              |
+|               |                     TableScan: host_micro, partial_filters=[host_micro.host = Utf8("host1"), host_micro.ts > TimestampMicrosecond(-5000000, None), host_micro.ts <= TimestampMicrosecond(10000000, None)] |
+|               | ]]                                                                                                                                                                                                        |
+| physical_plan | CooperativeExec                                                                                                                                                                                           |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                       |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- Range membership also retains nanosecond precision.
 -- Expected native bounds: ts_ns > -5000000000ns AND ts_ns <= 10000000000ns.
@@ -222,24 +228,26 @@ TQL EXPLAIN (0, 10, '5s') avg_over_time(host_micro{host="host1"}[5s]);
 -- SQLNESS REPLACE host_nano.__table_id\s*=\s*UInt32\(\d+\) host_nano.__table_id=UInt32(REDACTED)
 TQL EXPLAIN (0, 10, '5s') avg_over_time(host_nano{host="host1"}[5s]);
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                  |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                       |
-|               | Filter: prom_avg_over_time(ts_range,val) IS NOT NULL                                                                                                                                                  |
-|               |   Projection: host_nano.ts, prom_avg_over_time(ts_range, val) AS prom_avg_over_time(ts_range,val), host_nano.host                                                                                     |
-|               |     PromRangeManipulate: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts], values=["val"]                                                                                    |
-|               |       PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
-|               |         PromSeriesDivide: tags=["host"]                                                                                                                                                               |
-|               |           Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                          |
-|               |             Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                   |
-|               |               Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-5000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
-|               |                 TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-5000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
-|               | ]]                                                                                                                                                                                                    |
-| physical_plan | CooperativeExec                                                                                                                                                                                       |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                                      |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                           |
+|               | Projection: host_nano.ts, prom_avg_over_time(ts_range,val), host_nano.host                                                                                                                                |
+|               |   Filter: prom_avg_over_time(ts_range,val) IS NOT NULL                                                                                                                                                    |
+|               |     Projection: host_nano.ts, prom_avg_over_time(ts_range, val) AS prom_avg_over_time(ts_range,val), host_nano.host, __promql_metric_name                                                                 |
+|               |       Projection: val, host_nano.host, host_nano.ts, ts_range, Utf8("host_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name                                 |
+|               |         PromRangeManipulate: req range=[0..10000], interval=[5000], eval range=[5000], time index=[ts], values=["val"]                                                                                    |
+|               |           PromSeriesNormalize: offset=[0], time index=[ts], filter NaN: [true]                                                                                                                            |
+|               |             PromSeriesDivide: tags=["host"]                                                                                                                                                               |
+|               |               Sort: host_nano.host ASC NULLS FIRST, host_nano.ts ASC NULLS FIRST                                                                                                                          |
+|               |                 Projection: host_nano.val, host_nano.host, host_nano.ts                                                                                                                                   |
+|               |                   Filter: host_nano.host = Utf8("host1") AND host_nano.ts > TimestampNanosecond(-5000000000, None) AND host_nano.ts <= TimestampNanosecond(10000000000, None)                             |
+|               |                     TableScan: host_nano, partial_filters=[host_nano.host = Utf8("host1"), host_nano.ts > TimestampNanosecond(-5000000000, None), host_nano.ts <= TimestampNanosecond(10000000000, None)] |
+|               | ]]                                                                                                                                                                                                        |
+| physical_plan | CooperativeExec                                                                                                                                                                                           |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                       |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                           |
++---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 DROP TABLE host_sec;
 
