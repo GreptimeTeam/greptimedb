@@ -11,7 +11,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:e70b58eda2ad@sha256:9107d8f0e5ebd7a7b3c8da43a2294a0ca3c8ac5e5b2bb1cbb02fd98d4a4c8888
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:a918e1404e17@sha256:e65f7f4fc4786093f31d0b7d8f8f3613c9290d9a8e08f6b3968e80860fb41d01
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -54,6 +54,11 @@ on:
         type: string
         default: 32g
         required: true
+      load_workers:
+        description: CPU workers for parallel import preparation (currently VT pre-import scan; separate from write concurrency)
+        type: number
+        default: 4
+        required: true
       query_timeout_seconds:
         description: Timeout per query request in seconds (correctness, warmup and measurement; 1..3600)
         type: number
@@ -85,6 +90,7 @@ env:
   DB_CPUS: ${{ inputs.db_cpus }}
   DB_MEMORY: ${{ inputs.db_memory }}
   QUERY_TIMEOUT_SECONDS: ${{ inputs.query_timeout_seconds }}
+  LOAD_WORKERS: ${{ inputs.load_workers }}
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -133,6 +139,8 @@ jobs:
         [[ "$RUNTIME_CPUS" =~ ^(0|[1-9][0-9]*)$ && "$RUNTIME_MEMORY" =~ ^(0|[1-9][0-9]*[mMgG])$ ]]
         [[ "$QUERY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]]
         ((QUERY_TIMEOUT_SECONDS <= 3600))
+        [[ "$LOAD_WORKERS" =~ ^[1-9][0-9]{0,2}$ ]]
+        ((LOAD_WORKERS <= 256))
         runtime_limits=()
         [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
         [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
@@ -148,6 +156,7 @@ jobs:
         grep -F -- '--runtime-cpus' <<< "$help"
         grep -F -- '--runtime-memory' <<< "$help"
         grep -F -- '--query-timeout-seconds' <<< "$help"
+        grep -F -- '--load-workers' <<< "$help"
         docker run --rm "${runtime_limits[@]}" "$resolved" scripts/check_run_tracesbench_docker.py
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
   provision:
@@ -266,19 +275,19 @@ jobs:
     - name: GreptimeDB load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: VictoriaTraces load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target victoriatraces --port 19428 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Tempo load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target tempo --port 13200 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Validate and render report
