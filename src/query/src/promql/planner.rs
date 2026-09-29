@@ -56,7 +56,7 @@ use datafusion_expr::expr_fn::when;
 use datafusion_expr::simplify::SimplifyContext;
 use datafusion_expr::utils::{conjunction, disjunction};
 use datafusion_expr::{
-    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, lit,
+    ExprSchemable, Literal, Projection, SortExpr, TableScan, TableSource, col, ident, lit,
 };
 use datafusion_functions::core::coalesce;
 use datatypes::arrow::datatypes::{DataType as ArrowDataType, TimeUnit as ArrowTimeUnit};
@@ -713,7 +713,7 @@ impl PromPlanner {
                         .cloned()
                         .chain(prev_field_exprs.clone())
                         .collect::<Vec<_>>();
-                    group_exprs.push(col(label));
+                    group_exprs.push(ident(label));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
@@ -830,10 +830,10 @@ impl PromPlanner {
                     ),
                     self.promql_annotations.clone(),
                 )),
-                args: vec![col(&histogram_column)],
+                args: vec![ident(&histogram_column)],
             });
-            let keep_float = when(col(&histogram_column).is_not_null(), drop_histogram)
-                .otherwise(col(&float_column).is_not_null())
+            let keep_float = when(ident(&histogram_column).is_not_null(), drop_histogram)
+                .otherwise(ident(&float_column).is_not_null())
                 .context(DataFusionPlanningSnafu)?;
             input = LogicalPlanBuilder::from(input)
                 .filter(keep_float)
@@ -884,7 +884,7 @@ impl PromPlanner {
             .iter()
             .fold(None, |expr, rank| {
                 let predicate = DfExpr::BinaryExpr(BinaryExpr {
-                    left: Box::new(col(rank)),
+                    left: Box::new(ident(rank)),
                     op: Operator::LtEq,
                     right: Box::new(val.clone()),
                 });
@@ -900,7 +900,7 @@ impl PromPlanner {
             })
             .unwrap();
 
-        let rank_columns: Vec<_> = rank_columns.into_iter().map(col).collect();
+        let rank_columns: Vec<_> = rank_columns.into_iter().map(ident).collect();
 
         let mut new_group_exprs = group_exprs.clone();
         // Order by ranks
@@ -953,10 +953,12 @@ impl PromPlanner {
             if Self::field_column_is_native_histogram(&input_schema, col) {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: Arc::new(NativeHistogramNeg::scalar_udf()),
-                    args: vec![DfExpr::Column(col.into())],
+                    args: vec![DfExpr::Column(Column::from_name(col))],
                 }))
             } else {
-                Ok(DfExpr::Negative(Box::new(DfExpr::Column(col.into()))))
+                Ok(DfExpr::Negative(Box::new(DfExpr::Column(
+                    Column::from_name(col),
+                ))))
             }
         })
     }
@@ -1390,7 +1392,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let rhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let rhs = DfExpr::Column(col.into());
+                    let rhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         expr.clone(),
@@ -1459,7 +1461,7 @@ impl PromPlanner {
                     let binary_expr_builder = Self::prom_token_to_binary_expr_builder(*op)?;
                     let lhs_is_histogram =
                         Self::field_column_is_native_histogram(&input_schema, col);
-                    let lhs = DfExpr::Column(col.into());
+                    let lhs = DfExpr::Column(Column::from_name(col));
                     let mut binary_expr = match Self::native_histogram_binary_expr(
                         *op,
                         lhs.clone(),
@@ -2038,7 +2040,7 @@ impl PromPlanner {
         input: LogicalPlan,
         timestamp_value_column: &str,
     ) -> Result<LogicalPlan> {
-        let time_expr = col(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
+        let time_expr = ident(timestamp_value_column).alias(DEFAULT_FIELD_COLUMN);
         self.ctx.field_columns = vec![time_expr.schema_name().to_string()];
         let mut project_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
         project_exprs.push(self.create_time_index_column_expr()?);
@@ -2569,7 +2571,7 @@ impl PromPlanner {
                 // collect remaining fields and convert to col expr
                 let mut exprs = all_fields
                     .into_iter()
-                    .map(|c| DfExpr::Column(Column::from(c)))
+                    .map(|c| DfExpr::Column(Column::from_name(c)))
                     .collect::<Vec<_>>();
 
                 // add timestamp column
@@ -4800,7 +4802,7 @@ impl PromPlanner {
             .map(|col| {
                 let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
                 // Order by value in the specific order
-                sort_exprs.push(DfExpr::Column(Column::from(col)).sort(asc, true));
+                sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
                 // Try to ensure the relative stability of the output results.
                 sort_exprs.extend(tag_sort_exprs.clone());
@@ -5027,12 +5029,12 @@ impl PromPlanner {
                 "vector contains a mix of classic and native histograms".to_string(),
                 self.promql_annotations.clone(),
             )),
-            args: vec![col(&float_field), col(&histogram_field)],
+            args: vec![ident(&float_field), ident(&histogram_field)],
         });
         let keep = when(
-            col(&float_field)
+            ident(&float_field)
                 .is_not_null()
-                .and(col(&histogram_field).is_not_null()),
+                .and(ident(&histogram_field).is_not_null()),
             record_collision,
         )
         .otherwise(lit(true))
@@ -5042,7 +5044,7 @@ impl PromPlanner {
         let output_field = native_expr.schema_name().to_string();
         let value = DfExpr::ScalarFunction(ScalarFunction {
             func: coalesce(),
-            args: vec![col(&float_field), native_expr],
+            args: vec![ident(&float_field), native_expr],
         });
         self.ctx.field_columns = vec![output_field.clone()];
         LogicalPlanBuilder::from(LogicalPlan::Extension(Extension {
@@ -5051,9 +5053,9 @@ impl PromPlanner {
         .filter(keep)
         .context(DataFusionPlanningSnafu)?
         .project(
-            std::iter::once(col(&time_index_column))
+            std::iter::once(ident(&time_index_column))
                 .chain(std::iter::once(value.alias(output_field)))
-                .chain(tag_columns.iter().map(col)),
+                .chain(tag_columns.iter().map(ident)),
         )
         .context(DataFusionPlanningSnafu)?
         .build()
@@ -6196,6 +6198,7 @@ impl PromPlanner {
         let join_keys = left_tag_col_set
             .into_iter()
             .chain([left_time_index])
+            .map(Column::from_name)
             .collect::<Vec<_>>();
 
         ensure!(
@@ -7030,7 +7033,7 @@ impl PromPlanner {
     /// Generate an expr like `date_part("hour", <TIME_INDEX>)`. Caller should ensure the
     /// time index column in context is set
     fn date_part_on_time_index(&self, date_part: &str) -> Result<DfExpr> {
-        let input_expr = datafusion::logical_expr::col(
+        let input_expr = datafusion::logical_expr::ident(
             self.ctx
                 .time_index_column
                 .as_ref()
@@ -8340,8 +8343,10 @@ mod test {
         let table_name = "mixed_histogram";
         let catalog = MemoryCatalogManager::with_default_setup();
         let schema = Arc::new(Schema::new(vec![
+            // A dotted tag name guards the mixed histogram_quantile projection
+            // against qualified-name parsing (#9390).
             ColumnSchema::new(
-                "tag".to_string(),
+                "service.name".to_string(),
                 ConcreteDataType::string_datatype(),
                 false,
             ),
@@ -10910,7 +10915,7 @@ mod test {
                 .iter()
                 .flat_map(|batch| {
                     let tags = batch
-                        .column_by_name("tag")
+                        .column_by_name("service.name")
                         .unwrap()
                         .as_any()
                         .downcast_ref::<StringArray>()

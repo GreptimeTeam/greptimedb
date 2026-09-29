@@ -36,7 +36,7 @@ use datafusion::physical_plan::{
     DisplayAs, DisplayFormatType, Distribution, ExecutionPlan, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::compute;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -106,8 +106,8 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             return vec![];
         }
 
-        let mut exprs = vec![col(&self.time_index_column)];
-        exprs.extend(self.staleness_field_columns().map(col));
+        let mut exprs = vec![ident(&self.time_index_column)];
+        exprs.extend(self.staleness_field_columns().map(ident));
         exprs
     }
 

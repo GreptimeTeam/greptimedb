@@ -31,7 +31,7 @@ use datafusion::physical_plan::{
 };
 use datafusion::prelude::Expr;
 use datafusion::sql::TableReference;
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::array::{Array, ArrayRef, Float64Array, TimestampMillisecondArray};
 use datatypes::arrow::compute::{CastOptions, cast_with_options, concat_batches};
 use datatypes::arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -274,9 +274,9 @@ impl UserDefinedLogicalNodeCore for ScalarCalculate {
 
         self.tag_columns
             .iter()
-            .map(col)
-            .chain(std::iter::once(col(&self.time_index)))
-            .chain(std::iter::once(col(&self.field_column)))
+            .map(ident)
+            .chain(std::iter::once(ident(&self.time_index)))
+            .chain(std::iter::once(ident(&self.field_column)))
             .collect()
     }
 
