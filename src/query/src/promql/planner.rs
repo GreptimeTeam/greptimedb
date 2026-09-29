@@ -5588,9 +5588,15 @@ impl PromPlanner {
             .map(|(qualifier, field)| DfExpr::Column(Column::new(qualifier.cloned(), field.name())))
             .collect::<Vec<_>>();
         let assert_expr = DfExpr::ScalarFunction(ScalarFunction {
-            func: Arc::new(UniqueMatchGroup::scalar_udf(group_labels, violation)),
+            func: Arc::new(UniqueMatchGroup::scalar_udf()),
             args: std::iter::once(col(count_column.as_str()))
-                .chain(group_exprs)
+                .chain(std::iter::once(lit(violation.code())))
+                .chain(
+                    group_labels
+                        .into_iter()
+                        .zip(group_exprs)
+                        .flat_map(|(label, expr)| [lit(label), expr]),
+                )
                 .collect(),
         });
 
@@ -6065,11 +6071,12 @@ impl PromPlanner {
                 })?;
             (data_type, value_type, add_to_left)
         };
-        let null = Self::string_scalar_value(&value_type, None).with_context(|| {
-            UnexpectedPlanExprSnafu {
-                desc: format!("temporality match label {marker} must be a string"),
-            }
-        })?;
+        let empty =
+            Self::string_scalar_value(&value_type, Some(String::new())).with_context(|| {
+                UnexpectedPlanExprSnafu {
+                    desc: format!("temporality match label {marker} must be a string"),
+                }
+            })?;
         let add_marker = |plan: LogicalPlan| {
             let visible = plan
                 .schema()
@@ -6082,7 +6089,7 @@ impl PromPlanner {
                 .project(
                     visible
                         .into_iter()
-                        .chain([DfExpr::Literal(null, None).alias(marker)]),
+                        .chain([DfExpr::Literal(empty, None).alias(marker)]),
                 )
                 .context(DataFusionPlanningSnafu)?
                 .build()

@@ -41,7 +41,8 @@ use promql::functions::{
     NativeHistogramRate, NativeHistogramResets, NativeHistogramScalarMul, NativeHistogramStddev,
     NativeHistogramStdvar, NativeHistogramSub, NativeHistogramSum, NativeHistogramSumOverTime,
     NativeHistogramToString, PredictLinear, PresentOverTime, PromqlFloatToString, QuantileOverTime,
-    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, quantile_udaf,
+    Rate, Resets, Round, StddevOverTime, StdvarOverTime, SumOverTime, UniqueMatchGroup,
+    quantile_udaf,
 };
 use prost::Message;
 use session::context::QueryContextRef;
@@ -161,6 +162,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         let _ = session_state.register_udf(Arc::new(Changes::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(Deriv::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(Round::scalar_udf()));
+        let _ = session_state.register_udf(Arc::new(UniqueMatchGroup::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(AvgOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(MinOverTime::scalar_udf()));
         let _ = session_state.register_udf(Arc::new(MaxOverTime::scalar_udf()));
@@ -252,6 +254,7 @@ mod tests {
     };
     use datatypes::data_type::DataType;
     use promql::extension_plan::RangeManipulate;
+    use promql::functions::MatchGroupViolation;
     use session::context::QueryContext;
 
     use super::*;
@@ -311,6 +314,62 @@ mod tests {
   TableScan: devices",
             decode_plan.to_string(),
         );
+    }
+
+    #[tokio::test]
+    async fn test_serializer_decode_unique_match_group() {
+        let catalog_list = catalog::memory::new_memory_catalog_manager().unwrap();
+        let factory = QueryEngineFactory::new(
+            catalog_list,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        );
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("count", ArrowDataType::Int64, false),
+            Field::new("host", ArrowDataType::Utf8, true),
+        ]));
+        let plan = LogicalPlanBuilder::scan(
+            "devices",
+            Arc::new(LogicalTableSource::new(schema.clone())),
+            None,
+        )
+        .unwrap()
+        .filter(Expr::ScalarFunction(ScalarFunction {
+            func: Arc::new(UniqueMatchGroup::scalar_udf()),
+            args: vec![
+                col("count"),
+                lit(MatchGroupViolation::ImplicitManyToOne.code()),
+                lit("host"),
+                col("host"),
+            ],
+        }))
+        .unwrap()
+        .build()
+        .unwrap();
+        let bytes = DFLogicalSubstraitConvertor
+            .encode(&plan, DefaultSerializer)
+            .unwrap();
+        let table_provider = Arc::new(MemTable::try_new(schema, vec![vec![]]).unwrap());
+        let decoder = factory
+            .query_engine()
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap();
+        let decoded = decoder
+            .decode(
+                bytes,
+                Arc::new(DummyCatalogList::with_table_provider(table_provider)),
+                false,
+            )
+            .await
+            .unwrap()
+            .to_string();
+        assert!(decoded.contains(UniqueMatchGroup::name()));
+        assert!(decoded.contains("host"));
     }
 
     #[tokio::test]

@@ -74,7 +74,7 @@ CREATE TABLE delta_tagless (
 
 INSERT INTO delta_tagless VALUES (180000, 10);
 
--- A missing temporality marker matches the NULL cumulative state; "delta" does not.
+-- A missing temporality marker matches the normalized empty cumulative state; "delta" does not.
 TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
 TQL EVAL (180, 180, '1m') delta_marker_only AND delta_tagless;
 

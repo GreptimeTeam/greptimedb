@@ -263,7 +263,18 @@ impl CountNestAggrRule {
         let mut current = plan;
         loop {
             match current {
-                LogicalPlan::Projection(projection) => current = projection.input.as_ref(),
+                LogicalPlan::Projection(projection) => {
+                    // The rewrite prunes the selector input but reuses these projections.
+                    // A computed projection may still reference a pruned input column.
+                    if !projection
+                        .expr
+                        .iter()
+                        .all(|expr| matches!(expr, Expr::Column(_)))
+                    {
+                        return false;
+                    }
+                    current = projection.input.as_ref();
+                }
                 LogicalPlan::Extension(ext) => {
                     return ext.node.as_any().is::<InstantManipulate>();
                 }
