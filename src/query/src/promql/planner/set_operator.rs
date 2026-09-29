@@ -14,7 +14,7 @@
 
 //! Planning of the PromQL set operators (`and`, `unless`, and `or`).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use datafusion::logical_expr::{Cast, Extension, LogicalPlan, LogicalPlanBuilder};
@@ -74,6 +74,13 @@ impl PromPlanner {
                 desc: "OR operator input has zero columns",
             }
         );
+        // The marked metric-name identity is metadata about which series a row came from: `or`
+        // matches without it by default, `on(__name__)` compares it and the union has to keep it
+        // per row, including the typed NULL of an operand that dropped its own.
+        let metric_name = match Self::metric_name_column(left.schema())? {
+            Some(column) => Some(column.name),
+            None => Self::metric_name_column(right.schema())?.map(|column| column.name),
+        };
         let left_has_alternative_samples =
             Self::field_columns_are_alternative_samples(left.schema(), &left_context.field_columns);
         let right_has_alternative_samples = Self::field_columns_are_alternative_samples(
@@ -341,6 +348,10 @@ impl PromPlanner {
                 } else {
                     DfExpr::Cast(Cast::new(Box::new(expr), target_type.clone())).alias(col.clone())
                 }
+            } else if Some(col.as_str()) == metric_name.as_deref() {
+                // A row of this operand has no identity of its own; keep its name an empty but
+                // marked column so the union carries each row's own identity.
+                Self::marked_metric_name_null(col)
             } else {
                 DfExpr::Literal(
                     Self::string_scalar_value(target_type, None)
@@ -454,20 +465,38 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?;
 
         // step 2: compute match columns
-        let mut match_columns = if let Some(modifier) = modifier
+        let mut match_columns: Vec<String> = if let Some(modifier) = modifier
             && let Some(matching) = &modifier.matching
         {
             match matching {
                 // keeps columns mentioned in `on`
-                LabelModifier::Include(on) => on.labels.clone(),
-                // removes columns memtioned in `ignoring`
+                LabelModifier::Include(on) => {
+                    let mask = Self::binary_match_label_mask(&on.labels, metric_name.as_deref());
+                    all_tags
+                        .iter()
+                        .filter(|tag| mask.contains(*tag))
+                        .cloned()
+                        .collect()
+                }
+                // Remove ignored labels; the identity is not matched implicitly.
                 LabelModifier::Exclude(ignoring) => {
-                    let ignoring = ignoring.labels.iter().cloned().collect::<HashSet<_>>();
-                    all_tags.difference(&ignoring).cloned().collect()
+                    let ignoring =
+                        Self::binary_match_label_mask(&ignoring.labels, metric_name.as_deref());
+                    all_tags
+                        .iter()
+                        .filter(|tag| {
+                            Some(tag.as_str()) != metric_name.as_deref() && !ignoring.contains(*tag)
+                        })
+                        .cloned()
+                        .collect()
                 }
             }
         } else {
-            all_tags.iter().cloned().collect()
+            all_tags
+                .iter()
+                .filter(|tag| Some(tag.as_str()) != metric_name.as_deref())
+                .cloned()
+                .collect()
         };
         // sort to ensure the generated plan is not volatile
         match_columns.sort_unstable();
@@ -682,10 +711,15 @@ impl PromPlanner {
         let visible_left_schema = left.schema().clone();
         let mut left_context = left_context;
         let mut right_context = right_context;
+        let metric_name = match Self::metric_name_column(left.schema())? {
+            Some(column) => Some(column.name),
+            None => Self::metric_name_column(right.schema())?.map(|column| column.name),
+        };
         let added_marker_to_left = if Self::only_temporality_match_label_mismatches(
             &left_context,
             &right_context,
             modifier,
+            metric_name.as_deref(),
         ) {
             let aligned = Self::align_temporality_match_column(
                 left,
@@ -700,34 +734,16 @@ impl PromPlanner {
             false
         };
 
-        let mut left_tag_col_set = left_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let mut right_tag_col_set = right_context
-            .tag_columns
-            .iter()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        if let Some(matching) = modifier
-            .as_ref()
-            .and_then(|modifier| modifier.matching.as_ref())
-        {
-            match matching {
-                LabelModifier::Include(on) => {
-                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                    left_tag_col_set = left_tag_col_set.intersection(&mask).cloned().collect();
-                    right_tag_col_set = right_tag_col_set.intersection(&mask).cloned().collect();
-                }
-                LabelModifier::Exclude(ignoring) => {
-                    for label in &ignoring.labels {
-                        let _ = left_tag_col_set.remove(label);
-                        let _ = right_tag_col_set.remove(label);
-                    }
-                }
-            }
-        }
+        // The marked identity is not a label the default matching compares, and the whole set
+        // operation keeps the left operand's columns and its identity.
+        let left_tag_col_set =
+            Self::matching_tag_columns(&left_context, modifier, metric_name.as_deref())
+                .into_iter()
+                .collect::<HashSet<_>>();
+        let right_tag_col_set =
+            Self::matching_tag_columns(&right_context, modifier, metric_name.as_deref())
+                .into_iter()
+                .collect::<HashSet<_>>();
         ensure!(
             left_tag_col_set == right_tag_col_set,
             CombineTableColumnMismatchSnafu {

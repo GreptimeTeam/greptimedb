@@ -881,28 +881,51 @@ async fn build_missing_le_or_normal_metric_table_provider() -> DfTableSourceProv
     .await
 }
 
+/// Whether a schema field is the metadata-marked PromQL metric-name identity rather than an
+/// ordinary label or sample column.
+fn is_marked_metric_name_field(field: &Field) -> bool {
+    field
+        .metadata()
+        .get(PROMQL_FIELD_ROLE_KEY)
+        .map(String::as_str)
+        == Some(PROMQL_METRIC_NAME_ROLE)
+}
+
+/// A raw PromQL plan carries the metadata-marked metric-name identity next to exactly four
+/// ordinary fields: the `pod`/`instance` labels, the time index and the sample.
 fn assert_normal_metric_schema(plan: &LogicalPlan) {
-    let fields = plan.schema().fields();
-    assert_eq!(fields.len(), 4, "{fields:?}");
+    let (marked, ordinary): (Vec<_>, Vec<_>) = plan
+        .schema()
+        .fields()
+        .iter()
+        .partition(|field| is_marked_metric_name_field(field));
+    assert_eq!(marked.len(), 1, "{marked:?}");
+    assert_eq!(
+        marked[0].name().as_str(),
+        PROMQL_METRIC_NAME_COLUMN,
+        "{marked:?}"
+    );
+    assert_eq!(marked[0].data_type(), &ArrowDataType::Utf8, "{marked:?}");
+    assert_eq!(ordinary.len(), 4, "{ordinary:?}");
     assert!(
-        fields.iter().any(|field| field.name() == "pod"),
-        "{fields:?}"
+        ordinary.iter().any(|field| field.name() == "pod"),
+        "{ordinary:?}"
     );
     assert!(
-        fields.iter().any(|field| field.name() == "instance"),
-        "{fields:?}"
+        ordinary.iter().any(|field| field.name() == "instance"),
+        "{ordinary:?}"
     );
     assert!(
-        fields
+        ordinary
             .iter()
             .any(|field| field.name() == greptime_timestamp()),
-        "{fields:?}"
+        "{ordinary:?}"
     );
     assert!(
-        fields.iter().any(|field| {
+        ordinary.iter().any(|field| {
             field.name() == greptime_value() && field.data_type() == &ArrowDataType::Float64
         }),
-        "{fields:?}"
+        "{ordinary:?}"
     );
 }
 
@@ -6259,7 +6282,27 @@ async fn value_matcher() {
             PromPlanner::stmt_to_plan(table_provider, &eval_stmt, &build_query_engine_state())
                 .await
                 .unwrap();
-        let mut fields = plan.schema().field_names();
+        // The raw selector carries its metric-name identity as a metadata-marked field; the
+        // ordinary fields are the value matchers' projection of the table's columns.
+        let marked = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| is_marked_metric_name_field(field))
+            .collect::<Vec<_>>();
+        assert_eq!(marked.len(), 1, "case: {:?}", case.0);
+        assert_eq!(
+            marked[0].name().as_str(),
+            PROMQL_METRIC_NAME_COLUMN,
+            "case: {:?}",
+            case.0
+        );
+        let mut fields = plan
+            .schema()
+            .iter()
+            .filter(|(_, field)| !is_marked_metric_name_field(field))
+            .map(|(qualifier, field)| datafusion_common::qualified_name(qualifier, field.name()))
+            .collect::<Vec<_>>();
         let mut expected = case.1.into_iter().map(String::from).collect::<Vec<_>>();
         fields.sort();
         expected.sort();
@@ -6935,11 +6978,18 @@ async fn test_or_not_exists_table_label() {
     )
     .await
     .unwrap();
-    assert!(
-        raw.display_indent_schema()
-            .to_string()
-            .contains("__promql_or_match_0@")
+    // `on(absent_label)` names no label either operand carries, so the matching compares the
+    // timestamp alone and the plan generates no internal match key. The result keeps the marked
+    // metric-name identity of its left side.
+    assert_eq!(
+        PromPlanner::metric_name_column(raw.schema())
+            .unwrap()
+            .map(|marker| marker.name),
+        Some(PROMQL_METRIC_NAME_COLUMN.to_string()),
+        "{}",
+        raw.display_indent()
     );
+    assert_no_internal_or_keys(raw.schema());
     let (optimized, batches) = execute(raw, &state).await;
     assert_no_internal_or_keys(optimized.schema());
     assert!(batches.iter().all(|batch| {
@@ -6949,6 +6999,12 @@ async fn test_or_not_exists_table_label() {
             .iter()
             .all(|field| !field.name().starts_with("__promql_or_match_"))
     }));
+    // `missing_metric` does not exist and `normal_metric` holds no rows, so the OR emits none.
+    assert_eq!(
+        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        0,
+        "{batches:?}"
+    );
 }
 
 #[tokio::test]
@@ -7122,17 +7178,52 @@ async fn test_direct_or_skips_user_internal_key_name() {
         &or_modifier("lhs or on(missing_label) rhs"),
     )
     .await;
-    assert!(
-        raw.display_indent_schema()
-            .to_string()
-            .contains("__promql_or_match_1@")
-    );
-    let (_, batches) = execute(raw, &build_query_engine_state()).await;
-    assert!(
-        batches
+    // The only column named like an internal match key is the user's own tag column, and the
+    // plan must not reuse that occupied name for a generated key.
+    let user_tag_columns = |schema: &DFSchema| {
+        schema
+            .fields()
             .iter()
-            .all(|batch| batch.column_by_name(USER_TAG).is_some())
+            .filter(|field| field.name().starts_with("__promql_or_match_"))
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        user_tag_columns(raw.schema()),
+        vec![USER_TAG.to_string()],
+        "{}",
+        raw.display_indent_schema()
     );
+    let (optimized, batches) = execute(raw, &build_query_engine_state()).await;
+    assert_eq!(
+        user_tag_columns(optimized.schema()),
+        vec![USER_TAG.to_string()],
+        "{optimized:?}"
+    );
+    // `on(missing_label)` names no label either operand carries, so the matching compares the
+    // timestamp alone; the right row is the left row's match and the `or` returns the left row,
+    // its sample and its own `__promql_or_match_0` tag value.
+    assert_eq!(
+        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        1,
+        "{batches:?}"
+    );
+    assert_eq!(values(&batches, "v"), vec![1.0]);
+    for batch in &batches {
+        let tag = batch
+            .column_by_name(USER_TAG)
+            .unwrap_or_else(|| panic!("the user column must be kept: {}", batch.schema()))
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            (0..batch.num_rows())
+                .map(|row| tag.value(row).to_string())
+                .collect::<Vec<_>>(),
+            vec!["left".to_string()],
+            "the result must be the left row"
+        );
+    }
 }
 
 #[tokio::test]
@@ -9964,4 +10055,457 @@ async fn test_binary_island_drops_metric_name_of_nested_arithmetic() {
         ],
         "{query}"
     );
+}
+
+/// Table provider with two single-series metrics that share the ordinary label `tag="shared"` at
+/// `ts=1000`: `left_metric` holds 2.0 and `right_metric` 3.0, so a vector operation of the two
+/// matches them on that label alone.
+fn binary_metric_name_table_provider() -> DfTableSourceProvider {
+    let catalog = MemoryCatalogManager::with_default_setup();
+    let tables = [
+        operator_metric_table(
+            "left_metric",
+            2_101,
+            "shared",
+            None,
+            DirectOrValue::Float64(2.0),
+        ),
+        operator_metric_table(
+            "right_metric",
+            2_102,
+            "shared",
+            None,
+            DirectOrValue::Float64(3.0),
+        ),
+    ];
+    for table in tables {
+        let info = table.table_info();
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: info.name.clone(),
+                table_id: info.ident.table_id,
+                table,
+            })
+            .unwrap();
+    }
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// `(series tag, metric name, sample value)` rows of a binary result, sorted. A label or an
+/// identity the operation dropped reads as `None`, and so does a column the operation dropped
+/// entirely, as `ignoring(tag)` or `on(__name__)` drop the only ordinary label.
+fn binary_result_rows(
+    batches: &[RecordBatch],
+    marker: Option<&str>,
+    tag_column: &str,
+    value_column: &str,
+) -> Vec<(Option<String>, Option<String>, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let tag = batch
+                .column_by_name(tag_column)
+                .map(|column| column.as_any().downcast_ref::<StringArray>().unwrap());
+            let name = marker.map(|marker| {
+                batch
+                    .column_by_name(marker)
+                    .unwrap_or_else(|| {
+                        panic!("no metric-name column {marker} in {}", batch.schema())
+                    })
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .expect("the metric-name column must be a string column")
+            });
+            let value = batch
+                .column_by_name(value_column)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no sample value column {value_column} in {}",
+                        batch.schema()
+                    )
+                })
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the sample value must be a float column");
+            (0..batch.num_rows())
+                .map(|row| {
+                    assert!(value.is_valid(row), "the sample value must be valid");
+                    let tag = tag
+                        .filter(|tag| tag.is_valid(row))
+                        .map(|tag| tag.value(row).to_string());
+                    let name = name
+                        .filter(|name| name.is_valid(row))
+                        .map(|name| name.value(row).to_string());
+                    (tag, name, value.value(row))
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.partial_cmp(right).unwrap());
+    rows
+}
+
+/// Expected rows of a binary result as `(series tag, metric name, sample value)`.
+type BinaryResultRow = (Option<&'static str>, Option<&'static str>, f64);
+
+fn expected_binary_result_rows(
+    expected: &[BinaryResultRow],
+) -> Vec<(Option<String>, Option<String>, f64)> {
+    expected
+        .iter()
+        .map(|(tag, name, value)| (tag.map(str::to_string), name.map(str::to_string), *value))
+        .collect()
+}
+
+/// Vector-vector binary operations derive the metric-name identity from their matching: the
+/// default and `ignoring(...)` matching compare every ordinary label, `on(...)` keeps only the
+/// named ones, and a group modifier copies `__name__` from the "one" side. Arithmetic and `bool`
+/// comparisons build a new identity and drop the name, while a comparison that filters keeps the
+/// projected side - name and sample values included.
+#[tokio::test]
+async fn test_binary_vector_metric_name_lifecycle() {
+    let state = build_query_engine_state();
+    // (query, whether the plan keeps the identity, expected result rows)
+    for (query, keeps_marker, expected) in [
+        // Different metric names, same ordinary label: the default matching ignores the name.
+        (
+            "left_metric + right_metric",
+            false,
+            vec![(Some("shared"), None, 5.0)],
+        ),
+        (
+            "left_metric < bool right_metric",
+            false,
+            vec![(Some("shared"), None, 1.0)],
+        ),
+        // A comparison that filters keeps the left side, its name and its sample value.
+        (
+            "left_metric < right_metric",
+            true,
+            vec![(Some("shared"), Some("left_metric"), 2.0)],
+        ),
+        // `on(tag)` drops the identity from the result labels.
+        (
+            "left_metric + on(tag) right_metric",
+            false,
+            vec![(Some("shared"), None, 5.0)],
+        ),
+        (
+            "left_metric < on(tag) right_metric",
+            false,
+            vec![(Some("shared"), None, 2.0)],
+        ),
+        // `ignoring(tag)` keeps the identity in the result labels, and the matching no longer
+        // compares `tag`, so the two operands still match.
+        (
+            "left_metric < ignoring(tag) right_metric",
+            true,
+            vec![(None, Some("left_metric"), 2.0)],
+        ),
+        // An explicit `on(__name__)` distinguishes different names and matches equal ones.
+        ("left_metric < on(__name__) right_metric", true, vec![]),
+        (
+            "left_metric <= on(__name__) left_metric",
+            true,
+            vec![(None, Some("left_metric"), 2.0)],
+        ),
+        // `group_left(__name__)`/`group_right(__name__)` copy the "one" side's name.
+        (
+            "left_metric < on(tag) group_left(__name__) right_metric",
+            true,
+            vec![(Some("shared"), Some("right_metric"), 2.0)],
+        ),
+        (
+            "left_metric < on(tag) group_right(__name__) right_metric",
+            true,
+            vec![(Some("shared"), Some("left_metric"), 2.0)],
+        ),
+        // A "one" side that dropped its own name clears the identity.
+        (
+            "left_metric < on(tag) group_left(__name__) abs(right_metric)",
+            true,
+            vec![(Some("shared"), None, 2.0)],
+        ),
+        // The set operators keep the left operand's identity, and match on `__name__` when asked.
+        (
+            "left_metric and right_metric",
+            true,
+            vec![(Some("shared"), Some("left_metric"), 2.0)],
+        ),
+        // `or` matches like the default and keeps the row it selected, with that row's own name.
+        (
+            "left_metric or right_metric",
+            true,
+            vec![(Some("shared"), Some("left_metric"), 2.0)],
+        ),
+        ("left_metric and on(__name__) right_metric", true, vec![]),
+        (
+            "left_metric unless on(__name__) right_metric",
+            true,
+            vec![(Some("shared"), Some("left_metric"), 2.0)],
+        ),
+        ("left_metric unless right_metric", true, vec![]),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            binary_metric_name_table_provider(),
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.as_ref().map(|marker| marker.name.as_str()),
+            keeps_marker.then_some(PROMQL_METRIC_NAME_COLUMN),
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        if !batches.is_empty() {
+            if keeps_marker {
+                assert_metric_name_in_batches(&batches, PROMQL_METRIC_NAME_COLUMN);
+            } else {
+                assert_metric_name_not_in_batches(&batches);
+            }
+        }
+        assert_eq!(
+            binary_result_rows(
+                &batches,
+                marker.as_ref().map(|marker| marker.name.as_str()),
+                "tag",
+                &sample_column,
+            ),
+            expected_binary_result_rows(&expected),
+            "{query}"
+        );
+    }
+}
+
+/// A private physical column that already occupies the internal marker name is an ordinary label:
+/// the identity is attached under the next free name, `on(__name__)` compares that identity and
+/// never the physical column, and the set and binary operators keep the two apart.
+#[tokio::test]
+async fn test_binary_metric_name_private_collision() {
+    let state = build_query_engine_state();
+    let collision_marker = format!("{PROMQL_METRIC_NAME_COLUMN}_");
+    // The collision metric holds three series at `ts=1000` with the sample value 1.0 each, so
+    // `sum by (__name__)` holds 3.0.
+    for (query, keeps_marker, expected) in [
+        (
+            "cv_metric + cv_metric",
+            false,
+            vec![
+                (Some("k0"), None, 2.0),
+                (Some("k1"), None, 2.0),
+                (Some("k2"), None, 2.0),
+            ],
+        ),
+        (
+            "abs(cv_metric) or cv_metric",
+            true,
+            vec![
+                (Some("k0"), None, 1.0),
+                (Some("k1"), None, 1.0),
+                (Some("k2"), None, 1.0),
+            ],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.as_ref().map(|marker| marker.name.as_str()),
+            keeps_marker.then_some(collision_marker.as_str()),
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        if !batches.is_empty() {
+            if keeps_marker {
+                assert_metric_name_in_batches(&batches, &collision_marker);
+            } else {
+                // The fixture's ordinary label is named like the marker itself, so the role, not
+                // the name, tells whether a result field is the identity.
+                for batch in &batches {
+                    let schema = batch.schema();
+                    assert!(
+                        schema.field_with_name(&collision_marker).is_err(),
+                        "the metric-name marker must not reach the result batches: {schema:?}"
+                    );
+                    assert!(
+                        schema
+                            .fields()
+                            .iter()
+                            .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none()),
+                        "no result field may carry the metric-name role: {schema:?}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            binary_result_rows(
+                &batches,
+                marker.as_ref().map(|marker| marker.name.as_str()),
+                PROMQL_METRIC_NAME_COLUMN,
+                &sample_column,
+            ),
+            expected_binary_result_rows(&expected),
+            "{query}"
+        );
+    }
+
+    // `on(__name__)` resolves to the marked identity, never to the physical private column.
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await,
+        &operator_eval_stmt("cv_metric == on(__name__) cv_metric"),
+        &state,
+    )
+    .await
+    .unwrap();
+    let plan_str = plan.display_indent_schema().to_string();
+    let join = plan_str
+        .lines()
+        .find(|line| line.contains("Inner Join:"))
+        .unwrap_or_else(|| panic!("{plan_str}"));
+    assert!(
+        join.contains("__promql_metric_name_ ="),
+        "`on(__name__)` must compare the marked identity: {plan_str}"
+    );
+    assert!(
+        !join.contains("__promql_metric_name ="),
+        "`on(__name__)` must not compare the physical private label: {plan_str}"
+    );
+}
+
+#[tokio::test]
+async fn test_name_only_vector_matching_does_not_broadcast() {
+    let state = build_query_engine_state();
+
+    for (query, expected_tag, expected_name, expected_value) in [
+        (
+            "sum by (__name__) (left_metric) < on(__name__) sum by (__name__) (right_metric)",
+            None,
+            None,
+            None,
+        ),
+        (
+            "sum by (__name__) (left_metric) <= on(__name__) sum by (__name__) (left_metric)",
+            None,
+            Some("left_metric"),
+            Some(2.0),
+        ),
+        (
+            "left_metric < on() group_left(__name__) sum by (__name__) (right_metric)",
+            Some("shared"),
+            Some("right_metric"),
+            Some(2.0),
+        ),
+        (
+            "left_metric < on() group_left(__name__) sum(right_metric)",
+            Some("shared"),
+            None,
+            Some(2.0),
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            binary_metric_name_table_provider(),
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        let sample = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        let rows = binary_result_rows(
+            &batches,
+            marker.as_ref().map(|marker| marker.name.as_str()),
+            "tag",
+            &sample,
+        );
+        match expected_value {
+            Some(value) => {
+                assert_eq!(
+                    rows,
+                    expected_binary_result_rows(&[(expected_tag, expected_name, value)]),
+                    "{query}"
+                );
+            }
+            None => assert!(rows.is_empty(), "{query}: {rows:?}"),
+        }
+    }
+}
+
+/// `or` keeps every chosen row's own identity, including the typed NULL of an operand that
+/// dropped its name, and never invents an identity when neither operand has one.
+#[tokio::test]
+async fn test_or_preserves_metric_name_identity() {
+    let state = build_query_engine_state();
+    for (query, keeps_marker, expected) in [
+        (
+            "lf or rf",
+            true,
+            vec![(Some("a"), Some("lf"), 2.0), (Some("b"), Some("rf"), 3.0)],
+        ),
+        (
+            "abs(lf) or rf",
+            true,
+            vec![(Some("a"), None, 2.0), (Some("b"), Some("rf"), 3.0)],
+        ),
+        (
+            "abs(lf) or abs(rf)",
+            false,
+            vec![(Some("a"), None, 2.0), (Some("b"), None, 3.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            operator_table_provider(),
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.as_ref().map(|marker| marker.name.as_str()),
+            keeps_marker.then_some(PROMQL_METRIC_NAME_COLUMN),
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        if keeps_marker {
+            assert_metric_name_in_batches(&batches, PROMQL_METRIC_NAME_COLUMN);
+        } else {
+            assert_metric_name_not_in_batches(&batches);
+        }
+        assert_eq!(
+            binary_result_rows(
+                &batches,
+                marker.as_ref().map(|marker| marker.name.as_str()),
+                "tag",
+                &sample_column,
+            ),
+            expected_binary_result_rows(&expected),
+            "{query}"
+        );
+    }
 }

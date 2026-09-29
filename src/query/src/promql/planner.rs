@@ -1323,6 +1323,28 @@ impl PromPlanner {
                 let left_is_empty_metric = Self::is_empty_metric(&left_input);
                 let right_is_empty_metric = Self::is_empty_metric(&right_input);
 
+                // Both operands carry their own metric-name identity column, and the join and the
+                // set operators compare or copy it by name. Give them one physical name that no
+                // ordinary field of either operand occupies first.
+                let (aligned_left, aligned_right) = self.align_binary_metric_name_columns(
+                    left_input,
+                    right_input,
+                    &mut left_context,
+                    &mut right_context,
+                    *op,
+                    modifier,
+                )?;
+                left_input = aligned_left;
+                right_input = aligned_right;
+                // The alignment may have renamed or added the right operand's identity column.
+                self.ctx = right_context.clone();
+                let metric_name = match Self::metric_name_column(left_input.schema())? {
+                    Some(column) => Some(column.name),
+                    None => {
+                        Self::metric_name_column(right_input.schema())?.map(|column| column.name)
+                    }
+                };
+
                 // TODO(ruihang): avoid join if left and right are the same table
 
                 // set op has "special" join semantics
@@ -1355,7 +1377,7 @@ impl PromPlanner {
                     // to avoid case like `host + scalar(...)`
                     // we need preserve tag column on `host` table in subsequent projection,
                     // which only show in left plan ctx.
-                    if self.ctx.tag_columns.is_empty() {
+                    if !Self::has_ordinary_tag_columns(&self.ctx, metric_name.as_deref()) {
                         self.ctx = left_context.clone();
                         self.ctx.table_name = Some("lhs".to_string());
                     } else {
@@ -1405,13 +1427,20 @@ impl PromPlanner {
                 let only_join_time_index = lhs.value_type() == ValueType::Scalar
                     || rhs.value_type() == ValueType::Scalar
                     || has_empty_metric_operand
-                    || ((left_context.tag_columns.is_empty()
-                        || right_context.tag_columns.is_empty())
-                        && !left_context
-                            .tag_columns
-                            .iter()
-                            .chain(&right_context.tag_columns)
-                            .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL));
+                    || ((modifier.as_ref().is_none_or(|modifier| {
+                        modifier.matching.is_none()
+                            && matches!(modifier.card, VectorMatchCardinality::OneToOne)
+                    })) && (!Self::has_ordinary_tag_columns(
+                        &left_context,
+                        metric_name.as_deref(),
+                    ) || !Self::has_ordinary_tag_columns(
+                        &right_context,
+                        metric_name.as_deref(),
+                    )) && !left_context
+                        .tag_columns
+                        .iter()
+                        .chain(&right_context.tag_columns)
+                        .any(|tag| tag == OTLP_AGGREGATION_TEMPORALITY_LABEL));
                 let join_plan = self.join_on_non_field_columns(
                     left_input,
                     right_input,
@@ -1431,18 +1460,24 @@ impl PromPlanner {
                 let result_labels = if only_join_time_index {
                     None
                 } else {
-                    Self::binary_result_labels(&left_context, &right_context, modifier)
-                        .map(|labels| {
-                            Self::binary_result_label_projection(
-                                &join_plan_schema,
-                                &left_table_ref,
-                                &right_table_ref,
-                                &left_context,
-                                &right_context,
-                                labels,
-                            )
-                        })
-                        .transpose()?
+                    Self::binary_result_labels(
+                        &left_context,
+                        &right_context,
+                        modifier,
+                        metric_name.as_deref(),
+                    )
+                    .map(|labels| {
+                        Self::binary_result_label_projection(
+                            &join_plan_schema,
+                            &left_table_ref,
+                            &right_table_ref,
+                            &left_context,
+                            &right_context,
+                            labels,
+                            metric_name.as_deref(),
+                        )
+                    })
+                    .transpose()?
                 };
                 if let Some(labels) = &result_labels {
                     labels.apply(&mut self.ctx);
@@ -1590,13 +1625,9 @@ impl PromPlanner {
                         preserve_any_value,
                         retain_field_columns,
                     )?;
-                    if lhs.value_type() == ValueType::Scalar
-                        || rhs.value_type() == ValueType::Scalar
-                    {
-                        self.drop_metric_name(result)
-                    } else {
-                        Ok(result)
-                    }
+                    // Arithmetic and `bool` comparisons build a new identity, so the joined
+                    // result must not keep the metric name of either operand.
+                    self.drop_metric_name(result)
                 }
             }
         }
@@ -1937,6 +1968,264 @@ impl PromPlanner {
         self.ctx.tag_columns.push(name);
         LogicalPlanBuilder::from(input)
             .project(exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    /// A `Utf8` NULL that still carries the metric-name role. A binary or set operator has to
+    /// expose the identity even on an operand that dropped its own - `on(__name__)` matches on
+    /// it, `group_left(__name__)`/`group_right(__name__)` copy it and `or` keeps it per row -
+    /// and it has to stay recognizable as the identity.
+    fn marked_metric_name_null(name: &str) -> DfExpr {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            PROMQL_FIELD_ROLE_KEY.to_string(),
+            PROMQL_METRIC_NAME_ROLE.to_string(),
+        );
+        DfExpr::Alias(Alias {
+            expr: Box::new(DfExpr::Literal(ScalarValue::Utf8(None), None)),
+            relation: None,
+            name: name.to_string(),
+            metadata: Some(metadata.into()),
+        })
+    }
+
+    /// The labels a vector matching compares by default and under `ignoring(...)`. The marked
+    /// metric-name identity is metadata about which series a row came from, not a label the
+    /// operation matches on.
+    fn comparable_tag_columns(
+        context: &PromPlannerContext,
+        metric_name: Option<&str>,
+    ) -> BTreeSet<String> {
+        context
+            .tag_columns
+            .iter()
+            .filter(|tag| Some(tag.as_str()) != metric_name)
+            .cloned()
+            .collect()
+    }
+
+    /// The labels one operand of a vector matching is matched by: `on(...)` keeps exactly the
+    /// labels it names - where `__name__` names the marked identity column - `ignoring(...)`
+    /// drops the labels it names, and the default matching compares the ordinary labels with the
+    /// identity excluded. The identity is metadata about which series a row came from, so only
+    /// an explicit `on(__name__)` compares it.
+    fn matching_tag_columns(
+        context: &PromPlannerContext,
+        modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
+    ) -> BTreeSet<String> {
+        match modifier
+            .as_ref()
+            .and_then(|modifier| modifier.matching.as_ref())
+        {
+            Some(LabelModifier::Include(on)) => {
+                let on = Self::binary_match_label_mask(&on.labels, metric_name);
+                context
+                    .tag_columns
+                    .iter()
+                    .filter(|tag| on.contains(*tag))
+                    .cloned()
+                    .collect()
+            }
+            Some(LabelModifier::Exclude(ignoring)) => {
+                let ignored = Self::binary_match_label_mask(&ignoring.labels, metric_name);
+                context
+                    .tag_columns
+                    .iter()
+                    .filter(|tag| Some(tag.as_str()) != metric_name && !ignored.contains(*tag))
+                    .cloned()
+                    .collect()
+            }
+            None => Self::comparable_tag_columns(context, metric_name),
+        }
+    }
+
+    /// Whether a context still carries a label other than the metric-name identity.
+    fn has_ordinary_tag_columns(context: &PromPlannerContext, metric_name: Option<&str>) -> bool {
+        context
+            .tag_columns
+            .iter()
+            .any(|tag| Some(tag.as_str()) != metric_name)
+    }
+
+    /// Physical columns an explicit `on(...)`/`ignoring(...)`/`group_x(...)` label list names.
+    /// `__name__` is semantic: it names the marked identity column and never a physical column
+    /// of that name. Without a marked column the label is not one the operands carry.
+    fn binary_match_label_mask(labels: &[String], metric_name: Option<&str>) -> BTreeSet<String> {
+        labels
+            .iter()
+            .filter_map(|label| match (label.as_str(), metric_name) {
+                (METRIC_NAME, Some(metric_name)) => Some(metric_name.to_string()),
+                (METRIC_NAME, None) => None,
+                _ => Some(label.clone()),
+            })
+            .collect()
+    }
+
+    /// Which operand of a binary operation needs an identity column even though it dropped its
+    /// own, as `(left, right)`: `on(__name__)` compares it on both sides, while `group_left(...)`
+    /// and `group_right(...)` copy it from the "one" side - and clear it when that side has none.
+    fn modifier_names_metric_name(modifier: &Option<BinModifier>) -> (bool, bool) {
+        let Some(modifier) = modifier else {
+            return (false, false);
+        };
+        let names_metric_name = |labels: &[String]| labels.iter().any(|label| label == METRIC_NAME);
+        let mut left = false;
+        let mut right = false;
+        if let Some(LabelModifier::Include(on)) = &modifier.matching
+            && names_metric_name(&on.labels)
+        {
+            left = true;
+            right = true;
+        }
+        match &modifier.card {
+            // `group_left` is many-to-one: the one side is the right operand.
+            VectorMatchCardinality::ManyToOne(include) if names_metric_name(&include.labels) => {
+                right = true;
+            }
+            VectorMatchCardinality::OneToMany(include) if names_metric_name(&include.labels) => {
+                left = true;
+            }
+            _ => {}
+        }
+        (left, right)
+    }
+
+    /// Give both operands of a binary expression one physical metric-name column.
+    ///
+    /// Each operand attaches its identity under the first name free in its own plan, so two
+    /// operands may disagree, while the join and the set operators compare and copy the identity
+    /// by name. The chosen name avoids every ordinary field of both operands; an operand that
+    /// already uses it keeps its column untouched. A modifier that matches or copies `__name__`
+    /// additionally gets the typed NULL identity of an operand that dropped its own.
+    fn align_binary_metric_name_columns(
+        &self,
+        mut left: LogicalPlan,
+        mut right: LogicalPlan,
+        left_context: &mut PromPlannerContext,
+        right_context: &mut PromPlannerContext,
+        op: TokenType,
+        modifier: &Option<BinModifier>,
+    ) -> Result<(LogicalPlan, LogicalPlan)> {
+        let left_marker = Self::metric_name_column(left.schema())?.map(|column| column.name);
+        let right_marker = Self::metric_name_column(right.schema())?.map(|column| column.name);
+        if left_marker.is_none() && right_marker.is_none() {
+            return Ok((left, right));
+        }
+
+        let occupied = left
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| Some(field.name()) != left_marker.as_ref())
+            .chain(
+                right
+                    .schema()
+                    .fields()
+                    .iter()
+                    .filter(|field| Some(field.name()) != right_marker.as_ref()),
+            )
+            .map(|field| field.name().clone())
+            .collect::<HashSet<_>>();
+        let reused = [left_marker.as_ref(), right_marker.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|name| !occupied.contains(*name));
+        let target = match reused {
+            Some(name) => name.clone(),
+            None => {
+                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
+                while occupied.contains(&name) {
+                    name.push('_');
+                }
+                name
+            }
+        };
+
+        if let Some(marker) = &left_marker
+            && marker != &target
+        {
+            left = Self::rename_metric_name_column(left, left_context, marker, &target)?;
+        }
+        if let Some(marker) = &right_marker
+            && marker != &target
+        {
+            right = Self::rename_metric_name_column(right, right_context, marker, &target)?;
+        }
+
+        let (pad_left, pad_right) = if op.id() == token::T_LOR {
+            // `or` aligns both operands to one schema and inserts the label a row does not
+            // carry as a typed NULL there, identity included.
+            (false, false)
+        } else {
+            Self::modifier_names_metric_name(modifier)
+        };
+        if pad_left && left_marker.is_none() {
+            left = Self::add_metric_name_column(left, left_context, &target)?;
+        }
+        if pad_right && right_marker.is_none() {
+            right = Self::add_metric_name_column(right, right_context, &target)?;
+        }
+        Ok((left, right))
+    }
+
+    /// Rename an operand's metric-name column, keeping the identity role and the column's
+    /// qualifier, and update the context to the new physical name.
+    fn rename_metric_name_column(
+        plan: LogicalPlan,
+        context: &mut PromPlannerContext,
+        from: &str,
+        to: &str,
+    ) -> Result<LogicalPlan> {
+        let projection = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                let column = DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()));
+                if field.name() == from {
+                    column.alias_qualified(qualifier.cloned(), to)
+                } else {
+                    column
+                }
+            })
+            .collect::<Vec<_>>();
+        // The identity is not an ordinary label, but keep both listings consistent with the
+        // column the plan now exposes.
+        for name in context
+            .tag_columns
+            .iter_mut()
+            .chain(context.aggregation_field_labels.iter_mut())
+        {
+            if name.as_str() == from {
+                *name = to.to_string();
+            }
+        }
+        LogicalPlanBuilder::from(plan)
+            .project(projection)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
+    /// Add the typed NULL metric-name identity an operand that dropped its own has to expose.
+    fn add_metric_name_column(
+        plan: LogicalPlan,
+        context: &mut PromPlannerContext,
+        name: &str,
+    ) -> Result<LogicalPlan> {
+        let mut projection = plan
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        projection.push(Self::marked_metric_name_null(name));
+        context.tag_columns.push(name.to_string());
+        LogicalPlanBuilder::from(plan)
+            .project(projection)
             .context(DataFusionPlanningSnafu)?
             .build()
             .context(DataFusionPlanningSnafu)
@@ -5620,8 +5909,17 @@ impl PromPlanner {
                 .iter()
                 .any(|field| field.name() == DATA_SCHEMA_TSID_COLUMN_NAME)
         };
+        let metric_name = match Self::metric_name_column(left_schema)? {
+            Some(column) => Some(column.name),
+            None => Self::metric_name_column(right_schema)?.map(|column| column.name),
+        };
         let use_tsid_join = !only_join_time_index
-            && self.binary_modifier_preserves_tsid_join_key(left_context, right_context, modifier)
+            && self.binary_modifier_preserves_tsid_join_key(
+                left_context,
+                right_context,
+                modifier,
+                metric_name.as_deref(),
+            )
             && left_context.use_tsid
             && right_context.use_tsid
             && has_tsid(left_schema)
@@ -5632,43 +5930,14 @@ impl PromPlanner {
                 BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]),
                 BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]),
             )
+        } else if only_join_time_index {
+            (BTreeSet::new(), BTreeSet::new())
         } else {
-            if only_join_time_index {
-                (BTreeSet::new(), BTreeSet::new())
-            } else {
-                (
-                    left_context
-                        .tag_columns
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeSet<_>>(),
-                    right_context
-                        .tag_columns
-                        .iter()
-                        .cloned()
-                        .collect::<BTreeSet<_>>(),
-                )
-            }
+            (
+                Self::matching_tag_columns(left_context, modifier, metric_name.as_deref()),
+                Self::matching_tag_columns(right_context, modifier, metric_name.as_deref()),
+            )
         };
-
-        if !use_tsid_join
-            && let Some(modifier) = modifier
-            && let Some(matching) = &modifier.matching
-        {
-            match matching {
-                LabelModifier::Include(on) => {
-                    let mask = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                    left_tag_columns = left_tag_columns.intersection(&mask).cloned().collect();
-                    right_tag_columns = right_tag_columns.intersection(&mask).cloned().collect();
-                }
-                LabelModifier::Exclude(ignoring) => {
-                    for label in &ignoring.labels {
-                        let _ = left_tag_columns.remove(label);
-                        let _ = right_tag_columns.remove(label);
-                    }
-                }
-            }
-        }
 
         let force_empty_join =
             !use_tsid_join && !only_join_time_index && left_tag_columns != right_tag_columns;
@@ -5694,6 +5963,7 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
     ) -> Option<Vec<(bool, String)>> {
         let modifier = modifier.as_ref()?;
         let (many_is_left, include) = match &modifier.card {
@@ -5706,19 +5976,25 @@ impl PromPlanner {
 
         let Some(include) = include else {
             let matching = modifier.matching.as_ref()?;
-            let reduced = |keep: bool, labels: &BTreeSet<&String>| {
+            let reduced = |keep: bool, labels: &BTreeSet<String>| {
                 left_context
                     .tag_columns
                     .iter()
-                    .filter(|tag| labels.contains(tag) == keep)
+                    .filter(|tag| labels.contains(*tag) == keep)
                     .map(|tag| (true, tag.clone()))
                     .collect()
             };
             return Some(match matching {
-                LabelModifier::Include(on) => reduced(true, &on.labels.iter().collect()),
-                LabelModifier::Exclude(ignoring) => {
-                    reduced(false, &ignoring.labels.iter().collect())
-                }
+                // `on(__name__)` keeps the identity, `on(job)` drops it, and the same holds for
+                // `ignoring(...)`.
+                LabelModifier::Include(on) => reduced(
+                    true,
+                    &Self::binary_match_label_mask(&on.labels, metric_name),
+                ),
+                LabelModifier::Exclude(ignoring) => reduced(
+                    false,
+                    &Self::binary_match_label_mask(&ignoring.labels, metric_name),
+                ),
             });
         };
 
@@ -5727,19 +6003,19 @@ impl PromPlanner {
         } else {
             (right_context, left_context)
         };
-        let include = include.labels.iter().collect::<BTreeSet<_>>();
+        let include = Self::binary_match_label_mask(&include.labels, metric_name);
         // An included label the "one" side doesn't carry is deleted from the result, so it is
         // dropped from the "many" side as well.
         let mut labels = many_context
             .tag_columns
             .iter()
-            .filter(|tag| !include.contains(tag))
+            .filter(|tag| !include.contains(*tag))
             .map(|tag| (many_is_left, tag.clone()))
             .collect::<Vec<_>>();
         labels.extend(
             include
-                .into_iter()
-                .filter(|label| one_context.tag_columns.contains(label))
+                .iter()
+                .filter(|label| one_context.tag_columns.contains(*label))
                 .map(|label| (!many_is_left, label.clone())),
         );
         Some(labels)
@@ -5753,6 +6029,7 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         labels: Vec<(bool, String)>,
+        metric_name: Option<&str>,
     ) -> Result<BinaryResultLabels> {
         let mut exprs = Vec::with_capacity(labels.len());
         let mut names = Vec::with_capacity(labels.len());
@@ -5778,6 +6055,8 @@ impl PromPlanner {
         // One operand contributing every one of its tags as the whole result label set keeps the
         // one-to-one correspondence between its `__tsid` and a result series: no other operand
         // value reaches the labels, and the matching gives each of its rows a single partner.
+        // The marked identity is not an ordinary label, so an operation that drops the name
+        // still keeps that correspondence.
         let source_context = match sources.into_iter().collect::<Vec<_>>().as_slice() {
             [true] => Some((left_table_ref, left_context)),
             [false] => Some((right_table_ref, right_context)),
@@ -5786,8 +6065,11 @@ impl PromPlanner {
         let tsid = source_context
             .filter(|(_, context)| {
                 context.use_tsid
-                    && context.tag_columns.len() == names.len()
-                    && context.tag_columns.iter().all(|tag| names.contains(tag))
+                    && context
+                        .tag_columns
+                        .iter()
+                        .all(|tag| names.contains(tag) || Some(tag.as_str()) == metric_name)
+                    && names.iter().all(|name| context.tag_columns.contains(name))
             })
             .and_then(|(table_ref, _)| {
                 Self::optional_tsid_projection(schema, Some(table_ref), true)
@@ -5808,6 +6090,7 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
     ) -> bool {
         let Some(modifier) = modifier else {
             return false;
@@ -5816,22 +6099,25 @@ impl PromPlanner {
             VectorMatchCardinality::OneToOne => match &modifier.matching {
                 None => false,
                 Some(LabelModifier::Include(on)) => {
-                    let on = on.labels.iter().collect::<BTreeSet<_>>();
+                    let on = Self::binary_match_label_mask(&on.labels, metric_name);
                     !left_context.tag_columns.iter().all(|tag| on.contains(tag))
                 }
-                Some(LabelModifier::Exclude(ignoring)) => ignoring
-                    .labels
-                    .iter()
-                    .any(|label| left_context.tag_columns.contains(label)),
+                Some(LabelModifier::Exclude(ignoring)) => {
+                    Self::binary_match_label_mask(&ignoring.labels, metric_name)
+                        .iter()
+                        .any(|label| left_context.tag_columns.contains(label))
+                }
             },
-            VectorMatchCardinality::ManyToOne(include) => include
-                .labels
-                .iter()
-                .any(|label| left_context.tag_columns.contains(label)),
-            VectorMatchCardinality::OneToMany(include) => include
-                .labels
-                .iter()
-                .any(|label| right_context.tag_columns.contains(label)),
+            VectorMatchCardinality::ManyToOne(include) => {
+                Self::binary_match_label_mask(&include.labels, metric_name)
+                    .iter()
+                    .any(|label| left_context.tag_columns.contains(label))
+            }
+            VectorMatchCardinality::OneToMany(include) => {
+                Self::binary_match_label_mask(&include.labels, metric_name)
+                    .iter()
+                    .any(|label| right_context.tag_columns.contains(label))
+            }
             VectorMatchCardinality::ManyToMany => false,
         }
     }
@@ -5908,6 +6194,7 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
     ) -> bool {
         let Some(modifier) = modifier else {
             return true;
@@ -5919,22 +6206,29 @@ impl PromPlanner {
 
         match &modifier.matching {
             None => true,
-            Some(LabelModifier::Exclude(ignoring)) => ignoring.labels.iter().all(|label| {
-                !left_context.tag_columns.contains(label)
-                    && !right_context.tag_columns.contains(label)
-            }),
+            Some(LabelModifier::Exclude(ignoring)) => {
+                // An ignored ordinary label that neither operand carries keeps `__tsid` a
+                // complete join key. The marked identity is not an ordinary label, so ignoring
+                // `__name__` changes nothing here.
+                ignoring
+                    .labels
+                    .iter()
+                    .filter(|label| label.as_str() != METRIC_NAME)
+                    .all(|label| {
+                        !left_context.tag_columns.contains(label)
+                            && !right_context.tag_columns.contains(label)
+                    })
+            }
             Some(LabelModifier::Include(on)) => {
-                let on_labels = on.labels.iter().cloned().collect::<BTreeSet<_>>();
-                let left_labels = left_context
-                    .tag_columns
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                let right_labels = right_context
-                    .tag_columns
-                    .iter()
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+                // Matching the identity itself is not what joining on `__tsid` compares, so an
+                // explicit `on(__name__)` cannot be served by it. Otherwise the ordinary label
+                // sets decide: the marked identity is not an ordinary label of the operand.
+                if on.labels.iter().any(|label| label == METRIC_NAME) {
+                    return false;
+                }
+                let on_labels = Self::binary_match_label_mask(&on.labels, metric_name);
+                let left_labels = Self::comparable_tag_columns(left_context, metric_name);
+                let right_labels = Self::comparable_tag_columns(right_context, metric_name);
 
                 on_labels == left_labels && on_labels == right_labels
             }
@@ -5970,10 +6264,18 @@ impl PromPlanner {
             && !force_empty_join
             && left_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()])
             && right_tag_columns == BTreeSet::from([DATA_SCHEMA_TSID_COLUMN_NAME.to_string()]);
+        let metric_name = match Self::metric_name_column(left.schema())? {
+            Some(column) => Some(column.name),
+            None => Self::metric_name_column(right.schema())?.map(|column| column.name),
+        };
         let (left, right, left_matched_tags, right_matched_tags) = if !only_join_time_index
             && !use_tsid_join
-            && Self::only_temporality_match_label_mismatches(left_context, right_context, modifier)
-        {
+            && Self::only_temporality_match_label_mismatches(
+                left_context,
+                right_context,
+                modifier,
+                metric_name.as_deref(),
+            ) {
             let mut aligned_left_context = left_context.clone();
             let mut aligned_right_context = right_context.clone();
             let (left, right, _) = Self::align_temporality_match_column(
@@ -6088,10 +6390,22 @@ impl PromPlanner {
         // The result labels no longer identify a series on their own: the "many" side can hold
         // several series per result label set, which PromQL cannot represent.
         let labels = checked_matching
-            .then(|| Self::binary_result_labels(left_context, right_context, modifier))
+            .then(|| {
+                Self::binary_result_labels(
+                    left_context,
+                    right_context,
+                    modifier,
+                    metric_name.as_deref(),
+                )
+            })
             .flatten()
             .filter(|_| {
-                Self::binary_result_labels_may_repeat(left_context, right_context, modifier)
+                Self::binary_result_labels_may_repeat(
+                    left_context,
+                    right_context,
+                    modifier,
+                    metric_name.as_deref(),
+                )
             });
         let Some(labels) = labels else {
             return Ok(join_plan);
@@ -6173,12 +6487,12 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
     ) -> BTreeSet<String> {
-        let mut labels = left_context
-            .tag_columns
-            .iter()
-            .chain(&right_context.tag_columns)
-            .cloned()
+        // The marked identity is not a label the default matching compares.
+        let mut labels = Self::comparable_tag_columns(left_context, metric_name)
+            .into_iter()
+            .chain(Self::comparable_tag_columns(right_context, metric_name))
             .collect::<BTreeSet<_>>();
         if let Some(matching) = modifier
             .as_ref()
@@ -6186,19 +6500,18 @@ impl PromPlanner {
         {
             match matching {
                 LabelModifier::Include(on) => {
-                    labels = on
-                        .labels
-                        .iter()
+                    let mask = Self::binary_match_label_mask(&on.labels, metric_name);
+                    labels = mask
+                        .into_iter()
                         .filter(|label| {
                             left_context.tag_columns.contains(label)
                                 || right_context.tag_columns.contains(label)
                         })
-                        .cloned()
                         .collect();
                 }
                 LabelModifier::Exclude(ignoring) => {
-                    for label in &ignoring.labels {
-                        labels.remove(label);
+                    for label in Self::binary_match_label_mask(&ignoring.labels, metric_name) {
+                        labels.remove(&label);
                     }
                 }
             }
@@ -6210,9 +6523,10 @@ impl PromPlanner {
         left_context: &PromPlannerContext,
         right_context: &PromPlannerContext,
         modifier: &Option<BinModifier>,
+        metric_name: Option<&str>,
     ) -> bool {
         let mut mismatches =
-            Self::selected_binary_match_labels(left_context, right_context, modifier)
+            Self::selected_binary_match_labels(left_context, right_context, modifier, metric_name)
                 .into_iter()
                 .filter(|label| {
                     left_context.tag_columns.contains(label)
