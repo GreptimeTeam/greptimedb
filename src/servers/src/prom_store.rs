@@ -36,7 +36,7 @@ use common_query::prelude::{greptime_timestamp, greptime_value};
 use common_recordbatch::{RecordBatch, RecordBatches};
 use common_telemetry::{tracing, warn};
 use datafusion::dataframe::DataFrame;
-use datafusion::prelude::{Expr, col, lit, regexp_match};
+use datafusion::prelude::{Expr, ident, lit, regexp_match};
 use datafusion_common::ScalarValue;
 use datafusion_expr::LogicalPlan;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -150,8 +150,9 @@ pub fn query_to_plan(
     let mut conditions = Vec::with_capacity(label_matches.len() + 1);
 
     conditions
-        .push(col(timestamp_column_name).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
-    conditions.push(col(timestamp_column_name).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
+        .push(ident(timestamp_column_name).gt_eq(lit_timestamp_millisecond(start_timestamp_ms)));
+    conditions
+        .push(ident(timestamp_column_name).lt_eq(lit_timestamp_millisecond(end_timestamp_ms)));
 
     for m in label_matches {
         let name = &m.name;
@@ -170,18 +171,18 @@ pub fn query_to_plan(
 
         match m_type {
             MatcherType::Eq => {
-                conditions.push(col(name).eq(lit(value)));
+                conditions.push(ident(name).eq(lit(value)));
             }
             MatcherType::Neq => {
-                conditions.push(col(name).not_eq(lit(value)));
+                conditions.push(ident(name).not_eq(lit(value)));
             }
             // Case sensitive regexp match
             MatcherType::Re => {
-                conditions.push(regexp_match(col(name), lit(value), None).is_not_null());
+                conditions.push(regexp_match(ident(name), lit(value), None).is_not_null());
             }
             // Case sensitive regexp not match
             MatcherType::Nre => {
-                conditions.push(regexp_match(col(name), lit(value), None).is_null());
+                conditions.push(regexp_match(ident(name), lit(value), None).is_null());
             }
         }
     }
@@ -890,6 +891,8 @@ mod tests {
             ColumnSchema::new(greptime_value(), ConcreteDataType::float64_datatype(), true),
             ColumnSchema::new("instance", ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("job", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("service.name", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("Region", ConcreteDataType::string_datatype(), true),
         ]));
         let recordbatch = RecordBatch::new(
             schema,
@@ -898,6 +901,8 @@ mod tests {
                 Arc::new(Float64Vector::from_vec(vec![3.0])) as _,
                 Arc::new(StringVector::from(vec!["host1"])) as _,
                 Arc::new(StringVector::from(vec!["job"])) as _,
+                Arc::new(StringVector::from(vec!["api"])) as _,
+                Arc::new(StringVector::from(vec!["us"])) as _,
             ],
         )
         .unwrap();
@@ -936,6 +941,16 @@ mod tests {
                     value: "localhost".to_string(),
                     r#type: NEQ_TYPE,
                 },
+                LabelMatcher {
+                    name: "service.name".to_string(),
+                    value: "api".to_string(),
+                    r#type: EQ_TYPE,
+                },
+                LabelMatcher {
+                    name: "Region".to_string(),
+                    value: "us".to_string(),
+                    r#type: EQ_TYPE,
+                },
             ],
             ..Default::default()
         };
@@ -946,7 +961,7 @@ mod tests {
 
         let ts_col = greptime_timestamp();
         let expected = format!(
-            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\")\n  TableScan: ?table?",
+            "Filter: ?table?.{} >= TimestampMillisecond(1000, None) AND ?table?.{} <= TimestampMillisecond(2000, None) AND regexp_match(?table?.job, Utf8(\"*prom*\")) IS NOT NULL AND ?table?.instance != Utf8(\"localhost\") AND ?table?.service.name = Utf8(\"api\") AND ?table?.Region = Utf8(\"us\")\n  TableScan: ?table?",
             ts_col, ts_col
         );
         assert_eq!(expected, display_string);
