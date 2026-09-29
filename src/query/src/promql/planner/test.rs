@@ -6817,11 +6817,12 @@ async fn test_count_values_expr() {
     let expected = "Sort: prometheus_tsdb_head_series.ip ASC NULLS LAST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS LAST, prometheus_tsdb_head_series.series ASC NULLS LAST [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
         \n  Projection: count(prometheus_tsdb_head_series.greptime_value), prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value) AS series [count(prometheus_tsdb_head_series.greptime_value):Int64, ip:Utf8, greptime_timestamp:Timestamp(ms), series:Utf8;N]\
         \n    Aggregate: groupBy=[[prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prom_float_to_string(prometheus_tsdb_head_series.greptime_value)]], aggr=[[count(prometheus_tsdb_head_series.greptime_value)]] [ip:Utf8, greptime_timestamp:Timestamp(ms), prom_float_to_string(prometheus_tsdb_head_series.greptime_value):Utf8;N, count(prometheus_tsdb_head_series.greptime_value):Int64]\
-        \n      PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n        PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n          Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n            Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(?:(10.0.160.237:8080|10.0.160.237:9090))$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
-        \n              TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]";
+        \n      Projection: prometheus_tsdb_head_series.ip, prometheus_tsdb_head_series.greptime_timestamp, prometheus_tsdb_head_series.greptime_value, Utf8(\"prometheus_tsdb_head_series\") AS __promql_metric_name [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N, __promql_metric_name:Utf8]\
+        \n        PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n          PromSeriesDivide: tags=[\"ip\"] [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n            Sort: prometheus_tsdb_head_series.ip ASC NULLS FIRST, prometheus_tsdb_head_series.greptime_timestamp ASC NULLS FIRST [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n              Filter: prometheus_tsdb_head_series.ip ~ Utf8(\"^(?:(10.0.160.237:8080|10.0.160.237:9090))$\") AND prometheus_tsdb_head_series.greptime_timestamp >= TimestampMillisecond(-999, None) AND prometheus_tsdb_head_series.greptime_timestamp <= TimestampMillisecond(100000000, None) [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]\
+        \n                TableScan: prometheus_tsdb_head_series [ip:Utf8, greptime_timestamp:Timestamp(ms), greptime_value:Float64;N]";
 
     assert_eq!(plan.display_indent_schema().to_string(), expected);
 }
@@ -7423,6 +7424,16 @@ async fn test_and_preserves_left_context_when_le_is_missing() {
     );
     assert!(!plan.schema().fields().is_empty());
     assert!(!contains_histogram_fold(&plan), "{plan:?}");
+    // The result must stay empty, not turn into a non-empty plan that just lost its
+    // identity: the plan bottoms out in an `EmptyRelation` (possibly below a projection
+    // that only reshapes the schema), so no sample can be emitted.
+    let mut plans = vec![&plan];
+    let mut is_empty = false;
+    while let Some(next) = plans.pop() {
+        is_empty |= matches!(next, LogicalPlan::EmptyRelation(_));
+        plans.extend(next.inputs());
+    }
+    assert!(is_empty, "the missing `le` case must stay empty: {plan:?}");
 }
 
 async fn build_matching_filter_plan(query: &str) -> String {
@@ -8627,10 +8638,31 @@ async fn build_count_values_table_provider_with_values(values: &[f64]) -> DfTabl
 async fn build_count_values_table_provider_with_value_array(
     values: ArrayRef,
 ) -> DfTableSourceProvider {
+    build_count_values_table_provider_with_tag_value_array("k", values).await
+}
+
+/// Like [`build_count_values_table_provider_with_values`] with `[1.0, 1.0, 1.0]`, but with `tag`
+/// as the name of the series tag column, so tests can cover tag names that collide with the
+/// internal metric-name column while keeping the same `k0`/`k1`/`k2` rows: three series with
+/// equal sample values that must stay separate groups.
+async fn build_count_values_collision_table_provider(tag: &str) -> DfTableSourceProvider {
+    build_count_values_table_provider_with_tag_value_array(
+        tag,
+        Arc::new(Float64Array::from(vec![1.0; 3])),
+    )
+    .await
+}
+
+/// Like [`build_count_values_table_provider_with_value_array`], but with a caller provided tag
+/// name.
+async fn build_count_values_table_provider_with_tag_value_array(
+    tag: &str,
+    values: ArrayRef,
+) -> DfTableSourceProvider {
     let value_data_type = ConcreteDataType::from_arrow_type(values.data_type());
     let catalog_list = MemoryCatalogManager::with_default_setup();
     let columns = vec![
-        ColumnSchema::new("k".to_string(), ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(tag.to_string(), ConcreteDataType::string_datatype(), false),
         ColumnSchema::new(
             "timestamp".to_string(),
             ConcreteDataType::timestamp_millisecond_datatype(),
@@ -9443,7 +9475,10 @@ async fn test_sort_by_label_semantic_name_without_marker_keeps_missing_label_err
                 .await
                 .unwrap_err();
         assert!(
-            matches!(error, crate::promql::error::Error::DataFusionPlanning { .. }),
+            matches!(
+                error,
+                crate::promql::error::Error::DataFusionPlanning { .. }
+            ),
             "{error}"
         );
         let query = format!(r#"{function}(collision_metric, "__name__")"#);
@@ -9457,6 +9492,321 @@ async fn test_sort_by_label_semantic_name_without_marker_keeps_missing_label_err
             plan.display_indent()
                 .to_string()
                 .contains(&format!("Sort: {}", marker.name))
+        );
+    }
+}
+
+/// Aggregations follow the metric-name lifecycle: the semantic `__name__` resolves through the
+/// marked identity column only. An explicit `by (__name__, ...)` retains the name, every other
+/// modifier drops it.
+#[tokio::test]
+async fn test_aggregation_metric_name_lifecycle() {
+    let state = build_query_engine_state();
+    // (query, metric-name column of the result, sorted sample values)
+    for (query, expected_marker, expected_values) in [
+        ("sum(cv_metric)", None, vec![4.0]),
+        ("sum without (k) (cv_metric)", None, vec![4.0]),
+        ("sum by (k) (cv_metric)", None, vec![1.0, 1.0, 2.0]),
+        (
+            "sum by (__name__) (cv_metric)",
+            Some(PROMQL_METRIC_NAME_COLUMN),
+            vec![4.0],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        let sample_column = float_sample_column(&plan);
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .map(|marker| marker.name);
+        assert_eq!(
+            marker.as_deref(),
+            expected_marker,
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        let mut actual = values(&batches, &sample_column);
+        actual.sort_by(f64::total_cmp);
+        assert_eq!(actual, expected_values, "{query}");
+        match expected_marker {
+            // An explicit `by (__name__, ...)` groups by the marked identity column, so the result
+            // keeps the name of the input series as the metric name of each result series.
+            Some(marker) => {
+                assert_metric_name_in_batches(&batches, marker);
+                assert_eq!(
+                    count_values_rows(&batches, marker),
+                    vec![("cv_metric", 4.0)],
+                    "{query}"
+                );
+            }
+            None => assert_metric_name_not_in_batches(&batches),
+        }
+    }
+}
+
+/// `topk`/`bottomk` are aggregation operators that select a subset of the original samples with
+/// their labels, so the metric-name identity and the samples must survive.
+#[tokio::test]
+async fn test_topk_bottomk_preserve_metric_name_and_samples() {
+    let state = build_query_engine_state();
+    for (query, expected) in [
+        (
+            "topk(1, cv_metric)",
+            vec![("k2".to_string(), "cv_metric".to_string(), 3.0)],
+        ),
+        (
+            "bottomk(1, cv_metric)",
+            vec![("k0".to_string(), "cv_metric".to_string(), 1.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider_with_values(&[1.0, 2.0, 3.0]).await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: the metric name must survive"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, &marker.name);
+        assert_eq!(
+            metric_name_rows(&batches, &marker.name),
+            expected,
+            "{query}"
+        );
+    }
+}
+
+/// `count_values("__name__", ...)` overwrites the identity of its input with the formatted
+/// sample value: the result carries exactly one marked column, holding the sample value, and
+/// the identity of the input must not survive as a second marker.
+#[tokio::test]
+async fn test_count_values_semantic_name_overwrites_metric_identity() {
+    let state = build_query_engine_state();
+    // (query, expected `(generated name, aggregated value)` rows)
+    for (query, expected) in [
+        (
+            r#"count_values("__name__", cv_metric)"#,
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"count_values("__name__", cv_metric) by (__name__)"#,
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        (
+            r#"sum by (__name__) (count_values("__name__", cv_metric))"#,
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+        // Without an input identity the generated column must take neither the name of a
+        // physical field of the input nor the semantic `__name__` itself.
+        (
+            r#"count_values("__name__", abs(cv_metric))"#,
+            vec![("1", 2.0), ("2", 1.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        let markers = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(PROMQL_FIELD_ROLE_KEY)
+                    .map(String::as_str)
+                    == Some(PROMQL_METRIC_NAME_ROLE)
+            })
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            markers,
+            vec![PROMQL_METRIC_NAME_COLUMN.to_string()],
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, PROMQL_METRIC_NAME_COLUMN);
+        assert_eq!(
+            count_values_rows(&batches, PROMQL_METRIC_NAME_COLUMN),
+            expected,
+            "{query}"
+        );
+    }
+}
+
+/// `count_values("__name__", ...)` writes the semantic metric name, which lives in the marked
+/// identity column and never in a physical column of the input: a physical `__name__` label (or a
+/// physical column occupying the internal marker name) survives unmarked, while the generated
+/// name moves to the sole marked column, suffixed on collision.
+#[tokio::test]
+async fn test_count_values_semantic_name_keeps_physical_collision_columns() {
+    let state = build_query_engine_state();
+    // (physical tag columns, physical column that must survive, generated name column, query)
+    for (tags, physical, generated, query) in [
+        (
+            vec![METRIC_NAME, "job"],
+            METRIC_NAME,
+            PROMQL_METRIC_NAME_COLUMN.to_string(),
+            r#"count_values("__name__", collision_metric) without(job)"#,
+        ),
+        (
+            vec![PROMQL_METRIC_NAME_COLUMN, "job"],
+            PROMQL_METRIC_NAME_COLUMN,
+            format!("{PROMQL_METRIC_NAME_COLUMN}_"),
+            r#"count_values("__name__", abs(collision_metric)) without(job)"#,
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_test_table_provider_with_distinct_tags(&[("collision_metric", tags.as_slice())])
+                .await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        let field = plan
+            .schema()
+            .field_with_unqualified_name(physical)
+            .unwrap_or_else(|_| panic!("{query}: the physical `{physical}` column must survive"));
+        assert!(
+            field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none(),
+            "{query}: the physical `{physical}` column must stay unmarked: {}",
+            plan.display_indent()
+        );
+        let marked = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| {
+                field
+                    .metadata()
+                    .get(PROMQL_FIELD_ROLE_KEY)
+                    .map(String::as_str)
+                    == Some(PROMQL_METRIC_NAME_ROLE)
+            })
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            marked,
+            vec![generated],
+            "{query}: {}",
+            plan.display_indent()
+        );
+    }
+}
+
+/// A physical `__name__` label is an ordinary label, not the semantic metric name: with
+/// `without(...)` grouping `count_values("__name__", ...)` keeps it and the generated name goes to
+/// the sole marked column. Distinct physical labels with equal sample values must still be
+/// separate groups.
+#[tokio::test]
+async fn test_count_values_keeps_distinct_physical_name_labels() {
+    let state = build_query_engine_state();
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_collision_table_provider(METRIC_NAME).await,
+        &operator_eval_stmt(r#"count_values("__name__", cv_metric) without(job)"#),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    let physical = plan
+        .schema()
+        .field_with_unqualified_name(METRIC_NAME)
+        .expect("the physical `__name__` label must survive");
+    assert!(physical.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none());
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .unwrap_or_else(|| {
+            panic!(
+                "the generated name must be marked: {}",
+                plan.display_indent()
+            )
+        });
+    assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN);
+
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_in_batches(&batches, &marker.name);
+    // `k0`, `k1` and `k2` share one sample value and one timestamp: a single group would mean the
+    // physical `__name__` label was dropped from the grouping key.
+    assert_eq!(
+        count_values_rows(&batches, &marker.name),
+        vec![("1", 1.0), ("1", 1.0), ("1", 1.0)]
+    );
+    let mut physical_labels = batches
+        .iter()
+        .flat_map(|batch| {
+            let labels = batch
+                .column_by_name(METRIC_NAME)
+                .expect("the physical `__name__` label must be projected")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the physical `__name__` label must be a string column");
+            (0..batch.num_rows())
+                .map(|row| labels.value(row).to_string())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    physical_labels.sort();
+    assert_eq!(physical_labels, vec!["k0", "k1", "k2"]);
+}
+
+/// `absent()` drops the metric-name identity of its input - even when the selector matched no
+/// series - and must still emit one 1-valued sample per evaluation timestamp instead of an
+/// empty result.
+#[tokio::test]
+async fn test_absent_drops_metric_name_and_emits_one_sample() {
+    let state = build_query_engine_state();
+    for query in [
+        // A metric that does not exist at all.
+        "abs(absent(nonexistent_metric))",
+        // An equality label of an existing metric matching no series.
+        r#"absent(cv_metric{k="missing"})"#,
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        assert!(
+            PromPlanner::metric_name_column(plan.schema())
+                .unwrap()
+                .is_none(),
+            "{query}: {}",
+            plan.display_indent()
+        );
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_not_in_batches(&batches);
+        assert_eq!(
+            values(&batches, &sample_column),
+            vec![1.0],
+            "{query}: absent must emit one 1-valued sample"
         );
     }
 }
