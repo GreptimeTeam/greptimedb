@@ -31,7 +31,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:36650fdb611a@sha256:e9babec6ca6b074e24a863e5fa30d985353875248e7222f23cd126bd4d52bddd
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324
         required: true
       provider:
         description: Cloud provider for the benchmark runner
