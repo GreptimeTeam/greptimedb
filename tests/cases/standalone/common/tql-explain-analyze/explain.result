@@ -12,20 +12,22 @@ Affected Rows: 3
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '5s') test;
 
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                  |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                       |
-|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                           |
-|               |   PromSeriesDivide: tags=["k"]                                                                                                        |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                              |
-|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
-|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
-|               | ]]                                                                                                                                    |
-| physical_plan | CooperativeExec                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                        |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                             |
+|               | Projection: test.i, test.j, test.k                                                                                                          |
+|               |   Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                             |
+|               |       PromSeriesDivide: tags=["k"]                                                                                                          |
+|               |         Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                                |
+|               |           Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                             |
+|               |             TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]   |
+|               | ]]                                                                                                                                          |
+| physical_plan | CooperativeExec                                                                                                                             |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                       |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                             |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- 'lookback' parameter is not fully supported, the test has to be updated
 -- explain at 0s, 5s and 10s. No point at 0s.
@@ -33,40 +35,44 @@ TQL EXPLAIN (0, 10, '5s') test;
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN (0, 10, '1s', '2s') test;
 
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                     |
-|               | PromInstantManipulate: range=[0..10000], lookback=[2000], interval=[1000], time index=[j]                                           |
-|               |   PromSeriesDivide: tags=["k"]                                                                                                      |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                            |
-|               |       Filter: test.j >= TimestampMillisecond(-1999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
-|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-1999, None), test.j <= TimestampMillisecond(10000, None)] |
-|               | ]]                                                                                                                                  |
-| physical_plan | CooperativeExec                                                                                                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                        |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                             |
+|               | Projection: test.i, test.j, test.k                                                                                                          |
+|               |   Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[2000], interval=[1000], time index=[j]                                               |
+|               |       PromSeriesDivide: tags=["k"]                                                                                                          |
+|               |         Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                                |
+|               |           Filter: test.j >= TimestampMillisecond(-1999, None) AND test.j <= TimestampMillisecond(10000, None)                               |
+|               |             TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-1999, None), test.j <= TimestampMillisecond(10000, None)]     |
+|               | ]]                                                                                                                                          |
+| physical_plan | CooperativeExec                                                                                                                             |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                     |
-+---------------+-------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                             |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- explain at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 TQL EXPLAIN ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp + '10 seconds'::interval, '5s') test;
 
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                  |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                       |
-|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                           |
-|               |   PromSeriesDivide: tags=["k"]                                                                                                        |
-|               |     Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                              |
-|               |       Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                           |
-|               |         TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
-|               | ]]                                                                                                                                    |
-| physical_plan | CooperativeExec                                                                                                                       |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                        |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                             |
+|               | Projection: test.i, test.j, test.k                                                                                                          |
+|               |   Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                             |
+|               |       PromSeriesDivide: tags=["k"]                                                                                                          |
+|               |         Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST                                                                                |
+|               |           Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)                             |
+|               |             TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]   |
+|               | ]]                                                                                                                                          |
+| physical_plan | CooperativeExec                                                                                                                             |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                       |
-+---------------+---------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                             |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s. No point at 0s.
 -- SQLNESS REPLACE (-+) -
@@ -80,7 +86,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+| initial_logical_plan_| Projection: test.i, test.j, test.k_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
@@ -94,11 +102,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test.i, test.j, test.k_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test.i, test.j, test.k_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
@@ -128,11 +138,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test.i, test.j, test.k_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
@@ -164,11 +176,13 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test;
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test.i, test.j, test.k_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
@@ -233,7 +247,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| initial_logical_plan_| Projection: test.i AS series, test.k, test.j_|
+| initial_logical_plan_| Projection: series, test.k, test.j_|
+|_|_Projection: test.i AS series, test.k, __promql_metric_name, test.j_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") AS __promql_metric_name_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
@@ -248,12 +264,14 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: series, test.k, test.j_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: test.i AS series, test.k, test.j_|
+|_| Projection: series, test.k, test.j_|
+|_|_Projection: test.i AS series, test.k, __promql_metric_name, test.j_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | logical_plan after JsonSchemaConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan after FixStateUdafOrderingAnalyzer_| SAME TEXT AS ABOVE_|
@@ -283,12 +301,14 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: test.i AS series, test.k, test.j_|
+|_| Projection: series, test.k, test.j_|
+|_|_Projection: test.i AS series, test.k, __promql_metric_name, test.j_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
@@ -320,12 +340,14 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test AS series;
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| Projection: test.i AS series, test.k, test.j_|
+|_| Projection: series, test.k, test.j_|
+|_|_Projection: test.i AS series, test.k, __promql_metric_name, test.j_|
+|_|_Projection: test.i, test.j, test.k, Utf8("test") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name |
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test.k ASC NULLS FIRST, test.j ASC NULLS FIRST_|
 |_|_Filter: test.j >= TimestampMillisecond(-299999, None) AND test.j <= TimestampMillisecond(10000, None)_|
-|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)] |
+|_|_TableScan: test, partial_filters=[test.j >= TimestampMillisecond(-299999, None), test.j <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
 | initial_physical_plan_| MergeScanExec: REDACTED
 |_|_|
@@ -392,21 +414,23 @@ Affected Rows: 3
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 10, '5s') test_nano;
 
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                            |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                 |
-|               | PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                     |
-|               |   PromSeriesDivide: tags=["k"]                                                                                                                                  |
-|               |     Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                              |
-|               |       Projection: test_nano.i, test_nano.k, test_nano.j                                                                                                         |
-|               |         Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)                                |
-|               |           TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
-|               | ]]                                                                                                                                                              |
-| physical_plan | CooperativeExec                                                                                                                                                 |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                     |
+|               | Projection: test_nano.i, test_nano.k, test_nano.j                                                                                                                   |
+|               |   Projection: test_nano.i, test_nano.k, test_nano.j, Utf8("test_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name     |
+|               |     PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]                                                                     |
+|               |       PromSeriesDivide: tags=["k"]                                                                                                                                  |
+|               |         Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST                                                                                              |
+|               |           Projection: test_nano.i, test_nano.k, test_nano.j                                                                                                         |
+|               |             Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)                                |
+|               |               TableScan: test_nano, partial_filters=[test_nano.j > TimestampNanosecond(-300000000000, None), test_nano.j <= TimestampNanosecond(10000000000, None)] |
+|               | ]]                                                                                                                                                                  |
+| physical_plan | CooperativeExec                                                                                                                                                     |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                 |
-+---------------+-----------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                     |
++---------------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- explain verbose at 0s, 5s and 10s for a nanosecond time index.
 -- SQLNESS REPLACE (-+) -
@@ -420,7 +444,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| initial_logical_plan_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+| initial_logical_plan_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j, Utf8("test_nano") AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Filter: test_nano.j > TimestampNanosecond(-300000000000, None) AND test_nano.j <= TimestampNanosecond(10000000000, None)_|
@@ -435,7 +461,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after ConstNormalizationRule_| SAME TEXT AS ABOVE_|
 | logical_plan after DistPlannerAnalyzer_| Projection: test_nano.i, test_nano.k, test_nano.j_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j, Utf8("test_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
@@ -470,7 +498,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after extract_leaf_expressions_| SAME TEXT AS ABOVE_|
 | logical_plan after push_down_leaf_projections_| SAME TEXT AS ABOVE_|
 | logical_plan after optimize_projections_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j, Utf8("test_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
@@ -507,7 +537,9 @@ TQL EXPLAIN VERBOSE (0, 10, '5s') test_nano;
 | logical_plan after ScanHintRule_| SAME TEXT AS ABOVE_|
 | logical_plan after JsonTypeConcretizeRule_| SAME TEXT AS ABOVE_|
 | logical_plan_| MergeScan [is_placeholder=false, remote_input=[_|
-|_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
+|_| Projection: test_nano.i, test_nano.k, test_nano.j_|
+|_|_Projection: test_nano.i, test_nano.k, test_nano.j, Utf8("test_nano") FieldMetadata { inner: {"greptime:promql:role": "metric_name"} } AS __promql_metric_name_|
+|_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[j]_|
 |_|_PromSeriesDivide: tags=["k"]_|
 |_|_Sort: test_nano.k ASC NULLS FIRST, test_nano.j ASC NULLS FIRST_|
 |_|_Projection: test_nano.i, test_nano.k, test_nano.j_|
