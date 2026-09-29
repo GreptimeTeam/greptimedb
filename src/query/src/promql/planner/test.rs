@@ -7655,8 +7655,18 @@ async fn test_mixed_binary_operator_aligns_both_alternative_inputs() {
 #[tokio::test]
 async fn test_mixed_binary_operator_reports_only_dropped_samples() {
     for (query, expected_rows, expected_infos) in [
+        // `+`/`-` report the discarded mixed pairs from the float lane's coalesce fallbacks.
         ("(lf or on(tag) lh) + on(tag) (rf or on(tag) rh)", 0, 1),
+        ("(lf or on(tag) lh) - on(tag) (rf or on(tag) rh)", 0, 1),
+        // Compatible float/float and histogram/histogram pairs must not invent an annotation.
         ("(lf or on(tag) lh) + on(tag) (lf or on(tag) lh)", 2, 0),
+        ("(lf or on(tag) lh) - on(tag) (lf or on(tag) lh)", 2, 0),
+        // An unmatched operand has no dropped pair to report.
+        (
+            "(lf or on(tag) lh) + on(tag) (fallback or on(tag) bad_native)",
+            0,
+            0,
+        ),
         ("(lf or on(tag) lh) % on(tag) lh", 0, 1),
     ] {
         let state = build_query_engine_state();

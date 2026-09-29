@@ -1327,6 +1327,25 @@ impl PromPlanner {
                     &right_field_columns,
                 );
 
+                // `+`/`-` over two alternative float/histogram operands records its discarded
+                // mixed pairs from the float lane's `coalesce` fallbacks instead of a standalone
+                // annotation filter. `align_binary_field_columns` emits that lane first, named
+                // after the left operand's float lane.
+                let arithmetic_float_lane_output = if matches!(op.id(), token::T_ADD | token::T_SUB)
+                    && Self::field_columns_are_alternative_samples(
+                        left_input.schema(),
+                        &left_field_columns,
+                    )
+                    && Self::field_columns_are_alternative_samples(
+                        right_input.schema(),
+                        &right_field_columns,
+                    ) {
+                    Self::alternative_sample_columns(left_input.schema(), &left_field_columns)
+                        .map(|(float, _)| float.to_string())
+                } else {
+                    None
+                };
+
                 // normal join
                 if left_table_ref == right_table_ref {
                     // rename table references to avoid ambiguity
@@ -1349,7 +1368,7 @@ impl PromPlanner {
                 // Computed scalars reach this join path instead of the literal projection paths.
                 // Broadcast them for arithmetic in the same way as literal scalars.
                 let broadcast_scalar = !is_comparison_op;
-                let (field_groups, invalid_field_pairs) = Self::align_binary_field_columns(
+                let (mut field_groups, mut invalid_field_pairs) = Self::align_binary_field_columns(
                     left_input.schema(),
                     right_input.schema(),
                     &left_field_columns,
@@ -1380,6 +1399,20 @@ impl PromPlanner {
                     .iter()
                     .map(|(output, _)| output.clone())
                     .collect();
+                // `+`/`-` over two alternative float/histogram operands records the discarded
+                // mixed pairs from the float lane: the valid float expression stays first and
+                // each fallback records its pair while returning NULL. A standalone always-true
+                // annotation filter cannot be used for them, because the outer non-null filter
+                // can be pushed into the same physical filter and short-circuit those UDFs
+                // before they run.
+                if self.promql_annotations.is_some()
+                    && let Some(float_output) = arithmetic_float_lane_output.as_deref()
+                    && let Some((_, float_pairs)) = field_groups
+                        .iter_mut()
+                        .find(|(output, _)| output.as_str() == float_output)
+                {
+                    float_pairs.extend(std::mem::take(&mut invalid_field_pairs));
+                }
                 let mut field_groups = field_groups.into_iter();
                 // `vector()` uses EmptyMetric and keeps GreptimeDB's timestamp broadcast.
                 let has_empty_metric_operand = left_is_empty_metric || right_is_empty_metric;
@@ -1444,7 +1477,9 @@ impl PromPlanner {
                 }
                 let promql_annotations = self.promql_annotations.clone();
                 // These predicates always pass; they only evaluate otherwise-discarded pairs
-                // while collecting annotations.
+                // while collecting annotations. `+`/`-` over two alternative float/histogram
+                // operands already consumed its mixed pairs into the float lane above, where
+                // the physical plan cannot short-circuit them away.
                 let invalid_pair_predicates = invalid_field_pairs
                     .into_iter()
                     .filter(|_| promql_annotations.is_some())
