@@ -104,6 +104,8 @@ pub struct ObjectStoreLogStore {
     creates_held: watch::Sender<bool>,
     #[cfg(any(test, feature = "testing"))]
     creates_fail: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    next_create_fails_after_write: Arc<AtomicBool>,
 }
 
 type ObsoleteEntryIds = Arc<Mutex<HashMap<RegionId, EntryId>>>;
@@ -203,6 +205,8 @@ impl ObjectStoreLogStore {
         let (creates_held_tx, creates_held_rx) = watch::channel(false);
         #[cfg(any(test, feature = "testing"))]
         let creates_fail = Arc::new(AtomicBool::new(false));
+        #[cfg(any(test, feature = "testing"))]
+        let next_create_fails_after_write = Arc::new(AtomicBool::new(false));
 
         let actor = Actor {
             io: io.clone(),
@@ -237,6 +241,8 @@ impl ObjectStoreLogStore {
             creates_held: creates_held_rx,
             #[cfg(any(test, feature = "testing"))]
             creates_fail: creates_fail.clone(),
+            #[cfg(any(test, feature = "testing"))]
+            next_create_fails_after_write: next_create_fails_after_write.clone(),
         };
         common_runtime::spawn_global(actor.run());
         Ok(Arc::new(Self {
@@ -255,6 +261,8 @@ impl ObjectStoreLogStore {
             creates_held: creates_held_tx,
             #[cfg(any(test, feature = "testing"))]
             creates_fail,
+            #[cfg(any(test, feature = "testing"))]
+            next_create_fails_after_write,
         }))
     }
 
@@ -311,6 +319,20 @@ impl ObjectStoreLogStore {
             None => Ok(()),
         }
     }
+}
+
+/// The transient object store error of a create that a testing hook fails.
+#[cfg(any(test, feature = "testing"))]
+fn injected_create_failure(io: &dyn WalObjectIo, object_seq: u64) -> Result<PutResult> {
+    let error = object_store::Error::new(
+        object_store::ErrorKind::Unexpected,
+        "injected create failure",
+    )
+    .set_temporary();
+    Err(error).context(crate::error::WalObjectStoreSnafu {
+        operation: "write",
+        path: io.object_path(object_seq),
+    })
 }
 
 /// Records the obsolete watermark of `region_id`, which never moves down.
@@ -381,6 +403,14 @@ impl ObjectStoreLogStore {
     /// store error instead of writing.
     pub fn fail_creates(&self) {
         self.creates_fail.store(true, Ordering::Release);
+    }
+
+    /// Makes the next create that writes its object report a transient object
+    /// store error afterwards, so the object exists although its create
+    /// failed.
+    pub fn fail_next_create_after_write(&self) {
+        self.next_create_fails_after_write
+            .store(true, Ordering::Release);
     }
 
     /// Sets the stopped flag without sending the stop command, which is the
@@ -797,6 +827,8 @@ struct Actor {
     creates_held: watch::Receiver<bool>,
     #[cfg(any(test, feature = "testing"))]
     creates_fail: Arc<AtomicBool>,
+    #[cfg(any(test, feature = "testing"))]
+    next_create_fails_after_write: Arc<AtomicBool>,
 }
 
 impl Actor {
@@ -1076,6 +1108,8 @@ impl Actor {
             let mut creates_held = self.creates_held.clone();
             #[cfg(any(test, feature = "testing"))]
             let creates_fail = self.creates_fail.clone();
+            #[cfg(any(test, feature = "testing"))]
+            let next_create_fails_after_write = self.next_create_fails_after_write.clone();
             self.creates.push(Box::pin(async move {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -1088,16 +1122,7 @@ impl Actor {
                 }
                 #[cfg(any(test, feature = "testing"))]
                 if creates_fail.load(Ordering::Acquire) {
-                    let error = object_store::Error::new(
-                        object_store::ErrorKind::Unexpected,
-                        "injected create failure",
-                    )
-                    .set_temporary();
-                    let result = Err(error).context(crate::error::WalObjectStoreSnafu {
-                        operation: "write",
-                        path: io.object_path(object_seq),
-                    });
-                    return (object_seq, result);
+                    return (object_seq, injected_create_failure(io.as_ref(), object_seq));
                 }
                 // Any conflict poisons an `enqueued` store, so only the
                 // `durable` mode reads the epoch of the existing object.
@@ -1109,6 +1134,10 @@ impl Actor {
                     }
                     result => result,
                 };
+                #[cfg(any(test, feature = "testing"))]
+                if result.is_ok() && next_create_fails_after_write.swap(false, Ordering::AcqRel) {
+                    return (object_seq, injected_create_failure(io.as_ref(), object_seq));
+                }
                 (object_seq, result)
             }));
         }
@@ -2759,6 +2788,7 @@ mod tests {
             admitted_appends: watch::channel(0).1,
             creates_held: watch::channel(false).0,
             creates_fail: Arc::default(),
+            next_create_fails_after_write: Arc::default(),
         };
         (store, command_rx)
     }
@@ -3953,6 +3983,32 @@ mod tests {
 
         store.begin_stop();
         assert_stopped(&append(&store, region_id, "a3").await.unwrap_err());
+        store.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_store_hook_fails_the_next_create_after_it_writes() {
+        let store = open(memory_store(), &eager()).await;
+        let region_id = region(1);
+
+        // Object 1 is stored, but its create reports a failure, so the
+        // append fails and the region has no durable entry.
+        store.fail_next_create_after_write();
+        let error = append(&store, region_id, "a1").await.unwrap_err();
+        assert!(
+            matches!(unwrap_shared(&error), Error::WalObjectStore { .. }),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(vec![0, 1], object_seqs(store.io.as_ref()).await);
+        assert_eq!(0, latest(&store, region_id));
+
+        // Only that create failed.
+        let response = append(&store, region_id, "a2").await.unwrap();
+        assert_eq!(
+            HashMap::from([(region_id, id(2, 1))]),
+            response.last_entry_ids
+        );
+        assert_eq!(vec![0, 1, 2], object_seqs(store.io.as_ref()).await);
         store.stop().await.unwrap();
     }
 
