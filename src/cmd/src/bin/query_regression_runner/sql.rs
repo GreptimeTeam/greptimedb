@@ -15,9 +15,10 @@
 use std::time::Instant;
 
 use reqwest::Client;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::Result;
+use crate::query_regression_runner::model::ResponseFormat;
 
 pub(super) fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
@@ -116,11 +117,30 @@ pub(super) fn value_f64(value: Option<&Value>) -> Option<f64> {
     value?.as_f64().or_else(|| value?.as_str()?.parse().ok())
 }
 
+/// Posts one statement batch with the historical flat `format=json` body; its
+/// parsers (setup, visibility, discovery) read the flat `response.data` shape.
 pub(super) async fn http_post_sql(client: &Client, port: u16, sql: &str, db: &str) -> Value {
+    http_post_sql_with_format(client, port, sql, db, ResponseFormat::Json).await
+}
+
+/// Posts one statement batch with an explicit `/v1/sql` response format. The
+/// SQL text is sent unchanged.
+pub(super) async fn http_post_sql_with_format(
+    client: &Client,
+    port: u16,
+    sql: &str,
+    db: &str,
+    response_format: ResponseFormat,
+) -> Value {
     let mut sample = post_form(
         client,
         format!("http://127.0.0.1:{port}/v1/sql"),
-        &[("sql", sql), ("db", db), ("format", "json")],
+        &[
+            ("sql", sql),
+            ("db", db),
+            ("format", response_format.as_str()),
+        ],
+        response_format,
     )
     .await;
     sample
@@ -152,6 +172,7 @@ pub(super) async fn http_post_prom_range_query(
             ("end", end.unwrap_or_default()),
             ("step", step.unwrap_or_default()),
         ],
+        ResponseFormat::Json,
     )
     .await;
     sample
@@ -170,7 +191,12 @@ fn prom_range_query_url(port: u16, db: &str) -> String {
     url.into()
 }
 
-async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value {
+async fn post_form(
+    client: &Client,
+    url: String,
+    form: &[(&str, &str)],
+    response_format: ResponseFormat,
+) -> Value {
     let started = Instant::now();
     let request = client.post(url).form(form);
     match request.send().await {
@@ -178,19 +204,35 @@ async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value
             let status = response.status().as_u16();
             match response.text().await {
                 Ok(raw) => {
-                    let body = serde_json::from_str(&raw).unwrap_or_else(|_| json!({"raw": raw}));
-                    let ok = status < 400 && !response_has_error(&body);
+                    // Latency still ends after the body has been read and parsed.
+                    let (body, malformed) = match serde_json::from_str(&raw) {
+                        Ok(body) => (body, false),
+                        Err(_) => (json!({"raw": raw}), true),
+                    };
+                    let (ok, failure) = if status >= 400 {
+                        (false, Some(format!("HTTP {status}")))
+                    } else {
+                        match response_format {
+                            ResponseFormat::Json => (!response_has_error(&body), None),
+                            ResponseFormat::GreptimedbV1 => {
+                                match native_response_error(&body, malformed) {
+                                    Some(reason) => (false, Some(reason)),
+                                    None => (true, None),
+                                }
+                            }
+                        }
+                    };
                     let mut sample = json!({
                         "ok": ok,
                         "status": status,
                         "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
                         "response": body,
                     });
-                    if status >= 400 {
+                    if let Some(error) = failure {
                         sample
                             .as_object_mut()
                             .expect("HTTP samples are objects")
-                            .insert("error".to_string(), Value::String(format!("HTTP {status}")));
+                            .insert("error".to_string(), Value::String(error));
                     }
                     sample
                 }
@@ -208,6 +250,70 @@ async fn post_form(client: &Client, url: String, form: &[(&str, &str)]) -> Value
             "latency_ms": started.elapsed().as_secs_f64() * 1000.0,
             "error": error.to_string(),
         }),
+    }
+}
+
+/// Explains why a native `greptimedb_v1` body is not fully successful, or
+/// `None` when it is. The server serializes a successful batch as
+/// `{output: [...], execution_time_ms}`, where every `output` entry is an
+/// externally tagged `GreptimeQueryOutput` (`{"affectedrows": N}` or
+/// `{"records": {...}}`), and reports failures as the root `ErrorResponse`
+/// (`{code, error, execution_time_ms}`). Only the root object and the direct
+/// `output` entries are inspected: record rows and their values are never
+/// visited, so error-like row values cannot fail a successful response.
+/// Malformed JSON, non-envelope bodies, and unknown output shapes fail.
+fn native_response_error(body: &Value, malformed: bool) -> Option<String> {
+    if malformed {
+        return Some("greptimedb_v1 response body is not valid JSON".to_string());
+    }
+    let Some(object) = body.as_object() else {
+        return Some("greptimedb_v1 response body is not a JSON object".to_string());
+    };
+    if let Some(reason) = root_error(object) {
+        return Some(reason);
+    }
+    match object.get("output") {
+        Some(Value::Array(outputs)) => outputs.iter().enumerate().find_map(|(index, output)| {
+            output_error(output).map(|reason| format!("greptimedb_v1 output[{index}]: {reason}"))
+        }),
+        Some(_) => Some("greptimedb_v1 `output` is not an array".to_string()),
+        None => Some("greptimedb_v1 response has neither `output` nor a root error".to_string()),
+    }
+}
+
+/// Status fields of the root envelope, matching the server's `ErrorResponse`.
+fn root_error(envelope: &Map<String, Value>) -> Option<String> {
+    if envelope.get("error").is_some_and(is_truthy) {
+        return Some("`error` is set".to_string());
+    }
+    envelope
+        .get("code")
+        .filter(|value| !is_success_code(value))
+        .map(|_| "`code` is not a success code".to_string())
+}
+
+/// Checks one direct `output` entry against the serialized, externally tagged
+/// `GreptimeQueryOutput` shape: exactly one recognized variant whose payload
+/// has that variant's type. Nothing below the payload is inspected, so row
+/// values under `records` may contain arbitrary `error`/`code` fields.
+fn output_error(output: &Value) -> Option<String> {
+    let Some(object) = output.as_object() else {
+        return Some("is not a statement output object".to_string());
+    };
+    let Some((variant, payload)) = object.iter().next().filter(|_| object.len() == 1) else {
+        return Some(format!(
+            "must contain exactly one output variant, found {} fields",
+            object.len()
+        ));
+    };
+    match (variant.as_str(), payload) {
+        ("affectedrows", payload) if payload.as_u64().is_some() => None,
+        ("affectedrows", _) => Some("`affectedrows` is not an unsigned integer".to_string()),
+        ("records", Value::Object(records)) if records.get("rows").is_some_and(Value::is_array) => {
+            None
+        }
+        ("records", _) => Some("`records` is not a records object with a `rows` array".to_string()),
+        (variant, _) => Some(format!("`{variant}` is not a recognized output variant")),
     }
 }
 
@@ -294,5 +400,80 @@ mod tests {
             extract_count_value(&json!({"response": {"data": [[]]}})),
             None
         );
+    }
+
+    #[test]
+    fn native_validation_accepts_success_and_rejects_errors() {
+        // Successful affectedrows and records outputs; error-like row values
+        // below `records` are data, not failures.
+        for body in [
+            json!({"output": [{"affectedrows": 32768}, {"affectedrows": 0}], "execution_time_ms": 12}),
+            json!({"output": [{"records": {"schema": {"column_schemas": []}, "rows": [], "total_rows": 0}}], "execution_time_ms": 3}),
+            json!({"output": [{"records": {"schema": {"column_schemas": []}, "rows": [[{"error": "row value", "code": 7}]], "total_rows": 1}}], "execution_time_ms": 3}),
+            json!({"output": [{"affectedrows": 1}, {"records": {"rows": [["status", "error"]]}}]}),
+        ] {
+            assert_eq!(native_response_error(&body, false), None, "{body}");
+        }
+
+        // Root errors fail even when `output` is present.
+        for body in [
+            json!({"code": 1004, "error": "cannot output multi-statements result in json format", "output": [{"affectedrows": 1}]}),
+            json!({"code": 3000, "output": [{"affectedrows": 1}]}),
+            json!({"error": "flush failed", "output": [{"affectedrows": 1}]}),
+        ] {
+            assert!(native_response_error(&body, false).is_some(), "{body}");
+        }
+        // A success code is tolerated.
+        assert_eq!(
+            native_response_error(&json!({"code": 0, "output": [{"affectedrows": 1}]}), false),
+            None
+        );
+
+        // Output entries must be exactly one recognized variant whose payload
+        // matches the serialized `GreptimeQueryOutput` shape.
+        for (body, needle) in [
+            (json!({"output": [{}]}), "exactly one output variant"),
+            (
+                json!({"output": [{"foo": 1}]}),
+                "`foo` is not a recognized output variant",
+            ),
+            (
+                json!({"output": [{"affectedrows": 1, "records": {"rows": []}}]}),
+                "exactly one output variant",
+            ),
+            (
+                json!({"output": [{"affectedrows": "1"}]}),
+                "`affectedrows` is not an unsigned integer",
+            ),
+            (
+                json!({"output": [{"records": 3}]}),
+                "`records` is not a records object with a `rows` array",
+            ),
+            (
+                json!({"output": [{"records": {}}]}),
+                "`records` is not a records object with a `rows` array",
+            ),
+            (
+                json!({"output": ["boom"]}),
+                "is not a statement output object",
+            ),
+        ] {
+            let reason = native_response_error(&body, false).unwrap();
+            assert!(
+                reason.starts_with("greptimedb_v1 output[0]: ") && reason.contains(needle),
+                "{reason}"
+            );
+        }
+
+        // Malformed and non-envelope 200 bodies fail.
+        for (body, malformed) in [
+            (json!({"raw": "<html>not json</html>"}), true),
+            (json!({"raw": "<html>not json</html>"}), false),
+            (json!({"foo": 1}), false),
+            (json!("boom"), false),
+            (json!({"output": "boom"}), false),
+        ] {
+            assert!(native_response_error(&body, malformed).is_some(), "{body}");
+        }
     }
 }

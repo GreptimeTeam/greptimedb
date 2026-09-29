@@ -137,6 +137,24 @@ defaults are owned by Rust. The outer CI driver calls
 to select the Rust runner lifecycle. The fixture helper exposes `direct-sst`,
 `prom-remote-write`, and `inspect-footer` subcommands.
 
+### Query response format
+
+A `[[scenario.queries]]` entry may set `response_format = "json"` (the default)
+or `"greptimedb_v1"` for SQL queries. The default keeps the historical flat
+`format=json` parsing (`response.data`, `response.affected_rows`), as do all
+setup, visibility, and discovery requests. `greptimedb_v1` posts
+`format=greptimedb_v1`; only the root object and the direct `output` statement
+entries are validated (record rows and schemas are never inspected), the raw
+envelope is kept in the report, and a 200 body that is not a valid native
+envelope fails the sample. Opt in only when the flat formats cannot express the
+response: `json` rejects a response with more than one statement output (HTTP 400
+code 1004), so a measured semicolon-separated statement batch must use
+`greptimedb_v1`. The SQL text is forwarded unchanged; `response_format` is
+rejected on `kind = "prom_http"` and invalid values are rejected before any
+request. An insert+flush measurement that includes index creation also requires
+the mito default synchronous index build (`index.build_mode = "sync"`); under
+`"async"` the flush returns before the index build finishes.
+
 Remote-write cases that need to validate storage output can add
 `[scenario.remote_write.storage]`. When present, the scenario body becomes:
 remote-write → flush → visibility check → query measurement → stop and await
@@ -565,3 +583,10 @@ Additional SQL optimizer cases:
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
   time filters, aggregate ordering, and `LIMIT`.
+
+The `opt02_fulltext_flush` case measures the end-to-end insert+flush cost of a
+fixed remote-write source metric into append-mode mito tables with and without a
+fulltext bloom index on a STRING field. Its two measured statement batches opt
+into `response_format = "greptimedb_v1"` and expect 393216 rows per table
+(12 inserts of 32768 rows each), one `fulltext_bloom` index row for the indexed
+table, and a `matches_term` partial filter pushdown.

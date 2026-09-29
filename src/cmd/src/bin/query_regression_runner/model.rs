@@ -206,12 +206,38 @@ pub(super) struct ReadBenchConfig {
     pub(super) max_files: Option<usize>,
 }
 
+/// Requested `/v1/sql` response format for one measured query. `Json` is the
+/// historical flat body used by setup/visibility/discovery requests;
+/// `GreptimedbV1` is the native `{"output": [...]}` envelope, the only body
+/// that can serialize a batch with more than one statement output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub(super) enum ResponseFormat {
+    #[serde(rename = "json")]
+    Json,
+    #[serde(rename = "greptimedb_v1")]
+    GreptimedbV1,
+}
+
+impl ResponseFormat {
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            ResponseFormat::Json => "json",
+            ResponseFormat::GreptimedbV1 => "greptimedb_v1",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct Query {
     #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) kind: Option<String>,
+    /// Optional `/v1/sql` response format for SQL queries. Absent keeps the
+    /// historical flat `json` body. Rejected for `kind = "prom_http"` queries
+    /// (see `plan::validate_query_formats`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) response_format: Option<ResponseFormat>,
     pub(super) query: String,
     /// Prometheus HTTP range query parameters (`kind = "prom_http"` only).
     #[serde(default)]
@@ -249,4 +275,43 @@ pub(super) struct Measurement {
     pub(super) latency_ms_median: Option<f64>,
     pub(super) latency_ms_p95: Option<f64>,
     pub(super) status: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn response_format_defaults_absent_and_rejects_unsupported_values() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert_eq!(query.response_format, None);
+        // Absent stays absent so historical report shapes are unchanged.
+        assert!(
+            serde_json::to_value(&query)
+                .unwrap()
+                .get("response_format")
+                .is_none()
+        );
+
+        let sql = "INSERT INTO t (ts, msg) SELECT ts, msg FROM src; ADMIN FLUSH_TABLE('t')";
+        let query: Query =
+            serde_json::from_value(json!({"query": sql, "response_format": "greptimedb_v1"}))
+                .unwrap();
+        assert_eq!(query.response_format, Some(ResponseFormat::GreptimedbV1));
+        let report = serde_json::to_value(&query).unwrap();
+        assert_eq!(report["response_format"], json!("greptimedb_v1"));
+        assert_eq!(report["query"], json!(sql));
+
+        for value in [json!("csv"), json!("GREPTIMEDB_V1"), json!(5), json!(true)] {
+            assert!(
+                serde_json::from_value::<Query>(
+                    json!({"query": "SELECT 1", "response_format": value})
+                )
+                .is_err(),
+                "expected rejection for {value}"
+            );
+        }
+    }
 }

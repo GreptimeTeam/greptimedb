@@ -1,0 +1,149 @@
+# OPT02 fulltext index flush workload.
+#
+# Each measured HTTP round trip is one statement batch: `INSERT INTO <table>
+# SELECT ... FROM <source metric>` followed by `ADMIN FLUSH_TABLE('<table>')` in
+# the same body. The sample is end-to-end batch time (planning, distributed scan,
+# insert, flush, fulltext index build), not per-row ingestion or query latency,
+# and the identical batch goes to both targets.
+#
+# `response_format = "greptimedb_v1"` is required: the flat `json` format rejects
+# a response with more than one statement output (HTTP 400, code 1004). The SQL
+# text is unchanged; the single-statement diagnostics stay on flat `json`.
+#
+# `ADMIN FLUSH_TABLE` covers fulltext index creation only under the mito default
+# synchronous index build (`index.build_mode = "sync"` in
+# `src/mito2/src/config.rs`; the runner starts datanodes without a config file).
+# No per-table or `ADMIN` override exists, and under `"async"` the flush returns
+# before the index build finishes, so the batch would no longer include index
+# creation.
+#
+# Expected results to inspect in the report (not automatic assertions):
+#   * every `insert_flush_*` sample answers 200 with one direct `output` entry
+#     per statement: the insert reports `affectedrows` 32768 and the flush a
+#     single-row `records` entry named `ADMIN FLUSH_TABLE(...)`. Including the
+#     validation post for `queries[0]`, each table receives 12 inserts
+#     (1 + 2 + 9 and 3 + 9), so both count post-checks report 393216 rows: every
+#     inserted row contains the term `disk`.
+#   * `post_check_index_metadata` reports exactly one `fulltext_bloom` row
+#     (`FULLTEXT_INDEX_msg`, index_type `FULLTEXT`) for `opt02_fulltext_flush`
+#     and none for the control table; `post_check_explain_matches_term` shows the
+#     `matches_term` filter with partial filter pushdown, and the verbose analyze
+#     runs first so it carries the cold fulltext index apply metrics.
+#
+# The indexed column is `msg` because `message` is a reserved DDL keyword;
+# `msg STRING FULLTEXT INDEX` matches
+# `tests/cases/standalone/common/create/create_with_fulltext.sql`, and the bloom
+# backend option matches `tests-integration/tests/http.rs`.
+[case]
+name = "opt02_fulltext_flush"
+description = "OPT02: end-to-end insert+flush of a fixed remote-write metric into append-mode mito tables with and without a fulltext bloom index on a STRING FIELD (multi-statement batches measured with response_format = greptimedb_v1)"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "opt02_fulltext_source"
+physical_table = "opt02_fulltext_source_physical"
+# 256 series x 128 samples = 32768 source rows.
+series_count = 256
+samples_per_series = 128
+sample_chunk_size = 64
+flush_every_sample_chunks = 1
+# 2024-01-01T00:00:00Z; 128 samples per series at a 60s step.
+start_unix_millis = 1704067200000
+step_millis = 60000
+chunk_series_count = 128
+timeout_seconds = 180
+visibility_timeout_seconds = 120
+
+# Identical on both targets; the high TWCS trigger keeps compaction from
+# rewriting the flushed files during the run.
+base_setup_sql = [
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_source_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_flush (ts TIMESTAMP TIME INDEX, msg STRING FULLTEXT INDEX WITH(backend='bloom')) ENGINE=mito WITH (append_mode='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_flush_control (ts TIMESTAMP TIME INDEX, msg STRING) ENGINE=mito WITH (append_mode='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+candidate_setup_sql = [
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_source_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_flush (ts TIMESTAMP TIME INDEX, msg STRING FULLTEXT INDEX WITH(backend='bloom')) ENGINE=mito WITH (append_mode='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+  "CREATE TABLE IF NOT EXISTS opt02_fulltext_flush_control (ts TIMESTAMP TIME INDEX, msg STRING) ENGINE=mito WITH (append_mode='true', 'compaction.type'='twcs', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+[scenario.remote_write.value]
+pattern = "linear"
+base = 0
+step = 0.125
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+# Measured workload: multi-statement batches (see the file header for
+# `response_format`).
+[[scenario.queries]]
+name = "insert_flush_fulltext"
+kind = "sql"
+response_format = "greptimedb_v1"
+query = "INSERT INTO opt02_fulltext_flush (ts, msg) SELECT greptime_timestamp, concat('disk pressure on ', instance, ', value ', cast(greptime_value AS STRING)) FROM opt02_fulltext_source; ADMIN FLUSH_TABLE('opt02_fulltext_flush')"
+warmup = 2
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+[[scenario.queries]]
+name = "insert_flush_control"
+kind = "sql"
+response_format = "greptimedb_v1"
+query = "INSERT INTO opt02_fulltext_flush_control (ts, msg) SELECT greptime_timestamp, concat('disk pressure on ', instance, ', value ', cast(greptime_value AS STRING)) FROM opt02_fulltext_source; ADMIN FLUSH_TABLE('opt02_fulltext_flush_control')"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 30
+
+# Diagnostics: single statements on the default flat `json` format, ordered so
+# the verbose analyze is the first fulltext scan of the case.
+[[scenario.queries]]
+name = "post_check_explain_matches_term"
+kind = "sql"
+query = "EXPLAIN SELECT ts, msg FROM opt02_fulltext_flush WHERE matches_term(msg, 'disk')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "post_check_explain_analyze_verbose"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM opt02_fulltext_flush WHERE matches_term(msg, 'disk')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "post_check_fulltext_rows"
+kind = "sql"
+query = "SELECT count(*) AS fulltext_rows FROM opt02_fulltext_flush"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "post_check_control_rows"
+kind = "sql"
+query = "SELECT count(*) AS control_rows FROM opt02_fulltext_flush_control"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "post_check_fulltext_matches"
+kind = "sql"
+query = "SELECT count(*) AS fulltext_matches FROM opt02_fulltext_flush WHERE matches_term(msg, 'disk')"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "post_check_index_metadata"
+kind = "sql"
+query = "SELECT table_name, index_name, column_name, index_type, greptime_index_type FROM information_schema.statistics WHERE table_schema = 'public' AND table_name IN ('opt02_fulltext_flush', 'opt02_fulltext_flush_control') ORDER BY table_name, index_name, seq_in_index"
+warmup = 0
+iterations = 1
