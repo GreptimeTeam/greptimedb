@@ -11,7 +11,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:a78cc4971f90@sha256:22ea2820521ae18b4742c72b89f9e89f95fa9166ce7783a4b37a35e3cee8c8af
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:e70b58eda2ad@sha256:9107d8f0e5ebd7a7b3c8da43a2294a0ca3c8ac5e5b2bb1cbb02fd98d4a4c8888
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -54,6 +54,11 @@ on:
         type: string
         default: 32g
         required: true
+      query_timeout_seconds:
+        description: Timeout per query request in seconds (correctness, warmup and measurement; 1..3600)
+        type: number
+        default: 300
+        required: true
       runtime_cpus:
         description: CPU limit per runtime container (0 = unrestricted)
         type: string
@@ -79,6 +84,7 @@ env:
   JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
   DB_CPUS: ${{ inputs.db_cpus }}
   DB_MEMORY: ${{ inputs.db_memory }}
+  QUERY_TIMEOUT_SECONDS: ${{ inputs.query_timeout_seconds }}
 jobs:
   validate:
     runs-on: ubuntu-latest
@@ -125,6 +131,8 @@ jobs:
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
         [[ "$DB_CPUS" =~ ^[1-9][0-9]*$ && "$DB_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
         [[ "$RUNTIME_CPUS" =~ ^(0|[1-9][0-9]*)$ && "$RUNTIME_MEMORY" =~ ^(0|[1-9][0-9]*[mMgG])$ ]]
+        [[ "$QUERY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]]
+        ((QUERY_TIMEOUT_SECONDS <= 3600))
         runtime_limits=()
         [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
         [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
@@ -139,6 +147,7 @@ jobs:
         grep -F -- '--dataset {sanity,preflight,main}' <<< "$help"
         grep -F -- '--runtime-cpus' <<< "$help"
         grep -F -- '--runtime-memory' <<< "$help"
+        grep -F -- '--query-timeout-seconds' <<< "$help"
         docker run --rm "${runtime_limits[@]}" "$resolved" scripts/check_run_tracesbench_docker.py
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
   provision:
@@ -257,19 +266,19 @@ jobs:
     - name: GreptimeDB load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: VictoriaTraces load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target victoriatraces --port 19428 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Tempo load, correctness and benchmark
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target tempo --port 13200 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Validate and render report
