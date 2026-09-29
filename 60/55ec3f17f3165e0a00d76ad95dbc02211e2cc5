@@ -1,0 +1,18 @@
+.github/scripts/tracesbench-summary.py
+  h_623774b620da8e 69,79-80,83,122,124,150,157,159-161,163
+.github/workflows/tracesbench.yml
+  h_623774b620da8e 5-24,34,101,121-124,133-152,205-206,270,311-318,321-324,327,333,335,340,347,355,366,369
+tests/perf/test_ci_runner_scripts.py
+  h_623774b620da8e 113-141,552,554-570,594-595
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "6055ec3f17f3165e0a00d76ad95dbc02211e2cc5",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
