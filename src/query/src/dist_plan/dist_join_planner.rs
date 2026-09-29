@@ -14,24 +14,301 @@
 
 //! Nested broadcast join rewrite for `INNER` joins of two distributed scans.
 //!
-//! Opt-in only: enabled when [`DistPlannerOptions::nested_broadcast_join_build_table`]
-//! names the build side table. Runs after `DistPlannerAnalyzer`, which wraps the remote
-//! scans in `MergeScan` and assigns the remote dynamic filter producer ids preserved
-//! here. Not cost based: no statistics are consulted in this slice.
+//! Opt-in only, in two ways. The manual selector is enabled when
+//! [`DistPlannerOptions::nested_broadcast_join_build_table`] names the build side table. The
+//! cost heuristic is enabled per query when the session sets `experimental_dist_join`:
+//! [`DatafusionQueryEngine::create_physical_plan`](crate::datafusion::DatafusionQueryEngine)
+//! then fetches the approximate disk sizes of the candidate tables into [`DistJoinStats`], a
+//! query-local config extension, and the heuristic rewrites the join only when those statistics
+//! favor the right build side. Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
+//! `MergeScan` and assigns the remote dynamic filter producer ids preserved here.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use common_meta::datanode::RegionStat;
+use common_meta::rpc::router::RegionRoute;
+use datafusion::config::{ConfigExtension, ExtensionOptions};
+use datafusion::datasource::DefaultTableSource;
 use datafusion::error::Result as DfResult;
 use datafusion_common::config::ConfigOptions;
 use datafusion_common::tree_node::{Transformed, TreeNode, TreeNodeRewriter};
-use datafusion_expr::{Join, JoinType, LogicalPlan, UserDefinedLogicalNodeCore};
+use datafusion_expr::utils::{can_hash, find_valid_equijoin_key_pair, split_conjunction};
+use datafusion_expr::{
+    Expr, ExprSchemable, Join, JoinType, LogicalPlan, Operator, TableScan,
+    UserDefinedLogicalNodeCore,
+};
 use datafusion_optimizer::analyzer::AnalyzerRule;
 use datatypes::extension::json::is_json2_extension_type;
+use store_api::region_engine::RegionRole;
+use store_api::storage::RegionId;
+use table::metadata::{TableId, TableType};
+use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::analyzer::DistPlannerOptions;
 use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
 use crate::dist_plan::planner::table_name_of;
+
+/// Name of [`DistJoinPlanner`]. The query engine looks it up to check that this rewrite, the
+/// only consumer of [`DistJoinStats`], runs for the query at all.
+pub(crate) const DIST_JOIN_PLANNER_RULE_NAME: &str = "DistJoinPlanner";
+
+/// Region count and total disk size of a table, as the cost heuristic compares them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DistJoinTableStats {
+    /// Total approximate disk bytes of all regions of the table.
+    pub total_bytes: u64,
+    /// Number of regions of the table.
+    pub region_count: usize,
+}
+
+/// Per-table statistics fetched for the cost heuristic of one query.
+///
+/// A query-local `ConfigOptions` extension, like [`DistPlannerOptions`], built when
+/// [`DatafusionQueryEngine::create_physical_plan`](crate::datafusion::DatafusionQueryEngine)
+/// sees the session opt-in (`SET experimental_dist_join = true`) on a plausible candidate join.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct DistJoinStats {
+    /// Statistics per table id of the candidate tables of the query. A table is only usable as
+    /// a probe or build side when it is present here with a known, non-zero size.
+    pub tables: BTreeMap<TableId, DistJoinTableStats>,
+}
+
+impl ConfigExtension for DistJoinStats {
+    const PREFIX: &'static str = "dist_join";
+}
+
+/// Only satisfies the [`ConfigExtension`] bound: the statistics are built by the query engine
+/// and have no configurable entry.
+impl ExtensionOptions for DistJoinStats {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+
+    fn cloned(&self) -> Box<dyn ExtensionOptions> {
+        Box::new(self.clone())
+    }
+
+    fn set(&mut self, _key: &str, value: &str) -> DfResult<()> {
+        Err(datafusion_common::DataFusionError::NotImplemented(format!(
+            "DistJoinStats cannot be set (key: {value})"
+        )))
+    }
+
+    fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
+        vec![]
+    }
+}
+
+impl DistJoinStats {
+    /// Whether `build` should be the nested build side of a join whose probe side is `probe`.
+    ///
+    /// The probe side selects the regions the join runs on, and the build side is read from
+    /// every one of them. The heuristic compares the disk bytes of the build table per probe
+    /// region, `N_probe * B_build`, with the disk bytes of the probe table itself, `P_probe`, and
+    /// only takes the rewrite when the product is strictly smaller. Those sizes are the
+    /// approximate disk sizes the regions report, not a measured or predicted amount of network
+    /// traffic.
+    ///
+    /// The sides are never swapped, and a missing table, a table without regions or bytes, or an
+    /// overflowing product means "no".
+    pub fn favors_right_build(&self, probe: TableId, build: TableId) -> bool {
+        let (Some(probe), Some(build)) = (self.tables.get(&probe), self.tables.get(&build)) else {
+            return false;
+        };
+        if probe.region_count == 0 || probe.total_bytes == 0 || build.total_bytes == 0 {
+            return false;
+        }
+        let Some(per_probe_region_bytes) =
+            (probe.region_count as u64).checked_mul(build.total_bytes)
+        else {
+            return false;
+        };
+
+        per_probe_region_bytes < probe.total_bytes
+    }
+}
+
+/// The base tables of one plausible candidate join of the cost heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CandidateJoin {
+    /// The base table of the left (probe) side.
+    pub probe: TableId,
+    /// The base table of the right (build) side.
+    pub build: TableId,
+}
+
+/// Returns the candidate joins of `plan`, i.e. of its `EXPLAIN`/`EXPLAIN ANALYZE` input: the
+/// `INNER` joins whose sides each resolve to a single physical base table and whose condition
+/// compares the two sides.
+///
+/// The plan is the one before the analyzers run: DataFusion's SQL planner leaves the whole `ON`
+/// clause of `LogicalPlanBuilder::join_on` in `filter`, and `ExtractEquijoinPredicate` only
+/// moves the equijoin into `on` later, so both shapes count. This only decides whose statistics
+/// are worth fetching; the rewrite still requires the distributed `MergeScan` shape and usable
+/// statistics for the two tables.
+pub(crate) fn candidate_joins(plan: &LogicalPlan) -> Vec<CandidateJoin> {
+    fn collect(plan: &LogicalPlan, candidates: &mut Vec<CandidateJoin>) {
+        if let LogicalPlan::Join(join) = plan
+            && join.join_type == JoinType::Inner
+            && has_join_equality(join)
+            && let (Some(probe), Some(build)) = (
+                side_base_table_id(&join.left),
+                side_base_table_id(&join.right),
+            )
+        {
+            candidates.push(CandidateJoin { probe, build });
+        }
+
+        for input in plan.inputs() {
+            collect(input, candidates);
+        }
+    }
+
+    let plan = match plan {
+        LogicalPlan::Explain(explain) => explain.plan.as_ref(),
+        LogicalPlan::Analyze(analyze) => analyze.input.as_ref(),
+        plan => plan,
+    };
+    let mut candidates = Vec::new();
+    collect(plan, &mut candidates);
+    candidates
+}
+
+/// Whether the join compares its two inputs with a hashable equality, in `on` or still in
+/// `filter`.
+///
+/// Mirrors `ExtractEquijoinPredicate`, the rule that fills `on`:
+/// [`find_valid_equijoin_key_pair`] rejects top-level equalities that do not compare the two
+/// inputs (constants, same-side columns), and `can_hash` rejects operand types a hash join
+/// cannot use.
+fn has_join_equality(join: &Join) -> bool {
+    let is_equijoin_key = |left: &Expr, right: &Expr| {
+        let Ok(Some((left, right))) =
+            find_valid_equijoin_key_pair(left, right, join.left.schema(), join.right.schema())
+        else {
+            return false;
+        };
+        let (Ok(left_type), Ok(right_type)) = (
+            left.get_type(join.left.schema()),
+            right.get_type(join.right.schema()),
+        ) else {
+            return false;
+        };
+
+        can_hash(&left_type) && can_hash(&right_type)
+    };
+
+    if join
+        .on
+        .iter()
+        .any(|(left, right)| is_equijoin_key(left, right))
+    {
+        return true;
+    }
+
+    join.filter.as_ref().is_some_and(|filter| {
+        split_conjunction(filter).into_iter().any(|expr| {
+            matches!(
+                expr,
+                Expr::BinaryExpr(binary)
+                    if binary.op == Operator::Eq && is_equijoin_key(&binary.left, &binary.right)
+            )
+        })
+    })
+}
+
+/// The physical base table of a join side, which may be aliased, filtered or projected.
+fn side_base_table_id(plan: &LogicalPlan) -> Option<TableId> {
+    match plan {
+        LogicalPlan::TableScan(scan) => physical_base_table_id(scan),
+        LogicalPlan::Projection(projection) => side_base_table_id(&projection.input),
+        LogicalPlan::Filter(filter) => side_base_table_id(&filter.input),
+        LogicalPlan::SubqueryAlias(alias) => side_base_table_id(&alias.input),
+        _ => None,
+    }
+}
+
+/// The table id of a scan of a physical base table, the only tables [`DistJoinPlanner`]
+/// captures.
+fn physical_base_table_id(scan: &TableScan) -> Option<TableId> {
+    let source = scan.source.downcast_ref::<DefaultTableSource>()?;
+    let provider = source
+        .table_provider
+        .downcast_ref::<DfTableProviderAdapter>()?;
+    let table = provider.table();
+
+    (table.table_type() == TableType::Base).then(|| table.table_info().table_id())
+}
+
+/// Totals the `approximate_bytes` of the `expected_regions` from `reports`.
+///
+/// Returns `None`, i.e. no rewrite, unless every expected region has exactly one ordinary
+/// leader report with a non-zero size: a missing or duplicate leader report, a zero size, or
+/// an overflowing sum does not describe the table well enough to compare it with another one.
+pub(crate) fn aggregate_region_stats(
+    expected_regions: &[RegionId],
+    reports: &[RegionStat],
+) -> Option<DistJoinTableStats> {
+    let expected = expected_regions.iter().copied().collect::<BTreeSet<_>>();
+    if expected.is_empty() || expected.len() != expected_regions.len() {
+        return None;
+    }
+
+    let mut sizes = BTreeMap::new();
+    for report in reports {
+        if !expected.contains(&report.id) || report.role != RegionRole::Leader {
+            continue;
+        }
+        // A second leader report leaves the size of the region unknown.
+        if sizes.insert(report.id, report.approximate_bytes).is_some() {
+            return None;
+        }
+    }
+    if sizes.len() != expected.len() {
+        return None;
+    }
+
+    let mut total_bytes = 0u64;
+    for bytes in sizes.values() {
+        if *bytes == 0 {
+            return None;
+        }
+        total_bytes = total_bytes.checked_add(*bytes)?;
+    }
+
+    Some(DistJoinTableStats {
+        total_bytes,
+        region_count: expected.len(),
+    })
+}
+
+/// The expected region ids of the table with the physical table id `physical_table_id`, taken
+/// from its physical table route.
+///
+/// Returns `None` when the route lists no region or any region belongs to another table: the
+/// heuristic compares the complete region list of one table with another table, so a route that
+/// does not describe `physical_table_id` (e.g. the id a logical table was resolved to) is not
+/// usable.
+pub(crate) fn expected_region_ids(
+    physical_table_id: TableId,
+    routes: &[RegionRoute],
+) -> Option<Vec<RegionId>> {
+    let mut regions = Vec::with_capacity(routes.len());
+    for route in routes {
+        if route.region.id.table_id() != physical_table_id {
+            return None;
+        }
+        regions.push(route.region.id);
+    }
+
+    (!regions.is_empty()).then_some(regions)
+}
 
 /// Nests the build side's `MergeScan` inside the probe side's one, so the join runs on
 /// the datanodes holding the probe regions.
@@ -43,32 +320,77 @@ pub struct DistJoinPlanner;
 
 impl AnalyzerRule for DistJoinPlanner {
     fn name(&self) -> &str {
-        "DistJoinPlanner"
+        DIST_JOIN_PLANNER_RULE_NAME
     }
 
     fn analyze(&self, plan: LogicalPlan, config: &ConfigOptions) -> DfResult<LogicalPlan> {
-        let Some(build_table) = config
+        let manual = config
             .extensions
             .get::<DistPlannerOptions>()
-            .and_then(|options| options.nested_broadcast_join_build_table.as_deref())
-        else {
+            .and_then(|options| options.nested_broadcast_join_build_table.as_deref());
+        let selector = if let Some(build_table) = manual {
+            // The manual opt-in keeps its exact name matching and never consults statistics.
+            BuildSideSelector::Manual { build_table }
+        } else if let Some(stats) = config.extensions.get::<DistJoinStats>() {
+            BuildSideSelector::Stats { stats }
+        } else {
             return Ok(plan);
         };
 
-        let mut rewriter = NestedBroadcastJoinRewriter { build_table };
+        let mut rewriter = NestedBroadcastJoinRewriter { selector };
         Ok(plan.rewrite(&mut rewriter)?.data)
     }
 }
 
-/// Rewriter nesting the build side `MergeScan` of a supported join inside the probe
-/// side's `MergeScan`.
+/// Rewriter nesting the build side `MergeScan` of a supported join inside the probe side's
+/// `MergeScan`.
 struct NestedBroadcastJoinRewriter<'a> {
-    /// Name of the build side table, either bare (`device_limits`) or fully qualified.
-    build_table: &'a str,
+    /// How the build side of a supported join is selected.
+    selector: BuildSideSelector<'a>,
+}
+
+/// How the rewriter finds the build side of a supported join.
+enum BuildSideSelector<'a> {
+    /// Manual opt-in: the configured build table name has to be the right input.
+    Manual {
+        /// Name of the build side table, either bare (`device_limits`) or fully qualified.
+        build_table: &'a str,
+    },
+    /// Cost heuristic: only the right input is considered, and only when the statistics of the
+    /// query show that broadcasting its table to the probe regions is cheaper.
+    Stats {
+        /// Per-table statistics fetched for this query, see [`DistJoinStats`].
+        stats: &'a DistJoinStats,
+    },
+}
+
+impl BuildSideSelector<'_> {
+    /// Whether the build side of the supported join shape is its right input.
+    fn selects_right_build(&self, probe: &LogicalPlan, build: &LogicalPlan) -> bool {
+        match self {
+            Self::Manual { build_table } => {
+                let left_is_build =
+                    table_name_of(probe).is_some_and(|name| table_name_matches(&name, build_table));
+                let right_is_build =
+                    table_name_of(build).is_some_and(|name| table_name_matches(&name, build_table));
+
+                !left_is_build && right_is_build
+            }
+            Self::Stats { stats } => {
+                let (Some(probe), Some(build)) =
+                    (side_base_table_id(probe), side_base_table_id(build))
+                else {
+                    return false;
+                };
+
+                stats.favors_right_build(probe, build)
+            }
+        }
+    }
 }
 
 impl NestedBroadcastJoinRewriter<'_> {
-    /// Returns the rewritten plan when `node` matches this slice's shape, otherwise
+    /// Returns the rewritten plan when `node` matches the supported shape, otherwise
     /// `None` to keep the plan unchanged.
     ///
     /// A rewrite changes where the join runs, so it must preserve the join output
@@ -79,8 +401,8 @@ impl NestedBroadcastJoinRewriter<'_> {
             return None;
         };
 
-        // Scope restriction of this slice: only INNER equi-joins of two distributed
-        // scans are handled, everything else keeps the existing distributed plan.
+        // Only `INNER` equi-joins of two distributed scans are handled, everything else
+        // keeps the existing distributed plan.
         if join.join_type != JoinType::Inner || join.on.is_empty() {
             return None;
         }
@@ -103,13 +425,14 @@ impl NestedBroadcastJoinRewriter<'_> {
             return None;
         }
 
-        // The configured table must identify exactly one side, and the build side must be
-        // the right input: moving a left build side would change the join schema.
-        let left_is_build = table_name_of(probe_merge_scan.input())
-            .is_some_and(|name| table_name_matches(&name, self.build_table));
-        let right_is_build = table_name_of(build_merge_scan.input())
-            .is_some_and(|name| table_name_matches(&name, self.build_table));
-        if left_is_build || !right_is_build {
+        // The selector picks the build side: the manual opt-in requires the configured table
+        // to be exactly the right input, the cost heuristic only ever considers the right
+        // input. The build side has to be the right input, because moving a left build side
+        // would change the join schema.
+        if !self
+            .selector
+            .selects_right_build(probe_merge_scan.input(), build_merge_scan.input())
+        {
             return None;
         }
 
@@ -226,7 +549,7 @@ fn has_json2_boundary(merge_scan: &MergeScanLogicalPlan) -> bool {
         .schema()
         .fields()
         .iter()
-        .any(|field| is_json2_extension_type(field))
+        .any(is_json2_extension_type)
 }
 
 /// Whether the configured build side table name refers to `name`. Accepts the bare
@@ -248,6 +571,8 @@ mod tests {
     };
     use arrow_schema::{DataType, Field, Fields, Schema};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_meta::datanode::RegionManifestInfo;
+    use common_meta::rpc::router::Region;
     use datafusion::datasource::DefaultTableSource;
     use datafusion_common::{DFSchema, DFSchemaRef, JoinConstraint, NullEquality};
     use datafusion_expr::{Expr, LogicalPlanBuilder, build_join_schema, col, lit};
@@ -718,6 +1043,444 @@ mod tests {
         let result = rewrite(plan.clone(), "t2");
 
         assert_eq!(plan.to_string(), result.to_string());
+    }
+
+    /// A region report of the tests: one ordinary leader with `bytes` approximate disk bytes.
+    fn region_stat(region_id: RegionId, bytes: u64, role: RegionRole) -> RegionStat {
+        RegionStat {
+            id: region_id,
+            rcus: 0,
+            wcus: 0,
+            approximate_bytes: bytes,
+            engine: "mito".to_string(),
+            role,
+            num_rows: 0,
+            memtable_size: 0,
+            manifest_size: 0,
+            sst_size: 0,
+            sst_num: 0,
+            index_size: 0,
+            region_manifest: RegionManifestInfo::Mito {
+                manifest_version: 0,
+                flushed_entry_id: 0,
+                file_removed_cnt: 0,
+            },
+            written_bytes: 0,
+            query_cpu_time: 0,
+            query_scanned_bytes: 0,
+            data_topic_latest_entry_id: 0,
+            metadata_topic_latest_entry_id: 0,
+            min_timestamp: None,
+            max_timestamp: None,
+        }
+    }
+
+    /// Statistics of one table, as [`DistJoinStats`] reads them.
+    fn table_stats(total_bytes: u64, region_count: usize) -> DistJoinTableStats {
+        DistJoinTableStats {
+            total_bytes,
+            region_count,
+        }
+    }
+
+    /// Statistics of the given tables.
+    fn stats(tables: &[(TableId, DistJoinTableStats)]) -> DistJoinStats {
+        DistJoinStats {
+            tables: tables.iter().copied().collect(),
+        }
+    }
+
+    /// Config with the given statistics, as `create_physical_plan` inserts them.
+    fn stats_config(tables: &[(TableId, DistJoinTableStats)]) -> ConfigOptions {
+        let mut config = ConfigOptions::default();
+        config.extensions.insert(stats(tables));
+        config
+    }
+
+    /// A region route of the tests.
+    fn region_route(region_id: RegionId) -> RegionRoute {
+        RegionRoute {
+            region: Region {
+                id: region_id,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    /// The heuristic takes the rewrite only when the product of the build bytes per probe region
+    /// is strictly smaller than the probe bytes, and never with a missing, empty or overflowing
+    /// input.
+    #[test]
+    fn favors_right_build_compares_product_with_probe_bytes() {
+        let cases = [
+            // 2 probe regions * 1_000 bytes of build = 2_000 < 10_000.
+            (
+                Some(table_stats(10_000, 2)),
+                Some(table_stats(1_000, 1)),
+                true,
+            ),
+            // 10 * 1_000 == 10_000: not strictly smaller.
+            (
+                Some(table_stats(10_000, 10)),
+                Some(table_stats(1_000, 1)),
+                false,
+            ),
+            // 10 * 1_001 > 10_000.
+            (
+                Some(table_stats(10_000, 10)),
+                Some(table_stats(1_001, 1)),
+                false,
+            ),
+            // A table without bytes or without regions is not usable, even when the product
+            // would be smaller.
+            (Some(table_stats(10_000, 2)), Some(table_stats(0, 1)), false),
+            (Some(table_stats(10_000, 0)), Some(table_stats(1, 1)), false),
+            (Some(table_stats(0, 2)), Some(table_stats(1, 1)), false),
+            // 2 * u64::MAX overflows.
+            (
+                Some(table_stats(u64::MAX, 2)),
+                Some(table_stats(u64::MAX, 1)),
+                false,
+            ),
+        ];
+
+        for (probe, build, expected) in cases {
+            let mut tables = BTreeMap::new();
+            if let Some(probe) = probe {
+                tables.insert(1, probe);
+            }
+            if let Some(build) = build {
+                tables.insert(2, build);
+            }
+
+            assert_eq!(
+                expected,
+                DistJoinStats { tables }.favors_right_build(1, 2),
+                "probe: {probe:?}, build: {build:?}"
+            );
+        }
+    }
+
+    /// A table without statistics selects neither side.
+    #[test]
+    fn favors_right_build_requires_both_tables() {
+        let stats = stats(&[(1, table_stats(10_000, 2))]);
+
+        assert!(!stats.favors_right_build(1, 2));
+        assert!(!stats.favors_right_build(2, 1));
+        assert!(!stats.favors_right_build(3, 4));
+    }
+
+    /// The aggregation needs exactly one ordinary leader report per expected region, and ignores
+    /// the reports of other tables.
+    #[test]
+    fn aggregate_region_stats_requires_one_leader_per_region() {
+        let regions = vec![RegionId::new(1, 1), RegionId::new(1, 2)];
+        let reports = vec![
+            region_stat(RegionId::new(1, 1), 100, RegionRole::Leader),
+            region_stat(RegionId::new(1, 2), 200, RegionRole::Leader),
+            // Reports of other tables and of non-leaders are ignored.
+            region_stat(RegionId::new(2, 1), 1_000, RegionRole::Leader),
+            region_stat(RegionId::new(1, 3), 7, RegionRole::Follower),
+        ];
+
+        assert_eq!(
+            Some(table_stats(300, 2)),
+            aggregate_region_stats(&regions, &reports)
+        );
+    }
+
+    /// An incomplete or unusable description of the expected regions is not compared with another
+    /// table.
+    #[test]
+    fn aggregate_region_stats_rejects_incomplete_or_unusable_reports() {
+        let regions = vec![RegionId::new(1, 1), RegionId::new(1, 2)];
+        let leader = |number: u32, bytes: u64| {
+            region_stat(RegionId::new(1, number), bytes, RegionRole::Leader)
+        };
+        let cases = [
+            ("missing report", regions.clone(), vec![leader(1, 100)]),
+            (
+                "duplicate report",
+                regions.clone(),
+                vec![leader(1, 100), leader(1, 100), leader(2, 200)],
+            ),
+            (
+                "follower instead of leader",
+                regions.clone(),
+                vec![
+                    region_stat(RegionId::new(1, 1), 100, RegionRole::Follower),
+                    leader(2, 200),
+                ],
+            ),
+            (
+                "staging leader instead of leader",
+                regions.clone(),
+                vec![
+                    region_stat(RegionId::new(1, 1), 100, RegionRole::StagingLeader),
+                    leader(2, 200),
+                ],
+            ),
+            (
+                "zero bytes",
+                regions.clone(),
+                vec![leader(1, 0), leader(2, 200)],
+            ),
+            (
+                "overflowing sum",
+                regions.clone(),
+                vec![leader(1, u64::MAX), leader(2, 1)],
+            ),
+            ("no expected region", vec![], vec![leader(1, 100)]),
+            (
+                "duplicate expected region",
+                vec![RegionId::new(1, 1), RegionId::new(1, 1)],
+                vec![leader(1, 100)],
+            ),
+        ];
+
+        for (name, regions, reports) in cases {
+            assert_eq!(
+                None,
+                aggregate_region_stats(&regions, &reports),
+                "case: {name}"
+            );
+        }
+    }
+
+    /// A physical table route provides the expected regions, and only when all of them belong to
+    /// the resolved physical table.
+    #[test]
+    fn expected_region_ids_of_physical_route() {
+        let routes = vec![
+            region_route(RegionId::new(7, 1)),
+            region_route(RegionId::new(7, 2)),
+        ];
+
+        assert_eq!(
+            Some(vec![RegionId::new(7, 1), RegionId::new(7, 2)]),
+            expected_region_ids(7, &routes)
+        );
+        // The route of another physical table, e.g. after the captured logical table id was
+        // resolved to a different physical table.
+        assert_eq!(None, expected_region_ids(8, &routes));
+        assert_eq!(None, expected_region_ids(7, &[]));
+        assert_eq!(
+            None,
+            expected_region_ids(
+                7,
+                &[
+                    region_route(RegionId::new(7, 1)),
+                    region_route(RegionId::new(8, 1)),
+                ]
+            )
+        );
+    }
+
+    /// The cost heuristic nests the build side only when the statistics favor it: the same
+    /// statistics in the other order never swap the sides, and missing statistics keep the plan.
+    #[test]
+    fn nested_broadcast_join_rewrite_with_stats() {
+        let plan = distributed_join_plan();
+
+        // The probe table `t1` (id 1) has two regions and 10_000 bytes, the build table `t2`
+        // (id 2) one region and 1_000 bytes: 2 * 1_000 < 10_000.
+        let favoring = stats_config(&[(1, table_stats(10_000, 2)), (2, table_stats(1_000, 1))]);
+        let result = DistJoinPlanner {}.analyze(plan.clone(), &favoring).unwrap();
+
+        let join = outer_join(&result);
+        assert_eq!(2, merge_scans(&result).len());
+        assert!(
+            !contains_merge_scan(&join.left),
+            "probe side must become local, got: {}",
+            join.left
+        );
+        assert!(
+            contains_merge_scan(&join.right),
+            "build side must keep its MergeScan, got: {}",
+            join.right
+        );
+
+        // The sides are never swapped: the same statistics in the other order do not favor the
+        // right build side.
+        let swapped = stats_config(&[(1, table_stats(1_000, 1)), (2, table_stats(10_000, 2))]);
+        let result = DistJoinPlanner {}.analyze(plan.clone(), &swapped).unwrap();
+        assert_eq!(plan.to_string(), result.to_string());
+
+        // Statistics of the probe table only leave the build side unknown.
+        let partial = stats_config(&[(1, table_stats(10_000, 2))]);
+        let result = DistJoinPlanner {}.analyze(plan.clone(), &partial).unwrap();
+        assert_eq!(plan.to_string(), result.to_string());
+    }
+
+    /// The manual build table keeps its exact name matching and is preferred over the statistics,
+    /// which its option never consults.
+    #[test]
+    fn manual_build_table_precedes_stats() {
+        let plan = distributed_join_plan();
+        // These statistics do not favor the right build side.
+        let mut config = stats_config(&[(1, table_stats(1_000, 1)), (2, table_stats(10_000, 2))]);
+        config.extensions.insert(DistPlannerOptions {
+            nested_broadcast_join_build_table: Some("t2".to_string()),
+            ..Default::default()
+        });
+
+        let result = DistJoinPlanner {}.analyze(plan.clone(), &config).unwrap();
+
+        let join = outer_join(&result);
+        assert_eq!(2, merge_scans(&result).len());
+        assert!(!contains_merge_scan(&join.left));
+        assert!(contains_merge_scan(&join.right));
+    }
+
+    /// Both plan shapes the engine sees are covered: the equality in `on`, and the unanalyzed
+    /// `join_on` plan, whose whole `ON` clause is still in `filter`, including the input of an
+    /// EXPLAIN.
+    #[test]
+    fn candidate_joins_of_both_plan_shapes() {
+        // The equality in `on`.
+        let on_shape = inner_join(
+            table_scan("t1", 1, "t1"),
+            table_scan("t2", 2, "t2"),
+            col("t1.number"),
+            col("t2.number"),
+        );
+        assert!(
+            matches!(&on_shape, LogicalPlan::Join(join) if !join.on.is_empty()),
+            "expected the equality in `on`, got: {on_shape}"
+        );
+        assert_eq!(
+            vec![CandidateJoin { probe: 1, build: 2 }],
+            candidate_joins(&on_shape)
+        );
+
+        // The plan of `LogicalPlanBuilder::join_on`, as the SQL planner leaves it: the whole `ON`
+        // clause is the `filter`.
+        let filter_shape = join_plan(JoinType::Inner);
+        assert!(
+            matches!(&filter_shape, LogicalPlan::Join(join) if join.on.is_empty() && join.filter.is_some()),
+            "expected the unanalyzed join to carry its condition in `filter`, got: {filter_shape}"
+        );
+        assert_eq!(
+            vec![CandidateJoin { probe: 1, build: 2 }],
+            candidate_joins(&filter_shape)
+        );
+
+        // The input of an EXPLAIN.
+        let explain = LogicalPlanBuilder::from(filter_shape.clone())
+            .explain(false, false)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(candidate_joins(&filter_shape), candidate_joins(&explain));
+
+        // A join without an equality is not a candidate, in either shape.
+        let cross = LogicalPlanBuilder::from(table_scan("t1", 1, "t1"))
+            .join_on(
+                table_scan("t2", 2, "t2"),
+                JoinType::Inner,
+                vec![col("t1.number").gt(col("t2.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(candidate_joins(&cross).is_empty());
+
+        // Only `INNER` joins are candidates.
+        let left = LogicalPlanBuilder::from(table_scan("t1", 1, "t1"))
+            .join_on(
+                table_scan("t2", 2, "t2"),
+                JoinType::Left,
+                vec![col("t1.number").eq(col("t2.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(candidate_joins(&left).is_empty());
+
+        // The join of two joins is no candidate itself (its sides are not base tables), while the
+        // candidates of its inputs are collected: the rewrite applies at every join node.
+        let other = inner_join(
+            table_scan("t3", 3, "t3"),
+            table_scan("t4", 4, "t4"),
+            col("t3.number"),
+            col("t4.number"),
+        );
+        let nested = inner_join(
+            join_plan(JoinType::Inner),
+            other,
+            col("t1.number"),
+            col("t3.number"),
+        );
+        assert_eq!(
+            vec![
+                CandidateJoin { probe: 1, build: 2 },
+                CandidateJoin { probe: 3, build: 4 }
+            ],
+            candidate_joins(&nested)
+        );
+    }
+
+    /// Candidate joins need a real cross-input equijoin: constants, same-side equalities and
+    /// non-equality conditions are no candidates, while a cross-input equality stays one next to
+    /// residual predicates.
+    #[test]
+    fn candidate_joins_require_cross_input_equijoin() {
+        let candidates_of = |on: Vec<Expr>| {
+            let plan = LogicalPlanBuilder::from(table_scan("t1", 1, "t1"))
+                .join_on(table_scan("t2", 2, "t2"), JoinType::Inner, on)
+                .unwrap()
+                .build()
+                .unwrap();
+
+            candidate_joins(&plan)
+        };
+        let cases = [
+            (
+                "cross-input equality",
+                vec![col("t1.number").eq(col("t2.number"))],
+                true,
+            ),
+            (
+                "reversed cross-input equality",
+                vec![col("t2.number").eq(col("t1.number"))],
+                true,
+            ),
+            (
+                "cross-input equality with residual predicate",
+                vec![
+                    col("t1.number").eq(col("t2.number")),
+                    col("t1.number").gt(lit(1u32)),
+                ],
+                true,
+            ),
+            ("constants", vec![lit(1u32).eq(lit(1u32))], false),
+            (
+                "same-side equality",
+                vec![col("t1.number").eq(col("t1.number"))],
+                false,
+            ),
+            (
+                "column against constant",
+                vec![col("t1.number").eq(lit(1u32))],
+                false,
+            ),
+            (
+                "cross-input non-equality",
+                vec![col("t1.number").gt(col("t2.number"))],
+                false,
+            ),
+        ];
+
+        for (name, on, expected) in cases {
+            let expected = if expected {
+                vec![CandidateJoin { probe: 1, build: 2 }]
+            } else {
+                Vec::new()
+            };
+            assert_eq!(expected, candidates_of(on), "case: {name}");
+        }
     }
 
     /// A one-column JSON2 boundary schema, as `JsonSchemaConcretizeRule` expects to fix up.

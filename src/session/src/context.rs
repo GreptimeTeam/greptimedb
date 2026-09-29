@@ -706,6 +706,7 @@ pub struct ConfigurationVariables {
     pg_datestyle_format: ArcSwap<(PGDateTimeStyle, PGDateOrder)>,
     pg_intervalstyle_format: ArcSwap<PGIntervalStyle>,
     allow_query_fallback: ArcSwap<bool>,
+    experimental_dist_join: ArcSwap<bool>,
 }
 
 impl Clone for ConfigurationVariables {
@@ -715,6 +716,7 @@ impl Clone for ConfigurationVariables {
             pg_datestyle_format: ArcSwap::new(self.pg_datestyle_format.load().clone()),
             pg_intervalstyle_format: ArcSwap::new(self.pg_intervalstyle_format.load().clone()),
             allow_query_fallback: ArcSwap::new(self.allow_query_fallback.load().clone()),
+            experimental_dist_join: ArcSwap::new(self.experimental_dist_join.load().clone()),
         }
     }
 }
@@ -754,6 +756,16 @@ impl ConfigurationVariables {
 
     pub fn set_allow_query_fallback(&self, allow: bool) {
         self.allow_query_fallback.swap(Arc::new(allow));
+    }
+
+    /// Whether the session opted into the cost heuristic of the nested broadcast join
+    /// rewrite (`SET experimental_dist_join = true`).
+    pub fn experimental_dist_join(&self) -> bool {
+        **self.experimental_dist_join.load()
+    }
+
+    pub fn set_experimental_dist_join(&self, enabled: bool) {
+        self.experimental_dist_join.swap(Arc::new(enabled));
     }
 }
 
@@ -826,6 +838,31 @@ mod test {
         fork.set_skip_wal(true);
         assert!(!context.skip_wal());
         assert!(fork.skip_wal());
+    }
+
+    /// The configuration parameters belong to the session, not to a single statement: a
+    /// statement that is planned or executed after `SET` sees the same value.
+    #[test]
+    fn test_experimental_dist_join_persists_across_statements() {
+        let session = Session::new(None, Channel::Mysql, Default::default(), 0);
+        assert!(
+            !session
+                .new_query_context()
+                .configuration_parameter()
+                .experimental_dist_join()
+        );
+
+        session
+            .new_query_context()
+            .configuration_parameter()
+            .set_experimental_dist_join(true);
+
+        assert!(
+            session
+                .new_query_context()
+                .configuration_parameter()
+                .experimental_dist_join()
+        );
     }
 
     #[test]

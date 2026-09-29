@@ -11702,6 +11702,7 @@ dependencies = [
  "common-macro",
  "common-meta",
  "common-plugins",
+ "common-procedure",
  "common-query",
  "common-recordbatch",
  "common-runtime",
