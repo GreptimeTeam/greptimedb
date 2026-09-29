@@ -29,7 +29,8 @@ use common_query::prometheus::{
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray, UInt32Array,
+    UInt64Array,
 };
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -1643,6 +1644,183 @@ async fn build_test_table_provider_with_tsid_tag_fields(
     )
 }
 
+/// The `__tsid` constants used by [`build_cross_logical_table_tsid_provider`]'s physical rows.
+///
+/// `query` does not depend on `metric-engine`, so the fixture cannot call
+/// `metric_engine::row_modifier::TsidGenerator` (which hashes the sorted present label
+/// names and values with `FxHasher`); the values are hand-written instead. What these
+/// tests establish is the binary-match/execution behavior for equal TSIDs across logical
+/// tables (and the absence of a match for distinct TSIDs), not TSID generation itself.
+const CROSS_TABLE_TSID: u64 = 0x0123_4567_89ab_cdef;
+const OTHER_TABLE_TSID: u64 = 0xfedc_ba98_7654_3210;
+
+/// Builds a metric-engine-shaped catalogue with real data: a physical table holding one
+/// sample for each of the two logical tables `left_metric` (table id 1024, value 2.0) and
+/// `right_metric` (table id 1025, value 3.0), both with the same tag `tag_0="a"` and the
+/// same timestamp. `left_tsid`/`right_tsid` set the two rows' `__tsid` so a binary match
+/// pairs the logical tables only when the TSIDs are equal.
+fn build_cross_logical_table_tsid_provider(
+    left_tsid: u64,
+    right_tsid: u64,
+) -> DfTableSourceProvider {
+    const PHYSICAL_TABLE_ID: u32 = 999;
+    const LEFT_TABLE_ID: u32 = 1024;
+    const RIGHT_TABLE_ID: u32 = 1025;
+
+    let catalog = MemoryCatalogManager::with_default_setup();
+
+    // The shared physical table: `__table_id` and `__tsid` are internal columns, and each
+    // row carries the values its logical table would have written.
+    let physical_name = "phy";
+    let columns = vec![
+        ColumnSchema::new(
+            DATA_SCHEMA_TABLE_ID_COLUMN_NAME.to_string(),
+            ConcreteDataType::uint32_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            DATA_SCHEMA_TSID_COLUMN_NAME.to_string(),
+            ConcreteDataType::uint64_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "tag_0".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            "field_0".to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ];
+    let schema = Arc::new(Schema::new(columns));
+    let batch = RecordBatch::try_new(
+        schema.arrow_schema().clone(),
+        vec![
+            Arc::new(UInt32Array::from(vec![LEFT_TABLE_ID, RIGHT_TABLE_ID])) as Arc<dyn Array>,
+            Arc::new(UInt64Array::from(vec![left_tsid, right_tsid])),
+            Arc::new(StringArray::from(vec!["a", "a"])),
+            Arc::new(TimestampMillisecondArray::from(vec![1_000, 1_000])),
+            Arc::new(Float64Array::from(vec![2.0, 3.0])),
+        ],
+    )
+    .unwrap();
+    let backing = GreptimeMemTable::new_with_catalog(
+        physical_name,
+        GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+        PHYSICAL_TABLE_ID,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema)
+        .primary_key_indices(vec![0, 1, 2])
+        .value_indices(vec![3, 4])
+        .engine(METRIC_ENGINE_NAME.to_string())
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = Arc::new(
+        TableInfoBuilder::default()
+            .table_id(PHYSICAL_TABLE_ID)
+            .name(physical_name)
+            .meta(table_meta)
+            .build()
+            .unwrap(),
+    );
+    let physical = Arc::new(Table::new(
+        table_info,
+        FilterPushDownType::Unsupported,
+        backing.data_source(),
+    ));
+    assert!(
+        catalog
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: physical_name.to_string(),
+                table_id: PHYSICAL_TABLE_ID,
+                table: physical,
+            })
+            .is_ok()
+    );
+
+    // The two logical tables only describe the shared label set; their samples live in
+    // the physical table, which the planner scans with a `__table_id` filter.
+    for (table_name, table_id) in [
+        ("left_metric", LEFT_TABLE_ID),
+        ("right_metric", RIGHT_TABLE_ID),
+    ] {
+        let columns = vec![
+            ColumnSchema::new(
+                "tag_0".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "field_0".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let mut options = table::requests::TableOptions::default();
+        options.extra_options.insert(
+            LOGICAL_TABLE_METADATA_KEY.to_string(),
+            physical_name.to_string(),
+        );
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .engine(METRIC_ENGINE_NAME.to_string())
+            .options(options)
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::default()
+            .table_id(table_id)
+            .name(table_name)
+            .meta(table_meta)
+            .build()
+            .unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        assert!(
+            catalog
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: table_name.to_string(),
+                    table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+
+    DfTableSourceProvider::new(
+        catalog,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
 async fn build_test_table_provider_with_fields(
     table_name_tuples: &[(String, String)],
     tags: &[&str],
@@ -2693,6 +2871,129 @@ async fn default_binary_join_uses_tsid_when_available() {
     );
     assert!(
         !plan_str.contains("some_metric.tag_0 = some_alt_metric.tag_0"),
+        "{plan_str}"
+    );
+}
+
+/// Cross-logical-table regression: two logical metric tables whose physical rows share a
+/// tag and a timestamp but carry the same `__tsid` must match on `__tsid` and keep the
+/// complete sample (tag, time, value) through `left_metric + right_metric`.
+#[tokio::test]
+async fn tsid_cross_metric_exec_equal_tsid_keeps_complete_sample() {
+    let state = build_query_engine_state();
+    let table_provider =
+        build_cross_logical_table_tsid_provider(CROSS_TABLE_TSID, CROSS_TABLE_TSID);
+    let plan = PromPlanner::stmt_to_plan(
+        table_provider,
+        &operator_eval_stmt("left_metric + right_metric"),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    let plan_str = plan.display_indent_schema().to_string();
+    // Each side reads only its own logical table's row from the shared physical table.
+    assert_eq!(
+        plan_str.matches("__table_id = UInt32(1024)").count(),
+        1,
+        "{plan_str}"
+    );
+    assert_eq!(
+        plan_str.matches("__table_id = UInt32(1025)").count(),
+        1,
+        "{plan_str}"
+    );
+    // The cross-table match goes through `__tsid`, not the shared `tag_0` label.
+    assert!(
+        plan_str.contains("left_metric.__tsid = right_metric.__tsid"),
+        "{plan_str}"
+    );
+    assert!(
+        !plan_str.contains("left_metric.tag_0 = right_metric.tag_0"),
+        "{plan_str}"
+    );
+
+    let (optimized, batches) = execute(plan, &state).await;
+    let value_column = float_sample_column(&optimized);
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let tags = batch
+                .column_by_name("tag_0")
+                .expect("no tag column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the tag must be a string column");
+            let timestamps = batch
+                .column_by_name("timestamp")
+                .expect("no timestamp column")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the time index must be a millisecond timestamp column");
+            let values = batch
+                .column_by_name(&value_column)
+                .expect("no sample value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the sample value must be a float column");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        tags.value(row).to_string(),
+                        timestamps.value(row),
+                        values.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.0
+            .cmp(&right.0)
+            .then(left.1.cmp(&right.1))
+            .then(left.2.total_cmp(&right.2))
+    });
+    assert_eq!(rows, vec![("a".to_string(), 1_000, 5.0)], "{plan_str}");
+
+    // Neither internal column may leak into the arithmetic result.
+    for field in optimized.schema().fields() {
+        assert_ne!(field.name(), DATA_SCHEMA_TSID_COLUMN_NAME, "{plan_str}");
+        assert_ne!(field.name(), DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "{plan_str}");
+    }
+    for batch in &batches {
+        for field in batch.schema().fields() {
+            assert_ne!(field.name(), DATA_SCHEMA_TSID_COLUMN_NAME, "{plan_str}");
+            assert_ne!(field.name(), DATA_SCHEMA_TABLE_ID_COLUMN_NAME, "{plan_str}");
+        }
+    }
+}
+
+/// Control for [`tsid_cross_metric_exec_equal_tsid_keeps_complete_sample`]: the two rows
+/// still share the tag and the timestamp, but carry distinct `__tsid`s, so the TSID-based
+/// `__tsid` match must not pair the logical tables and the result must stay empty.
+#[tokio::test]
+async fn tsid_cross_metric_exec_distinct_tsid_matches_nothing() {
+    let state = build_query_engine_state();
+    let table_provider =
+        build_cross_logical_table_tsid_provider(CROSS_TABLE_TSID, OTHER_TABLE_TSID);
+    let plan = PromPlanner::stmt_to_plan(
+        table_provider,
+        &operator_eval_stmt("left_metric + right_metric"),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    let plan_str = plan.display_indent_schema().to_string();
+    assert!(
+        plan_str.contains("left_metric.__tsid = right_metric.__tsid"),
+        "{plan_str}"
+    );
+
+    let (_, batches) = execute(plan, &state).await;
+    assert_eq!(
+        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        0,
         "{plan_str}"
     );
 }
