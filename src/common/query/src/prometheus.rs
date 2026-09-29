@@ -12,6 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+/// Field metadata key that identifies the PromQL metric-name column.
+pub const PROMQL_FIELD_ROLE_KEY: &str = "greptime:promql:role";
+/// Field metadata value that identifies the PromQL metric-name column.
+pub const PROMQL_METRIC_NAME_ROLE: &str = "metric_name";
+
 /// Canonical Prometheus stale-marker NaN bit pattern.
 pub const PROMETHEUS_STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
 

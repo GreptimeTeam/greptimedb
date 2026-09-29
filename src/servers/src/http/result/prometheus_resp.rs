@@ -31,7 +31,10 @@ use common_error::status_code::StatusCode;
 use common_query::native_histogram::{
     NativeHistogram, is_native_histogram_value_type, read_histogram,
 };
-use common_query::prometheus::{format_prometheus_float, is_prometheus_stale_nan};
+use common_query::prometheus::{
+    PROMQL_FIELD_ROLE_KEY, PROMQL_METRIC_NAME_ROLE, format_prometheus_float,
+    is_prometheus_stale_nan,
+};
 use common_query::promql_annotations::{
     PromqlAnnotationCollector, get_promql_annotation_collector,
 };
@@ -360,6 +363,7 @@ struct ColumnLayout {
     tag_names: Vec<String>,
     first_field_column_index: Option<usize>,
     native_histogram_column_index: Option<usize>,
+    metric_name_column_index: Option<usize>,
 }
 
 impl ColumnLayout {
@@ -370,8 +374,23 @@ impl ColumnLayout {
         let mut tag_column_indices = Vec::new();
         let mut first_field_column_index = None;
         let mut native_histogram_column_index = None;
+        let mut metric_name_column_index = None;
 
         for (i, column) in schema.column_schemas().iter().enumerate() {
+            // Runs only for a matching role: record the marker index and
+            // reject duplicates or non-string marker columns.
+            if column
+                .metadata()
+                .get(PROMQL_FIELD_ROLE_KEY)
+                .is_some_and(|role| role == PROMQL_METRIC_NAME_ROLE)
+                && (metric_name_column_index.replace(i).is_some()
+                    || !matches!(column.data_type, ConcreteDataType::String(_)))
+            {
+                return UnexpectedResultSnafu {
+                    reason: "invalid PromQL metric-name field marker".to_string(),
+                }
+                .fail();
+            }
             match column.data_type {
                 ConcreteDataType::Timestamp(datatypes::types::TimestampType::Millisecond(_))
                     if timestamp_column_index.is_none() =>
@@ -398,9 +417,10 @@ impl ColumnLayout {
                 {
                     native_histogram_column_index = Some(i);
                 }
-                ConcreteDataType::String(_) => {
+                ConcreteDataType::String(_) if Some(i) != metric_name_column_index => {
                     tag_column_indices.push(i);
                 }
+                ConcreteDataType::String(_) => {}
                 _ => {}
             }
         }
@@ -415,6 +435,10 @@ impl ColumnLayout {
             .fail();
         }
 
+        if metric_name_column_index.is_some() {
+            tag_column_indices.retain(|index| schema.column_name_by_index(*index) != METRIC_NAME);
+        }
+
         let tag_names = tag_column_indices
             .iter()
             .map(|index| schema.column_name_by_index(*index).to_string())
@@ -426,6 +450,7 @@ impl ColumnLayout {
             tag_names,
             first_field_column_index,
             native_histogram_column_index,
+            metric_name_column_index,
         })
     }
 }
@@ -470,6 +495,15 @@ fn merge_batch(
         .iter()
         .map(|i| batch.column(*i))
         .collect::<Vec<_>>();
+    let metric_name_column = layout
+        .metric_name_column_index
+        .map(|index| batch.column(index));
+    // The marked metric name is part of the series identity, so it must be a
+    // label-run boundary like any tag column.
+    let mut label_columns = tag_columns.clone();
+    if let Some(column) = metric_name_column {
+        label_columns.push(column);
+    }
     let timestamp_column = batch
         .column(layout.timestamp_column_index)
         .as_primitive::<TimestampMillisecondType>();
@@ -498,8 +532,8 @@ fn merge_batch(
     // Read the labels once per run of rows that share them instead of
     // once per row. `label_runs` finds every boundary, so the probe only
     // decides whether looking for runs is worth its cost.
-    let label_runs = if prefer_label_runs(&tag_columns, batch.num_rows()) {
-        Either::Left(label_runs(&tag_columns, batch.num_rows())?.into_iter())
+    let label_runs = if prefer_label_runs(&label_columns, batch.num_rows()) {
+        Either::Left(label_runs(&label_columns, batch.num_rows())?.into_iter())
     } else {
         Either::Right((0..batch.num_rows()).map(|row| row..row + 1))
     };
@@ -539,8 +573,19 @@ fn merge_batch(
                 None => {
                     // retrieve tags
                     tags.clear();
-                    if let Some(metric_name) = metric_name {
-                        tags.push((METRIC_NAME, metric_name));
+                    let marked_name = metric_name_column
+                        .and_then(|column| string_array_value_at_index(column, row_index))
+                        .filter(|name| !name.is_empty());
+                    // A schema with the marker takes the name from the marked
+                    // column alone; a null or empty marker never falls back to
+                    // the caller-provided name.
+                    let name = if metric_name_column.is_some() {
+                        marked_name
+                    } else {
+                        metric_name
+                    };
+                    if let Some(name) = name {
+                        tags.push((METRIC_NAME, name));
                     }
                     for (tag_column, tag_name) in tag_columns.iter().zip(layout.tag_names.iter()) {
                         if let Some(tag_value) = string_array_value_at_index(tag_column, row_index)
@@ -784,6 +829,215 @@ mod tests {
                 ..
             }) if series.is_empty()
         ));
+    }
+
+    /// Builds a string column marked as the PromQL metric-name field, like the
+    /// ones the planner emits for metadata-driven metric names.
+    fn marked_metric_name_column(name: &str) -> ColumnSchema {
+        let mut column = ColumnSchema::new(name, ConcreteDataType::string_datatype(), true);
+        column.mut_metadata().insert(
+            PROMQL_FIELD_ROLE_KEY.to_string(),
+            PROMQL_METRIC_NAME_ROLE.to_string(),
+        );
+        column
+    }
+
+    #[test]
+    fn marked_metric_name_overrides_external_fallback_and_ordinary_name_tag() {
+        // The marked column is the renamed physical identity, while both the
+        // caller-provided name and an ordinary `__name__` label column would
+        // otherwise supply the metric name.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            ColumnSchema::new("__name__", ConcreteDataType::string_datatype(), true),
+            marked_metric_name_column("renamed_identity"),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000])) as _,
+                Arc::new(StringVector::from(vec![Some("host-a")])) as _,
+                Arc::new(StringVector::from(vec![Some("ordinary_name")])) as _,
+                Arc::new(StringVector::from(vec![Some("physical_name")])) as _,
+                Arc::new(Float64Vector::from_values([1.0])) as _,
+            ],
+        )
+        .unwrap();
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            Some("external_fallback".to_string()),
+            ValueType::Vector,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Vector(series),
+            ..
+        }) = response
+        else {
+            panic!("expected vector response");
+        };
+        assert_eq!(series.len(), 1);
+        assert_eq!(
+            series[0].metric.get(METRIC_NAME).map(String::as_str),
+            Some("physical_name")
+        );
+        assert_eq!(
+            series[0].metric.get("host").map(String::as_str),
+            Some("host-a")
+        );
+    }
+
+    #[tokio::test]
+    async fn marked_metric_name_splits_adjacent_runs_in_buffered_and_streamed_output() {
+        // Two adjacent runs that differ only in the marked metric name must
+        // become two series, both in the buffered path and the streamed path.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            marked_metric_name_column("identity"),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([
+                    1_000, 2_000, 3_000, 4_000,
+                ])) as _,
+                Arc::new(StringVector::from(vec![Some("same"); 4])) as _,
+                Arc::new(StringVector::from(vec![
+                    Some("first"),
+                    Some("first"),
+                    Some("second"),
+                    Some("second"),
+                ])) as _,
+                Arc::new(Float64Vector::from_values([1.0, 2.0, 3.0, 4.0])) as _,
+            ],
+        )
+        .unwrap();
+        let batches = RecordBatches::try_new(schema.clone(), vec![batch.clone()]).unwrap();
+        let streamed = PrometheusJsonResponse::consume_stream_to_data(
+            batches.as_stream(),
+            None,
+            ValueType::Matrix,
+        )
+        .await
+        .unwrap();
+        let eager = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            None,
+            ValueType::Matrix,
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&eager).unwrap(),
+            serde_json::to_value(&streamed).unwrap()
+        );
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = eager
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 2);
+        assert_eq!(
+            series[0].metric.get(METRIC_NAME).map(String::as_str),
+            Some("first")
+        );
+        assert_eq!(series[0].values.len(), 2);
+        assert_eq!(
+            series[1].metric.get(METRIC_NAME).map(String::as_str),
+            Some("second")
+        );
+        assert_eq!(series[1].values.len(), 2);
+    }
+
+    #[test]
+    fn marked_null_or_empty_metric_name_does_not_restore_fallback() {
+        // Both rows share their ordinary labels, so a fallback name would merge
+        // them into one named series instead of leaving the name unset.
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
+            marked_metric_name_column("identity"),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]));
+        let batch = RecordBatch::new(
+            schema.clone(),
+            vec![
+                Arc::new(TimestampMillisecondVector::from_values([1_000, 2_000])) as _,
+                Arc::new(StringVector::from(vec![Some("host-a"), Some("host-a")])) as _,
+                Arc::new(StringVector::from(vec![None::<&str>, Some("")])) as _,
+                Arc::new(Float64Vector::from_values([1.0, 2.0])) as _,
+            ],
+        )
+        .unwrap();
+        let response = PrometheusJsonResponse::record_batches_to_data(
+            RecordBatches::try_new(schema, vec![batch]).unwrap(),
+            Some("fallback".to_string()),
+            ValueType::Matrix,
+        )
+        .unwrap();
+        let PrometheusResponse::PromData(PromData {
+            result: PromQueryResult::Matrix(series),
+            ..
+        }) = response
+        else {
+            panic!("expected matrix response");
+        };
+        assert_eq!(series.len(), 1);
+        assert!(!series[0].metric.contains_key(METRIC_NAME));
+        assert_eq!(
+            series[0].metric.get("host").map(String::as_str),
+            Some("host-a")
+        );
+        assert_eq!(series[0].values.len(), 2);
+    }
+
+    #[test]
+    fn malformed_metric_name_markers_are_rejected() {
+        let duplicate_markers = Schema::new(vec![
+            marked_metric_name_column("identity"),
+            marked_metric_name_column("identity_2"),
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]);
+        assert!(ColumnLayout::infer(&duplicate_markers).is_err());
+
+        let mut wrong_type =
+            ColumnSchema::new("identity", ConcreteDataType::float64_datatype(), true);
+        wrong_type.mut_metadata().insert(
+            PROMQL_FIELD_ROLE_KEY.to_string(),
+            PROMQL_METRIC_NAME_ROLE.to_string(),
+        );
+        let wrong_type_marker = Schema::new(vec![
+            wrong_type,
+            ColumnSchema::new(
+                "timestamp",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            ),
+            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
+        ]);
+        assert!(ColumnLayout::infer(&wrong_type_marker).is_err());
     }
 
     #[tokio::test]
