@@ -1,0 +1,22 @@
+.github/scripts/agent-observability-summary.py
+  h_623774b620da8e 21-22,206
+.github/scripts/benchmark_resource_summary.py
+  h_623774b620da8e 1-99
+.github/scripts/tracesbench-summary.py
+  h_623774b620da8e 21-22,120,146-148,157
+.github/workflows/agent-observability.yml
+  h_623774b620da8e 51
+.github/workflows/tracesbench.yml
+  h_623774b620da8e 14
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "b21fe455c93ab663968e79e270071e8fab0e181f",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
