@@ -407,8 +407,8 @@ impl Server for GrpcServer {
                         )
                     })
                     .allow_headers(AllowHeaders::any())
-                    // gRPC-Web reports the call status in trailers, which the
-                    // browser can only read when they are exposed explicitly.
+                    // Trailers-only responses (most errors) carry `grpc-status` as HTTP
+                    // headers, which a browser can only read when they are exposed.
                     .expose_headers([
                         HeaderName::from_static("grpc-status"),
                         HeaderName::from_static("grpc-message"),
@@ -422,8 +422,8 @@ impl Server for GrpcServer {
 
         // `tonic::transport::Server::layer` prepends to the layer stack, so the
         // layer added first ends up outermost. CORS has to stay outside of the
-        // gRPC-Web layer to answer the `OPTIONS` preflight before the request
-        // reaches the gRPC routes.
+        // gRPC-Web layer, which rejects any non-gRPC-Web HTTP/1.1 request,
+        // including the `OPTIONS` preflight, with a 400.
         let middleware_layer = tower::ServiceBuilder::new()
             .layer(MetricsMiddlewareLayer)
             .option_layer(cors_layer)
@@ -499,7 +499,7 @@ mod tests {
     use tokio::net::TcpStream;
 
     use super::{
-        DEFAULT_GRPC_ADDR_PORT, GrpcServer, GrpcServerConfig, format_server_addr,
+        DEFAULT_GRPC_ADDR_PORT, GrpcOptions, GrpcServer, GrpcServerConfig, format_server_addr,
         port_from_bind_addr,
     };
     use crate::grpc::builder::GrpcServerBuilder;
@@ -557,6 +557,26 @@ mod tests {
         )
     }
 
+    /// Builds the actual gRPC-Web `POST` a client sends once the preflight has
+    /// passed. The path is not served, so the call comes back as a trailers-only
+    /// `Unimplemented` response.
+    fn build_grpc_web_request(origin: &str) -> String {
+        // One gRPC-Web message frame: a compression flag, a four byte message
+        // length, and an empty payload.
+        let body = "\0\0\0\0\0";
+        format!(
+            "POST /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
+             Host: 127.0.0.1\r\n\
+             Origin: {origin}\r\n\
+             Content-Type: application/grpc-web+proto\r\n\
+             X-Grpc-Web: 1\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        )
+    }
+
     /// Sends a raw HTTP/1.1 request and returns the response head, lowercased.
     async fn send_raw_request(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
@@ -577,11 +597,27 @@ mod tests {
         String::from_utf8_lossy(&buf).to_lowercase()
     }
 
+    #[test]
+    fn test_grpc_options_as_config() {
+        // The CORS options only reach the server through `as_config`. Every test
+        // below builds `GrpcServerConfig` directly, so none of them would notice
+        // a field that `as_config` forgot to carry over.
+        let options = GrpcOptions {
+            enable_cors: true,
+            cors_allowed_origins: vec!["https://example.com".to_string()],
+            ..Default::default()
+        };
+        let config = options.as_config();
+
+        assert!(config.enable_cors);
+        assert_eq!(config.cors_allowed_origins, options.cors_allowed_origins);
+    }
+
     #[tokio::test]
     async fn test_grpc_web_cors_preflight() {
         // The preflight must be answered by the CORS layer, which is stacked
-        // outside of the gRPC-Web layer; with the order reversed the request
-        // would reach the gRPC routes instead.
+        // outside of the gRPC-Web layer; with the order reversed the gRPC-Web
+        // layer would reject the request as a non-gRPC-Web one with a 400.
         let config = GrpcServerConfig {
             enable_cors: true,
             ..Default::default()
@@ -606,6 +642,39 @@ mod tests {
             response.contains("access-control-allow-methods: post"),
             "{response}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_grpc_web_cors_expose_headers() {
+        // A failed call comes back trailers-only, with `grpc-status` in the HTTP
+        // headers rather than the status line. Browsers drop unexposed headers, so
+        // the client would see a successful response and never learn of the failure.
+        let config = GrpcServerConfig {
+            enable_cors: true,
+            ..Default::default()
+        };
+        let (_server, addr) = start_test_grpc_server(config).await;
+
+        let response = send_raw_request(addr, &build_grpc_web_request("https://example.com")).await;
+
+        // The call itself is allowed, not only the preflight.
+        assert!(response.starts_with("http/1.1 200"), "{response}");
+        assert!(
+            response.contains("access-control-allow-origin: *"),
+            "{response}"
+        );
+
+        // The premise of the assertions below: the call really did come back as a
+        // trailers-only response, with the status carried by the headers.
+        assert!(response.contains("\r\ngrpc-status: 12"), "{response}");
+
+        let expose_headers = response
+            .lines()
+            .find(|line| line.starts_with("access-control-expose-headers:"))
+            .unwrap_or_else(|| panic!("no access-control-expose-headers in {response}"));
+        for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
+            assert!(expose_headers.contains(name), "{expose_headers}");
+        }
     }
 
     #[tokio::test]
@@ -648,8 +717,8 @@ mod tests {
         let response =
             send_raw_request(addr, &build_preflight_request("https://example.com")).await;
 
-        // Without the CORS layer the preflight is an ordinary request and falls
-        // through to the gRPC routes, which reject it.
+        // Without the CORS layer, `GrpcWebLayer` rejects the preflight as a
+        // non-gRPC-Web HTTP/1.1 request.
         assert!(response.starts_with("http/1.1 400"), "{response}");
         assert!(
             !response.contains("access-control-allow-origin"),
