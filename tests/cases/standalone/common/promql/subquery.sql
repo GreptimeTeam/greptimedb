@@ -20,3 +20,49 @@ tql eval (10, 10, '1s') rate(metric_total[20s:10s]);
 tql eval (20, 20, '1s') rate(metric_total[20s:5s]);
 
 drop table metric_total;
+
+-- Offset on a subquery shifts the subquery's own evaluation window back by the offset.
+-- Reference: Prometheus `evaluator.subqueryTimeRange` (promql/engine.go).
+-- The offset cases stay on the subquery step grid so they match Prometheus directly.
+create table subquery_offset_total (
+    ts timestamp time index,
+    host string primary key,
+    val double,
+);
+
+insert into subquery_offset_total values
+    (0, 'a', 1),
+    (10000, 'a', 2),
+    (20000, 'a', 3),
+    (30000, 'a', 4),
+    (40000, 'a', 5),
+    (50000, 'a', 6),
+    (60000, 'a', 7);
+
+-- baseline: no offset at t=60 covers the 10s subquery points in (40s, 60s] -> 6 + 7
+tql eval (60, 60, '1s') sum_over_time(subquery_offset_total[20s:10s]);
+
+-- the same subquery evaluated at t=30 -> 3 + 4
+tql eval (30, 30, '1s') sum_over_time(subquery_offset_total[20s:10s]);
+
+-- `offset 30s` at t=60 must equal the un-offset subquery at t=30
+tql eval (60, 60, '1s') sum_over_time(subquery_offset_total[20s:10s] offset 30s);
+
+-- a negative offset looks ahead of the evaluation time
+tql eval (30, 30, '1s') sum_over_time(subquery_offset_total[20s:10s] offset -30s);
+
+-- an offset on the inner selector composes additively with the subquery offset: Prometheus
+-- `subqueryTimes` accumulates "the sum of offsets and ranges of all subqueries in the path",
+-- and the inner selector subtracts its own offset from the already shifted step timestamps.
+-- 20s + 10s therefore behaves like the un-offset subquery at t=30.
+tql eval (60, 60, '1s') sum_over_time((subquery_offset_total offset 10s)[20s:10s] offset 20s);
+
+-- ... and the inner offset alone accounts for the same total shift
+tql eval (60, 60, '1s') sum_over_time((subquery_offset_total offset 30s)[20s:10s]);
+
+-- `predict_linear` predicts from the evaluation time: 4 + 0.1 * 30 = 7 and 7 - 0.1 * 30 = 4
+tql eval (60, 60, '1s') predict_linear(subquery_offset_total[20s:10s] offset 30s, 0);
+
+tql eval (30, 30, '1s') predict_linear(subquery_offset_total[20s:10s] offset -30s, 0);
+
+drop table subquery_offset_total;

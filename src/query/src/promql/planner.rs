@@ -403,18 +403,34 @@ impl PromPlanner {
         subquery_expr: &SubqueryExpr,
     ) -> Result<LogicalPlan> {
         let SubqueryExpr {
-            expr, range, step, ..
+            expr,
+            range,
+            step,
+            offset,
+            ..
         } = subquery_expr;
+
+        // Prometheus evaluates the inner expression over `(start - offset - range, end - offset]`
+        // (`subqueryTimeRange`). Shift the inner window back here; `RangeManipulate` maps the
+        // samples forward again by the same offset.
+        let offset_ms = match offset {
+            Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
+            Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
+            None => 0,
+        };
 
         let current_interval = self.ctx.interval;
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
         let current_start = self.ctx.start;
-        self.ctx.start -= range.as_millis() as i64 - self.ctx.interval;
+        let current_end = self.ctx.end;
+        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
+        self.ctx.end -= offset_ms;
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
+        self.ctx.end = current_end;
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -471,26 +487,42 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?;
         let divide_plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesDivide::new(
-                series_key_columns,
+                series_key_columns.clone(),
                 time_index_column.clone(),
                 sort_plan,
             )),
         });
 
+        // `RangeManipulate` has no offset in its protobuf message; decoding recovers it from the
+        // `SeriesNormalize` directly below. Stale markers are not filtered: the input is computed.
+        let divide_plan = if offset_ms != 0 {
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(SeriesNormalize::new(
+                    offset_ms,
+                    time_index_column.clone(),
+                    false,
+                    series_key_columns,
+                    divide_plan,
+                )),
+            })
+        } else {
+            divide_plan
+        };
+
         let manipulate = RangeManipulate::new(
             self.ctx.start,
             self.ctx.end,
             self.ctx.interval,
-            0,
+            offset_ms,
             range_ms,
             time_index_column,
             self.ctx.field_columns.clone(),
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
-        // A subquery always folds with offset 0, so its payload timestamps are already on the
-        // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
-        self.ctx.range_fold_offset = Some(0);
+        // The payload timestamps are shifted by the subquery offset; see
+        // [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(offset_ms);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
