@@ -60,4 +60,9 @@ tql eval (60, 60, '1s') sum_over_time((subquery_offset_total offset 10s)[20s:10s
 -- ... and the inner offset alone accounts for the same total shift
 tql eval (60, 60, '1s') sum_over_time((subquery_offset_total offset 30s)[20s:10s]);
 
+-- `predict_linear` predicts from the evaluation time: 4 + 0.1 * 30 = 7 and 7 - 0.1 * 30 = 4
+tql eval (60, 60, '1s') predict_linear(subquery_offset_total[20s:10s] offset 30s, 0);
+
+tql eval (30, 30, '1s') predict_linear(subquery_offset_total[20s:10s] offset -30s, 0);
+
 drop table subquery_offset_total;

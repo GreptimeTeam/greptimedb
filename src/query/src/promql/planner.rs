@@ -520,9 +520,9 @@ impl PromPlanner {
             divide_plan,
         )
         .context(DataFusionPlanningSnafu)?;
-        // A subquery always folds with offset 0, so its payload timestamps are already on the
-        // evaluation timeline a function above it reads; see [`Self::create_range_eval_ts_expr`].
-        self.ctx.range_fold_offset = Some(0);
+        // The payload timestamps are shifted by the subquery offset; see
+        // [`Self::create_range_eval_ts_expr`].
+        self.ctx.range_fold_offset = Some(offset_ms);
 
         Ok(LogicalPlan::Extension(Extension {
             node: Arc::new(manipulate),
