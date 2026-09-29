@@ -23,7 +23,9 @@ use common_query::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
 };
 use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
-use common_query::prometheus::{PROMETHEUS_STALE_NAN_BITS, PROMQL_FIELD_ROLE_KEY};
+use common_query::prometheus::{
+    PROMETHEUS_STALE_NAN_BITS, PROMQL_FIELD_ROLE_KEY, PROMQL_METRIC_NAME_ROLE,
+};
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
@@ -36,7 +38,7 @@ use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
 use datafusion::execution::context::SessionContext;
-use datafusion::logical_expr::{Extension, col};
+use datafusion::logical_expr::{Extension, UserDefinedLogicalNode, col};
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{ColumnSchema, Schema};
 use promql::extension_plan::HistogramFold;
@@ -64,6 +66,121 @@ fn find_instant_manipulate(plan: &LogicalPlan) -> Option<&InstantManipulate> {
     }
 
     plan.inputs().into_iter().find_map(find_instant_manipulate)
+}
+
+fn find_histogram_fold(plan: &LogicalPlan) -> Option<&HistogramFold> {
+    if let LogicalPlan::Extension(Extension { node }) = plan
+        && let Some(histogram_fold) = node.as_any().downcast_ref::<HistogramFold>()
+    {
+        return Some(histogram_fold);
+    }
+
+    plan.inputs().into_iter().find_map(find_histogram_fold)
+}
+
+/// The name of the single `Float64` sample column of `plan`, ignoring the metric-name marker.
+fn float_sample_column(plan: &LogicalPlan) -> String {
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .map(|marker| marker.name);
+    let mut sample_columns = plan
+        .schema()
+        .fields()
+        .iter()
+        .filter(|field| {
+            field.data_type() == &ArrowDataType::Float64 && marker.as_ref() != Some(field.name())
+        })
+        .map(|field| field.name().clone());
+    let sample_column = sample_columns
+        .next()
+        .unwrap_or_else(|| panic!("expected a float sample column: {}", plan.display_indent()));
+    assert!(
+        sample_columns.next().is_none(),
+        "expected exactly one float sample column: {}",
+        plan.display_indent()
+    );
+    sample_column
+}
+
+/// `(series tag, timestamp in milliseconds, sample value)` of every emitted `cv_metric` sample,
+/// sorted by series tag.
+fn cv_rows(batches: &[RecordBatch], value_column: &str) -> Vec<(String, i64, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let tag = batch
+                .column_by_name("k")
+                .expect("no series tag column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the series tag must be a string column");
+            let timestamp = batch
+                .column_by_name("timestamp")
+                .expect("no timestamp column")
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .expect("the time index must be a millisecond timestamp column");
+            let value = batch
+                .column_by_name(value_column)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no sample value column {value_column} in {}",
+                        batch.schema()
+                    )
+                })
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the sample value must be a float column");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        tag.value(row).to_string(),
+                        timestamp.value(row),
+                        value.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows
+}
+
+/// The dropped metric-name identity must be gone from the physical batches as well.
+fn assert_metric_name_not_in_batches(batches: &[RecordBatch]) {
+    for batch in batches {
+        let schema = batch.schema();
+        assert!(
+            schema.field_with_name(PROMQL_METRIC_NAME_COLUMN).is_err(),
+            "the metric-name marker must not reach the result batches: {schema:?}"
+        );
+        assert!(
+            schema
+                .fields()
+                .iter()
+                .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none()),
+            "no result batch field may carry the metric-name role: {schema:?}"
+        );
+    }
+}
+
+/// The kept metric-name identity must still be visible in the result batches' Arrow metadata.
+fn assert_metric_name_in_batches(batches: &[RecordBatch], marker: &str) {
+    assert!(!batches.is_empty(), "expected at least one result batch");
+    for batch in batches {
+        let schema = batch.schema();
+        let field = schema
+            .field_with_name(marker)
+            .unwrap_or_else(|_| panic!("the marker must reach the result batches: {schema:?}"));
+        assert_eq!(
+            field
+                .metadata()
+                .get(PROMQL_FIELD_ROLE_KEY)
+                .map(String::as_str),
+            Some(PROMQL_METRIC_NAME_ROLE),
+            "the result batch must mark the metric-name field: {schema:?}"
+        );
+    }
 }
 
 fn build_query_engine_state() -> QueryEngineState {
@@ -6700,7 +6817,11 @@ async fn test_and_preserves_left_context_when_le_is_missing() {
     )
     .await
     .unwrap();
-    assert!(matches!(&plan, LogicalPlan::EmptyRelation(_)), "{plan:?}");
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none()
+    );
     assert!(!plan.schema().fields().is_empty());
     assert!(!contains_histogram_fold(&plan), "{plan:?}");
 }
@@ -8277,6 +8398,16 @@ async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
 /// Collects `(series tag, metric-name marker, sample value)` triples of every row in `batches`,
 /// one row per emitted sample of the `cv_metric` fixture, sorted by series tag.
 fn metric_name_rows(batches: &[RecordBatch], marker: &str) -> Vec<(String, String, f64)> {
+    metric_name_rows_of(batches, marker, greptime_value())
+}
+
+/// Like [`metric_name_rows`], but reading the sample from `value_column` (range functions name
+/// their output column after the function instead of `greptime_value`).
+fn metric_name_rows_of(
+    batches: &[RecordBatch],
+    marker: &str,
+    value_column: &str,
+) -> Vec<(String, String, f64)> {
     let mut rows = batches
         .iter()
         .flat_map(|batch| {
@@ -8293,8 +8424,13 @@ fn metric_name_rows(batches: &[RecordBatch], marker: &str) -> Vec<(String, Strin
                 .downcast_ref::<StringArray>()
                 .expect("the metric-name marker must be a string column");
             let value = batch
-                .column_by_name(greptime_value())
-                .expect("no sample value column")
+                .column_by_name(value_column)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no sample value column {value_column} in {}",
+                        batch.schema()
+                    )
+                })
                 .as_any()
                 .downcast_ref::<Float64Array>()
                 .expect("the sample value must be a float column");
@@ -8446,5 +8582,282 @@ async fn test_unary_sign_controls_metric_name_identity() {
                 assert_eq!(values, vec![-2.0, -1.0, -1.0], "{query}");
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn test_ordinary_functions_drop_metric_name_from_their_result() {
+    let state = build_query_engine_state();
+    for query in ["abs(cv_metric)", "ceil(cv_metric)"] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            PromPlanner::metric_name_column(plan.schema())
+                .unwrap()
+                .is_none(),
+            "{query}: an ordinary function must drop the metric name: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_not_in_batches(&batches);
+        assert_eq!(
+            cv_rows(&batches, &sample_column),
+            vec![
+                ("k0".to_string(), 1_000, 1.0),
+                ("k1".to_string(), 1_000, 2.0),
+                ("k2".to_string(), 1_000, 1.0),
+            ],
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_sort_functions_keep_metric_name_identity() {
+    let state = build_query_engine_state();
+    for (query, expected_values) in [
+        ("sort(cv_metric)", vec![1.0, 1.0, 2.0]),
+        ("sort_desc(cv_metric)", vec![2.0, 1.0, 1.0]),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: sort keeps the metric name"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, &marker.name);
+        assert_eq!(
+            metric_name_rows(&batches, &marker.name),
+            vec![
+                ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                ("k2".to_string(), "cv_metric".to_string(), 1.0),
+            ],
+            "{query}"
+        );
+        assert_eq!(values(&batches, &sample_column), expected_values, "{query}");
+    }
+}
+
+#[tokio::test]
+async fn test_sort_by_label_resolves_semantic_name_to_the_marker() {
+    let state = build_query_engine_state();
+    // `__name__` is not a physical column: it resolves to the marked identity column, while
+    // ordinary labels keep their existing lookup.
+    for (query, sort_column, direction) in [
+        (
+            r#"sort_by_label(cv_metric, "__name__")"#,
+            "__promql_metric_name",
+            "ASC",
+        ),
+        (r#"sort_by_label_desc(cv_metric, "k")"#, "k", "DESC"),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let plan_text = plan.display_indent().to_string();
+        assert!(
+            plan_text.contains(&format!("{sort_column} {direction}")),
+            "{query}: {plan_text}"
+        );
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: sort_by_label keeps the metric name"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, &marker.name);
+        assert_eq!(
+            metric_name_rows(&batches, &marker.name),
+            vec![
+                ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                ("k2".to_string(), "cv_metric".to_string(), 1.0),
+            ],
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_range_functions_control_metric_name_identity() {
+    let state = build_query_engine_state();
+    // The fixture's only samples sit at `ts=1000`; the evaluation point is the same second.
+    for (query, keeps_name) in [
+        ("last_over_time(cv_metric[5m])", true),
+        ("sum_over_time(cv_metric[5m])", false),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.is_some(),
+            keeps_name,
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            cv_rows(&batches, &sample_column),
+            vec![
+                ("k0".to_string(), 1_000, 1.0),
+                ("k1".to_string(), 1_000, 2.0),
+                ("k2".to_string(), 1_000, 1.0),
+            ],
+            "{query}"
+        );
+        match marker {
+            Some(marker) => {
+                assert_metric_name_in_batches(&batches, &marker.name);
+                assert_eq!(
+                    metric_name_rows_of(&batches, &marker.name, &sample_column),
+                    vec![
+                        ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                        ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                        ("k2".to_string(), "cv_metric".to_string(), 1.0),
+                    ],
+                    "{query}"
+                );
+            }
+            None => assert_metric_name_not_in_batches(&batches),
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_histogram_quantile_folds_with_identity_then_drops_it() {
+    let state = build_query_engine_state();
+    let plan = PromPlanner::stmt_to_plan(
+        classic_and_native_histogram_table_provider("native", None, direct_or_histogram()),
+        &operator_eval_stmt("histogram_quantile(0.5, mixed_histogram)"),
+        &state,
+    )
+    .await
+    .unwrap();
+
+    // The completed result drops the metric name ...
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none(),
+        "{}",
+        plan.display_indent()
+    );
+    // ... while the fold still groups by the input's identity.
+    let fold = find_histogram_fold(&plan).expect("the plan must contain a HistogramFold");
+    assert!(
+        PromPlanner::metric_name_column(fold.inputs()[0].schema())
+            .unwrap()
+            .is_some(),
+        "the fold must see the input metric identity: {}",
+        plan.display_indent()
+    );
+
+    let value_field = float_sample_column(&plan);
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_not_in_batches(&batches);
+    let mut actual = batches
+        .iter()
+        .flat_map(|batch| {
+            let tags = batch
+                .column_by_name("tag")
+                .expect("no series tag column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the series tag must be a string column");
+            let values = batch
+                .column_by_name(&value_field)
+                .expect("no sample value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the sample value must be a float column");
+            (0..batch.num_rows())
+                .map(|row| (tags.value(row).to_string(), values.value(row)))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    actual.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        actual,
+        vec![("classic".to_string(), 1.0), ("native".to_string(), 0.0)]
+    );
+}
+
+#[tokio::test]
+async fn test_sort_by_label_semantic_name_without_marker_keeps_missing_label_error() {
+    let state = build_query_engine_state();
+    let provider = || async {
+        build_test_table_provider_with_distinct_tags(&[("collision_metric", &["__name__", "job"])])
+            .await
+    };
+    let plan = PromPlanner::stmt_to_plan(
+        provider().await,
+        &operator_eval_stmt("abs(collision_metric)"),
+        &state,
+    )
+    .await
+    .unwrap();
+    assert!(
+        plan.schema()
+            .field_with_unqualified_name("__name__")
+            .is_ok()
+    );
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none()
+    );
+    for function in ["sort_by_label", "sort_by_label_desc"] {
+        let query = format!(r#"{function}(abs(collision_metric), "__name__")"#);
+        let error =
+            PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
+                .await
+                .unwrap_err();
+        assert!(
+            matches!(error, crate::promql::error::Error::DataFusionPlanning { .. }),
+            "{error}"
+        );
+        let query = format!(r#"{function}(collision_metric, "__name__")"#);
+        let plan = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
+            .await
+            .unwrap();
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap();
+        assert!(
+            plan.display_indent()
+                .to_string()
+                .contains(&format!("Sort: {}", marker.name))
+        );
     }
 }
