@@ -27,7 +27,8 @@ use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
-    Array, ArrayRef, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+    TimestampMillisecondArray,
 };
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
@@ -6849,6 +6850,7 @@ async fn test_and_unless_match_full_label_sets_and_preserve_left_samples() {
 async fn test_set_operator_numeric_and_incompatible_label_types() {
     async fn plan(
         expression: &str,
+        left_key_type: ArrowDataType,
         right_key_type: ArrowDataType,
         left_key: Option<i64>,
         right_key: Option<i64>,
@@ -6864,10 +6866,16 @@ async fn test_set_operator_numeric_and_incompatible_label_types() {
                 Field::new("v", ArrowDataType::Float64, true),
             ]));
             let key: ArrayRef = match key_type {
+                ArrowDataType::Int32 => {
+                    Arc::new(Int32Array::from(vec![key_value.map(|value| value as i32)]))
+                }
                 ArrowDataType::Int64 => Arc::new(Int64Array::from(vec![key_value])),
                 ArrowDataType::Utf8 => Arc::new(StringArray::from(vec![
                     key_value.map(|value| value.to_string()),
                 ])),
+                ArrowDataType::Boolean => {
+                    Arc::new(BooleanArray::from(vec![key_value.map(|value| value != 0)]))
+                }
                 _ => unreachable!(),
             };
             let batch = RecordBatch::try_new(
@@ -6885,7 +6893,7 @@ async fn test_set_operator_numeric_and_incompatible_label_types() {
                 .build()
                 .unwrap()
         };
-        let left = make_source("lhs", ArrowDataType::Int64, left_key);
+        let left = make_source("lhs", left_key_type, left_key);
         let right = make_source("rhs", right_key_type, right_key);
         let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
             unreachable!()
@@ -6911,70 +6919,266 @@ async fn test_set_operator_numeric_and_incompatible_label_types() {
             .map_err(|error| error.to_string())
     }
 
-    for expression in ["lhs and on(n) rhs", "lhs unless on(n) rhs"] {
-        for (left_key, right_key, expected_values) in [
-            (
-                Some(7),
-                Some(7),
-                if expression.contains("unless") {
-                    vec![]
-                } else {
-                    vec![10.0]
-                },
-            ),
-            (
-                Some(7),
-                Some(8),
-                if expression.contains("unless") {
-                    vec![10.0]
-                } else {
-                    vec![]
-                },
-            ),
-            (
-                Some(7),
-                None,
-                if expression.contains("unless") {
-                    vec![10.0]
-                } else {
-                    vec![]
-                },
-            ),
-            (
-                None,
-                None,
-                if expression.contains("unless") {
-                    vec![]
-                } else {
-                    vec![10.0]
-                },
-            ),
-            (
-                None,
-                Some(7),
-                if expression.contains("unless") {
-                    vec![10.0]
-                } else {
-                    vec![]
-                },
-            ),
-        ] {
-            let plan = plan(expression, ArrowDataType::Int64, left_key, right_key)
+    for (left_key_type, right_key_type) in [
+        (ArrowDataType::Int64, ArrowDataType::Int64),
+        (ArrowDataType::Int32, ArrowDataType::Int64),
+    ] {
+        for expression in ["lhs and on(n) rhs", "lhs unless on(n) rhs"] {
+            for (left_key, right_key, expected_values) in [
+                (
+                    Some(7),
+                    Some(7),
+                    if expression.contains("unless") {
+                        vec![]
+                    } else {
+                        vec![10.0]
+                    },
+                ),
+                (
+                    Some(7),
+                    Some(8),
+                    if expression.contains("unless") {
+                        vec![10.0]
+                    } else {
+                        vec![]
+                    },
+                ),
+                (
+                    Some(7),
+                    None,
+                    if expression.contains("unless") {
+                        vec![10.0]
+                    } else {
+                        vec![]
+                    },
+                ),
+                (
+                    None,
+                    None,
+                    if expression.contains("unless") {
+                        vec![]
+                    } else {
+                        vec![10.0]
+                    },
+                ),
+                (
+                    None,
+                    Some(7),
+                    if expression.contains("unless") {
+                        vec![10.0]
+                    } else {
+                        vec![]
+                    },
+                ),
+            ] {
+                let plan = plan(
+                    expression,
+                    left_key_type.clone(),
+                    right_key_type.clone(),
+                    left_key,
+                    right_key,
+                )
                 .await
                 .unwrap();
-            let (_, batches) = execute(plan, &build_query_engine_state()).await;
-            assert_eq!(
-                values(&batches, "v"),
-                expected_values,
-                "{expression}, {left_key:?}, {right_key:?}"
-            );
+                let (_, batches) = execute(plan, &build_query_engine_state()).await;
+                assert_eq!(
+                    values(&batches, "v"),
+                    expected_values,
+                    "{expression}, {left_key_type:?}, {right_key_type:?}, {left_key:?}, {right_key:?}"
+                );
+            }
         }
     }
 
-    let error = plan("lhs and on(n) rhs", ArrowDataType::Utf8, Some(7), Some(7))
+    // The LHS keeps its own label column type and values; DataFusion's join
+    // analyzer coerces the two sides' join keys (Int32/Int64) instead of the
+    // planner reconciling them or widening the visible LHS column.
+    let coerced = plan(
+        "lhs unless on(n) rhs",
+        ArrowDataType::Int32,
+        ArrowDataType::Int64,
+        Some(7),
+        Some(8),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        coerced
+            .schema()
+            .field_with_unqualified_name("n")
+            .unwrap()
+            .data_type(),
+        &ArrowDataType::Int32
+    );
+    let (optimized, batches) = execute(coerced, &build_query_engine_state()).await;
+    assert_eq!(
+        optimized
+            .schema()
+            .field_with_unqualified_name("n")
+            .unwrap()
+            .data_type(),
+        &ArrowDataType::Int32
+    );
+    assert_eq!(
+        batches[0].column_by_name("n").unwrap().data_type(),
+        &ArrowDataType::Int32
+    );
+    assert_eq!(values(&batches, "v"), vec![10.0]);
+
+    // DataFusion's join analyzer coerces a string match key to the numeric side,
+    // so numeric label strings match as they did before the match keys were aligned.
+    let coerced = plan(
+        "lhs and on(n) rhs",
+        ArrowDataType::Int64,
+        ArrowDataType::Utf8,
+        Some(7),
+        Some(7),
+    )
+    .await
+    .unwrap();
+    let (_, batches) = execute(coerced, &build_query_engine_state()).await;
+    assert_eq!(values(&batches, "v"), vec![10.0]);
+
+    let coerced = plan(
+        "lhs unless on(n) rhs",
+        ArrowDataType::Int64,
+        ArrowDataType::Utf8,
+        Some(7),
+        Some(8),
+    )
+    .await
+    .unwrap();
+    let (_, batches) = execute(coerced, &build_query_engine_state()).await;
+    assert_eq!(values(&batches, "v"), vec![10.0]);
+
+    // Types DataFusion's join coercion cannot compare still fail the plan
+    // instead of panicking.
+    let uncoercible = plan(
+        "lhs and on(n) rhs",
+        ArrowDataType::Int64,
+        ArrowDataType::Boolean,
+        Some(7),
+        Some(1),
+    )
+    .await
+    .unwrap();
+    let state = build_query_engine_state();
+    let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+    let optimized = state
+        .optimize_by_extension_rules(uncoercible, &context)
+        .unwrap();
+    let error = state
+        .session_state()
+        .create_physical_plan(&optimized)
         .await
-        .unwrap_err();
-    assert!(error.contains("incompatible types"), "{error}");
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("Cannot infer common argument type"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn test_set_operator_distinct_time_index_names() {
+    let right_plan = |empty: bool| {
+        let schema = Arc::new(ArrowSchema::new(vec![
+            Field::new(
+                "event_ts",
+                ArrowDataType::Timestamp(ArrowTimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("job", ArrowDataType::Utf8, true),
+            Field::new("ts", ArrowDataType::Utf8, true),
+            Field::new("v", ArrowDataType::Float64, true),
+        ]));
+        let partitions = if empty {
+            vec![vec![]]
+        } else {
+            vec![vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(TimestampMillisecondArray::from(vec![1])) as ArrayRef,
+                        Arc::new(StringArray::from(vec![Some("api")])) as ArrayRef,
+                        Arc::new(StringArray::from(vec![Some("worker")])) as ArrayRef,
+                        Arc::new(Float64Array::from(vec![1.0])) as ArrayRef,
+                    ],
+                )
+                .unwrap(),
+            ]]
+        };
+        let provider = Arc::new(MemTable::try_new(schema, partitions).unwrap());
+        LogicalPlanBuilder::scan("rhs", provider_as_source(provider), None)
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+
+    async fn evaluate(expression: &str, right: LogicalPlan) -> (LogicalPlan, Vec<RecordBatch>) {
+        let left = source(
+            "lhs",
+            false,
+            1,
+            vec![("job", Some("api"))],
+            DirectOrValue::Float64(10.0),
+        );
+        let PromExpr::Binary(binary) = parser::parse(expression).unwrap() else {
+            unreachable!()
+        };
+        let mut right_context = direct_or_context("rhs", &["job", "ts"], "v");
+        right_context.time_index_column = Some("event_ts".to_string());
+        let mut planner = PromPlanner {
+            table_provider: build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
+                &[],
+            )
+            .await,
+            ctx: PromPlannerContext::default(),
+            promql_annotations: None,
+        };
+        let plan = planner
+            .set_op_on_non_field_columns(
+                scan(&left),
+                right,
+                direct_or_context("lhs", &["job"], "v"),
+                right_context,
+                binary.op,
+                &binary.modifier,
+            )
+            .unwrap();
+        let (_, batches) = execute(plan.clone(), &build_query_engine_state()).await;
+        (plan, batches)
+    }
+
+    // The RHS time index keeps its own name while the RHS also carries a `ts`
+    // label. Default matching must treat the LHS `ts` as its time index, not as a
+    // label, so the missing LHS `ts` label does not match the RHS `ts` label.
+    let (plan, batches) = evaluate("lhs unless rhs", right_plan(false)).await;
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>(),
+        vec!["ts".to_string(), "job".to_string(), "v".to_string()]
+    );
+    assert_eq!(values(&batches, "v"), vec![10.0]);
+    let time = batches[0]
+        .column_by_name("ts")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    assert_eq!(time.value(0), 1);
+
+    // An empty RHS leaves the LHS untouched.
+    let (_, batches) = evaluate("lhs unless rhs", right_plan(true)).await;
+    assert_eq!(values(&batches, "v"), vec![10.0]);
+
+    // `on(job)` matches across the differently named time columns, so the sample is dropped.
+    let (_, batches) = evaluate("lhs unless on(job) rhs", right_plan(false)).await;
+    assert_eq!(values(&batches, "v"), Vec::<f64>::new());
 }
 
 #[tokio::test]

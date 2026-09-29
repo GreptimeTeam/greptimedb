@@ -696,29 +696,11 @@ impl PromPlanner {
         let match_columns =
             Self::selected_binary_match_labels(&left_context, &right_context, modifier);
 
+        // Each side keeps its own time index column name; the join keys below name
+        // them separately so an RHS label that reuses the LHS time index name does
+        // not collide with a renamed RHS time column.
         let left_time_index = left_context.time_index_column.clone().unwrap();
         let right_time_index = right_context.time_index_column.clone().unwrap();
-        // alias right time index column if necessary
-        if left_context.time_index_column != right_context.time_index_column {
-            let right_project_exprs = right
-                .schema()
-                .fields()
-                .iter()
-                .map(|field| {
-                    if field.name() == &right_time_index {
-                        DfExpr::Column(Column::from_name(&right_time_index)).alias(&left_time_index)
-                    } else {
-                        DfExpr::Column(Column::from_name(field.name()))
-                    }
-                })
-                .collect::<Vec<_>>();
-
-            right = LogicalPlanBuilder::from(right)
-                .project(right_project_exprs)
-                .context(DataFusionPlanningSnafu)?
-                .build()
-                .context(DataFusionPlanningSnafu)?;
-        }
 
         let mut occupied_names = left
             .schema()
@@ -766,36 +748,29 @@ impl PromPlanner {
             } else {
                 None
             };
-            let key_type = match (left_field, right_field) {
-                (Some((_, left_field)), Some((_, right_field)))
-                    if Self::string_value_data_type(left_field.data_type()).is_some()
-                        && Self::string_value_data_type(right_field.data_type()).is_some() =>
-                {
-                    Self::common_label_data_type(
-                        Some(left_field.data_type()),
-                        Some(right_field.data_type()),
-                    )
-                    .unwrap_or(ArrowDataType::Utf8)
-                }
-                (Some((_, left_field)), Some((_, right_field)))
-                    if left_field.data_type() == right_field.data_type() =>
-                {
-                    left_field.data_type().clone()
-                }
+            // String match keys normalize missing, NULL and empty label values.
+            // Non-string keys keep each side's own column so DataFusion's join
+            // analyzer, the same rule a plain SQL join uses, coerces compatible
+            // label types such as Int32 and Int64.
+            let string_value_type = match (left_field, right_field) {
                 (Some((_, left_field)), Some((_, right_field))) => {
-                    return UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "set match label {label} has incompatible types: {:?} and {:?}",
-                            left_field.data_type(),
-                            right_field.data_type()
-                        ),
+                    let left_value_type = Self::string_value_data_type(left_field.data_type());
+                    let right_value_type = Self::string_value_data_type(right_field.data_type());
+                    match (left_value_type, right_value_type) {
+                        (Some(_), Some(_)) => Self::common_label_data_type(
+                            Some(left_field.data_type()),
+                            Some(right_field.data_type()),
+                        )
+                        .and_then(|data_type| Self::string_value_data_type(&data_type).cloned()),
+                        _ => None,
                     }
-                    .fail();
                 }
-                (Some((_, field)), None) | (None, Some((_, field))) => field.data_type().clone(),
-                (None, None) => ArrowDataType::Utf8,
+                (Some((_, field)), None) | (None, Some((_, field))) => {
+                    Self::string_value_data_type(field.data_type()).cloned()
+                }
+                (None, None) => Some(ArrowDataType::Utf8),
             };
-            if let Some(value_type) = Self::string_value_data_type(&key_type) {
+            if let Some(value_type) = string_value_type.as_ref() {
                 left_projection.push(Self::normalized_match_key_expr(
                     label,
                     left_field
@@ -811,6 +786,10 @@ impl PromPlanner {
                     &internal_name,
                 ));
             } else {
+                let key_type = left_field
+                    .or(right_field)
+                    .map(|(_, field)| field.data_type().clone())
+                    .unwrap_or(ArrowDataType::Utf8);
                 let left_expr = left_field
                     .map(|(qualifier, _)| DfExpr::Column(Column::new(qualifier.cloned(), label)))
                     .unwrap_or(DfExpr::Literal(
@@ -828,7 +807,15 @@ impl PromPlanner {
             }
             join_keys.push(internal_name);
         }
-        join_keys.push(left_time_index.clone());
+        let left_join_keys = join_keys
+            .iter()
+            .cloned()
+            .chain([left_time_index])
+            .collect::<Vec<_>>();
+        let right_join_keys = join_keys
+            .into_iter()
+            .chain([right_time_index])
+            .collect::<Vec<_>>();
         left = LogicalPlanBuilder::from(left)
             .project(left_projection)
             .context(DataFusionPlanningSnafu)?
@@ -859,7 +846,7 @@ impl PromPlanner {
                 .join_detailed(
                     right,
                     JoinType::LeftSemi,
-                    (join_keys.clone(), join_keys.clone()),
+                    (left_join_keys.clone(), right_join_keys.clone()),
                     None,
                     NullEquality::NullEqualsNull,
                 )
@@ -872,7 +859,7 @@ impl PromPlanner {
                 .join_detailed(
                     right,
                     JoinType::LeftAnti,
-                    (join_keys.clone(), join_keys),
+                    (left_join_keys, right_join_keys),
                     None,
                     NullEquality::NullEqualsNull,
                 )
