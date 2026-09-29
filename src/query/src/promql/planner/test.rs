@@ -2915,7 +2915,7 @@ async fn tsid_cross_metric_exec_equal_tsid_keeps_complete_sample() {
 
     let (optimized, batches) = execute(plan, &state).await;
     let value_column = float_sample_column(&optimized);
-    let mut rows = batches
+    let rows = batches
         .iter()
         .flat_map(|batch| {
             let tags = batch
@@ -2947,13 +2947,16 @@ async fn tsid_cross_metric_exec_equal_tsid_keeps_complete_sample() {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.0
-            .cmp(&right.0)
-            .then(left.1.cmp(&right.1))
-            .then(left.2.total_cmp(&right.2))
-    });
     assert_eq!(rows, vec![("a".to_string(), 1_000, 5.0)], "{plan_str}");
+
+    // The arithmetic result must not keep a metric-name identity marker.
+    assert!(
+        PromPlanner::metric_name_column(optimized.schema())
+            .unwrap()
+            .is_none(),
+        "{plan_str}"
+    );
+    assert_metric_name_not_in_batches(&batches);
 
     // Neither internal column may leak into the arithmetic result.
     for field in optimized.schema().fields() {
