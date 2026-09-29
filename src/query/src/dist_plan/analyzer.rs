@@ -68,9 +68,15 @@ pub(crate) use utils::AliasMapping;
 /// Placeholder for other physical partition columns that are not in logical table
 const OTHER_PHY_PART_COL_PLACEHOLDER: &str = "__OTHER_PHYSICAL_PART_COLS_PLACEHOLDER__";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DistPlannerOptions {
     pub allow_query_fallback: bool,
+    /// Manual opt-in for the nested broadcast join rewrite: name of the (small) build
+    /// side table, e.g. `device_limits`. `None` (the default) keeps it disabled.
+    ///
+    /// Not cost based in this slice: setting the option enables the rewrite for the
+    /// supported shape, see [`DistJoinPlanner`](crate::dist_plan::DistJoinPlanner).
+    pub nested_broadcast_join_build_table: Option<String>,
 }
 
 impl ConfigExtension for DistPlannerOptions {
@@ -91,17 +97,32 @@ impl ExtensionOptions for DistPlannerOptions {
     }
 
     fn set(&mut self, key: &str, value: &str) -> DfResult<()> {
-        Err(datafusion_common::DataFusionError::NotImplemented(format!(
-            "DistPlannerOptions does not support set key: {key} with value: {value}"
-        )))
+        match key {
+            "nested_broadcast_join_build_table" => {
+                let value = value.trim().trim_matches(&['\'', '"'][..]);
+                self.nested_broadcast_join_build_table =
+                    (!value.is_empty()).then(|| value.to_string());
+                Ok(())
+            }
+            _ => Err(datafusion_common::DataFusionError::NotImplemented(format!(
+                "DistPlannerOptions does not support set key: {key} with value: {value}"
+            ))),
+        }
     }
 
     fn entries(&self) -> Vec<datafusion::config::ConfigEntry> {
-        vec![datafusion::config::ConfigEntry {
-            key: "allow_query_fallback".to_string(),
-            value: Some(self.allow_query_fallback.to_string()),
-            description: "Allow query fallback to fallback plan rewriter",
-        }]
+        vec![
+            datafusion::config::ConfigEntry {
+                key: "allow_query_fallback".to_string(),
+                value: Some(self.allow_query_fallback.to_string()),
+                description: "Allow query fallback to fallback plan rewriter",
+            },
+            datafusion::config::ConfigEntry {
+                key: "nested_broadcast_join_build_table".to_string(),
+                value: self.nested_broadcast_join_build_table.clone(),
+                description: "Build side table of the nested broadcast join rewrite",
+            },
+        ]
     }
 }
 

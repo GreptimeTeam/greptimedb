@@ -14,6 +14,7 @@
 
 mod analyzer;
 mod commutativity;
+mod dist_join_planner;
 mod dyn_filter_bridge;
 mod filter_id;
 mod merge_scan;
@@ -25,6 +26,7 @@ mod remote_dyn_filter_receiver;
 mod remote_dyn_filter_registry;
 
 pub use analyzer::{DistPlannerAnalyzer, DistPlannerOptions};
+pub use dist_join_planner::DistJoinPlanner;
 pub use filter_id::{FilterFingerprint, FilterId, ParseFilterIdError, RemoteDynFilterProducerId};
 pub use merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 pub(crate) use merge_sort::MergeSortExec;
