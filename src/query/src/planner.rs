@@ -460,7 +460,13 @@ impl DfLogicalPlanner {
                 };
                 let stmt = QueryLanguageParser::parse_promql(&prom_query, &query_ctx)?;
 
-                self.plan(&stmt, query_ctx).await
+                let plan = self.plan(&stmt, query_ctx).await?;
+                // A TQL statement is tabular, so its result must not expose the PromQL-internal
+                // metric-name identity. Stripping here, before the CTE column arity check and
+                // alias projection below, keeps both operating on the tabular schema.
+                PromPlanner::strip_metric_name_column(plan)
+                    .map_err(BoxedError::new)
+                    .context(QueryPlanSnafu)
             }
             Tql::Explain(_) => UnimplementedSnafu {
                 operation: "TQL EXPLAIN in CTEs",
@@ -746,6 +752,7 @@ mod tests {
     use catalog::RegisterTableRequest;
     use catalog::memory::MemoryCatalogManager;
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+    use common_query::prometheus::{PROMQL_FIELD_ROLE_KEY, PROMQL_METRIC_NAME_ROLE};
     use common_time::Timezone;
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
@@ -919,6 +926,31 @@ mod tests {
         .query_engine()
     }
 
+    /// A two-column table (`ts` time index, `val` field), the shape a TQL CTE aliases.
+    fn create_promql_cte_test_engine() -> QueryEngineRef {
+        let columns = vec![
+            ColumnSchema::new(
+                "ts",
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new("val", ConcreteDataType::float64_datatype(), true),
+        ];
+        let schema = Arc::new(Schema::new(columns));
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![])
+            .value_indices(vec![1])
+            .next_column_id(1024)
+            .build()
+            .unwrap();
+        let table_info = TableInfoBuilder::new("metric", table_meta).build().unwrap();
+        let table = EmptyTable::from_table_info(&table_info);
+
+        crate::tests::new_query_engine_with_table(table)
+    }
+
     async fn parse_sql_to_plan(sql: &str) -> LogicalPlan {
         let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
         let engine = create_test_engine().await;
@@ -927,6 +959,79 @@ mod tests {
             .plan(&stmt, QueryContext::arc())
             .await
             .unwrap()
+    }
+
+    fn plan_column_names(plan: &LogicalPlan) -> Vec<String> {
+        plan.schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    /// The name of the field carrying the PromQL metric-name identity, if any.
+    fn metric_name_role_column(plan: &LogicalPlan) -> Option<String> {
+        plan.schema()
+            .fields()
+            .iter()
+            .find(|field| {
+                field
+                    .metadata()
+                    .get(PROMQL_FIELD_ROLE_KEY)
+                    .map(String::as_str)
+                    == Some(PROMQL_METRIC_NAME_ROLE)
+            })
+            .map(|field| field.name().clone())
+    }
+
+    async fn parse_tql_cte_to_plan(engine: &QueryEngineRef, sql: &str) -> LogicalPlan {
+        let stmt = QueryLanguageParser::parse_sql(sql, &QueryContext::arc()).unwrap();
+        engine
+            .planner()
+            .plan(&stmt, QueryContext::arc())
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_tql_cte_select_star_keeps_tabular_shape_without_metric_name() {
+        let engine = create_promql_cte_test_engine();
+        let plan = parse_tql_cte_to_plan(
+            &engine,
+            "WITH tql AS (TQL EVAL (0, 10, '5s') metric) SELECT * FROM tql",
+        )
+        .await;
+
+        assert_eq!(plan_column_names(&plan), vec!["ts", "val"]);
+        assert_eq!(metric_name_role_column(&plan), None);
+    }
+
+    #[tokio::test]
+    async fn test_tql_cte_column_aliases_cover_the_stripped_result() {
+        let engine = create_promql_cte_test_engine();
+        let plan = parse_tql_cte_to_plan(
+            &engine,
+            "WITH tql (the_timestamp, the_value) AS (TQL EVAL (0, 10, '5s') metric) \
+             SELECT * FROM tql",
+        )
+        .await;
+
+        // The identity column is stripped before the CTE arity check and the alias
+        // projection, so the aliases line up with the tabular columns.
+        assert_eq!(plan_column_names(&plan), vec!["the_timestamp", "the_value"]);
+        assert_eq!(metric_name_role_column(&plan), None);
+    }
+
+    #[tokio::test]
+    async fn test_plan_pql_keeps_metric_name_identity_outside_tql() {
+        // Plain PromQL still carries the identity for the Prometheus HTTP API; only the
+        // tabular TQL boundaries strip it.
+        let plan = parse_promql_to_plan("some_metric").await;
+
+        assert_eq!(
+            metric_name_role_column(&plan),
+            Some("__promql_metric_name".to_string())
+        );
     }
 
     async fn parse_promql_to_plan(query: &str) -> LogicalPlan {

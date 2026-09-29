@@ -8644,6 +8644,45 @@ async fn test_collision_metric_name_label_is_preserved() {
 }
 
 #[tokio::test]
+async fn test_dropping_identity_keeps_physical_column_with_the_same_name() {
+    // Dropping the identity must remove only the marked column, never the physical label
+    // that happens to be spelled the same way.
+    let plan = PromPlanner::stmt_to_plan(
+        build_test_table_provider_with_distinct_tags(&[(
+            "collision_metric",
+            &[PROMQL_METRIC_NAME_COLUMN, "job"],
+        )])
+        .await,
+        // Unary minus drops the metric name of its operand.
+        &operator_eval_stmt("-collision_metric"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+
+    let schema = plan.schema();
+    assert!(
+        PromPlanner::metric_name_column(schema).unwrap().is_none(),
+        "the identity must be dropped: {}",
+        plan.display_indent()
+    );
+    assert!(
+        schema
+            .field_with_name(None, PROMQL_METRIC_NAME_COLUMN)
+            .is_ok(),
+        "the physical label must survive the drop: {}",
+        plan.display_indent()
+    );
+    assert!(
+        schema
+            .field_with_name(None, &format!("{PROMQL_METRIC_NAME_COLUMN}_"))
+            .is_err(),
+        "the marker column must be gone: {}",
+        plan.display_indent()
+    );
+}
+
+#[tokio::test]
 async fn test_unary_sign_controls_metric_name_identity() {
     let state = build_query_engine_state();
     // The parser returns the operand of unary plus unchanged and wraps unary minus in a

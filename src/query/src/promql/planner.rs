@@ -996,26 +996,13 @@ impl PromPlanner {
     }
 
     fn drop_metric_name(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
-        let Some(marker) = Self::metric_name_column(input.schema())? else {
-            return Ok(input);
-        };
-        self.ctx.tag_columns.retain(|name| name != &marker.name);
-        self.ctx
-            .aggregation_field_labels
-            .retain(|name| name != &marker.name);
-        let projection = input
-            .schema()
-            .iter()
-            .filter_map(|(qualifier, field)| {
-                (field.name() != &marker.name)
-                    .then(|| DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone())))
-            })
-            .collect::<Vec<_>>();
-        LogicalPlanBuilder::from(input)
-            .project(projection)
-            .context(DataFusionPlanningSnafu)?
-            .build()
-            .context(DataFusionPlanningSnafu)
+        if let Some(marker) = Self::metric_name_column(input.schema())? {
+            self.ctx.tag_columns.retain(|name| name != &marker.name);
+            self.ctx
+                .aggregation_field_labels
+                .retain(|name| name != &marker.name);
+        }
+        Self::strip_metric_name_column(input)
     }
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
@@ -1853,6 +1840,34 @@ impl PromPlanner {
             }
         }
         Ok(found)
+    }
+
+    /// Strips the metric-name identity from `plan`'s output, if it carries one.
+    ///
+    /// The identity is an ordinary column distinguished only by its field metadata; this projects
+    /// every other column with its qualifier retained and returns `plan` unchanged when no column
+    /// is marked. Column names are never special-cased, so a physical column that happens to be
+    /// spelled like the marker is kept.
+    ///
+    /// PromQL results keep the identity for the Prometheus HTTP API; tabular boundaries (TQL
+    /// statements, TQL CTEs) use this to keep it out of user-visible result schemas.
+    pub fn strip_metric_name_column(plan: LogicalPlan) -> Result<LogicalPlan> {
+        let Some(marker) = Self::metric_name_column(plan.schema())? else {
+            return Ok(plan);
+        };
+        let projection = plan
+            .schema()
+            .iter()
+            .filter_map(|(qualifier, field)| {
+                (field.name() != &marker.name)
+                    .then(|| DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone())))
+            })
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::from(plan)
+            .project(projection)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     fn attach_metric_name(
