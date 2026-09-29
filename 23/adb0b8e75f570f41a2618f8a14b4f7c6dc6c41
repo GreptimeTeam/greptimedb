@@ -1,0 +1,14 @@
+tests/perf/test_agent_observability_summary.py
+  h_623774b620da8e 17,23
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "23adb0b8e75f570f41a2618f8a14b4f7c6dc6c41",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
