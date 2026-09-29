@@ -34,6 +34,7 @@
             gcc
             protobuf
             gnumake
+            mold
             wild
             (rustToolchain.withComponents [
               "cargo"
