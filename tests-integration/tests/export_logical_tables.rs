@@ -1599,7 +1599,7 @@ async fn metric_export_v2_cli_roundtrip(s3: bool, packed: bool) {
         let error = client.sql_in_public(
             "SHOW CREATE TABLE audit; SHOW CREATE TABLE missing_middle; SHOW CREATE VIEW dashboard"
         ).await.unwrap_err();
-        assert!(error.to_string().contains("missing_middle"), "{error}");
+        assert!(error.to_string().contains("SQL request failed"), "{error}");
     }
 
     let destination = tempfile::tempdir_in(common_test_util::find_workspace_path(".")).unwrap();

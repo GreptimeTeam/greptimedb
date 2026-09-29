@@ -192,7 +192,7 @@ impl DatabaseClient {
         })?;
         let value: Value = serde_json::from_str(&text).map_err(|_| {
             crate::error::UnexpectedSnafu {
-                msg: format!("invalid SQL response for {sql}: {text}"),
+                msg: format!("invalid SQL response ({status})"),
             }
             .build()
         })?;
@@ -203,7 +203,10 @@ impl DatabaseClient {
                 .is_some_and(|code| code.as_u64() != Some(0))
         {
             return crate::error::UnexpectedSnafu {
-                msg: format!("SQL request failed ({status}) for {sql}: {value}"),
+                msg: format!(
+                    "SQL request failed ({status}, code {:?})",
+                    value.get("code").and_then(Value::as_u64)
+                ),
             }
             .fail();
         }
@@ -215,7 +218,11 @@ impl DatabaseClient {
                         .is_some_and(|code| code.as_u64() != Some(0))
                 {
                     return crate::error::UnexpectedSnafu {
-                        msg: format!("SQL statement {} failed in {sql}: {output}", index + 1),
+                        msg: format!(
+                            "SQL statement {} failed (code {:?})",
+                            index + 1,
+                            output.get("code").and_then(Value::as_u64)
+                        ),
                     }
                     .fail();
                 }
@@ -223,7 +230,7 @@ impl DatabaseClient {
         }
         serde_json::from_value(value).map_err(|_| {
             crate::error::UnexpectedSnafu {
-                msg: format!("invalid SQL response for {sql}: {text}"),
+                msg: format!("invalid SQL response ({status})"),
             }
             .build()
         })

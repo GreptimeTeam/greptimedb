@@ -83,7 +83,13 @@ pub(crate) fn append_schema_ddl<'a>(
             }
             let response = client
                 .sql_response(&batch.concat(), DEFAULT_SCHEMA_NAME)
-                .await?;
+                .await
+                .map_err(|error| {
+                    UnexpectedSnafu {
+                        msg: format!("SHOW CREATE batch failed for {}: {error}", batch.concat()),
+                    }
+                    .build()
+                })?;
             append_results(&batch, &response, ddl)?;
         }
     }
@@ -427,6 +433,38 @@ mod tests {
             assert!(queries[5].contains("SHOW CREATE TABLE \"catalog\".\"public\".\"middle\""));
             assert!(!queries.iter().any(|sql| sql.starts_with("COPY")));
         }
+    }
+
+    #[tokio::test]
+    async fn sql_response_errors_do_not_expose_copy_credentials() {
+        let secret = "sentinel-connection-secret";
+        let echoed = "sentinel-response-secret";
+        let sql = format!(
+            "COPY DATABASE public TO 's3://bucket/' CONNECTION (SECRET_ACCESS_KEY='{secret}')"
+        );
+        let bodies = vec![
+            (200, format!("not json {echoed}")),
+            (200, json!({"output": [{"records": echoed}], "execution_time_ms": 0}).to_string()),
+            (400, json!({"code": 3001, "error": echoed}).to_string()),
+            (200, json!({"error": echoed}).to_string()),
+            (200, json!({"code": 3001, "output": [records("first", echoed)], "execution_time_ms": 0}).to_string()),
+            (200, json!({"output": [{"error": echoed}]}).to_string()),
+            (200, json!({"output": [{"code": 3001, "records": records("first", echoed)["records"]}], "execution_time_ms": 0}).to_string()),
+        ];
+        let count = bodies.len();
+        let (client, server) = responses(bodies).await;
+        for _ in 0..count {
+            let error = client
+                .sql_response(&sql, "public")
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("SQL"), "{error}");
+            assert!(!error.contains(secret), "{error}");
+            assert!(!error.contains(echoed), "{error}");
+            assert!(!error.contains("COPY DATABASE"), "{error}");
+        }
+        assert_eq!(server.await.unwrap().len(), count);
     }
 
     #[tokio::test]
