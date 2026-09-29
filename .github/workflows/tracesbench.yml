@@ -2,6 +2,26 @@ name: Tracesbench
 on:
   workflow_dispatch:
     inputs:
+      run_greptimedb:
+        description: Run GreptimeDB
+        type: boolean
+        default: true
+        required: false
+      run_victoriatraces:
+        description: Run VictoriaTraces
+        type: boolean
+        default: false
+        required: false
+      run_tempo:
+        description: Run Tempo
+        type: boolean
+        default: false
+        required: false
+      greptimedb_tag:
+        description: Docker Hub greptime/greptimedb tag
+        type: string
+        default: latest
+        required: true
       dataset:
         description: Dataset profile (main is experimental; native queries may exceed memory limits)
         type: choice
@@ -11,7 +31,7 @@ on:
       runtime_image:
         description: Aliyun runtime image (tag or digest reference)
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:4c6ff840d4e0@sha256:b7d0be034ba002768994a7187ce5c60fea4818537644f7a47d4913353b5c81ff
+        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:36650fdb611a@sha256:e9babec6ca6b074e24a863e5fa30d985353875248e7222f23cd126bd4d52bddd
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -78,6 +98,7 @@ permissions:
   contents: read
 env:
   DATASET: ${{ inputs.dataset }}
+  GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
@@ -97,6 +118,10 @@ jobs:
     timeout-minutes: 15
     outputs:
       instance_type: ${{ steps.runner.outputs.instance_type }}
+      targets: ${{ steps.inputs.outputs.targets }}
+      greptimedb: ${{ steps.inputs.outputs.greptimedb }}
+      victoriatraces: ${{ steps.inputs.outputs.victoriatraces }}
+      tempo: ${{ steps.inputs.outputs.tempo }}
       system_disk_gib: ${{ steps.runtime.outputs.system_disk_gib }}
       runtime_image: ${{ steps.runtime.outputs.runtime_image }}
       o11ybench_ref: ${{ steps.runtime.outputs.o11ybench_ref }}
@@ -105,6 +130,26 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate selected targets
+      id: inputs
+      env:
+        greptimedb: ${{ inputs.run_greptimedb }}
+        victoriatraces: ${{ inputs.run_victoriatraces }}
+        tempo: ${{ inputs.run_tempo }}
+      run: |
+        set -euo pipefail
+        selected=
+        for target in greptimedb victoriatraces tempo; do
+          enabled=${!target}
+          [[ "$enabled" == true || "$enabled" == false ]]
+          printf '%s=%s\n' "$target" "$enabled" >> "$GITHUB_OUTPUT"
+          if [[ "$enabled" == true ]]; then selected="${selected:+$selected,}$target"; fi
+        done
+        [[ -n "$selected" ]] || { echo 'Select at least one database' >&2; exit 1; }
+        if [[ "$greptimedb" == true ]]; then
+          [[ "$GREPTIMEDB_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo 'Invalid GreptimeDB image tag' >&2; exit 1; }
+        fi
+        printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
     - name: Resolve CI runner
       id: runner
       run: |
@@ -157,6 +202,8 @@ jobs:
         grep -F -- '--runtime-memory' <<< "$help"
         grep -F -- '--query-timeout-seconds' <<< "$help"
         grep -F -- '--load-workers' <<< "$help"
+        grep -F -- '--targets' <<< "$help"
+        grep -F -- '--greptimedb-image' <<< "$help"
         docker run --rm "${runtime_limits[@]}" "$resolved" scripts/check_run_tracesbench_docker.py
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
   provision:
@@ -220,6 +267,7 @@ jobs:
     runs-on: ${{ needs.provision.outputs.label }}
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
+      TARGETS: ${{ needs.validate.outputs.targets }}
       RESOLVED_RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RESOLVED_O11YBENCH_REF: ${{ needs.validate.outputs.o11ybench_ref }}
       RUN_ROOT: ${{ inputs.benchmark_root }}/tracesbench-${{ github.run_id }}-${{ github.run_attempt }}
@@ -257,34 +305,46 @@ jobs:
         bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
-    # Preserve the pinned catalog images and require all three targets in the report.
     - name: Pull database images before generating data
       run: |
         set -euo pipefail
-        for target in greptimedb victoriatraces tempo; do
-          image=$(jq -er '.target_identity.image | select(test("@sha256:[a-f0-9]{64}$"))' \
-            "o11ybench/workloads/tracesbench/catalogs/$target.json")
+        IFS=, read -ra targets <<< "$TARGETS"
+        for target in "${targets[@]}"; do
+          if [[ "$target" == greptimedb ]]; then
+            image="greptime/greptimedb:$GREPTIMEDB_TAG"
+          else
+            image=$(jq -er '.target_identity.image | select(test("@sha256:[a-f0-9]{64}$"))' \
+              "o11ybench/workloads/tracesbench/catalogs/$target.json")
+          fi
           bash greptimedb/.github/scripts/pull-benchmark-image.sh "$image"
           docker image inspect "$image" > "$METADATA_ROOT/$target-image.json"
+          if [[ "$target" == greptimedb ]]; then
+            resolved=$(jq -er '.[0].RepoDigests[0] | select(test("@sha256:[a-f0-9]{64}$"))' "$METADATA_ROOT/$target-image.json")
+            printf 'GREPTIMEDB_IMAGE=%s\n' "$resolved" >> "$GITHUB_ENV"
+          fi
         done
     - name: Generate selected dataset once
+      id: generate
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage generate \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: GreptimeDB load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 --greptimedb-image "$GREPTIMEDB_IMAGE" \
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: VictoriaTraces load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.victoriatraces == 'true' }}
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target victoriatraces --port 19428 \
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Tempo load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.tempo == 'true' }}
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target tempo --port 13200 \
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
@@ -292,7 +352,7 @@ jobs:
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Validate and render report
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
@@ -303,10 +363,10 @@ jobs:
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Benchmark summary
       if: always()
-      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --section benchmark >> "$GITHUB_STEP_SUMMARY"
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section benchmark >> "$GITHUB_STEP_SUMMARY"
     - name: Load / lifecycle summary
       if: always()
-      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |

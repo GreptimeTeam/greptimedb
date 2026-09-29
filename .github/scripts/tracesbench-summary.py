@@ -66,7 +66,7 @@ def load(root):
     return report, runs
 
 
-def benchmark(report, runs):
+def benchmark(report, runs, targets=TARGETS):
     lines = ['# Tracesbench benchmark summary', '',
              'Median Δ = (target / GreptimeDB − 1) × 100%; negative is faster. '
              'Min/median/max come from the validated report, not recalculated samples. '
@@ -76,9 +76,11 @@ def benchmark(report, runs):
     statistics = {}
     for corpus in report.get('per_corpus', []):
         for stat in corpus.get('statistics', []):
+            if stat['target'] not in targets:
+                continue
             statistics[(corpus['corpus'], stat['round'], stat['target'], stat['query_id'])] = stat
     rows, details = [], []
-    for target in TARGETS:
+    for target in targets:
         selected = [run for run in runs if run.get('target') == target]
         if not selected:
             lines.append(f'- **{target}**: unavailable / not run.')
@@ -117,9 +119,9 @@ def benchmark(report, runs):
     return '\n'.join(lines)
 
 
-def lifecycle(report, runs, root):
+def lifecycle(report, runs, root, targets=TARGETS):
     rows = []
-    for target in TARGETS:
+    for target in targets:
         selected = [r for r in runs if r.get('target') == target] or [{}]
         for run in selected:
             load = run.get('load', {})
@@ -145,16 +147,20 @@ def lifecycle(report, runs, root):
                               'DB CPU', 'DB memory', 'Running after load', 'OOM after load',
                               'Container removed'], rows), '',
                        render_resources([('dataset', root / 'runs' / 'generate')] +
-                                        [(t, root / 'runs' / t) for t in TARGETS], table)])
+                                        [(t, root / 'runs' / t) for t in targets], table)])
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--section', choices=('benchmark', 'lifecycle'), required=True)
+    parser.add_argument('--targets', default=','.join(TARGETS), help='Comma-separated selected engines')
     args = parser.parse_args()
+    targets = args.targets.split(',')
+    if not targets or any(t not in TARGETS for t in targets) or len(set(targets)) != len(targets):
+        parser.error('targets must be a non-empty comma-separated subset of greptimedb,victoriatraces,tempo')
     report, runs = load(args.root)
-    print(benchmark(report, runs) if args.section == 'benchmark' else lifecycle(report, runs, args.root))
+    print(benchmark(report, runs, targets) if args.section == 'benchmark' else lifecycle(report, runs, args.root, targets))
 
 
 if __name__ == '__main__':

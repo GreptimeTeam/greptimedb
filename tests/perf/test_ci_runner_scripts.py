@@ -110,6 +110,35 @@ class ProviderConfigTest(unittest.TestCase):
         self.assertRegex(workflow, r"(?s)db_cpus:.*?default: '8'")
         self.assertRegex(workflow, r"(?s)db_memory:.*?default: 32g")
 
+    def test_traces_selected_targets_and_image_tag(self):
+        workflow = (SCRIPTS.parent / "workflows/tracesbench.yml").read_text()
+        step = workflow.split("    - name: Validate selected targets\n", 1)[1].split("    - name:", 1)[0]
+        command = textwrap.dedent(step.split("      run: |\n", 1)[1])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            for enabled, tag, expected in (
+                (("true", "false", "false"), "latest", "greptimedb"),
+                (("false", "true", "false"), "", "victoriatraces"),
+                (("false", "false", "true"), "", "tempo"),
+                (("true", "true", "true"), "v1.3.0-beta.1", "greptimedb,victoriatraces,tempo"),
+                (("false", "false", "false"), "latest", None),
+                (("true", "false", "false"), "latest; touch /tmp/unexpected", None),
+                (("true", "false", "false"), "", None),
+                (("invalid", "false", "false"), "latest", None),
+            ):
+                with self.subTest(enabled=enabled, tag=tag):
+                    output.write_text("")
+                    env = dict(os.environ, GREPTIMEDB_TAG=tag, GITHUB_OUTPUT=str(output))
+                    env.update(zip(("greptimedb", "victoriatraces", "tempo"), enabled))
+                    result = subprocess.run(["bash", "-c", command], env=env,
+                                            capture_output=True, text=True, timeout=5)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertNotIn("targets=", output.read_text())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertIn(f"targets={expected}\n", output.read_text())
+
     def test_wrong_provider_and_shell_fragments_rejected(self):
         for provider, requested in (("ec2", "auto"), ("AWS", "ecs.c9i.2xlarge"),
                                     ("Aliyun", "c7i.2xlarge"), ("AWS", ""),
@@ -520,14 +549,25 @@ class BenchmarkImagePullTest(unittest.TestCase):
         self.tool('docker', '''
             echo "$*" >> "$PULL_TEST_ROOT/docker.log"
             if [[ $1 == pull && $2 == ${PULL_FAIL_IMAGE:-} ]]; then exit 1; fi
-            if [[ $1 == image ]]; then echo '[]'; fi
+            if [[ $1 == image ]]; then printf '[{"RepoDigests":["greptime/greptimedb@sha256:%s"]}]\\n' "$(printf 'a%.0s' {1..64})"; fi
         ''')
-        self.env['METADATA_ROOT'] = str(self.root)
-        result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
-                                capture_output=True, text=True, timeout=5)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.lines('docker'),
-                         [call for image in images for call in (f'pull {image}', f'image inspect {image}')])
+        images[0] = 'greptime/greptimedb:v1.3.0-beta.1'
+        self.env.update(METADATA_ROOT=str(self.root), GREPTIMEDB_TAG='v1.3.0-beta.1',
+                        GITHUB_ENV=str(self.root / 'env'))
+        for selected in (('greptimedb',), ('tempo',), ('greptimedb', 'victoriatraces', 'tempo')):
+            with self.subTest(selected=selected):
+                self.env['TARGETS'] = ','.join(selected)
+                (self.root / 'env').write_text('')
+                (self.root / 'docker.log').unlink(missing_ok=True)
+                result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                selected_images = [image for target, image in zip(('greptimedb', 'victoriatraces', 'tempo'), images)
+                                   if target in selected]
+                self.assertEqual(self.lines('docker'),
+                                 [call for image in selected_images for call in (f'pull {image}', f'image inspect {image}')])
+                expected_env = 'GREPTIMEDB_IMAGE=greptime/greptimedb@sha256:' + 'a' * 64 + '\n'
+                self.assertEqual((self.root / 'env').read_text(), expected_env if 'greptimedb' in selected else '')
         (self.root / 'docker.log').unlink()
         self.env['PULL_FAIL_IMAGE'] = images[1]
         result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
@@ -551,7 +591,8 @@ class BenchmarkImagePullTest(unittest.TestCase):
         end = traces.index('    - name: Generate selected dataset once')
         self.assertLess(start, end)
         step = traces[start:end]
-        self.assertIn('for target in greptimedb victoriatraces tempo', step)
+        self.assertIn('IFS=, read -ra targets <<< "$TARGETS"', step)
+        self.assertIn('for target in "${targets[@]}"', step)
         self.assertIn('o11ybench/workloads/tracesbench/catalogs/$target.json', step)
         self.assertIn('pull-benchmark-image.sh "$image"', step)
         self.assertIn('set -euo pipefail', step)
