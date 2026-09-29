@@ -584,10 +584,18 @@ impl PromPlanner {
                 let prev_field_exprs =
                     normalize_cols(prev_field_exprs, &input).context(DataFusionPlanningSnafu)?;
 
+                // Compare ordinary labels; the internal metric name is not a row-key tag.
+                let input_metric_name =
+                    Self::metric_name_column(input.schema())?.map(|column| column.name);
                 let keep_tsid = op.id() != token::T_COUNT_VALUES
                     && input_has_tsid
                     && input_tag_columns.iter().collect::<HashSet<_>>()
-                        == self.ctx.tag_columns.iter().collect::<HashSet<_>>();
+                        == self
+                            .ctx
+                            .tag_columns
+                            .iter()
+                            .filter(|name| input_metric_name.as_deref() != Some(name.as_str()))
+                            .collect::<HashSet<&String>>();
 
                 if keep_tsid {
                     aggr_exprs.push(
@@ -617,10 +625,48 @@ impl PromPlanner {
                     // label only. Dropping it from the projected tag columns is required as well:
                     // projecting both would emit two columns with the same name (rejected as an
                     // ambiguous reference).
-                    self.ctx.tag_columns.retain(|tag| tag != label);
-                    group_exprs.retain(
-                        |expr| !matches!(expr, DfExpr::Column(column) if column.name == label),
-                    );
+                    let metric_name = label == METRIC_NAME;
+                    // The semantic `__name__` replaces the marked identity further below, so only
+                    // an ordinary input label is overwritten here.
+                    if !metric_name {
+                        self.ctx.tag_columns.retain(|tag| tag != label);
+                        group_exprs.retain(
+                            |expr| !matches!(expr, DfExpr::Column(column) if column.name == label),
+                        );
+                    }
+                    // The generated column reuses the name of the identity it replaces, or a free
+                    // internal name when the input carries no identity.
+                    let label_column = if metric_name {
+                        match Self::metric_name_column(builder.schema())? {
+                            Some(column) => column.name,
+                            None => {
+                                let occupied = builder
+                                    .schema()
+                                    .fields()
+                                    .iter()
+                                    .map(|field| field.name().as_str())
+                                    .collect::<HashSet<_>>();
+                                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
+                                while occupied.contains(name.as_str()) {
+                                    name.push('_');
+                                }
+                                name
+                            }
+                        }
+                    } else {
+                        label.to_string()
+                    };
+                    if metric_name {
+                        // The overwritten identity must not stay grouped or projected: the
+                        // generated label is the only marked column.
+                        self.ctx
+                            .aggregation_field_labels
+                            .retain(|tag| tag != &label_column);
+                        self.ctx.tag_columns.retain(|tag| tag != &label_column);
+                        group_exprs.retain(
+                            |expr| !matches!(expr, DfExpr::Column(column) if column.name == label_column),
+                        );
+                    }
                     // The tag columns projected below are unqualified `Column` references, so they
                     // end up qualified with whatever qualifier they carry in the input plan. Give
                     // the generated label the same qualifier, otherwise qualified references to it
@@ -673,7 +719,22 @@ impl PromPlanner {
                                     expr.schema_name().to_string(),
                                 )),
                             };
-                            DfExpr::Alias(Alias::new(value, label_qualifier.clone(), label))
+                            // The generated name carries the identity role, like the selector
+                            // marker it replaces.
+                            let metadata = metric_name.then(|| {
+                                let mut metadata = std::collections::HashMap::new();
+                                metadata.insert(
+                                    PROMQL_FIELD_ROLE_KEY.to_string(),
+                                    PROMQL_METRIC_NAME_ROLE.to_string(),
+                                );
+                                metadata.into()
+                            });
+                            DfExpr::Alias(Alias {
+                                expr: Box::new(value),
+                                relation: label_qualifier.clone(),
+                                name: label_column.clone(),
+                                metadata,
+                            })
                         })
                         .collect::<Vec<_>>();
                     let aggregate_group_exprs = group_exprs
@@ -681,7 +742,7 @@ impl PromPlanner {
                         .cloned()
                         .chain(prev_field_exprs.clone())
                         .collect::<Vec<_>>();
-                    group_exprs.push(ident(label));
+                    group_exprs.push(col(&label_column));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
@@ -694,8 +755,8 @@ impl PromPlanner {
                         .context(DataFusionPlanningSnafu)?
                         .project(project_fields)
                         .context(DataFusionPlanningSnafu)?;
-                    // The label only exists in the output schema from here on.
-                    self.ctx.tag_columns.push(label.to_string());
+                    // The generated label only exists in the output schema from here on.
+                    self.ctx.tag_columns.push(label_column);
                     builder
                 } else {
                     builder
@@ -2579,6 +2640,9 @@ impl PromPlanner {
                 Ok(vec![self.create_time_index_column_expr()?])
             }
             Some(LabelModifier::Include(labels)) => {
+                // `__name__` is not a physical column: it resolves through the marked identity
+                // column of the input, never through a physical column of that name.
+                let metric_name_column = Self::metric_name_column(input_schema)?;
                 if update_ctx {
                     // A `by(...)` label can name a value field of the input instead of a tag. The
                     // aggregate still reports it among its tag columns below, but unlike a tag it
@@ -2589,6 +2653,10 @@ impl PromPlanner {
                         .labels
                         .iter()
                         .filter(|label| {
+                            // The metric name is a series identity, not a value field.
+                            if label.as_str() == METRIC_NAME {
+                                return false;
+                            }
                             self.ctx.field_columns.contains(label)
                                 || !self.ctx.tag_columns.contains(label)
                                 || self.ctx.aggregation_field_labels.contains(label)
@@ -2600,6 +2668,17 @@ impl PromPlanner {
                 let mut exprs = Vec::with_capacity(labels.labels.len());
                 for label in &labels.labels {
                     if is_metric_engine_internal_column(label) {
+                        continue;
+                    }
+                    // Ignore a missing identity, exactly like any other missing label.
+                    if label.as_str() == METRIC_NAME {
+                        if let Some(column) = &metric_name_column {
+                            exprs.push(DfExpr::Column(column.clone()));
+                            if update_ctx {
+                                // record the resolved physical name, not the semantic label
+                                self.ctx.tag_columns.push(column.name.clone());
+                            }
+                        }
                         continue;
                     }
                     // nonexistence label will be ignored
@@ -2628,6 +2707,12 @@ impl PromPlanner {
                 // Exclude metric engine internal columns (not PromQL labels) from the implicit
                 // "without" label set.
                 all_fields.retain(|col| !is_metric_engine_internal_column(col.as_str()));
+
+                // The identity is not an ordinary label of the implicit set: `without(...)` never
+                // keeps a metric name it did not ask for.
+                if let Some(column) = Self::metric_name_column(input_schema)? {
+                    let _ = all_fields.remove(&column.name);
+                }
 
                 // remove "without"-ed fields
                 // nonexistence label will be ignored
