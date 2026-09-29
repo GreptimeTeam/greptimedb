@@ -301,6 +301,12 @@ jobs:
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Benchmark summary
+      if: always()
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --section benchmark >> "$GITHUB_STEP_SUMMARY"
+    - name: Load / lifecycle summary
+      if: always()
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |
