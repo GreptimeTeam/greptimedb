@@ -31,9 +31,9 @@ on:
         default: v1.114.0@sha256:227ad53fd57a4b4430624898a1be0cac39431e1235fa0dc92f567cce38969344
         required: true
       runtime_image:
-        description: Aliyun runtime image (tag or digest reference)
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324
+        default: auto
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -83,7 +83,7 @@ env:
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   VICTORIAMETRICS_TAG: ${{ inputs.victoriametrics_tag }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -135,7 +135,7 @@ jobs:
         ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
         # Match the existing ECS workflow's provision, teardown and queue headroom.
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
-        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
         docker pull "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")

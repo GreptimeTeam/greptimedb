@@ -29,9 +29,9 @@ on:
         default: sanity
         required: true
       runtime_image:
-        description: Aliyun runtime image (tag or digest reference)
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324
+        default: auto
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -102,7 +102,7 @@ env:
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:f860545b0306@sha256:756027f193e53a4364f0ee8b19336c565e97dde212d761db7efe31ee9b698324' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -189,7 +189,7 @@ jobs:
         runtime_limits=()
         [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
         [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
-        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
         bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
