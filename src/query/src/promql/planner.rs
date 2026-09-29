@@ -48,7 +48,7 @@ use datafusion::functions_window::row_number::RowNumber;
 use datafusion::logical_expr::expr::{Alias, ScalarFunction, WindowFunction};
 use datafusion::logical_expr::expr_rewriter::normalize_cols;
 use datafusion::logical_expr::{
-    BinaryExpr, Cast, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
+    BinaryExpr, Cast, EmptyRelation, Extension, LogicalPlan, LogicalPlanBuilder, Operator,
     ScalarUDF as ScalarUdfDef, WindowFrame, WindowFunctionDefinition,
 };
 use datafusion::prelude as df_prelude;
@@ -107,9 +107,10 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SubqueryTimestampOutOfRangeSnafu,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -411,8 +412,9 @@ impl PromPlanner {
         } = subquery_expr;
 
         // Prometheus evaluates the inner expression over `(start - offset - range, end - offset]`
-        // (`subqueryTimeRange`). Shift the inner window back here; `RangeManipulate` maps the
-        // samples forward again by the same offset.
+        // (`subqueryTimeRange`), on the absolute grid of the subquery step that
+        // [`Self::subquery_child_window`] builds. Shift the inner window back here;
+        // `RangeManipulate` maps the samples forward again by the same offset.
         let offset_ms = match offset {
             Some(Offset::Pos(duration)) => duration.as_millis() as Millisecond,
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
@@ -423,14 +425,52 @@ impl PromPlanner {
         if let Some(step) = step {
             self.ctx.interval = step.as_millis() as _;
         }
+        // The child grid divides by the subquery step, which is the explicit step or the
+        // evaluation step the subquery inherits. Prometheus rejects a zero step there
+        // ("duration must be greater than 0" on `[5s:0]`), so does the planner -- with the crate's
+        // error for a zero duration where a positive one is required.
+        ensure!(self.ctx.interval > 0, ZeroRangeSelectorSnafu);
         let current_start = self.ctx.start;
         let current_end = self.ctx.end;
-        self.ctx.start -= offset_ms + range.as_millis() as i64 - self.ctx.interval;
-        self.ctx.end -= offset_ms;
+        // A subquery is evaluated within the window it is part of, so that window must be valid:
+        // an inverted range is rejected here, not turned into an empty child.
+        ensure!(
+            current_start <= current_end,
+            InvalidTimeRangeSnafu {
+                start: current_start,
+                end: current_end,
+            }
+        );
+        // The window the child is evaluated over, on the subquery's own grid; `None` when it holds
+        // no step, and an error when a derived bound cannot be named in milliseconds. Such a child
+        // plan only supplies its output schema, so it is planned over the caller's window -- the
+        // last one known to be valid.
+        let child_window = Self::subquery_child_window(
+            current_start,
+            current_end,
+            current_interval,
+            offset_ms,
+            range.as_millis() as Millisecond,
+            self.ctx.interval,
+        )?;
+        if let Some((child_start, child_end)) = child_window {
+            self.ctx.start = child_start;
+            self.ctx.end = child_end;
+        }
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
         self.ctx.interval = current_interval;
         self.ctx.start = current_start;
         self.ctx.end = current_end;
+        // Prometheus evaluates no child point for a window without a step, so the subquery reports
+        // nothing: an empty relation keeps that answer -- and an enclosing `or` fallback -- while
+        // carrying the child schema the nodes below read.
+        let input = match child_window {
+            Some(_) => input,
+            None => LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: input.schema().clone(),
+            }),
+        };
 
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
@@ -1654,6 +1694,56 @@ impl PromPlanner {
             Some(Offset::Neg(duration)) => -(duration.as_millis() as Millisecond),
             None => 0,
         }
+    }
+
+    /// The window a subquery evaluates its child expression over (Prometheus'
+    /// `subqueryTimeRange`): `[start, end]` on the subquery's own step grid, or `None` when that
+    /// window holds no step.
+    ///
+    /// The grid start is the first multiple of `step` strictly after `start - offset - range`. The
+    /// grid end is `end` aligned down to the parent `interval` -- unaligned for a non-positive
+    /// interval -- minus `offset`. `step` is positive; the caller checks it.
+    ///
+    /// The window is empty -- `None`, and the child reports nothing -- exactly when the grid start
+    /// lies after the grid end. A bound that cannot be named in milliseconds is an error instead,
+    /// for either side: a nonempty window with an unrepresentable derived endpoint is rejected.
+    fn subquery_child_window(
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        offset: Millisecond,
+        range: Millisecond,
+        step: Millisecond,
+    ) -> Result<Option<(Millisecond, Millisecond)>> {
+        let window_start = i128::from(start) - i128::from(offset) - i128::from(range);
+        let grid_start = (window_start.div_euclid(i128::from(step)) + 1) * i128::from(step);
+        let grid_end = if interval > 0 {
+            let steps = (i128::from(end) - i128::from(start)) / i128::from(interval);
+            i128::from(start) + steps * i128::from(interval)
+        } else {
+            i128::from(end)
+        } - i128::from(offset);
+        // Emptiness is decided on the exact bounds: whether they are representable does not change
+        // that no step lies in the window.
+        if grid_start > grid_end {
+            return Ok(None);
+        }
+        let bound = |name: &str, value: i128| {
+            i64::try_from(value).map_err(|_| {
+                SubqueryTimestampOutOfRangeSnafu {
+                    timestamp: format!(
+                        "subquery child window {name} = {value} ms (start = {start} ms, \
+                         end = {end} ms, interval = {interval} ms, offset = {offset} ms, \
+                         range = {range} ms, step = {step} ms)"
+                    ),
+                }
+                .build()
+            })
+        };
+        Ok(Some((
+            bound("grid start", grid_start)?,
+            bound("grid end", grid_end)?,
+        )))
     }
 
     /// The columns that identify one series, which is the series key expected by the PromQL plan

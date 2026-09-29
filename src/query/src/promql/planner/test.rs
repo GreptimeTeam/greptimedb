@@ -5134,6 +5134,705 @@ async fn count_over_time_subquery_with_offset() {
     indie_query_plan_compare(query, expected).await;
 }
 
+/// Table provider for the subquery-offset probes. Single-series tables whose samples are time
+/// varying, so a window folded for the wrong instants cannot pass as the right one:
+///
+/// - `subquery_offset_probe`: samples at 0s..60s every 10s with values 1..7, i.e. exactly on the
+///   10s grid of the subquery step used below;
+/// - `subquery_offset_offgrid`: samples at 5s..55s every 10s with values 1..6, i.e. 5s off that
+///   grid, which is what makes the inner evaluation points of a subquery observable.
+async fn build_subquery_offset_probe_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let probe_rows = (0..=6_i64)
+        .map(|step| (step * 10_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+    let offgrid_rows = (0..6_i64)
+        .map(|step| (step * 10_000 + 5_000, (step + 1) as f64))
+        .collect::<Vec<_>>();
+
+    for (table_id, name, rows) in [
+        (7_001_u32, "subquery_offset_probe", &probe_rows),
+        (7_002_u32, "subquery_offset_offgrid", &offgrid_rows),
+    ] {
+        let schema = Arc::new(Schema::new(vec![
+            ColumnSchema::new(
+                "host".to_string(),
+                ConcreteDataType::string_datatype(),
+                false,
+            ),
+            ColumnSchema::new(
+                "timestamp".to_string(),
+                ConcreteDataType::timestamp_millisecond_datatype(),
+                false,
+            )
+            .with_time_index(true),
+            ColumnSchema::new(
+                "val".to_string(),
+                ConcreteDataType::float64_datatype(),
+                true,
+            ),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.arrow_schema().clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["a"; rows.len()])),
+                Arc::new(TimestampMillisecondArray::from_iter_values(
+                    rows.iter().map(|(ts, _)| *ts),
+                )),
+                Arc::new(Float64Array::from_iter_values(
+                    rows.iter().map(|(_, value)| *value),
+                )),
+            ],
+        )
+        .unwrap();
+        let backing = GreptimeMemTable::new_with_catalog(
+            name,
+            GreptimeRecordBatch::from_df_record_batch(schema.clone(), batch),
+            table_id,
+            DEFAULT_CATALOG_NAME.to_string(),
+            DEFAULT_SCHEMA_NAME.to_string(),
+        );
+        let table_meta = TableMetaBuilder::empty()
+            .schema(schema)
+            .primary_key_indices(vec![0])
+            .value_indices(vec![2])
+            .next_column_id(3)
+            .build()
+            .unwrap();
+        let table_info = Arc::new(
+            TableInfoBuilder::default()
+                .table_id(table_id)
+                .name(name)
+                .meta(table_meta)
+                .build()
+                .unwrap(),
+        );
+        let table = Arc::new(Table::new(
+            table_info,
+            FilterPushDownType::Unsupported,
+            backing.data_source(),
+        ));
+        assert!(
+            catalog_list
+                .register_table_sync(RegisterTableRequest {
+                    catalog: DEFAULT_CATALOG_NAME.to_string(),
+                    schema: DEFAULT_SCHEMA_NAME.to_string(),
+                    table_name: name.to_string(),
+                    table_id,
+                    table,
+                })
+                .is_ok()
+        );
+    }
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Plans `query` over the subquery-offset probe tables on the evaluation grid `[start, end]` with
+/// step `step` (in seconds, as in `tql eval`).
+async fn plan_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Result<LogicalPlan> {
+    let eval_stmt = EvalStmt {
+        expr: parser::parse(query).unwrap(),
+        start: UNIX_EPOCH + Duration::from_secs(start),
+        end: UNIX_EPOCH + Duration::from_secs(end),
+        interval: Duration::from_secs(step),
+        lookback_delta: Duration::from_secs(300),
+    };
+    PromPlanner::stmt_to_plan(
+        build_subquery_offset_probe_provider().await,
+        &eval_stmt,
+        &build_query_engine_state(),
+    )
+    .await
+}
+
+/// Executes `query` over the subquery-offset probe tables on the evaluation grid
+/// `[start, end]` with step `step` (in seconds, as in `tql eval`) and returns the
+/// `(timestamp, value)` rows of the single series, sorted by timestamp.
+async fn run_subquery_offset_probe(
+    query: &str,
+    start: u64,
+    end: u64,
+    step: u64,
+) -> Vec<(i64, f64)> {
+    let state = build_query_engine_state();
+    let plan = plan_subquery_offset_probe(query, start, end, step)
+        .await
+        .unwrap();
+
+    let (_, batches) = execute(plan, &state).await;
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let timestamp_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| matches!(field.data_type(), ArrowDataType::Timestamp(..)))
+            .expect("no timestamp column");
+        let value_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|field| field.data_type() == &ArrowDataType::Float64)
+            .expect("no Float64 value column");
+        let timestamps = batch
+            .column(timestamp_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("timestamp column is not a millisecond timestamp");
+        let values = batch
+            .column(value_index)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("value column is not Float64");
+        rows.extend(
+            timestamps
+                .iter()
+                .zip(values.iter())
+                .map(|(timestamp, value)| (timestamp.unwrap(), value.unwrap())),
+        );
+    }
+    rows.sort_by_key(|(timestamp, _)| *timestamp);
+    rows
+}
+
+/// `offset` on a subquery shifts the inner evaluation window back by the offset, while the outer
+/// result keeps the evaluation timestamps of the grid it was planned on. Prometheus reference:
+/// `evaluator.subqueryTimeRange` (promql/engine.go) evaluates the inner expression of
+/// `<expr>[range:step] offset <d>` at a step `t` over `(t - d - range, t - d]`, sampled every
+/// `step` on the absolute multiples of `step`, and reports the folded window at `t` (the samples
+/// are selected on the shifted timeline, the result timestamps stay on the evaluation timeline).
+/// The samples below are on that step grid, so the offset alone decides the windows.
+///
+/// The expectations below are derived from that window on the probe samples (one sample every 10s
+/// with values 1..7, subquery step 10s). Each `offset` query must also repeat, with its own
+/// timestamps, the rows of the explicitly shifted equivalent: the un-offset subquery evaluated at
+/// `t - d`.
+#[tokio::test]
+async fn subquery_own_offset_shifts_the_inner_window_but_keeps_evaluation_timestamps() {
+    // Positive offset, single step at a non-zero start: the window `(45s - 30s - 20s,
+    // 45s - 30s] = (-5s, 15s]` holds the samples at 0s and 10s, so the sum is 1 + 2.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 3.0)],
+    );
+    // The explicitly shifted equivalent: the un-offset subquery at 15s folds `(-5s, 15s]` too.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 15, 15, 1).await,
+        vec![(15_000, 3.0)],
+    );
+
+    // Multi-step grid at a non-zero start. The inner points of the offset query run from the
+    // first 10s point after `30s - 30s - 20s = -20s` -- i.e. from -10s -- to `60s - 30s = 30s`, so
+    // its windows hold the samples of `(-20s, 0s]` (1) and `(10s, 30s]` (3 + 4) -- the same
+    // windows as the un-offset subquery on the grid `(0s, 30s]`, but reported at the 30s and 60s
+    // of its own evaluation grid.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(30_000, 1.0), (60_000, 7.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 0, 30, 30).await,
+        vec![(0, 1.0), (30_000, 7.0)],
+    );
+
+    // A negative offset looks ahead of the evaluation time: the windows are `(t + 30s - 20s,
+    // t + 30s]`, i.e. `(-20s, 0s]` and `(10s, 30s]` again on the 0s/30s grid, so the offset query
+    // repeats the un-offset subquery at 30s/60s (7 and 6 + 7 = 13) with its own timestamps.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_probe[20s:10s] offset -30s)",
+            0,
+            30,
+            30
+        )
+        .await,
+        vec![(0, 7.0), (30_000, 13.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_probe[20s:10s])", 30, 60, 30)
+            .await,
+        vec![(30_000, 7.0), (60_000, 13.0)],
+    );
+}
+
+/// The inner evaluation points of a subquery sit on the absolute multiples of its step, as in
+/// Prometheus: `<expr>[range:step] offset <d>` folded at `t` reads the points `step * k` of the
+/// window `(t - d - range, t - d]`. Anchoring them on the evaluation start instead (this planner
+/// before this change) phase-shifts the grid by `(t - d - range) % step` and folds the wrong
+/// samples whenever that remainder is non-zero -- the `offset` cases below are the ones that
+/// exposed it, but the un-offset subquery at an off-grid instant diverges the same way.
+///
+/// `subquery_offset_offgrid` holds samples at 5s..55s (values 1..6) while the subquery step is
+/// 10s, so no window below is insensitive to a sample 5s off its grid. The expectations are from
+/// Prometheus v3.14.0 (the oracle commands and output are in the report).
+#[tokio::test]
+async fn subquery_inner_points_are_anchored_on_absolute_step_multiples() {
+    // No offset, off-grid instant: 45s folds the points 30s and 40s of `(25s, 45s]`, i.e. the
+    // samples at 25s and 35s -- 3 + 4.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[20s:10s])", 45, 45, 1)
+            .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // Offset 5s at 30s: the window `(5s, 25s]` is folded at the points 10s and 20s, i.e. the
+    // samples at 5s and 15s -- 1 + 2. (Anchoring on the evaluation start folds 15s and 25s -- the
+    // samples at 15s and 25s, 2 + 3.)
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 3.0)],
+    );
+    // The same query one window later: 45s folds the points 30s and 40s of `(20s, 40s]`, i.e. the
+    // samples at 25s and 35s -- 3 + 4.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            45,
+            45,
+            1
+        )
+        .await,
+        vec![(45_000, 7.0)],
+    );
+
+    // Offset 15s at 30s: the window `(-5s, 15s]` starts before the first sample, so only the
+    // sample at 5s is in reach of the points 0s and 10s -- 1.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 15s)",
+            30,
+            30,
+            1
+        )
+        .await,
+        vec![(30_000, 1.0)],
+    );
+
+    // A negative offset: `offset -5s` at 15s folds the points 10s and 20s of `(0s, 20s]`, i.e. the
+    // samples at 5s and 15s -- 1 + 2.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset -5s)",
+            15,
+            15,
+            1
+        )
+        .await,
+        vec![(15_000, 3.0)],
+    );
+
+    // A range longer than the evaluation instant: the points run from the first 10s point after
+    // `15s - 40s = -25s`, i.e. from -20s, and only the sample at 5s is in reach -- 1. The grid
+    // start is negative here, which is the rounding the grid alignment has to get right.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[40s:10s])", 15, 15, 1)
+            .await,
+        vec![(15_000, 1.0)],
+    );
+
+    // Multi-step evaluation at a non-zero, non-multiple start: 35s folds `(15s, 35s]` (2 + 3) and
+    // 65s folds `(45s, 65s]` (5 + 6), reported at those evaluation instants.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            30
+        )
+        .await,
+        vec![(35_000, 5.0), (65_000, 11.0)],
+    );
+
+    // An evaluation instant whose window holds no point yields no row, as in Prometheus: with
+    // `offset 30s` the 30s window is `(-20s, 0s]`, whose points reach no sample (the first one is
+    // at 5s), while 60s folds `(10s, 30s]` -- the samples at 15s and 25s, 2 + 3.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 30s)",
+            30,
+            60,
+            30
+        )
+        .await,
+        vec![(60_000, 5.0)],
+    );
+}
+
+/// The child window of a subquery (`subqueryTimeRange`): the first multiple of the subquery step
+/// strictly after `start - offset - range`, and the parent's last step -- `end` aligned down to the
+/// parent interval -- minus the offset. `None` means the window holds no step; a bound outside the
+/// representable millisecond range is an error, never an empty window.
+#[test]
+fn subquery_child_window_is_the_child_grid_window() {
+    let child_window = PromPlanner::subquery_child_window;
+    // The grid start is the first step multiple strictly after the window start: an exact multiple
+    // (`30s - 20s = 10s`) advances by one step, and an off-grid boundary (`45s - 20s = 25s`, or a
+    // window start before the first sample) rounds up. The end is the parent's last step, so an end
+    // off the parent grid is trimmed, and a short grid window keeps only the steps it has.
+    assert_eq!(
+        child_window(30_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 60_000))
+    );
+    assert_eq!(
+        child_window(45_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((30_000, 55_000))
+    );
+    assert_eq!(
+        child_window(25_000, 60_000, 10_000, 0, 20_000, 10_000).unwrap(),
+        Some((10_000, 55_000))
+    );
+    assert_eq!(
+        child_window(35_000, 65_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((20_000, 65_000))
+    );
+    assert_eq!(
+        child_window(0, 55_000, 30_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 30_000))
+    );
+    // A range shorter than the step can still hold a step, e.g. `[5s:10s]` over `(30s, 65s]`: the
+    // grid points 40s..65s are reached by no parent step, so the fold reports nothing even though
+    // the window itself is not empty.
+    assert_eq!(
+        child_window(35_000, 65_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        Some((40_000, 65_000))
+    );
+    // ... and when the first step multiple lies past the parent's last step, the window holds no
+    // step: `None` is the only empty answer.
+    assert_eq!(
+        child_window(35_000, 44_000, 10_000, 0, 5_000, 10_000).unwrap(),
+        None
+    );
+    // The offset moves the whole window: `offset 5s` at 30s folds `(5s, 25s]` at the points 10s and
+    // 20s, and a negative offset reaches past the evaluation instant.
+    assert_eq!(
+        child_window(30_000, 30_000, 1_000, 5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 25_000))
+    );
+    assert_eq!(
+        child_window(15_000, 15_000, 1_000, -5_000, 20_000, 10_000).unwrap(),
+        Some((10_000, 20_000))
+    );
+    // Boundaries before the epoch floor towards minus infinity.
+    assert_eq!(
+        child_window(-15_000, -15_000, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-30_000, -15_000))
+    );
+    assert_eq!(
+        child_window(-45_000, -45_000, 1_000, -10_000, 20_000, 10_000).unwrap(),
+        Some((-50_000, -35_000))
+    );
+    // A grid start before the first sample is not clamped to it.
+    assert_eq!(
+        child_window(0, 0, 1_000, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 0))
+    );
+    // A parent interval of zero (a statement evaluated with a zero step) leaves the end unaligned,
+    // as in Prometheus, where the alignment applies only to a positive interval.
+    assert_eq!(
+        child_window(0, 55_000, 0, 0, 20_000, 10_000).unwrap(),
+        Some((-10_000, 55_000))
+    );
+
+    // A window whose derived bounds are outside the representable millisecond range is an error,
+    // not an empty result: the window still holds steps, they just cannot be named. Each side is
+    // reported on its own, and the error names the bound that does not fit with the derived value.
+    // The grid start first: `start - range` rounds up to a multiple of the step below `i64::MIN`
+    // while the grid end (`i64::MIN + 1000`) is representable.
+    let err = child_window(i64::MIN + 1_000, i64::MIN + 1_000, 1_000, 0, 2_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start") && timestamp.contains("-9223372036854776800")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // Then the grid end alone: `offset -2s` moves the aligned end past `i64::MAX` while the grid
+    // start (9223372036854773810) is representable.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, -2_000, 3_000, 10).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end") && timestamp.contains("9223372036854776807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // A wide window whose grid start alone is unrepresentable is rejected the same way; its grid
+    // end (-1615) is representable and the window still holds steps.
+    let err = child_window(i64::MIN, i64::MAX, 10_000, i64::MAX, i64::MAX, 1_000).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+        ),
+        "{err}"
+    );
+    // Both bounds can be unrepresentable at once while the window still holds steps -- neither is
+    // clipped into a representable one, and the grid start is reported with its exact value.
+    let err = child_window(i64::MAX - 1_000, i64::MAX - 1_000, 1, i64::MIN, 10, 1).unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start")
+                    && timestamp.contains("18446744073709550606")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // An empty window stays `None` even when its exact bounds are unrepresentable: emptiness is
+    // decided before either bound is converted, so no overflow is reported for a window that holds
+    // no step. The grid start (18446744073709552000) here lies past the grid end (18446744073709551615).
+    assert_eq!(
+        child_window(i64::MAX, i64::MAX, 1_000, i64::MIN, 0, 1_000).unwrap(),
+        None
+    );
+}
+
+/// A subquery whose child window holds no step contributes nothing, as in Prometheus, instead of
+/// rejecting the range: the parent's last step is the aligned `end`, and the child grid of
+/// `<expr>[range:step]` starts at the first step multiple after `start - range`, which lies past it
+/// when the range is shorter than the step. The rows below are the Prometheus v3.14.0 reference
+/// over the same samples as `subquery_offset_offgrid` (samples 5s..55s, values 1..6); the sqlness
+/// case `promql/subquery` runs the same probes.
+#[tokio::test]
+async fn subquery_child_window_without_a_step_reports_no_row() {
+    // `sum_over_time(...[5s:10s])` at `[35s, 44s]` with a 10s step: the child grid would start at
+    // 40s, past the parent's only step 35s, so the subquery reports no row at all.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 44, 10)
+            .await,
+        vec![],
+    );
+    // ... so an enclosing `or` fallback still fires, at the evaluation grid (35s, 44s -> [35s]).
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    // Multi-step: every step of the grid reports no child point and falls back.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0), (45_000, 1.0), (55_000, 1.0), (65_000, 1.0)],
+    );
+    // The same grid with a range that does cover steps: the child window is `[40s, 65s]`, whose
+    // points are reached by no parent step either, and the same probe one range longer folds the
+    // sums of `(t - 20s, t]`, with and without an offset.
+    assert_eq!(
+        run_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 35, 65, 10)
+            .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s])",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[20s:10s] offset 5s)",
+            35,
+            65,
+            10
+        )
+        .await,
+        vec![(35_000, 5.0), (45_000, 7.0), (55_000, 9.0), (65_000, 11.0)],
+    );
+    // An offset in the empty-window region still finds its sample: `offset -5s` at 35s reads
+    // `(30s, 35s]` at the child grid point 40s, i.e. the sample at 35s.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time(subquery_offset_offgrid[5s:10s] offset -5s)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 4.0)],
+    );
+
+    // Nested: the inner subquery of `(sum_over_time(...)[5s:10s])` has no child window either, so
+    // the outer subquery reports nothing and only the outermost fallback fires.
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s]) or vector(1)",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![(35_000, 1.0)],
+    );
+    assert_eq!(
+        run_subquery_offset_probe(
+            "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]) or vector(1))[5s:10s])",
+            35,
+            44,
+            10
+        )
+        .await,
+        vec![],
+    );
+}
+
+/// An inverted evaluation window and a zero subquery step are rejected while planning a subquery,
+/// with the same errors the planner uses for the same inputs elsewhere: a subquery cannot turn its
+/// caller's invalid range into an empty result, and the child grid has no step to divide by.
+#[tokio::test]
+async fn subquery_rejects_invalid_range_and_zero_step() {
+    let err =
+        plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:10s])", 44, 35, 10)
+            .await
+            .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::InvalidTimeRange {
+                start: 44_000,
+                end: 35_000,
+                ..
+            }
+        ),
+        "{err}"
+    );
+    // The same window one subquery deeper is rejected the same way.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time((sum_over_time(subquery_offset_offgrid[5s:10s]))[5s:10s])",
+        44,
+        35,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+
+    // `[5s:0]` parses to a zero step, which the child grid cannot divide by.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:0])", 60, 60, 1)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+    // So does a statement evaluated with a zero step and a subquery that inherits it.
+    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:])", 60, 60, 0)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
+        "{err}"
+    );
+}
+
+/// A child window whose derived bounds are outside the representable millisecond range is rejected
+/// while planning the subquery, with the `InvalidArguments` class the planner uses for the other
+/// invalid time ranges, instead of silently reporting an empty result. Both sides are covered -- a
+/// child grid start (the `offset 292471208y...` case, with a range long enough to reach below
+/// `i64::MIN`) and a child grid end (the `offset -292471208y...` case, `-i64::MAX` ms) -- and in
+/// both the other bound stays representable and the window itself still holds steps.
+#[tokio::test]
+async fn subquery_rejects_a_child_window_out_of_the_representable_range() {
+    // The grid start alone is out of range: `0ms - i64::MAX ms - 21366776s` is below `i64::MIN`
+    // and so is the next step multiple after it, while the grid end (-9223372036854715807) and the
+    // window itself are fine.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[21366776s:10s] offset 292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid start = -9223372058221550000")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+    // The grid end alone is out of range: the offset is `-i64::MAX` ms, so the aligned end moves to
+    // `i64::MAX + 60000` while the grid start (9223372036854760000) is representable.
+    let err = plan_subquery_offset_probe(
+        "sum_over_time(subquery_offset_offgrid[20s:10s] offset -292471208y21366775s807ms)",
+        0,
+        60,
+        10,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            crate::promql::error::Error::SubqueryTimestampOutOfRange { timestamp, .. }
+                if timestamp.contains("grid end = 9223372036854835807")
+        ),
+        "{err}"
+    );
+    assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{err}");
+}
+
 #[tokio::test]
 async fn test_hash_join() {
     let mut eval_stmt = EvalStmt {
