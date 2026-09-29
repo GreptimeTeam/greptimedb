@@ -1440,6 +1440,23 @@ impl PromPlanner {
                 {
                     float_pairs.extend(std::mem::take(&mut invalid_field_pairs));
                 }
+                // `%` over a mixed float/histogram vector and a native-histogram vector supports
+                // none of its pairs, so `align_binary_field_columns` falls back to a single lane
+                // that holds nothing but the discarded pairs. Record the dropped samples from
+                // that lane instead of a standalone annotation filter: `%` is not a comparison,
+                // so each lane expression is a `Float64(NULL)` drop UDF, and the outer non-null
+                // filter still discards those rows.
+                else if op.id() == token::T_MOD
+                    && self.promql_annotations.is_some()
+                    && !invalid_field_pairs.is_empty()
+                    && field_groups.len() == 1
+                    && field_groups[0]
+                        .1
+                        .iter()
+                        .all(|pair| invalid_field_pairs.contains(pair))
+                {
+                    field_groups[0].1 = std::mem::take(&mut invalid_field_pairs);
+                }
                 let mut field_groups = field_groups.into_iter();
                 // `vector()` uses EmptyMetric and keeps GreptimeDB's timestamp broadcast.
                 let has_empty_metric_operand = left_is_empty_metric || right_is_empty_metric;
@@ -1505,8 +1522,9 @@ impl PromPlanner {
                 let promql_annotations = self.promql_annotations.clone();
                 // These predicates always pass; they only evaluate otherwise-discarded pairs
                 // while collecting annotations. `+`/`-` over two alternative float/histogram
-                // operands already consumed its mixed pairs into the float lane above, where
-                // the physical plan cannot short-circuit them away.
+                // operands and `%` over a mixed vector and a native-histogram vector already
+                // consumed their mixed pairs into their only output lane above, where the
+                // physical plan cannot short-circuit them away.
                 let invalid_pair_predicates = invalid_field_pairs
                     .into_iter()
                     .filter(|_| promql_annotations.is_some())
