@@ -233,6 +233,15 @@ impl PromPlanner {
             let plan = self
                 .prom_vector_selector_to_plan(&leaf.selector, false)
                 .await?;
+            // A binary island contains only arithmetic, whose PromQL result has no metric name,
+            // and it joins the leaf scans into one plan. An identity column per leaf would leave
+            // the joined plan carrying one metric-name column per selector, while neither the
+            // join key nor the island projection below reads it: the join stays keyed by the
+            // series identity or the ordinary labels, and the projected field names come from the
+            // leaf's own table (`display_table`). Drop the marked identity here - together with
+            // the leaf context that registered it - so a leaf exposes exactly the columns the
+            // island joins and projects, and the name-free arithmetic result cannot inherit one.
+            let plan = self.drop_metric_name(plan)?;
             let ctx = self.ctx.clone();
             let alias = TableReference::bare(format!("{BINARY_ISLAND_LEAF_ALIAS_PREFIX}{idx}"));
             let plan = LogicalPlanBuilder::from(plan)
