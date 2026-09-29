@@ -136,7 +136,7 @@ jobs:
         # Match the existing ECS workflow's provision, teardown and queue headroom.
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
         [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
-        docker pull "$RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
@@ -273,13 +273,13 @@ jobs:
           available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
           ((available >= 10 * 1024 * 1024)) || { echo "Need at least 10 GiB free on $path"; exit 1; }
         done
-        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
         plan="$METADATA_ROOT/warm.json"
         while IFS=$'\t' read -r target reference; do
           echo "Resolving $target: $reference"
-          docker pull "$reference"
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$reference"
           docker image inspect "$reference" > "$METADATA_ROOT/$target-image.json"
           digest=$(jq -er '.[0].RepoDigests[0]' "$METADATA_ROOT/$target-image.json")
           jq --arg target "$target" --arg image "$digest" '.targets |= map(if .name == $target then .image = $image else . end)' "$plan" > "$plan.tmp"

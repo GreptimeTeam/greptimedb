@@ -581,8 +581,13 @@ class BenchmarkImagePullTest(unittest.TestCase):
         workflows = SCRIPTS.parent / "workflows"
         agent = (workflows / "agent-observability.yml").read_text()
         traces = (workflows / "tracesbench.yml").read_text()
-        for content in (agent, traces):
+        long_range = (workflows / "vmbench-long-range.yml").read_text()
+        for content in (agent, traces, long_range):
             self.assertNotIn("docker pull ", content)
+        for reference in ("RUNTIME_IMAGE", "RESOLVED_RUNTIME_IMAGE", "reference"):
+            self.assertIn(f'pull-benchmark-image.sh "${reference}"', long_range)
+        self.assertLess(long_range.index('pull-benchmark-image.sh "$reference"'),
+                        long_range.index('- name: Warm serial and concurrent benchmarks'))
         self.assertIn('pull-benchmark-image.sh "$reference"', agent)
         self.assertLess(agent.index('resolve_image runtime'), agent.index('- name: Generate dataset once'))
         self.assertIn('pull-benchmark-image.sh "$RUNTIME_IMAGE"', traces)
