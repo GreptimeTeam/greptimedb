@@ -55,8 +55,8 @@ use table::table::adapter::DfTableProviderAdapter;
 
 use crate::QueryEngineContext;
 use crate::dist_plan::{
-    DistExtensionPlanner, DistPlannerAnalyzer, DistPlannerOptions, DynFilterRegistryManager,
-    MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
+    DistExtensionPlanner, DistJoinPlanner, DistPlannerAnalyzer, DistPlannerOptions,
+    DynFilterRegistryManager, MergeSortExtensionPlanner, RemoteDynFilterReceiverExtensionPlanner,
     RemoteDynFilterRegistryLease,
 };
 use crate::metrics::{QUERY_MEMORY_POOL_REJECTED_TOTAL, QUERY_MEMORY_POOL_USAGE_BYTES};
@@ -161,6 +161,7 @@ impl QueryEngineState {
                 .extensions
                 .insert(DistPlannerOptions {
                     allow_query_fallback: true,
+                    ..Default::default()
                 });
         }
 
@@ -210,6 +211,9 @@ impl QueryEngineState {
         );
         if with_dist_planner {
             analyzer.rules.push(Arc::new(DistPlannerAnalyzer));
+            // Runs after `DistPlannerAnalyzer`, which wraps the remote scans in
+            // `MergeScan`: the nested broadcast join shape is only visible then.
+            analyzer.rules.push(Arc::new(DistJoinPlanner));
             analyzer.rules.push(Arc::new(JsonSchemaConcretizeRule));
         }
         analyzer.rules.push(Arc::new(FixStateUdafOrderingAnalyzer));

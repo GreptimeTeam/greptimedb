@@ -58,6 +58,11 @@
 //! * a cold load of the route of the build table returns the rows of the join after an unrelated
 //!   table id is invalidated once (see
 //!   [`test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation`]).
+//!
+//! [`test_nested_broadcast_join_rewrite_executes_on_probe_regions`] is the exception to the
+//! hand-built plans: it plans the join SQL with the distributed rules of the frontend, checks that
+//! the outer `MergeScan` of that plan is planned for the probe region the probe predicate selects,
+//! and executes the plan on the frontend (see that test).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -70,11 +75,16 @@ use common_meta::instruction::CacheIdent;
 use common_query::Output;
 use common_recordbatch::{RecordBatch, RecordBatches, SendableRecordBatchStream};
 use common_telemetry::info;
+use datafusion::common::config::ConfigOptions;
+use datafusion::optimizer::AnalyzerRule;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion_expr::{JoinType, LogicalPlan, LogicalPlanBuilder};
 use datanode::region_server::RegionServer;
 use frontend::instance::Instance;
 use query::datafusion::QUERY_PARALLELISM_HINT;
-use query::dist_plan::MergeScanLogicalPlan;
+use query::dist_plan::{
+    DistJoinPlanner, DistPlannerAnalyzer, DistPlannerOptions, MergeScanExec, MergeScanLogicalPlan,
+};
 use query::parser::QueryLanguageParser;
 use query::query_engine::DefaultSerializer;
 use servers::query_handler::sql::SqlQueryHandler;
@@ -311,6 +321,224 @@ async fn test_nested_merge_scan_capability_cold_load_with_unrelated_invalidation
 
 /// A failing inner region makes the whole query fail: the datanode must not return the rows of the
 /// inner regions that succeed.
+/// The distributed rules produce the nested plan of the join SQL, the frontend plans the outer
+/// `MergeScan` of that plan to the *selected* probe regions, and the datanodes execute it.
+///
+/// Unlike the hand-built plans of the capability tests above, the plan here is the plan of a SQL
+/// query: `DistPlannerAnalyzer` wraps the table scans of the join in `MergeScan`, and
+/// `DistJoinPlanner` (opted in for the build table) nests the build side into the probe side's
+/// scan. The probe predicate of the SQL selects one of the two probe regions, so the outer
+/// `MergeScan` must be planned for that region only: routing by the whole join payload would read
+/// both probe regions. The executed result must be the multiset of the equivalent join on the
+/// frontend, which also covers the duplicated build keys, the NULL join keys, the residual join
+/// filter and the projection of the query.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_nested_broadcast_join_rewrite_executes_on_probe_regions() {
+    common_telemetry::init_default_ut_logging();
+
+    let cluster =
+        build_cluster("test_nested_broadcast_join_rewrite_executes_on_probe_regions").await;
+    let frontend = cluster.fe_instance().clone();
+
+    prepare_tables(&frontend).await;
+    // A NULL join key on both sides and a second probe row of the duplicated join key `10`. They
+    // are inserted here, so the shared fixture of the capability tests keeps its rows.
+    execute_sql(
+        &frontend,
+        &format!("INSERT INTO {PROBE_TABLE}(a_id, probe_key, probe_v, a_ts) VALUES (3, NULL, 500, 3000), (4, 10, 600, 4000)"),
+    )
+    .await;
+    execute_sql(
+        &frontend,
+        &format!(
+            "INSERT INTO {BUILD_TABLE}(b_id, build_key, build_v, b_ts) VALUES (4, NULL, 6, 5000)"
+        ),
+    )
+    .await;
+
+    let sql = rewritten_join_sql();
+    let query_ctx = query_ctx();
+
+    // The reference: the frontend executes the same SQL with its default distributed plan, i.e.
+    // both sides of the join are read with a `MergeScan` and the join runs on the frontend.
+    let reference = query_pretty(&frontend, &sql, query_ctx.clone()).await;
+    info!("reference result of the frontend:\n{reference}");
+    assert_eq!(
+        expected_rewritten_join_rows(),
+        multiset(table_cells(&reference)),
+        "unexpected result of the join on the frontend:\n{reference}"
+    );
+
+    // The plan of the rules, not a hand-built plan.
+    let plan = rewritten_join_plan(&frontend, &query_ctx, &sql).await;
+    let outer = outer_merge_scan(&plan).unwrap_or_else(|| {
+        panic!("the rules must nest the join into the probe side's MergeScan, got: {plan}")
+    });
+    assert!(
+        matches!(outer.input(), LogicalPlan::Join(_)),
+        "the outer MergeScan must carry the join, got: {}",
+        outer.input()
+    );
+
+    // Physical planning of the outer `MergeScan`: the probe predicate selects one of the two probe
+    // regions, so only that region is dispatched.
+    let probe_leaders = region_leaders(&frontend, PROBE_TABLE).await;
+    assert!(
+        probe_leaders.len() > 1,
+        "expected {PROBE_TABLE} to have several regions, actual region leaders: {probe_leaders:?}"
+    );
+    let physical = create_physical_plan(&frontend, &plan, &query_ctx).await;
+    let merge_scan = find_merge_scan_exec(&physical)
+        .unwrap_or_else(|| panic!("expected the outer MergeScan to be planned, got: {physical:?}"));
+    let regions = merge_scan.regions().to_vec();
+    info!("the outer MergeScan is planned for the regions {regions:?}");
+    assert_eq!(
+        1,
+        regions.len(),
+        "the probe predicate `a_id < 100` must select one of the {} probe regions, actual \
+         selection: {regions:?}",
+        probe_leaders.len()
+    );
+    assert!(
+        regions
+            .iter()
+            .all(|region| probe_leaders.contains_key(&region.as_u64())),
+        "the outer MergeScan must select regions of {PROBE_TABLE}, actual selection: {regions:?}"
+    );
+
+    // Execution: the frontend serializes the payload of the outer `MergeScan` to the datanode that
+    // owns the selected region, and the nested `MergeScan` of that payload reads the build table.
+    let actual = output_batches(
+        frontend
+            .query_engine()
+            .execute(plan, query_ctx)
+            .await
+            .expect("the nested plan must be executable"),
+    )
+    .await
+    .pretty_print()
+    .expect("the result of the nested plan must be printable");
+    info!("result of the rule-produced nested plan:\n{actual}");
+    assert_eq!(
+        expected_rewritten_join_rows(),
+        multiset(table_cells(&actual)),
+        "the nested plan returned an unexpected multiset of rows:\n{actual}"
+    );
+    assert_eq!(
+        multiset(table_cells(&reference)),
+        multiset(table_cells(&actual)),
+        "the nested plan returned a different multiset of rows than the frontend:\n{actual}"
+    );
+}
+
+/// The SQL of [`test_nested_broadcast_join_rewrite_executes_on_probe_regions`], over the columns of
+/// [`expected_rewritten_join_rows`] in order.
+///
+/// The projection reorders the columns of the join, the join keys `10` of the build table are
+/// duplicated, the residual join filter rejects the join partners whose values sum to at most
+/// `105` (the probe row `100` sum up to `101` and `102`), and the probe predicate selects the
+/// first probe region.
+fn rewritten_join_sql() -> String {
+    format!(
+        "SELECT p.probe_v, p.a_id, b.build_v
+         FROM {PROBE_TABLE} p JOIN {BUILD_TABLE} b
+         ON p.probe_key = b.build_key AND p.probe_v + b.build_v > 105
+         WHERE p.a_id < 100"
+    )
+}
+
+/// The rows of [`rewritten_join_sql`] as `(probe_v, a_id, build_v)`: the probe row `(4, 10, 600)`
+/// joins the two build rows of the duplicated key `10` (`600 + 1` and `600 + 2`), the probe row
+/// `(2, 20, 200)` joins `(3, 20, 3)`, the residual filter rejects the probe row `(1, 10, 100)`
+/// (`100 + 1` and `100 + 2` are not greater than `105`), and the NULL join keys of both sides
+/// match nothing.
+fn expected_rewritten_join_rows() -> Vec<Vec<String>> {
+    multiset(vec![
+        vec!["200".to_string(), "2".to_string(), "3".to_string()],
+        vec!["600".to_string(), "4".to_string(), "1".to_string()],
+        vec!["600".to_string(), "4".to_string(), "2".to_string()],
+    ])
+}
+
+/// Plans `sql` on the frontend and applies the distributed rules of the frontend: the
+/// [`DistPlannerAnalyzer`], which wraps the table scans of both sides of the join in `MergeScan`,
+/// and the [`DistJoinPlanner`] opted in for the build table.
+async fn rewritten_join_plan(
+    frontend: &Arc<Instance>,
+    query_ctx: &QueryContextRef,
+    sql: &str,
+) -> LogicalPlan {
+    let plan = plan_sql(frontend, sql, query_ctx).await;
+    info!("logical plan of the join SQL:\n{plan}");
+
+    let mut config = ConfigOptions::default();
+    config.extensions.insert(DistPlannerOptions {
+        nested_broadcast_join_build_table: Some(BUILD_TABLE.to_string()),
+        ..Default::default()
+    });
+    let plan = DistPlannerAnalyzer {}
+        .analyze(plan, &config)
+        .expect("the distributed plan of the join must be analyzable");
+    let plan = DistJoinPlanner {}
+        .analyze(plan, &config)
+        .expect("the nested broadcast join rewrite must not fail");
+    info!("plan of the distributed rules:\n{plan}");
+
+    plan
+}
+
+/// Returns the outermost `MergeScan` of `plan`, descending through projections.
+fn outer_merge_scan(plan: &LogicalPlan) -> Option<&MergeScanLogicalPlan> {
+    match plan {
+        LogicalPlan::Extension(extension) => extension
+            .node
+            .as_any()
+            .downcast_ref::<MergeScanLogicalPlan>(),
+        LogicalPlan::Projection(projection) => outer_merge_scan(&projection.input),
+        _ => None,
+    }
+}
+
+/// Creates the physical plan of `plan` the way the query engine does: the session analyzer of the
+/// frontend, the optimizer (skipped for a `MergeScan` root) and the physical planner with its
+/// distributed extension planner.
+async fn create_physical_plan(
+    frontend: &Arc<Instance>,
+    plan: &LogicalPlan,
+    query_ctx: &QueryContextRef,
+) -> Arc<dyn ExecutionPlan> {
+    let ctx = frontend.query_engine().engine_context(query_ctx.clone());
+    let state = ctx.state();
+    let analyzed = state
+        .analyzer()
+        .execute_and_check(plan.clone(), state.config_options(), |_, _| {})
+        .expect("the nested plan must pass the session analyzer");
+    let optimized = if let LogicalPlan::Extension(extension) = &analyzed
+        && extension.node.name() == MergeScanLogicalPlan::name()
+    {
+        analyzed.clone()
+    } else {
+        state
+            .optimizer()
+            .optimize(analyzed, state, |_, _| {})
+            .expect("the nested plan must be optimizable")
+    };
+    state
+        .query_planner()
+        .create_physical_plan(&optimized, state)
+        .await
+        .expect("the nested plan must be physically plannable")
+}
+
+/// Returns the `MergeScanExec` of `plan`, descending through the physical plan tree.
+fn find_merge_scan_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<&MergeScanExec> {
+    if let Some(merge_scan) = plan.downcast_ref::<MergeScanExec>() {
+        return Some(merge_scan);
+    }
+
+    plan.children().into_iter().find_map(find_merge_scan_exec)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_nested_merge_scan_capability_inner_failure_fails_query() {
     common_telemetry::init_default_ut_logging();

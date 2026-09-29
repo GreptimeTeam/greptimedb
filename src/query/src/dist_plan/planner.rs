@@ -46,6 +46,7 @@ use table::table::adapter::DfTableProviderAdapter;
 use table::table_name::TableName;
 
 use crate::dist_plan::PredicateExtractor;
+use crate::dist_plan::dist_join_planner::nested_broadcast_join_probe_input;
 use crate::dist_plan::merge_scan::{MergeScanExec, MergeScanLogicalPlan};
 use crate::dist_plan::merge_sort::{MergeSortExec, MergeSortLogicalPlan};
 use crate::dist_plan::region_pruner::ConstraintPruner;
@@ -195,12 +196,17 @@ impl ExtensionPlanner for DistExtensionPlanner {
         }
 
         let optimized_plan = input_plan;
-        let Some(table_name) = Self::extract_full_table_name(input_plan)? else {
+        // Region pruning clears the collected predicates at a node with several inputs,
+        // so the payload of a nested broadcast join would be routed by the join itself
+        // and read every probe region. The local probe input keeps the probe predicate
+        // pruning; the full payload is still dispatched to the selected regions.
+        let routing_plan = nested_broadcast_join_probe_input(input_plan).unwrap_or(input_plan);
+        let Some(table_name) = Self::extract_full_table_name(routing_plan)? else {
             // no relation found in input plan, going to execute them locally
             return fallback(optimized_plan).await;
         };
 
-        let Ok(regions) = self.get_regions(&table_name, input_plan).await else {
+        let Ok(regions) = self.get_regions(&table_name, routing_plan).await else {
             // no peers found, going to execute them locally
             return fallback(optimized_plan).await;
         };
@@ -471,6 +477,14 @@ fn partition_column_types(table_info: &TableInfo) -> Vec<(String, ConcreteDataTy
         .collect()
 }
 
+/// Returns the resolved name of the first base table found in `plan`.
+pub(crate) fn table_name_of(plan: &LogicalPlan) -> Option<TableName> {
+    let mut extractor = TableScanExtractor::default();
+    let _ = plan.visit(&mut extractor).ok()?;
+
+    extractor.table_name
+}
+
 /// Extract the scan name and captured table identity from a logical plan.
 #[derive(Default)]
 struct TableScanExtractor {
@@ -555,7 +569,7 @@ mod tests {
     use common_query::request::QueryRequest;
     use common_recordbatch::SendableRecordBatchStream;
     use datafusion::datasource::DefaultTableSource;
-    use datafusion_expr::{LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
+    use datafusion_expr::{JoinType, LogicalPlan, LogicalPlanBuilder, col as df_col, lit};
     use datatypes::prelude::ConcreteDataType;
     use datatypes::schema::{ColumnSchema, Schema};
     use datatypes::value::Value;
@@ -571,6 +585,8 @@ mod tests {
     use table::test_util::EmptyTable;
 
     use super::DistExtensionPlanner;
+    use super::nested_broadcast_join_probe_input;
+    use crate::dist_plan::merge_scan::MergeScanLogicalPlan;
     use crate::region_query::{RegionQueryHandler, RegionQueryTarget};
 
     const LOGICAL_TABLE_ID: u32 = 1024;
@@ -800,6 +816,63 @@ mod tests {
             vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
             planner.get_regions(&table_name, &plan).await.unwrap()
         );
+    }
+
+    /// Region pruning clears the collected predicates at a node with several inputs, so a
+    /// nested broadcast join must be routed by its local probe input: the probe predicate
+    /// prunes the probe regions, while routing by the whole payload would scan every
+    /// probe region.
+    #[tokio::test]
+    async fn nested_broadcast_join_routes_by_probe_input() {
+        let (planner, probe_plan, table_name) =
+            planner_and_plan(vec![0, 1], physical_partition_expressions()).await;
+        // The build side scans the same table under another qualifier, so the join sides
+        // have distinct field qualifiers.
+        let build_plan =
+            MergeScanLogicalPlan::new(build_side_plan(&probe_plan), false, Default::default())
+                .into_logical_plan();
+        let join_plan = LogicalPlanBuilder::from(probe_plan.clone())
+            .join(
+                build_plan,
+                JoinType::Inner,
+                (vec!["host"], vec!["host"]),
+                None,
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        // The whole payload clears the probe predicate at the join and reads all regions.
+        assert_all_logical_regions(planner.get_regions(&table_name, &join_plan).await.unwrap());
+
+        // The local probe input keeps the probe predicate pruning: one of three regions.
+        let routing_plan = nested_broadcast_join_probe_input(&join_plan)
+            .expect("the supported nested shape must route by its probe input");
+        assert_eq!(probe_plan.to_string(), routing_plan.to_string());
+        assert_eq!(
+            vec![RegionId::new(LOGICAL_TABLE_ID, 1)],
+            planner
+                .get_regions(&table_name, routing_plan)
+                .await
+                .unwrap()
+        );
+    }
+
+    /// Scans the table of `plan` under the qualifier `build` with the same probe predicate,
+    /// so a join of both sides has distinct field qualifiers.
+    fn build_side_plan(plan: &LogicalPlan) -> LogicalPlan {
+        let LogicalPlan::Filter(filter) = plan else {
+            panic!("expected the probe plan to be a filter, got: {plan}");
+        };
+        let LogicalPlan::TableScan(scan) = filter.input.as_ref() else {
+            panic!("expected the probe plan to scan a table, got: {plan}");
+        };
+        LogicalPlanBuilder::scan_with_filters("build", scan.source.clone(), None, vec![])
+            .unwrap()
+            .filter(filter.predicate.clone())
+            .unwrap()
+            .build()
+            .unwrap()
     }
 
     #[tokio::test]

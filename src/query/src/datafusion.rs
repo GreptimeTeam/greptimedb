@@ -642,27 +642,35 @@ impl QueryEngine for DatafusionQueryEngine {
             Some(query_ctx.timezone().to_string());
 
         // usually it's impossible to have both `set variable` set by sql client and
-        // hint in header by grpc client, so only need to deal with them separately
+        // hint in header by grpc client, so only need to deal with them separately.
+        // Start from the options already configured on the session config (e.g. the
+        // engine level `allow_query_fallback`) so that an insert below doesn't drop them.
+        let mut dist_planner_options = state
+            .config()
+            .options()
+            .extensions
+            .get::<DistPlannerOptions>()
+            .cloned()
+            .unwrap_or_default();
+        let mut has_dist_planner_options = false;
         if query_ctx.configuration_parameter().allow_query_fallback() {
-            state
-                .config_mut()
-                .options_mut()
-                .extensions
-                .insert(DistPlannerOptions {
-                    allow_query_fallback: true,
-                });
+            dist_planner_options.allow_query_fallback = true;
+            has_dist_planner_options = true;
         } else if let Some(fallback) = query_ctx.extension(QUERY_FALLBACK_HINT) {
             // also check the query context for fallback hint
             // if it is set, we will enable the fallback
             if fallback.to_lowercase().parse::<bool>().unwrap_or(false) {
-                state
-                    .config_mut()
-                    .options_mut()
-                    .extensions
-                    .insert(DistPlannerOptions {
-                        allow_query_fallback: true,
-                    });
+                dist_planner_options.allow_query_fallback = true;
+                has_dist_planner_options = true;
             }
+        }
+
+        if has_dist_planner_options {
+            state
+                .config_mut()
+                .options_mut()
+                .extensions
+                .insert(dist_planner_options);
         }
 
         state
