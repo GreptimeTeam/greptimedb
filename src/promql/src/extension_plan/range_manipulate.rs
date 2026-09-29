@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics, StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -318,8 +318,8 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         }
 
         let mut exprs = Vec::with_capacity(1 + self.field_columns.len());
-        exprs.push(col(&self.time_index));
-        exprs.extend(self.field_columns.iter().map(col));
+        exprs.push(ident(&self.time_index));
+        exprs.extend(self.field_columns.iter().map(ident));
         exprs
     }
 
