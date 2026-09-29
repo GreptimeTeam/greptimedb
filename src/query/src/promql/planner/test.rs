@@ -2411,9 +2411,9 @@ async fn at_modifier_keeps_multi_series_roots_out_of_promoted_subtree() {
 async fn at_modifier_does_not_promote_label_join() {
     for query in [
         // Directly above the anchored instant selector...
-        "label_join(some_metric @ 300, \"tag_0\", \"-\", \"\")",
+        "label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
         // ... and below another call, which is planned as usual over the join.
-        "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"\"))",
+        "abs(label_join(some_metric @ 300, \"tag_0\", \"-\", \"tag_0\", \"tag_0\"))",
     ] {
         let plan = build_at_modifier_plan(query, 0, 1000).await;
         let plan_str = plan.display_indent_schema().to_string();
@@ -2446,7 +2446,7 @@ async fn at_modifier_does_not_promote_label_join() {
     // A range call below the join is still promoted on its own: the anchored window is folded
     // once per series, and the join above it is evaluated at every step over that replay.
     let plan = build_at_modifier_plan(
-        "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"\")",
+        "label_join(rate(some_metric[5m] @ 300), \"tag_0\", \"-\", \"tag_0\", \"tag_0\")",
         0,
         1000,
     )
@@ -5878,7 +5878,7 @@ async fn test_label_join() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
-  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), up.tag_1, up.tag_2, up.tag_3) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
+  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), up.tag_1, up.tag_2, up.tag_3), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.tag_1 ASC NULLS FIRST, up.tag_2 ASC NULLS FIRST, up.tag_3 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -5913,7 +5913,7 @@ async fn test_label_replace() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
-  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
+  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0 [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8]
     PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
       PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         Sort: up.tag_0 ASC NULLS FIRST, up.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]

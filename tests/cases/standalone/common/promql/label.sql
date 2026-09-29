@@ -17,6 +17,7 @@ INSERT INTO TABLE test VALUES
     (15000, 'host2', 'idc4',8);
 
 -- Missing source labels --
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "new_host", "-");
 
 -- dst_label is equal to source label --
@@ -27,8 +28,7 @@ TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "host");
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "idc", "host");
 
--- test the empty source label --
--- SQLNESS SORT_RESULT 3 1
+-- An empty source label name is invalid --
 TQL EVAL (0, 15, '5s') label_join(test{host="host1"}, "host", "-", "");
 
 -- Both hosts are joined to the same `host` at 0s, leaving two series with the same label set --
@@ -52,6 +52,12 @@ TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "new_idc", "$2", "idc",
 -- dst_label is equal to source label --
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 15, '5s') label_replace(test{host="host2"}, "idc", "$2", "idc", "(.*):(.*)");
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 15, '5s') label_replace(test{host="host1"}, "idc", "$2", "idc", "(.*):(.*)");
+
+-- Both hosts are rewritten to the same `host`, leaving two series with the same label set --
+TQL EVAL (0, 15, '5s') label_replace(test, "host", "x", "host", ".*");
 
 -- test the empty source label --
 -- TODO(dennis): we can't remove the label currently --

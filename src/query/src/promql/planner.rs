@@ -107,7 +107,7 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, SameLabelSetSnafu, TableNameNotFoundSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
     TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
     UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
 };
@@ -2069,8 +2069,8 @@ impl PromPlanner {
 
         // Rewriting a label the input series already have can map several of them onto the same
         // label set, which PromQL rejects. A new label keeps the series distinct.
-        let may_duplicate_label_sets =
-            func.name == "label_join" && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
+        let may_duplicate_label_sets = matches!(func.name, "label_join" | "label_replace")
+            && new_tags.iter().any(|tag| input_tag_columns.contains(tag));
 
         // Update context tags after building plan
         // We can't push them before planning, because they won't exist until projection.
@@ -3618,8 +3618,8 @@ impl PromPlanner {
             }
             "label_replace" => {
                 self.ctx.use_tsid = false;
-                if let Some((replace_expr, dst_label)) = self
-                    .build_regexp_replace_label_expr(&mut other_input_exprs, query_engine_state)?
+                if let Some((replace_expr, dst_label)) =
+                    self.build_regexp_replace_label_expr(&mut other_input_exprs, input_schema)?
                 {
                     // Reserve the current field columns except the `dst_label`.
                     for value in &self.ctx.field_columns {
@@ -3629,10 +3629,8 @@ impl PromPlanner {
                         }
                     }
 
-                    ensure!(
-                        !self.ctx.tag_columns.contains(&dst_label),
-                        SameLabelSetSnafu
-                    );
+                    // Remove it from tag columns if exists to avoid duplicated column names
+                    self.ctx.tag_columns.retain(|tag| *tag != dst_label);
                     new_tags.push(dst_label);
                     // Add the new label expr to evaluate
                     exprs.push(replace_expr);
@@ -3941,7 +3939,7 @@ impl PromPlanner {
     fn build_regexp_replace_label_expr(
         &self,
         other_input_exprs: &mut VecDeque<DfExpr>,
-        query_engine_state: &QueryEngineState,
+        input_schema: &DFSchemaRef,
     ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
@@ -3977,66 +3975,63 @@ impl PromPlanner {
             .fail()?,
         };
 
-        // Validate the regex before using it
+        // Like Prometheus, match the whole source value. A series whose source value matches gets
+        // `dst_label` set to the expanded replacement; any other series is left unchanged.
         // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
-        regex::Regex::new(&regex).map_err(|_| {
-            InvalidRegularExpressionSnafu {
-                regex: regex.clone(),
-            }
-            .build()
-        })?;
+        let anchored = format!("^(?s:{regex})$");
+        let compiled = regex::Regex::new(&anchored)
+            .map_err(|_| InvalidRegularExpressionSnafu { regex }.build())?;
+        let dst_exists = self.ctx.tag_columns.contains(&dst_label);
 
-        // If the src_label exists and regex is empty, keep everything unchanged.
-        if self.ctx.tag_columns.contains(&src_label) && regex.is_empty() {
-            return Ok(None);
-        }
-
-        // If the src_label doesn't exists, and
+        // A missing source label reads as the empty string for every series, so the result is
+        // the same for all of them and is decided here.
         if !self.ctx.tag_columns.contains(&src_label) {
-            if replacement.is_empty() {
-                // the replacement is empty, keep everything unchanged.
+            let Some(captures) = compiled.captures("") else {
                 return Ok(None);
-            } else {
-                // the replacement is not empty, always adds dst_label with replacement value.
+            };
+            let mut value = String::new();
+            captures.expand(&replacement, &mut value);
+            if value.is_empty() {
+                // Setting a label to the empty string removes it, which is a no-op for a new
+                // label.
+                if !dst_exists {
+                    return Ok(None);
+                }
                 return Ok(Some((
-                    // alias literal `replacement` as dst_label
-                    lit(replacement).alias(&dst_label),
+                    lit(ScalarValue::Utf8(None)).alias(&dst_label),
                     dst_label,
                 )));
             }
+            return Ok(Some((lit(value).alias(&dst_label), dst_label)));
         }
 
-        // Preprocess the regex:
-        // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
-        let regex = format!("^(?s:{regex})$");
+        let src = DfExpr::Column(Column::from_name(src_label))
+            .cast_to(&ArrowDataType::Utf8, input_schema)
+            .context(DataFusionPlanningSnafu)?;
+        let src = DfExpr::ScalarFunction(ScalarFunction {
+            func: coalesce(),
+            args: vec![src, lit("")],
+        });
+        let matched = DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::regex::regexp_like(),
+            args: vec![src.clone(), lit(anchored.clone())],
+        });
+        let replaced = Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::regex::regexp_replace(),
+            args: vec![src, lit(anchored), lit(replacement)],
+        }));
+        let unchanged = if dst_exists {
+            DfExpr::Column(Column::from_name(&dst_label))
+                .cast_to(&ArrowDataType::Utf8, input_schema)
+                .context(DataFusionPlanningSnafu)?
+        } else {
+            lit(ScalarValue::Utf8(None))
+        };
+        let replace_expr = when(matched, replaced)
+            .otherwise(unchanged)
+            .context(DataFusionPlanningSnafu)?;
 
-        let session_state = query_engine_state.session_state();
-        let func = session_state
-            .scalar_functions()
-            .get("regexp_replace")
-            .context(UnsupportedExprSnafu {
-                name: "regexp_replace",
-            })?;
-
-        // regexp_replace(src_label, regex, replacement)
-        let args = vec![
-            if src_label.is_empty() {
-                DfExpr::Literal(ScalarValue::Utf8(Some(String::new())), None)
-            } else {
-                DfExpr::Column(Column::from_name(src_label))
-            },
-            DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
-            DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
-        ];
-
-        Ok(Some((
-            DfExpr::ScalarFunction(ScalarFunction {
-                func: func.clone(),
-                args,
-            })
-            .alias(&dst_label),
-            dst_label,
-        )))
+        Ok(Some((replace_expr.alias(&dst_label), dst_label)))
     }
 
     /// Build expr for `label_join` function
@@ -4078,7 +4073,10 @@ impl PromPlanner {
                 match expr {
                     DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
                         if label.is_empty() {
-                            Ok(DfExpr::Literal(ScalarValue::Null, None))
+                            FunctionInvalidArgumentSnafu {
+                                fn_name: "label_join",
+                            }
+                            .fail()
                         } else if available_columns.contains(label.as_str()) {
                             // Label exists in the table schema
                             Ok(DfExpr::Column(Column::from_name(label)))
@@ -4097,12 +4095,10 @@ impl PromPlanner {
                 }
             })
             .collect::<Result<Vec<_>>>()?;
-        ensure!(
-            !src_labels.is_empty(),
-            FunctionInvalidArgumentSnafu {
-                fn_name: "label_join"
-            }
-        );
+        // Joining no labels yields the empty string, i.e. removes `dst_label`.
+        if src_labels.is_empty() {
+            return Ok((lit(ScalarValue::Utf8(None)).alias(&dst_label), dst_label));
+        }
 
         let session_state = query_engine_state.session_state();
         let func = session_state
@@ -4116,13 +4112,23 @@ impl PromPlanner {
         args.extend(src_labels);
 
         Ok((
-            DfExpr::ScalarFunction(ScalarFunction {
+            Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
                 func: func.clone(),
                 args,
-            })
+            }))
             .alias(&dst_label),
             dst_label,
         ))
+    }
+
+    /// An empty label value means the label is absent in PromQL. Label functions represent it
+    /// as NULL, like a series that never had the label, so that both compare equal when label
+    /// sets are matched and neither is reported as a label.
+    fn empty_label_to_null(value: DfExpr) -> DfExpr {
+        DfExpr::ScalarFunction(ScalarFunction {
+            func: datafusion_functions::core::nullif(),
+            args: vec![value, lit("")],
+        })
     }
 
     fn create_time_index_column_expr(&self) -> Result<DfExpr> {

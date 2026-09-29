@@ -1017,6 +1017,31 @@ pub async fn test_prometheus_label_replace_response(store_type: StorageType) {
         .unwrap()
     );
 
+    // A series whose source value does not match keeps its labels, without `host_copy`.
+    let query = encode(r#"label_replace(demo, "host_copy", "$1", "host", "other(.*)")"#);
+    let res = client
+        .get(&format!("/v1/prometheus/api/v1/query?query={query}&time=0"))
+        .send()
+        .await;
+
+    assert_eq!(res.status(), StatusCode::OK);
+    let body = res.json::<PrometheusJsonResponse>().await;
+    assert_eq!(body.status, "success");
+    assert_eq!(
+        body.data,
+        serde_json::from_value::<PrometheusResponse>(json!({
+            "resultType": "vector",
+            "result": [{
+                "metric": {
+                    "__name__": "demo",
+                    "host": "host1"
+                },
+                "value": [0.0, "1.1"]
+            }]
+        }))
+        .unwrap()
+    );
+
     guard.remove_all().await;
 }
 
