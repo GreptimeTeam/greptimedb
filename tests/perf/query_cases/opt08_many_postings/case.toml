@@ -1,0 +1,72 @@
+# Fixture-only OPT08 Stage A case: one wide (all-matching) indexed host regex
+# predicate over inverted-index SSTs produced by a real Prometheus remote-write
+# ingest. Expected counts for manual inspection only; no regression threshold is
+# set, so no speedup can be assumed from this case:
+#   host ~ '^host.*$' -> 131072 (2048 series x 64 samples)
+#   count(*)          -> 131072 (no-filter control)
+#   host = 'host9999' -> 0      (absent control; hosts are host0000..host1023)
+# The single EXPLAIN ANALYZE VERBOSE sample is the diagnostic for OPT08 index
+# behavior, but it is not a comparable measurement, and its aggregate metrics
+# cannot by themselves prove how many postings one file contributed to one call.
+# sample_chunk_size=64 with flush_every_sample_chunks=1 fixes the flush layout
+# without changing the expected counts.
+
+[case]
+name = "opt08_many_postings"
+description = "OPT08 Stage A wide indexed host predicate over flushed inverted-index Prometheus SSTs"
+
+[scenario]
+kind = "prom_remote_write_then_query"
+
+[scenario.remote_write]
+database = "public"
+metric = "opt08_many_postings"
+physical_table = "opt08_many_postings_physical"
+disable_index_result_cache = true
+series_count = 2048
+samples_per_series = 64
+sample_chunk_size = 64
+flush_every_sample_chunks = 1
+start_unix_millis = 1704067200000
+step_millis = 15000
+chunk_series_count = 256
+timeout_seconds = 600
+visibility_timeout_seconds = 120
+base_setup_sql = [
+  "CREATE TABLE opt08_many_postings_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'index.type'='inverted', 'compaction.twcs.trigger_file_num'='100')",
+]
+candidate_setup_sql = [
+  "CREATE TABLE opt08_many_postings_physical (greptime_timestamp TIMESTAMP TIME INDEX, greptime_value DOUBLE) ENGINE=metric WITH ('physical_metric_table'='', 'index.type'='inverted', 'compaction.twcs.trigger_file_num'='100')",
+]
+
+[scenario.remote_write.prom_store]
+pending_rows_flush_interval = "1s"
+max_batch_rows = 100000
+
+[[scenario.queries]]
+name = "host_regex_all_present"
+kind = "sql"
+query = "SELECT count(*) FROM opt08_many_postings WHERE host ~ '^host.*$'"
+warmup = 3
+iterations = 20
+
+[[scenario.queries]]
+name = "explain_host_regex_all_present"
+kind = "sql"
+query = "EXPLAIN ANALYZE VERBOSE SELECT count(*) FROM opt08_many_postings WHERE host ~ '^host.*$'"
+warmup = 0
+iterations = 1
+
+[[scenario.queries]]
+name = "all_rows_control"
+kind = "sql"
+query = "SELECT count(*) FROM opt08_many_postings"
+warmup = 3
+iterations = 9
+
+[[scenario.queries]]
+name = "absent_host_control"
+kind = "sql"
+query = "SELECT count(*) FROM opt08_many_postings WHERE host = 'host9999'"
+warmup = 3
+iterations = 9
