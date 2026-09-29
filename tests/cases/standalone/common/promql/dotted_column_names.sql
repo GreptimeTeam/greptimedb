@@ -1,27 +1,29 @@
 -- https://github.com/GreptimeTeam/greptimedb/issues/9390
 -- Tag, field and time index names containing dots or upper case letters must
--- be resolved as plain column names, not as `relation.column`.
+-- be resolved as plain column names, not as `relation.column`. `Host` and `host`
+-- hold different values, so reading one for the other changes the output.
 CREATE TABLE "otel.m" (
     "ts.time" TIMESTAMP(3) TIME INDEX,
     "service.name" STRING,
     "Host" STRING,
+    host STRING,
     "v.val" DOUBLE,
-    PRIMARY KEY ("service.name", "Host")
+    PRIMARY KEY ("service.name", "Host", host)
 ) PARTITION ON COLUMNS ("service.name") (
     "service.name" < 'b',
     "service.name" >= 'b'
 );
 
 INSERT INTO "otel.m" VALUES
-    (0,     'a', 'h1', 1),
-    (0,     'a', 'h2', 2),
-    (0,     'b', 'h1', 3),
-    (5000,  'a', 'h1', 4),
-    (5000,  'a', 'h2', 5),
-    (5000,  'b', 'h1', 6),
-    (10000, 'a', 'h1', 8),
-    (10000, 'a', 'h2', 9),
-    (10000, 'b', 'h1', 8);
+    (0,     'a', 'h1', 'x', 1),
+    (0,     'a', 'h2', 'x', 2),
+    (0,     'b', 'h1', 'y', 3),
+    (5000,  'a', 'h1', 'x', 4),
+    (5000,  'a', 'h2', 'x', 5),
+    (5000,  'b', 'h1', 'y', 6),
+    (10000, 'a', 'h1', 'x', 8),
+    (10000, 'a', 'h2', 'x', 9),
+    (10000, 'b', 'h1', 'y', 8);
 
 CREATE TABLE "otel.h" (
     "ts.time" TIMESTAMP(3) TIME INDEX,
@@ -46,6 +48,9 @@ TQL EVAL (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 TQL EVAL (0, 10, '5s') {"otel.m"} and on("service.name") {"otel.m", "service.name"="b"};
 
 -- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') {"otel.m"} and on(host) {"otel.m", host="y"};
+
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} unless {"otel.m", "Host"="h1"};
 
 -- SQLNESS SORT_RESULT 3 1
@@ -68,6 +73,15 @@ TQL EVAL (0, 10, '5s') bottomk by ("service.name") (1, {"otel.m"});
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') sum by ("service.name") ({"otel.m"});
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum by ("Host") ({"otel.m"});
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum by (host) ({"otel.m"});
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum without ("Host") ({"otel.m"});
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') -{"otel.m"};

@@ -1,12 +1,14 @@
 -- https://github.com/GreptimeTeam/greptimedb/issues/9390
 -- Tag, field and time index names containing dots or upper case letters must
--- be resolved as plain column names, not as `relation.column`.
+-- be resolved as plain column names, not as `relation.column`. `Host` and `host`
+-- hold different values, so reading one for the other changes the output.
 CREATE TABLE "otel.m" (
     "ts.time" TIMESTAMP(3) TIME INDEX,
     "service.name" STRING,
     "Host" STRING,
+    host STRING,
     "v.val" DOUBLE,
-    PRIMARY KEY ("service.name", "Host")
+    PRIMARY KEY ("service.name", "Host", host)
 ) PARTITION ON COLUMNS ("service.name") (
     "service.name" < 'b',
     "service.name" >= 'b'
@@ -15,15 +17,15 @@ CREATE TABLE "otel.m" (
 Affected Rows: 0
 
 INSERT INTO "otel.m" VALUES
-    (0,     'a', 'h1', 1),
-    (0,     'a', 'h2', 2),
-    (0,     'b', 'h1', 3),
-    (5000,  'a', 'h1', 4),
-    (5000,  'a', 'h2', 5),
-    (5000,  'b', 'h1', 6),
-    (10000, 'a', 'h1', 8),
-    (10000, 'a', 'h2', 9),
-    (10000, 'b', 'h1', 8);
+    (0,     'a', 'h1', 'x', 1),
+    (0,     'a', 'h2', 'x', 2),
+    (0,     'b', 'h1', 'y', 3),
+    (5000,  'a', 'h1', 'x', 4),
+    (5000,  'a', 'h2', 'x', 5),
+    (5000,  'b', 'h1', 'y', 6),
+    (10000, 'a', 'h1', 'x', 8),
+    (10000, 'a', 'h2', 'x', 9),
+    (10000, 'b', 'h1', 'y', 8);
 
 Affected Rows: 9
 
@@ -50,69 +52,80 @@ Affected Rows: 6
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 
-+---------------------+--------------+------+-------+
-| ts.time             | service.name | Host | v.val |
-+---------------------+--------------+------+-------+
-| 1970-01-01T00:00:00 | a            | h1   | 1.0   |
-| 1970-01-01T00:00:00 | b            | h1   | 3.0   |
-| 1970-01-01T00:00:05 | a            | h1   | 4.0   |
-| 1970-01-01T00:00:05 | b            | h1   | 6.0   |
-| 1970-01-01T00:00:10 | a            | h1   | 8.0   |
-| 1970-01-01T00:00:10 | b            | h1   | 8.0   |
-+---------------------+--------------+------+-------+
++---------------------+--------------+------+------+-------+
+| ts.time             | service.name | Host | host | v.val |
++---------------------+--------------+------+------+-------+
+| 1970-01-01T00:00:00 | a            | h1   | x    | 1.0   |
+| 1970-01-01T00:00:00 | b            | h1   | y    | 3.0   |
+| 1970-01-01T00:00:05 | a            | h1   | x    | 4.0   |
+| 1970-01-01T00:00:05 | b            | h1   | y    | 6.0   |
+| 1970-01-01T00:00:10 | a            | h1   | x    | 8.0   |
+| 1970-01-01T00:00:10 | b            | h1   | y    | 8.0   |
++---------------------+--------------+------+------+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} and on("service.name") {"otel.m", "service.name"="b"};
 
-+---------------------+--------------+------+-------+
-| ts.time             | service.name | Host | v.val |
-+---------------------+--------------+------+-------+
-| 1970-01-01T00:00:00 | b            | h1   | 3.0   |
-| 1970-01-01T00:00:05 | b            | h1   | 6.0   |
-| 1970-01-01T00:00:10 | b            | h1   | 8.0   |
-+---------------------+--------------+------+-------+
++---------------------+--------------+------+------+-------+
+| ts.time             | service.name | Host | host | v.val |
++---------------------+--------------+------+------+-------+
+| 1970-01-01T00:00:00 | b            | h1   | y    | 3.0   |
+| 1970-01-01T00:00:05 | b            | h1   | y    | 6.0   |
+| 1970-01-01T00:00:10 | b            | h1   | y    | 8.0   |
++---------------------+--------------+------+------+-------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') {"otel.m"} and on(host) {"otel.m", host="y"};
+
++---------------------+--------------+------+------+-------+
+| ts.time             | service.name | Host | host | v.val |
++---------------------+--------------+------+------+-------+
+| 1970-01-01T00:00:00 | b            | h1   | y    | 3.0   |
+| 1970-01-01T00:00:05 | b            | h1   | y    | 6.0   |
+| 1970-01-01T00:00:10 | b            | h1   | y    | 8.0   |
++---------------------+--------------+------+------+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} unless {"otel.m", "Host"="h1"};
 
-+---------------------+--------------+------+-------+
-| ts.time             | service.name | Host | v.val |
-+---------------------+--------------+------+-------+
-| 1970-01-01T00:00:00 | a            | h2   | 2.0   |
-| 1970-01-01T00:00:05 | a            | h2   | 5.0   |
-| 1970-01-01T00:00:10 | a            | h2   | 9.0   |
-+---------------------+--------------+------+-------+
++---------------------+--------------+------+------+-------+
+| ts.time             | service.name | Host | host | v.val |
++---------------------+--------------+------+------+-------+
+| 1970-01-01T00:00:00 | a            | h2   | x    | 2.0   |
+| 1970-01-01T00:00:05 | a            | h2   | x    | 5.0   |
+| 1970-01-01T00:00:10 | a            | h2   | x    | 9.0   |
++---------------------+--------------+------+------+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} unless on("service.name") {"otel.m", "service.name"="b"};
 
-+---------------------+--------------+------+-------+
-| ts.time             | service.name | Host | v.val |
-+---------------------+--------------+------+-------+
-| 1970-01-01T00:00:00 | a            | h1   | 1.0   |
-| 1970-01-01T00:00:00 | a            | h2   | 2.0   |
-| 1970-01-01T00:00:05 | a            | h1   | 4.0   |
-| 1970-01-01T00:00:05 | a            | h2   | 5.0   |
-| 1970-01-01T00:00:10 | a            | h1   | 8.0   |
-| 1970-01-01T00:00:10 | a            | h2   | 9.0   |
-+---------------------+--------------+------+-------+
++---------------------+--------------+------+------+-------+
+| ts.time             | service.name | Host | host | v.val |
++---------------------+--------------+------+------+-------+
+| 1970-01-01T00:00:00 | a            | h1   | x    | 1.0   |
+| 1970-01-01T00:00:00 | a            | h2   | x    | 2.0   |
+| 1970-01-01T00:00:05 | a            | h1   | x    | 4.0   |
+| 1970-01-01T00:00:05 | a            | h2   | x    | 5.0   |
+| 1970-01-01T00:00:10 | a            | h1   | x    | 8.0   |
+| 1970-01-01T00:00:10 | a            | h2   | x    | 9.0   |
++---------------------+--------------+------+------+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} or {"otel.m", "Host"="h1"};
 
-+---------------------+------+--------------+-------+
-| ts.time             | Host | service.name | v.val |
-+---------------------+------+--------------+-------+
-| 1970-01-01T00:00:00 | h1   | a            | 1.0   |
-| 1970-01-01T00:00:00 | h1   | b            | 3.0   |
-| 1970-01-01T00:00:00 | h2   | a            | 2.0   |
-| 1970-01-01T00:00:05 | h1   | a            | 4.0   |
-| 1970-01-01T00:00:05 | h1   | b            | 6.0   |
-| 1970-01-01T00:00:05 | h2   | a            | 5.0   |
-| 1970-01-01T00:00:10 | h1   | a            | 8.0   |
-| 1970-01-01T00:00:10 | h1   | b            | 8.0   |
-| 1970-01-01T00:00:10 | h2   | a            | 9.0   |
-+---------------------+------+--------------+-------+
++---------------------+------+------+--------------+-------+
+| ts.time             | Host | host | service.name | v.val |
++---------------------+------+------+--------------+-------+
+| 1970-01-01T00:00:00 | h1   | x    | a            | 1.0   |
+| 1970-01-01T00:00:00 | h1   | y    | b            | 3.0   |
+| 1970-01-01T00:00:00 | h2   | x    | a            | 2.0   |
+| 1970-01-01T00:00:05 | h1   | x    | a            | 4.0   |
+| 1970-01-01T00:00:05 | h1   | y    | b            | 6.0   |
+| 1970-01-01T00:00:05 | h2   | x    | a            | 5.0   |
+| 1970-01-01T00:00:10 | h1   | x    | a            | 8.0   |
+| 1970-01-01T00:00:10 | h1   | y    | b            | 8.0   |
+| 1970-01-01T00:00:10 | h2   | x    | a            | 9.0   |
++---------------------+------+------+--------------+-------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') count_values("v.name", {"otel.m"});
@@ -150,27 +163,27 @@ TQL EVAL (0, 10, '5s') count_values by ("service.name") ("v.name", {"otel.m"});
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') topk(1, {"otel.m"});
 
-+-------+--------------+------+---------------------+
-| v.val | service.name | Host | ts.time             |
-+-------+--------------+------+---------------------+
-| 3.0   | b            | h1   | 1970-01-01T00:00:00 |
-| 6.0   | b            | h1   | 1970-01-01T00:00:05 |
-| 9.0   | a            | h2   | 1970-01-01T00:00:10 |
-+-------+--------------+------+---------------------+
++-------+--------------+------+------+---------------------+
+| v.val | service.name | Host | host | ts.time             |
++-------+--------------+------+------+---------------------+
+| 3.0   | b            | h1   | y    | 1970-01-01T00:00:00 |
+| 6.0   | b            | h1   | y    | 1970-01-01T00:00:05 |
+| 9.0   | a            | h2   | x    | 1970-01-01T00:00:10 |
++-------+--------------+------+------+---------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') bottomk by ("service.name") (1, {"otel.m"});
 
-+-------+--------------+------+---------------------+
-| v.val | service.name | Host | ts.time             |
-+-------+--------------+------+---------------------+
-| 1.0   | a            | h1   | 1970-01-01T00:00:00 |
-| 3.0   | b            | h1   | 1970-01-01T00:00:00 |
-| 4.0   | a            | h1   | 1970-01-01T00:00:05 |
-| 6.0   | b            | h1   | 1970-01-01T00:00:05 |
-| 8.0   | a            | h1   | 1970-01-01T00:00:10 |
-| 8.0   | b            | h1   | 1970-01-01T00:00:10 |
-+-------+--------------+------+---------------------+
++-------+--------------+------+------+---------------------+
+| v.val | service.name | Host | host | ts.time             |
++-------+--------------+------+------+---------------------+
+| 1.0   | a            | h1   | x    | 1970-01-01T00:00:00 |
+| 3.0   | b            | h1   | y    | 1970-01-01T00:00:00 |
+| 4.0   | a            | h1   | x    | 1970-01-01T00:00:05 |
+| 6.0   | b            | h1   | y    | 1970-01-01T00:00:05 |
+| 8.0   | a            | h1   | x    | 1970-01-01T00:00:10 |
+| 8.0   | b            | h1   | y    | 1970-01-01T00:00:10 |
++-------+--------------+------+------+---------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') sum by ("service.name") ({"otel.m"});
@@ -187,89 +200,131 @@ TQL EVAL (0, 10, '5s') sum by ("service.name") ({"otel.m"});
 +--------------+---------------------+-------------------+
 
 -- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum by ("Host") ({"otel.m"});
+
++------+---------------------+-------------------+
+| Host | ts.time             | sum(otel.m.v.val) |
++------+---------------------+-------------------+
+| h1   | 1970-01-01T00:00:00 | 4.0               |
+| h1   | 1970-01-01T00:00:05 | 10.0              |
+| h1   | 1970-01-01T00:00:10 | 16.0              |
+| h2   | 1970-01-01T00:00:00 | 2.0               |
+| h2   | 1970-01-01T00:00:05 | 5.0               |
+| h2   | 1970-01-01T00:00:10 | 9.0               |
++------+---------------------+-------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum by (host) ({"otel.m"});
+
++------+---------------------+-------------------+
+| host | ts.time             | sum(otel.m.v.val) |
++------+---------------------+-------------------+
+| x    | 1970-01-01T00:00:00 | 3.0               |
+| x    | 1970-01-01T00:00:05 | 9.0               |
+| x    | 1970-01-01T00:00:10 | 17.0              |
+| y    | 1970-01-01T00:00:00 | 3.0               |
+| y    | 1970-01-01T00:00:05 | 6.0               |
+| y    | 1970-01-01T00:00:10 | 8.0               |
++------+---------------------+-------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 10, '5s') sum without ("Host") ({"otel.m"});
+
++------+--------------+---------------------+-------------------+
+| host | service.name | ts.time             | sum(otel.m.v.val) |
++------+--------------+---------------------+-------------------+
+| x    | a            | 1970-01-01T00:00:00 | 3.0               |
+| x    | a            | 1970-01-01T00:00:05 | 9.0               |
+| x    | a            | 1970-01-01T00:00:10 | 17.0              |
+| y    | b            | 1970-01-01T00:00:00 | 3.0               |
+| y    | b            | 1970-01-01T00:00:05 | 6.0               |
+| y    | b            | 1970-01-01T00:00:10 | 8.0               |
++------+--------------+---------------------+-------------------+
+
+-- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') -{"otel.m"};
 
-+--------------+------+---------------------+-----------+
-| service.name | Host | ts.time             | (- v.val) |
-+--------------+------+---------------------+-----------+
-| a            | h1   | 1970-01-01T00:00:00 | -1.0      |
-| a            | h1   | 1970-01-01T00:00:05 | -4.0      |
-| a            | h1   | 1970-01-01T00:00:10 | -8.0      |
-| a            | h2   | 1970-01-01T00:00:00 | -2.0      |
-| a            | h2   | 1970-01-01T00:00:05 | -5.0      |
-| a            | h2   | 1970-01-01T00:00:10 | -9.0      |
-| b            | h1   | 1970-01-01T00:00:00 | -3.0      |
-| b            | h1   | 1970-01-01T00:00:05 | -6.0      |
-| b            | h1   | 1970-01-01T00:00:10 | -8.0      |
-+--------------+------+---------------------+-----------+
++--------------+------+------+---------------------+-----------+
+| service.name | Host | host | ts.time             | (- v.val) |
++--------------+------+------+---------------------+-----------+
+| a            | h1   | x    | 1970-01-01T00:00:00 | -1.0      |
+| a            | h1   | x    | 1970-01-01T00:00:05 | -4.0      |
+| a            | h1   | x    | 1970-01-01T00:00:10 | -8.0      |
+| a            | h2   | x    | 1970-01-01T00:00:00 | -2.0      |
+| a            | h2   | x    | 1970-01-01T00:00:05 | -5.0      |
+| a            | h2   | x    | 1970-01-01T00:00:10 | -9.0      |
+| b            | h1   | y    | 1970-01-01T00:00:00 | -3.0      |
+| b            | h1   | y    | 1970-01-01T00:00:05 | -6.0      |
+| b            | h1   | y    | 1970-01-01T00:00:10 | -8.0      |
++--------------+------+------+---------------------+-----------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') 2 * {"otel.m"};
 
-+--------------+------+---------------------+--------------------+
-| service.name | Host | ts.time             | Float64(2) * v.val |
-+--------------+------+---------------------+--------------------+
-| a            | h1   | 1970-01-01T00:00:00 | 2.0                |
-| a            | h1   | 1970-01-01T00:00:05 | 8.0                |
-| a            | h1   | 1970-01-01T00:00:10 | 16.0               |
-| a            | h2   | 1970-01-01T00:00:00 | 4.0                |
-| a            | h2   | 1970-01-01T00:00:05 | 10.0               |
-| a            | h2   | 1970-01-01T00:00:10 | 18.0               |
-| b            | h1   | 1970-01-01T00:00:00 | 6.0                |
-| b            | h1   | 1970-01-01T00:00:05 | 12.0               |
-| b            | h1   | 1970-01-01T00:00:10 | 16.0               |
-+--------------+------+---------------------+--------------------+
++--------------+------+------+---------------------+--------------------+
+| service.name | Host | host | ts.time             | Float64(2) * v.val |
++--------------+------+------+---------------------+--------------------+
+| a            | h1   | x    | 1970-01-01T00:00:00 | 2.0                |
+| a            | h1   | x    | 1970-01-01T00:00:05 | 8.0                |
+| a            | h1   | x    | 1970-01-01T00:00:10 | 16.0               |
+| a            | h2   | x    | 1970-01-01T00:00:00 | 4.0                |
+| a            | h2   | x    | 1970-01-01T00:00:05 | 10.0               |
+| a            | h2   | x    | 1970-01-01T00:00:10 | 18.0               |
+| b            | h1   | y    | 1970-01-01T00:00:00 | 6.0                |
+| b            | h1   | y    | 1970-01-01T00:00:05 | 12.0               |
+| b            | h1   | y    | 1970-01-01T00:00:10 | 16.0               |
++--------------+------+------+---------------------+--------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') {"otel.m"} - 1;
 
-+--------------+------+---------------------+--------------------+
-| service.name | Host | ts.time             | v.val - Float64(1) |
-+--------------+------+---------------------+--------------------+
-| a            | h1   | 1970-01-01T00:00:00 | 0.0                |
-| a            | h1   | 1970-01-01T00:00:05 | 3.0                |
-| a            | h1   | 1970-01-01T00:00:10 | 7.0                |
-| a            | h2   | 1970-01-01T00:00:00 | 1.0                |
-| a            | h2   | 1970-01-01T00:00:05 | 4.0                |
-| a            | h2   | 1970-01-01T00:00:10 | 8.0                |
-| b            | h1   | 1970-01-01T00:00:00 | 2.0                |
-| b            | h1   | 1970-01-01T00:00:05 | 5.0                |
-| b            | h1   | 1970-01-01T00:00:10 | 7.0                |
-+--------------+------+---------------------+--------------------+
++--------------+------+------+---------------------+--------------------+
+| service.name | Host | host | ts.time             | v.val - Float64(1) |
++--------------+------+------+---------------------+--------------------+
+| a            | h1   | x    | 1970-01-01T00:00:00 | 0.0                |
+| a            | h1   | x    | 1970-01-01T00:00:05 | 3.0                |
+| a            | h1   | x    | 1970-01-01T00:00:10 | 7.0                |
+| a            | h2   | x    | 1970-01-01T00:00:00 | 1.0                |
+| a            | h2   | x    | 1970-01-01T00:00:05 | 4.0                |
+| a            | h2   | x    | 1970-01-01T00:00:10 | 8.0                |
+| b            | h1   | y    | 1970-01-01T00:00:00 | 2.0                |
+| b            | h1   | y    | 1970-01-01T00:00:05 | 5.0                |
+| b            | h1   | y    | 1970-01-01T00:00:10 | 7.0                |
++--------------+------+------+---------------------+--------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') timestamp({"otel.m"});
 
-+---------------------+-------+--------------+------+
-| ts.time             | value | service.name | Host |
-+---------------------+-------+--------------+------+
-| 1970-01-01T00:00:00 | 0.0   | a            | h1   |
-| 1970-01-01T00:00:00 | 0.0   | a            | h2   |
-| 1970-01-01T00:00:00 | 0.0   | b            | h1   |
-| 1970-01-01T00:00:05 | 5.0   | a            | h1   |
-| 1970-01-01T00:00:05 | 5.0   | a            | h2   |
-| 1970-01-01T00:00:05 | 5.0   | b            | h1   |
-| 1970-01-01T00:00:10 | 10.0  | a            | h1   |
-| 1970-01-01T00:00:10 | 10.0  | a            | h2   |
-| 1970-01-01T00:00:10 | 10.0  | b            | h1   |
-+---------------------+-------+--------------+------+
++---------------------+-------+--------------+------+------+
+| ts.time             | value | service.name | Host | host |
++---------------------+-------+--------------+------+------+
+| 1970-01-01T00:00:00 | 0.0   | a            | h1   | x    |
+| 1970-01-01T00:00:00 | 0.0   | a            | h2   | x    |
+| 1970-01-01T00:00:00 | 0.0   | b            | h1   | y    |
+| 1970-01-01T00:00:05 | 5.0   | a            | h1   | x    |
+| 1970-01-01T00:00:05 | 5.0   | a            | h2   | x    |
+| 1970-01-01T00:00:05 | 5.0   | b            | h1   | y    |
+| 1970-01-01T00:00:10 | 10.0  | a            | h1   | x    |
+| 1970-01-01T00:00:10 | 10.0  | a            | h2   | x    |
+| 1970-01-01T00:00:10 | 10.0  | b            | h1   | y    |
++---------------------+-------+--------------+------+------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') minute({"otel.m"});
 
-+---------------------+-----------------------------------+--------------+------+
-| ts.time             | date_part(Utf8("minute"),ts.time) | service.name | Host |
-+---------------------+-----------------------------------+--------------+------+
-| 1970-01-01T00:00:00 | 0                                 | a            | h1   |
-| 1970-01-01T00:00:00 | 0                                 | a            | h2   |
-| 1970-01-01T00:00:00 | 0                                 | b            | h1   |
-| 1970-01-01T00:00:05 | 0                                 | a            | h1   |
-| 1970-01-01T00:00:05 | 0                                 | a            | h2   |
-| 1970-01-01T00:00:05 | 0                                 | b            | h1   |
-| 1970-01-01T00:00:10 | 0                                 | a            | h1   |
-| 1970-01-01T00:00:10 | 0                                 | a            | h2   |
-| 1970-01-01T00:00:10 | 0                                 | b            | h1   |
-+---------------------+-----------------------------------+--------------+------+
++---------------------+-----------------------------------+--------------+------+------+
+| ts.time             | date_part(Utf8("minute"),ts.time) | service.name | Host | host |
++---------------------+-----------------------------------+--------------+------+------+
+| 1970-01-01T00:00:00 | 0                                 | a            | h1   | x    |
+| 1970-01-01T00:00:00 | 0                                 | a            | h2   | x    |
+| 1970-01-01T00:00:00 | 0                                 | b            | h1   | y    |
+| 1970-01-01T00:00:05 | 0                                 | a            | h1   | x    |
+| 1970-01-01T00:00:05 | 0                                 | a            | h2   | x    |
+| 1970-01-01T00:00:05 | 0                                 | b            | h1   | y    |
+| 1970-01-01T00:00:10 | 0                                 | a            | h1   | x    |
+| 1970-01-01T00:00:10 | 0                                 | a            | h2   | x    |
+| 1970-01-01T00:00:10 | 0                                 | b            | h1   | y    |
++---------------------+-----------------------------------+--------------+------+------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
@@ -286,13 +341,13 @@ TQL EVAL (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') scalar(sum({"otel.m"})) * {"otel.m", "Host"="h2"};
 
-+--------------+------+---------------------+-------------------------------------------+
-| service.name | Host | ts.time             | lhs.scalar(sum(otel.m.v.val)) * rhs.v.val |
-+--------------+------+---------------------+-------------------------------------------+
-| a            | h2   | 1970-01-01T00:00:00 | 12.0                                      |
-| a            | h2   | 1970-01-01T00:00:05 | 75.0                                      |
-| a            | h2   | 1970-01-01T00:00:10 | 225.0                                     |
-+--------------+------+---------------------+-------------------------------------------+
++--------------+------+------+---------------------+-------------------------------------------+
+| service.name | Host | host | ts.time             | lhs.scalar(sum(otel.m.v.val)) * rhs.v.val |
++--------------+------+------+---------------------+-------------------------------------------+
+| a            | h2   | x    | 1970-01-01T00:00:00 | 12.0                                      |
+| a            | h2   | x    | 1970-01-01T00:00:05 | 75.0                                      |
+| a            | h2   | x    | 1970-01-01T00:00:10 | 225.0                                     |
++--------------+------+------+---------------------+-------------------------------------------+
 
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 10, '5s') absent({"otel.m", "service.name"="c"});
@@ -325,35 +380,35 @@ TQL EXPLAIN (0, 10, '5s') {"otel.m"} and {"otel.m", "Host"="h1"};
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| LeftSemi Join: otel.m.Host = otel.m.Host, otel.m.service.name = otel.m.service.name, otel.m.ts.time = otel.m.ts.time_|
-|_|_Aggregate: groupBy=[[otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.v.val]], aggr=[[]]_|
+| logical_plan_| LeftSemi Join: otel.m.Host = otel.m.Host, otel.m.host = otel.m.host, otel.m.service.name = otel.m.service.name, otel.m.ts.time = otel.m.ts.time_|
+|_|_Aggregate: groupBy=[[otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.v.val]], aggr=[[]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Distinct:_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
-|_|_PromSeriesDivide: tags=["service.name", "Host"]_|
-|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
+|_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
+|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
-|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host_|
+|_|_Projection: otel.m.ts.time, otel.m.service.name, otel.m.Host, otel.m.host_|
 |_|_PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
-|_|_PromSeriesDivide: tags=["service.name", "Host"]_|
-|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
+|_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
+|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| Filter: otel.m.Host = Utf8("h1") AND otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.Host = Utf8("h1"), otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)] |
 |_| ]]_|
-| physical_plan | HashJoinExec: mode=CollectLeft, join_type=RightSemi, on=[(Host@2, Host@2), (service.name@1, service.name@1), (ts.time@0, ts.time@0)], NullsEqual: true_|
+| physical_plan | HashJoinExec: mode=CollectLeft, join_type=RightSemi, on=[(Host@2, Host@2), (host@3, host@3), (service.name@1, service.name@1), (ts.time@0, ts.time@0)], NullsEqual: true_|
 |_|_CoalescePartitionsExec_|
-|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host]_|
+|_|_ProjectionExec: expr=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host]_|
 |_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
-|_|_PromSeriesDivideExec: tags=["service.name", "Host"]_|
-|_|_SortExec: expr=[service.name@1 ASC, Host@2 ASC, ts.time@0 ASC], preserve_REDACTED
+|_|_PromSeriesDivideExec: tags=["service.name", "Host", "host"]_|
+|_|_SortExec: expr=[service.name@1 ASC, Host@2 ASC, host@3 ASC, ts.time@0 ASC], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
-|_|_AggregateExec: mode=FinalPartitioned, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, v.val@3 as v.val], aggr=[]_|
+|_|_AggregateExec: mode=FinalPartitioned, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val], aggr=[]_|
 |_|_RepartitionExec: REDACTED
-|_|_AggregateExec: mode=Partial, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, v.val@3 as v.val], aggr=[]_|
+|_|_AggregateExec: mode=Partial, gby=[ts.time@0 as ts.time, service.name@1 as service.name, Host@2 as Host, host@3 as host, v.val@4 as v.val], aggr=[]_|
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -368,22 +423,22 @@ TQL EXPLAIN (0, 10, '5s') topk(1, {"otel.m"});
 +-+-+
 | plan_type_| plan_|
 +-+-+
-| logical_plan_| Projection: otel.m.v.val, otel.m.service.name, otel.m.Host, otel.m.ts.time_|
-|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
-|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
-|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
+| logical_plan_| Projection: otel.m.v.val, otel.m.service.name, otel.m.Host, otel.m.host, otel.m.ts.time_|
+|_|_Sort: otel.m.ts.time ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW ASC NULLS LAST_|
+|_|_Filter: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW AS Float64) <= Float64(1)_|
+|_|_WindowAggr: windowExpr=[[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW]]_|
 |_|_MergeScan [is_placeholder=false, remote_input=[_|
 |_| PromInstantManipulate: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts.time]_|
-|_|_PromSeriesDivide: tags=["service.name", "Host"]_|
-|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
+|_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
+|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-299999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-299999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
-| physical_plan | ProjectionExec: expr=[v.val@3 as v.val, service.name@1 as service.name, Host@2 as Host, ts.time@0 as ts.time]_|
-|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@4 ASC NULLS LAST]_|
-|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@4 AS Float64) <= 1_|
-|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
-|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, v.val@3 DESC, service.name@1 DESC, Host@2 DESC], preserve_REDACTED
+| physical_plan | ProjectionExec: expr=[v.val@4 as v.val, service.name@1 as service.name, Host@2 as Host, host@3 as host, ts.time@0 as ts.time]_|
+|_|_SortPreservingMergeExec: [ts.time@0 ASC NULLS LAST, row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 ASC NULLS LAST]_|
+|_|_FilterExec: CAST(row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW@5 AS Float64) <= 1_|
+|_|_BoundedWindowAggExec: wdw=[row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW: Field { "row_number() PARTITION BY [otel.m.ts.time] ORDER BY [otel.m.v.val DESC NULLS FIRST, otel.m.service.name DESC NULLS FIRST, otel.m.Host DESC NULLS FIRST, otel.m.host DESC NULLS FIRST] ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW": UInt64 }, frame: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW], mode=[Sorted] |
+|_|_SortExec: expr=[ts.time@0 ASC NULLS LAST, v.val@4 DESC, service.name@1 DESC, Host@2 DESC, host@3 DESC], preserve_REDACTED
 |_|_RepartitionExec: REDACTED
 |_|_MergeScanExec: REDACTED
 |_|_|
@@ -403,11 +458,11 @@ TQL EXPLAIN (5, 10, '5s') sum by ("service.name") (increase({"otel.m"}[10s]));
 |_| Sort: otel.m.service.name ASC NULLS LAST, otel.m.ts.time ASC NULLS LAST_|
 |_|_Aggregate: groupBy=[[otel.m.service.name, otel.m.ts.time]], aggr=[[sum(prom_increase(ts.time_range,v.val,ts.time,Int64(10000)))]]_|
 |_|_Filter: prom_increase(ts.time_range,v.val,ts.time,Int64(10000)) IS NOT NULL_|
-|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host |
+|_|_Projection: otel.m.ts.time, prom_increase(ts.time_range, v.val, otel.m.ts.time, Int64(10000)) AS prom_increase(ts.time_range,v.val,ts.time,Int64(10000)), otel.m.service.name, otel.m.Host, otel.m.host |
 |_|_PromRangeManipulate: req range=[5000..10000], interval=[5000], eval range=[10000], time index=[ts.time], values=["v.val"]_|
 |_|_PromSeriesNormalize: offset=[0], time index=[ts.time], filter NaN: [true]_|
-|_|_PromSeriesDivide: tags=["service.name", "Host"]_|
-|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
+|_|_PromSeriesDivide: tags=["service.name", "Host", "host"]_|
+|_|_Sort: otel.m.service.name ASC NULLS FIRST, otel.m.Host ASC NULLS FIRST, otel.m.host ASC NULLS FIRST, otel.m.ts.time ASC NULLS FIRST_|
 |_|_Filter: otel.m.ts.time >= TimestampMillisecond(-4999, None) AND otel.m.ts.time <= TimestampMillisecond(10000, None)_|
 |_|_TableScan: otel.m, partial_filters=[otel.m.ts.time >= TimestampMillisecond(-4999, None), otel.m.ts.time <= TimestampMillisecond(10000, None)]_|
 |_| ]]_|
