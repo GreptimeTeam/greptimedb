@@ -113,7 +113,8 @@ TQL ANALYZE (0, 10, '5s') histogram_quantile(0.5, tsid_no_aggr_histogram_bucket)
 |_|_|_SortExec: expr=[job@1 ASC NULLS LAST, ts@3 ASC NULLS LAST, TRY_CAST(le@2 AS Float64) ASC NULLS LAST], preserve_partitioning=[false] REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[val@0 as val, job@1 as job, le@2 as le, ts@4 as ts] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[val@2 as val, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as job, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as le, ts@3 as ts] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(job@1 AS Utf8) as __common_expr_1, CAST(le@2 AS Utf8) as __common_expr_2, val@0 as val, ts@4 as ts] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["__tsid"] REDACTED
 |_|_|_ProjectionExec: expr=[val@1 as val, job@3 as job, le@4 as le, __tsid@2 as __tsid, ts@0 as ts] REDACTED

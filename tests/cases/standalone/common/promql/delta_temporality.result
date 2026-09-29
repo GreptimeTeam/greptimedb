@@ -63,6 +63,8 @@ TQL ANALYZE (180, 180, '1m') rate(delta_temporality[3m]);
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
 |_|_|_ProjectionExec: expr=[ts@0 as ts, CASE WHEN otlp_aggregation_temporality@3 = delta THEN prom_sum_over_time(ts_range@4, greptime_value@1) / 180 ELSE prom_rate(ts_range@4, greptime_value@1, ts@0, 180000) END as RATE_RESULT, series@2 as series, otlp_aggregation_temporality@3 as otlp_aggregation_temporality] REDACTED
+|_|_|_ProjectionExec: expr=[ts@2 as ts, greptime_value@3 as greptime_value, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as series, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as otlp_aggregation_temporality, ts_range@4 as ts_range] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(series@2 AS Utf8) as __common_expr_1, CAST(otlp_aggregation_temporality@3 AS Utf8) as __common_expr_2, ts@0 as ts, greptime_value@1 as greptime_value, ts_range@4 as ts_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[180000..180000], interval=[60000], eval range=[180000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["series", "otlp_aggregation_temporality"] REDACTED
@@ -190,7 +192,7 @@ INSERT INTO delta_tagless VALUES (180000, 10);
 
 Affected Rows: 1
 
--- A missing temporality marker matches the NULL cumulative state; "delta" does not.
+-- A missing temporality marker matches the normalized empty cumulative state; "delta" does not.
 TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
 
 +---------------------+-----------------------------------------------------------------+

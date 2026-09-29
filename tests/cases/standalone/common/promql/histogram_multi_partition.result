@@ -53,7 +53,8 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 | 1_| 0_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
-|_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as le, val@2 as val] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(le@1 AS Utf8) as __common_expr_1, ts@0 as ts, val@3 as val] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["shard", "le"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
@@ -61,7 +62,8 @@ tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bu
 | 1_| 1_|_AggregateExec: mode=FinalPartitioned, gby=[le@0 as le, ts@1 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
 |_|_|_RepartitionExec: partitioning=Hash([le@0, ts@1],REDACTED
 |_|_|_AggregateExec: mode=Partial, gby=[le@1 as le, ts@0 as ts], aggr=[__sum_state(histogram_gap_bucket.val)] REDACTED
-|_|_|_ProjectionExec: expr=[ts@0 as ts, le@1 as le, val@3 as val] REDACTED
+|_|_|_ProjectionExec: expr=[ts@1 as ts, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as le, val@2 as val] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(le@1 AS Utf8) as __common_expr_1, ts@0 as ts, val@3 as val] REDACTED
 |_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[10000], time index=[ts] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["shard", "le"] REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED

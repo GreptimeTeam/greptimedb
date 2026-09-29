@@ -1,6 +1,6 @@
--- Regression test for TSID-backed PromQL binary joins on metric-engine tables.
--- Default arithmetic and comparison joins should use `__tsid` when matching is the
--- default one-to-one case. Label modifiers still have to stay label-based.
+-- Regression test for PromQL binary joins on metric-engine tables.
+-- Nullable labels need label-based matching even for default one-to-one joins,
+-- since normalization can make distinct TSIDs share the same label set.
 
 CREATE TABLE tsid_binary_join_physical (
   ts TIMESTAMP(3) TIME INDEX,
@@ -82,7 +82,7 @@ INSERT INTO tsid_binary_join_third (host, job, ts, greptime_value) VALUES
   ('host1', 'job1', 5000, 4),
   ('host2', 'job2', 5000, 6);
 
--- Default vector-vector arithmetic should join on `__tsid` and time index.
+-- Default vector-vector arithmetic matches normalized labels and time index.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -148,8 +148,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_job;
 
--- Comparison filters can join on `__tsid`, but the filtered result must still behave like
--- a regular derived vector downstream.
+-- Comparison filters match normalized labels, and the filtered result must still behave
+-- like a regular derived vector downstream.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -162,7 +162,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 
--- `bool` comparison should follow the same TSID-backed matching path.
+-- `bool` comparison should follow the same label-based matching path.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -

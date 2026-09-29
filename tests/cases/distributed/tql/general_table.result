@@ -31,13 +31,16 @@ TQL analyze (0, 10, '1s')  sum by(job) (irate(cpu_usage{job="fire"}[5s])) / 1e9;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[job@0 as job, ts@1 as ts, sum(prom_irate(ts_range,value))@2 / 1000000000 as sum(prom_irate(ts_range,value)) / Float64(1000000000)] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END@0 as job, ts@1 as ts, sum(prom_irate(ts_range,value))@2 / 1000000000 as sum(prom_irate(ts_range,value)) / Float64(1000000000)] REDACTED
 |_|_|_RepartitionExec: partitioning=REDACTED
-|_|_|_SortPreservingMergeExec: [job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST] REDACTED
-|_|_|_SortExec: expr=[job@0 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
-|_|_|_AggregateExec: mode=SinglePartitioned, gby=[job@2 as job, ts@0 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
+|_|_|_SortPreservingMergeExec: [CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END@0 ASC NULLS LAST, ts@1 ASC NULLS LAST] REDACTED
+|_|_|_SortExec: expr=[CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END@0 ASC NULLS LAST, ts@1 ASC NULLS LAST], preserve_partitioning=[true] REDACTED
+|_|_|_AggregateExec: mode=FinalPartitioned, gby=[CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END@0 as CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END, ts@1 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
+|_|_|_RepartitionExec: partitioning=REDACTED
+|_|_|_AggregateExec: mode=Partial, gby=[CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END@2 as CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END, ts@0 as ts], aggr=[sum(prom_irate(ts_range,value))] REDACTED
 |_|_|_FilterExec: prom_irate(ts_range,value)@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[ts@2 as ts, prom_irate(ts_range@3, value@0) as prom_irate(ts_range,value), job@1 as job] REDACTED
+|_|_|_ProjectionExec: expr=[ts@2 as ts, prom_irate(ts_range@3, value@1) as prom_irate(ts_range,value), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as CASE WHEN cpu_usage.job IS NOT NULL THEN cpu_usage.job ELSE Utf8("") END] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(job@1 AS Utf8) as __common_expr_1, value@0 as value, ts@2 as ts, ts_range@3 as ts_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[1000], eval range=[5000], time index=[ts] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[ts], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["job"] REDACTED
