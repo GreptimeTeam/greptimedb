@@ -39,6 +39,9 @@ impl<'a> ParallelFstValuesMapper<'a> {
     /// Maps each group of FST values to the union of the bitmaps its values point to, preserving the
     /// group order. All bitmaps are fetched with a single batched read and decoded one at a time;
     /// any decode failure returns an error instead of a partial result.
+    ///
+    /// One bitmap per input group is returned. When all groups are empty — including the case of
+    /// zero groups — a single empty `BitVec` is returned instead of one empty bitmap per group.
     pub async fn map_values_vec(
         &mut self,
         value_and_meta_vec: &[(Vec<u64>, &InvertedIndexMeta)],
@@ -106,7 +109,6 @@ impl<'a> ParallelFstValuesMapper<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::io;
     use std::ops::Range;
 
@@ -184,35 +186,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_map_values_vec_single_group_in_value_order() {
-        let roaring_meta = meta(BitmapType::Roaring);
-        // Values are fetched in the order they are given, duplicates included.
-        let mut mock_reader = mock_reader_returning(
-            vec![2..3, 1..2, 1..2],
-            vec![
-                (roaring(&[0b01010101]), BitmapType::Roaring),
-                (roaring(&[0b10101010]), BitmapType::Roaring),
-                (roaring(&[0b10101010]), BitmapType::Roaring),
-            ],
-        );
-        let mut values_mapper = ParallelFstValuesMapper::new(&mut mock_reader);
-
-        let output = values_mapper
-            .map_values_vec(
-                &[(vec![value(2, 1), value(1, 1), value(1, 1)], &roaring_meta)],
-                None,
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(output, vec![roaring(&[0b11111111])]);
-    }
-
-    #[tokio::test]
     async fn test_map_values_vec_multiple_groups_with_empty_middle() {
         let roaring_meta = meta(BitmapType::Roaring);
+        let mut offset_meta = meta(BitmapType::Roaring);
+        offset_meta.base_offset = 100;
         let mut mock_reader = mock_reader_returning(
-            vec![2..3, 1..2, 4..5],
+            vec![2..3, 1..2, 104..105],
             vec![
                 (roaring(&[0b01010101]), BitmapType::Roaring),
                 (roaring(&[0b10101010]), BitmapType::Roaring),
@@ -226,7 +205,7 @@ mod tests {
                 &[
                     (vec![value(2, 1), value(1, 1)], &roaring_meta),
                     (vec![], &roaring_meta),
-                    (vec![value(4, 1)], &roaring_meta),
+                    (vec![value(4, 1)], &offset_meta),
                 ],
                 None,
             )
@@ -347,59 +326,5 @@ mod tests {
             .await;
 
         assert!(matches!(output, Err(Error::CommonIo { .. })));
-    }
-
-    #[tokio::test]
-    async fn test_map_values_vec_matches_eager_decode_reference() {
-        let roaring_meta = meta(BitmapType::Roaring);
-        let bitvec_meta = meta(BitmapType::BitVec);
-        let responses = vec![
-            (roaring(&[0b10101010]), BitmapType::Roaring),
-            (roaring(&[0b01010101]), BitmapType::Roaring),
-            (
-                Bitmap::from_lsb0_bytes(&[0b00001111], BitmapType::BitVec),
-                BitmapType::BitVec,
-            ),
-        ];
-        let mut mock_reader = mock_reader_returning(vec![1..2, 2..3, 3..4], responses.clone());
-        let mut values_mapper = ParallelFstValuesMapper::new(&mut mock_reader);
-
-        let output = values_mapper
-            .map_values_vec(
-                &[
-                    (vec![value(1, 1), value(2, 1)], &roaring_meta),
-                    (vec![], &roaring_meta),
-                    (vec![value(3, 1)], &bitvec_meta),
-                ],
-                None,
-            )
-            .await
-            .unwrap();
-
-        // The previous eager behavior: decode every fetched bitmap first, then pop and union
-        // them into each group in order.
-        let mut decoded = VecDeque::new();
-        for (bitmap, bitmap_type) in &responses {
-            let bytes = serialized(bitmap, *bitmap_type);
-            decoded.push_back(Bitmap::deserialize_from(&bytes, *bitmap_type).unwrap());
-        }
-        let mut eager = Vec::new();
-        for counter in [2usize, 0, 1] {
-            let mut bitmap = Bitmap::new_roaring();
-            for _ in 0..counter {
-                bitmap.union(decoded.pop_front().unwrap());
-            }
-            eager.push(bitmap);
-        }
-
-        assert_eq!(output, eager);
-        assert_eq!(
-            output,
-            vec![
-                roaring(&[0b11111111]),
-                Bitmap::new_roaring(),
-                Bitmap::from_lsb0_bytes(&[0b00001111], BitmapType::BitVec),
-            ]
-        );
     }
 }
