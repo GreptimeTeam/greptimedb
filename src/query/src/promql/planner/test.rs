@@ -9211,3 +9211,158 @@ async fn test_absent_drops_metric_name_and_emits_one_sample() {
         );
     }
 }
+
+/// Binary operations between a vector and a scalar follow the metric-name lifecycle: arithmetic
+/// and `bool` comparisons build a new identity and drop the name, while comparison filters
+/// without `bool` keep the vector side, including its name and its sample values.
+#[tokio::test]
+async fn test_binary_scalar_metric_name_lifecycle() {
+    let state = build_query_engine_state();
+    // (query, whether the metric-name identity survives, `(series tag, sample value)` at ts=1000)
+    for (query, keeps_marker, expected) in [
+        (
+            "cv_metric + 1",
+            false,
+            vec![("k0", 2.0), ("k1", 3.0), ("k2", 2.0)],
+        ),
+        (
+            "1 + cv_metric",
+            false,
+            vec![("k0", 2.0), ("k1", 3.0), ("k2", 2.0)],
+        ),
+        (
+            "cv_metric > bool 1",
+            false,
+            vec![("k0", 0.0), ("k1", 1.0), ("k2", 0.0)],
+        ),
+        (
+            "1 < bool cv_metric",
+            false,
+            vec![("k0", 0.0), ("k1", 1.0), ("k2", 0.0)],
+        ),
+        ("cv_metric > 1", true, vec![("k1", 2.0)]),
+        ("1 < cv_metric", true, vec![("k1", 2.0)]),
+        // Computed scalars join instead of projecting against a literal.
+        (
+            "cv_metric + scalar(sum(cv_metric))",
+            false,
+            vec![("k0", 5.0), ("k1", 6.0), ("k2", 5.0)],
+        ),
+        (
+            "scalar(sum(cv_metric)) + cv_metric",
+            false,
+            vec![("k0", 5.0), ("k1", 6.0), ("k2", 5.0)],
+        ),
+        (
+            "cv_metric > scalar(min(cv_metric))",
+            true,
+            vec![("k1", 2.0)],
+        ),
+        (
+            "scalar(min(cv_metric)) < cv_metric",
+            true,
+            vec![("k1", 2.0)],
+        ),
+        // The ordinary path: `abs` already dropped the name, `sort` keeps it and must lose it.
+        (
+            "abs(cv_metric) + 1",
+            false,
+            vec![("k0", 2.0), ("k1", 3.0), ("k2", 2.0)],
+        ),
+        (
+            "sort(cv_metric) + 1",
+            false,
+            vec![("k0", 2.0), ("k1", 3.0), ("k2", 2.0)],
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        let sample_column = float_sample_column(&plan);
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.is_some(),
+            keeps_marker,
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        if keeps_marker {
+            assert_metric_name_in_batches(&batches, PROMQL_METRIC_NAME_COLUMN);
+            // A comparison filter keeps the vector side's value (2.0), never the scalar's (1).
+            assert_eq!(
+                metric_name_rows(&batches, PROMQL_METRIC_NAME_COLUMN),
+                expected
+                    .iter()
+                    .map(|(tag, value)| (tag.to_string(), "cv_metric".to_string(), *value))
+                    .collect::<Vec<_>>(),
+                "{query}"
+            );
+        } else {
+            assert_metric_name_not_in_batches(&batches);
+            assert_eq!(
+                cv_rows(&batches, &sample_column),
+                expected
+                    .iter()
+                    .map(|(tag, value)| (tag.to_string(), 1_000, *value))
+                    .collect::<Vec<_>>(),
+                "{query}"
+            );
+        }
+    }
+}
+
+/// A binary island plans a repeated selector once and computes a new sample per series, so its
+/// result must not keep the metric name of the underlying selector.
+#[tokio::test]
+async fn test_binary_island_drops_metric_name_of_nested_arithmetic() {
+    let state = build_query_engine_state();
+    let query = "(cv_metric + 1) * (cv_metric + 2)";
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider().await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+    // One underlying scan, aliased once: the island reused the shared selector.
+    let plan_str = plan.display_indent_schema().to_string();
+    assert_eq!(
+        plan_str.matches("SubqueryAlias: __prom_v0").count(),
+        1,
+        "{plan_str}"
+    );
+    assert_eq!(
+        plan_str.matches("TableScan: cv_metric").count(),
+        1,
+        "{plan_str}"
+    );
+
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none(),
+        "{query}: {}",
+        plan.display_indent()
+    );
+
+    let sample_column = float_sample_column(&plan);
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_not_in_batches(&batches);
+    assert_eq!(
+        cv_rows(&batches, &sample_column),
+        vec![
+            ("k0".to_string(), 1_000, 6.0),
+            ("k1".to_string(), 1_000, 12.0),
+            ("k2".to_string(), 1_000, 6.0),
+        ],
+        "{query}"
+    );
+}
