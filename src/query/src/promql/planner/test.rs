@@ -23,7 +23,7 @@ use common_query::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
 };
 use common_query::prelude::{greptime_native_histogram, greptime_timestamp, greptime_value};
-use common_query::prometheus::PROMETHEUS_STALE_NAN_BITS;
+use common_query::prometheus::{PROMETHEUS_STALE_NAN_BITS, PROMQL_FIELD_ROLE_KEY};
 use common_query::test_util::DummyDecoder;
 use common_recordbatch::RecordBatch as GreptimeRecordBatch;
 use datafusion::arrow::array::{
@@ -8871,4 +8871,179 @@ async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
         count_values_rows(&batches, "v"),
         vec![("9007199254740992", 2.0)]
     );
+}
+
+/// Collects `(series tag, metric-name marker, sample value)` triples of every row in `batches`,
+/// one row per emitted sample of the `cv_metric` fixture, sorted by series tag.
+fn metric_name_rows(batches: &[RecordBatch], marker: &str) -> Vec<(String, String, f64)> {
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let tag = batch
+                .column_by_name("k")
+                .expect("no series tag column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the series tag must be a string column");
+            let name = batch
+                .column_by_name(marker)
+                .expect("no metric-name marker column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the metric-name marker must be a string column");
+            let value = batch
+                .column_by_name(greptime_value())
+                .expect("no sample value column")
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("the sample value must be a float column");
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        tag.value(row).to_string(),
+                        name.value(row).to_string(),
+                        value.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows
+}
+
+#[tokio::test]
+async fn test_raw_selector_attaches_metric_name_identity() {
+    let state = build_query_engine_state();
+    for query in [
+        "cv_metric",
+        r#"cv_metric{k=~"k.*"}"#,
+        r#"{__name__="cv_metric"}"#,
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: the selector must attach its metric name"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            metric_name_rows(&batches, &marker.name),
+            vec![
+                ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                ("k2".to_string(), "cv_metric".to_string(), 1.0),
+            ],
+            "{query}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_collision_metric_name_label_is_preserved() {
+    let plan = PromPlanner::stmt_to_plan(
+        build_test_table_provider_with_distinct_tags(&[(
+            "collision_metric",
+            &[PROMQL_METRIC_NAME_COLUMN, "job"],
+        )])
+        .await,
+        &operator_eval_stmt("collision_metric"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+
+    // The label physically named like the marker keeps its name and metadata; the marker
+    // moves to a suffixed column instead of overwriting it.
+    let physical = plan
+        .schema()
+        .fields()
+        .iter()
+        .find(|field| field.name() == PROMQL_METRIC_NAME_COLUMN)
+        .expect("the physical label must be preserved");
+    assert!(
+        physical.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none(),
+        "the physical label must not carry the marker role"
+    );
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .expect("the selector must attach its metric name");
+    assert_eq!(
+        marker.name,
+        format!("{PROMQL_METRIC_NAME_COLUMN}_"),
+        "{}",
+        plan.display_indent()
+    );
+}
+
+#[tokio::test]
+async fn test_unary_sign_controls_metric_name_identity() {
+    let state = build_query_engine_state();
+    // The parser returns the operand of unary plus unchanged and wraps unary minus in a
+    // negation, which drops the metric name.
+    for (sign, negated) in [("-", true), ("+", false)] {
+        let query = format!("{sign}cv_metric");
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(&query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let marker = PromPlanner::metric_name_column(plan.schema()).unwrap();
+        assert_eq!(
+            marker.is_some(),
+            !negated,
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        // The negated sample column is aliased after the negation expression and no longer
+        // carries the source field name, so identify it by type. The fixture has a single
+        // `Float64` column; the tag, time index and marker are not `Float64`.
+        let marker_name = marker.as_ref().map(|marker| marker.name.clone());
+        let sample_columns = plan
+            .schema()
+            .fields()
+            .iter()
+            .filter(|field| {
+                field.data_type() == &ArrowDataType::Float64
+                    && marker_name.as_ref() != Some(field.name())
+            })
+            .map(|field| field.name().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sample_columns.len(),
+            1,
+            "{query}: expected exactly one float sample column: {}",
+            plan.display_indent()
+        );
+        let sample_column = sample_columns.into_iter().next().unwrap();
+
+        let (_, batches) = execute(plan, &state).await;
+        match marker {
+            Some(marker) => assert_eq!(
+                metric_name_rows(&batches, &marker.name),
+                vec![
+                    ("k0".to_string(), "cv_metric".to_string(), 1.0),
+                    ("k1".to_string(), "cv_metric".to_string(), 2.0),
+                    ("k2".to_string(), "cv_metric".to_string(), 1.0),
+                ],
+                "{query}"
+            ),
+            None => {
+                let mut values = values(&batches, &sample_column);
+                values.sort_by(f64::total_cmp);
+                assert_eq!(values, vec![-2.0, -1.0, -1.0], "{query}");
+            }
+        }
+    }
 }

@@ -34,6 +34,7 @@ use common_query::prelude::{
     GREPTIME_TEMPORALITY_DELTA, OTLP_AGGREGATION_TEMPORALITY_LABEL, greptime_native_histogram,
     greptime_value,
 };
+use common_query::prometheus::{PROMQL_FIELD_ROLE_KEY, PROMQL_METRIC_NAME_ROLE};
 use common_query::promql_annotations::PromqlAnnotationCollector;
 use datafusion::common::DFSchemaRef;
 use datafusion::datasource::DefaultTableSource;
@@ -138,6 +139,8 @@ const DEFAULT_TIME_INDEX_COLUMN: &str = "time";
 
 /// default value column name for empty metric
 const DEFAULT_FIELD_COLUMN: &str = "value";
+/// Base name of the private column carrying a selector's metric name.
+const PROMQL_METRIC_NAME_COLUMN: &str = "__promql_metric_name";
 
 /// Special modifier to project field columns under multi-field mode
 const FIELD_COLUMN_MATCHER: &str = "__field__";
@@ -939,7 +942,31 @@ impl PromPlanner {
         let UnaryExpr { expr } = unary_expr;
         // Unary Expr in PromQL implys the `-` operator
         let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
-        self.negate_field_columns(input)
+        let plan = self.negate_field_columns(input)?;
+        self.drop_metric_name(plan)
+    }
+
+    fn drop_metric_name(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
+        let Some(marker) = Self::metric_name_column(input.schema())? else {
+            return Ok(input);
+        };
+        self.ctx.tag_columns.retain(|name| name != &marker.name);
+        self.ctx
+            .aggregation_field_labels
+            .retain(|name| name != &marker.name);
+        let projection = input
+            .schema()
+            .iter()
+            .filter_map(|(qualifier, field)| {
+                (field.name() != &marker.name)
+                    .then(|| DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone())))
+            })
+            .collect::<Vec<_>>();
+        LogicalPlanBuilder::from(input)
+            .project(projection)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
     }
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
@@ -1752,6 +1779,83 @@ impl PromPlanner {
         }
     }
 
+    fn metric_name_column(schema: &DFSchemaRef) -> Result<Option<Column>> {
+        let mut found = None;
+        for (qualifier, field) in schema.iter() {
+            if field
+                .metadata()
+                .get(PROMQL_FIELD_ROLE_KEY)
+                .map(String::as_str)
+                == Some(PROMQL_METRIC_NAME_ROLE)
+            {
+                ensure!(
+                    field.data_type() == &ArrowDataType::Utf8,
+                    UnexpectedPlanExprSnafu {
+                        desc: "PromQL metric-name column must be Utf8"
+                    }
+                );
+                ensure!(
+                    found.is_none(),
+                    UnexpectedPlanExprSnafu {
+                        desc: "multiple PromQL metric-name columns"
+                    }
+                );
+                found = Some(Column::new(qualifier.cloned(), field.name().clone()));
+            }
+        }
+        Ok(found)
+    }
+
+    fn attach_metric_name(
+        &mut self,
+        input: LogicalPlan,
+        metric_name: Option<&str>,
+    ) -> Result<LogicalPlan> {
+        let Some(metric_name) = metric_name else {
+            return Ok(input);
+        };
+        ensure!(
+            Self::metric_name_column(input.schema())?.is_none(),
+            UnexpectedPlanExprSnafu {
+                desc: "metric-name identity already attached"
+            }
+        );
+        let occupied = input
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect::<HashSet<_>>();
+        let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
+        while occupied.contains(name.as_str()) {
+            name.push('_');
+        }
+        let mut exprs = input
+            .schema()
+            .iter()
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
+            })
+            .collect::<Vec<_>>();
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            PROMQL_FIELD_ROLE_KEY.to_string(),
+            PROMQL_METRIC_NAME_ROLE.to_string(),
+        );
+        exprs.push(DfExpr::Alias(Alias {
+            expr: Box::new(lit(metric_name.to_string())),
+            relation: None,
+            name: name.clone(),
+            metadata: Some(metadata.into()),
+        }));
+        self.ctx.tag_columns.push(name);
+        LogicalPlanBuilder::from(input)
+            .project(exprs)
+            .context(DataFusionPlanningSnafu)?
+            .build()
+            .context(DataFusionPlanningSnafu)
+    }
+
     async fn prom_vector_selector_to_plan(
         &mut self,
         vector_selector: &VectorSelector,
@@ -1764,8 +1868,9 @@ impl PromPlanner {
             at,
         } = vector_selector;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
+        let metric_name = self.ctx.table_name.clone();
         if let Some(empty_plan) = self.setup_context().await? {
-            return Ok(empty_plan);
+            return self.attach_metric_name(empty_plan, metric_name.as_deref());
         }
         let offset_ms = Self::offset_millis(offset);
         // `@` anchors the sample window at a fixed timestamp: the selector selects its samples
@@ -1878,7 +1983,7 @@ impl PromPlanner {
         if let Some(timestamp_value_column) = timestamp_value_column {
             self.create_timestamp_func_plan(manipulate, ident(timestamp_value_column))
         } else {
-            Ok(manipulate)
+            self.attach_metric_name(manipulate, metric_name.as_deref())
         }
     }
 
@@ -1948,6 +2053,7 @@ impl PromPlanner {
             at,
         } = vs;
         let matchers = self.preprocess_label_matchers(matchers, name)?;
+        let metric_name = self.ctx.table_name.clone();
         ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
         let range_ms = range.as_millis() as _;
         self.ctx.range = Some(range_ms);
@@ -2046,7 +2152,7 @@ impl PromPlanner {
             }
         };
 
-        Ok(manipulate)
+        self.attach_metric_name(manipulate, metric_name.as_deref())
     }
 
     async fn prom_call_expr_to_plan(
