@@ -39,8 +39,10 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
 
     def test_measure_report_is_finalized_after_datanodes_stop(self) -> None:
         events: list[str] = []
+        commands: list[list[str]] = []
 
         def run(command, **_kwargs):
+            commands.append(command)
             phase = command[1]
             events.append(phase)
             if phase == "measure":
@@ -71,6 +73,13 @@ class RemoteWriteLifecycleTest(unittest.TestCase):
 
         measure = events.index("measure")
         finalize = events.index("finalize-remote")
+        datanode_configs = [command for command in commands if "--target" in command]
+        self.assertEqual(len(datanode_configs), 2)
+        self.assertTrue(all(command[command.index("--target") + 1] == "datanode" for command in datanode_configs))
+        self.assertTrue(all("--config-file" in runner.component_command(target, "datanode") for target in [
+            runner.make_target("base", Path("base"), Path("work"), self.ports[:8], Path("front.toml"), Path("data.toml")),
+            runner.make_target("candidate", Path("candidate"), Path("work"), self.ports[8:], Path("front.toml"), Path("data.toml")),
+        ]))
         self.assertLess(measure, events.index("stop:base:datanode"))
         self.assertLess(events.index("stop:base:datanode"), finalize)
         self.assertLess(events.index("stop:candidate:datanode"), finalize)
