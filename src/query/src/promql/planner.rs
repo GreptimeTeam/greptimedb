@@ -1079,7 +1079,8 @@ impl PromPlanner {
         }
 
         if let Some(plan) = self.try_plan_binary_island(binary_expr).await? {
-            return Ok(plan);
+            // Binary islands contain only arithmetic operators.
+            return self.drop_metric_name(plan);
         }
 
         let PromBinaryExpr {
@@ -1191,12 +1192,13 @@ impl PromPlanner {
                 } else {
                     let projected =
                         self.projection_for_each_field_column(input, bin_expr_builder)?;
-                    self.filter_binary_projection(
+                    let result = self.filter_binary_projection(
                         projected,
                         has_native_histogram,
                         preserve_any_value,
                         retain_field_columns,
-                    )
+                    )?;
+                    self.drop_metric_name(result)
                 }
             }
             // lhs is a column, rhs is a literal
@@ -1258,12 +1260,13 @@ impl PromPlanner {
                 } else {
                     let projected =
                         self.projection_for_each_field_column(input, bin_expr_builder)?;
-                    self.filter_binary_projection(
+                    let result = self.filter_binary_projection(
                         projected,
                         has_native_histogram,
                         preserve_any_value,
                         retain_field_columns,
-                    )
+                    )?;
+                    self.drop_metric_name(result)
                 }
             }
             // both are columns. join them on time index
@@ -1581,12 +1584,19 @@ impl PromPlanner {
                         &self.ctx.field_columns,
                     );
                     let retain_field_columns = vec![true; self.ctx.field_columns.len()];
-                    self.filter_binary_projection(
+                    let result = self.filter_binary_projection(
                         projected,
                         has_native_histogram,
                         preserve_any_value,
                         retain_field_columns,
-                    )
+                    )?;
+                    if lhs.value_type() == ValueType::Scalar
+                        || rhs.value_type() == ValueType::Scalar
+                    {
+                        self.drop_metric_name(result)
+                    } else {
+                        Ok(result)
+                    }
                 }
             }
         }
