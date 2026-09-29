@@ -1,0 +1,16 @@
+.github/scripts/tracesbench-summary.py
+  h_623774b620da8e 1-157
+.github/workflows/tracesbench.yml
+  h_623774b620da8e 304-309
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "336151d9683413016990361c57de954e8c91d247",
+  "prompts": {},
+  "humans": {
+    "h_623774b620da8e": {
+      "author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
