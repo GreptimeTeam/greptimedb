@@ -88,7 +88,7 @@ const RECOVERY_TAIL_WINDOW: usize = 64 * 1024;
 /// `enqueued` mode it returns on admission and the object is created in the
 /// background. While [`MAX_SEALED_BATCHES`] batches
 /// wait to become durable no append is admitted.
-pub(crate) struct ObjectStoreLogStore {
+pub struct ObjectStoreLogStore {
     prefix: String,
     ack_mode: AckMode,
     io: Arc<dyn WalObjectIo>,
@@ -124,7 +124,7 @@ impl ObjectStoreLogStore {
     /// recovering the catalog from the objects that already exist and writing
     /// the object that starts the epoch of this instance. Recovery fails on the
     /// first corrupted or conflicting object.
-    pub(crate) async fn try_new(
+    pub async fn try_new(
         object_store: ObjectStore,
         config: &ObjectStoreWalConfig,
         node_id: u64,
@@ -336,7 +336,7 @@ fn positive_bytes(bytes: u64, name: &str) -> Result<usize> {
 impl ObjectStoreLogStore {
     /// Waits until the actor has admitted at least `expected` append calls
     /// since the store was built.
-    pub(crate) async fn wait_for_admitted_appends(&self, expected: usize) -> Result<()> {
+    pub async fn wait_for_admitted_appends(&self, expected: usize) -> Result<()> {
         self.admitted_appends
             .clone()
             .wait_for(|count| *count >= expected)
@@ -348,7 +348,7 @@ impl ObjectStoreLogStore {
 
     /// Seals the open batch regardless of its size and age and returns once
     /// its object is durable and indexed, or with the error that failed it.
-    pub(crate) async fn seal_open_batch(&self) -> Result<()> {
+    pub async fn seal_open_batch(&self) -> Result<()> {
         ensure!(
             !self.stopped.load(Ordering::Acquire),
             ObjectStoreWalStoppedSnafu
@@ -368,24 +368,24 @@ impl ObjectStoreLogStore {
     /// [`release_creates`](Self::release_creates), so a test can observe
     /// entries that are admitted but not durable. A create that is parked when
     /// the store is dropped never runs.
-    pub(crate) fn hold_creates(&self) {
+    pub fn hold_creates(&self) {
         self.creates_held.send_replace(true);
     }
 
     /// Lets the creates parked by [`hold_creates`](Self::hold_creates) run.
-    pub(crate) fn release_creates(&self) {
+    pub fn release_creates(&self) {
         self.creates_held.send_replace(false);
     }
 
     /// Makes every create that runs from now on fail with a transient object
     /// store error instead of writing.
-    pub(crate) fn fail_creates(&self) {
+    pub fn fail_creates(&self) {
         self.creates_fail.store(true, Ordering::Release);
     }
 
     /// Sets the stopped flag without sending the stop command, which is the
     /// state a store is in between the two steps of [`stop`](LogStore::stop).
-    pub(crate) fn begin_stop(&self) {
+    pub fn begin_stop(&self) {
         self.stopped.store(true, Ordering::Release);
     }
 }
