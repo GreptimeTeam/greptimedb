@@ -431,9 +431,11 @@ impl Export {
             });
         }
 
-        let success = self.execute_tasks(tasks).await;
+        for result in futures::future::join_all(tasks).await {
+            result?;
+        }
         let elapsed = timer.elapsed();
-        info!("Success {success}/{db_count} jobs, cost: {elapsed:?}");
+        info!("Success {db_count}/{db_count} jobs, cost: {elapsed:?}");
 
         Ok(())
     }

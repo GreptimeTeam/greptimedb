@@ -257,7 +257,10 @@ mod tests {
                 let mut headers = String::new();
                 loop {
                     let mut line = String::new();
-                    assert!(socket.read_line(&mut line).await.unwrap() > 0);
+                    if socket.read_line(&mut line).await.unwrap() == 0 {
+                        assert!(headers.is_empty());
+                        return queries;
+                    }
                     headers.push_str(&line);
                     if line == "\r\n" {
                         break;
@@ -345,6 +348,85 @@ mod tests {
         );
         assert!(queries[0].ends_with(".\"表.127\"\";x\";\n"));
         assert!(queries[1].ends_with(".\"表.128\"\";x\";\n"));
+    }
+
+    #[tokio::test]
+    async fn legacy_command_stops_before_data_after_schema_failure() {
+        use clap::Parser;
+
+        use crate::data::export::ExportCommand;
+
+        let output = |rows: Value, columns: usize| {
+            json!({"records": {"schema": {"column_schemas": (0..columns)
+                .map(|i| json!({"name": i.to_string(), "data_type": "String"}))
+                .collect::<Vec<_>>()}, "rows": rows, "total_rows": rows.as_array().unwrap().len()}})
+        };
+        let databases = output(json!([["public"]]), 1);
+        let mut malformed = records("middle", "CREATE TABLE middle");
+        malformed["records"]["rows"][0][1] = json!(42);
+        let bodies = vec![
+            vec![databases.clone()],
+            vec![records("public", "CREATE DATABASE public")],
+            vec![databases.clone()],
+            vec![output(json!([]), 3)],
+            vec![output(
+                json!([
+                    ["catalog", "public", "first", "BASE TABLE"],
+                    ["catalog", "public", "middle", "BASE TABLE"],
+                    ["catalog", "public", "last", "BASE TABLE"]
+                ]),
+                4,
+            )],
+            vec![
+                records("first", "CREATE TABLE first"),
+                malformed,
+                records("last", "CREATE TABLE last"),
+            ],
+            vec![databases],
+            vec![json!({"affectedrows": 0})],
+        ]
+        .into_iter()
+        .map(|output| {
+            (
+                200,
+                json!({"output": output, "execution_time_ms": 0}).to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+        for target in ["schema", "all"] {
+            let (client, server) = responses(bodies.clone()).await;
+            let dir = tempfile::tempdir().unwrap();
+            let command = ExportCommand::parse_from([
+                "export",
+                "--addr",
+                client.addr(),
+                "--database",
+                "catalog-public",
+                "--output-dir",
+                dir.path().to_str().unwrap(),
+                "--target",
+                target,
+                "--auth-basic",
+                "user:password",
+                "--timeout",
+                "7s",
+                "--no-proxy",
+            ]);
+            let tool = command.build().await.unwrap();
+            let result = tool.do_work().await;
+            drop(tool);
+            let queries = server.await.unwrap();
+            assert!(result.unwrap_err().to_string().contains("middle"));
+            assert!(
+                dir.path()
+                    .join("catalog/public/create_database.sql")
+                    .is_file()
+            );
+            assert!(!dir.path().join("catalog/public/create_tables.sql").exists());
+            assert_eq!(queries.len(), 6);
+            assert!(queries[5].contains("SHOW CREATE TABLE \"catalog\".\"public\".\"middle\""));
+            assert!(!queries.iter().any(|sql| sql.starts_with("COPY")));
+        }
     }
 
     #[tokio::test]
