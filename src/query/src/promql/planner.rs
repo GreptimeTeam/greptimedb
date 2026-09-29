@@ -946,6 +946,21 @@ impl PromPlanner {
         self.drop_metric_name(plan)
     }
 
+    /// Whether a PromQL function keeps the metric-name identity of its input. The functions
+    /// absent from the list drop it in [`Self::drop_metric_name`] once their result is built.
+    fn keeps_metric_name(function_name: &str) -> bool {
+        matches!(
+            function_name,
+            "label_join"
+                | "label_replace"
+                | "sort"
+                | "sort_desc"
+                | "sort_by_label"
+                | "sort_by_label_desc"
+                | "last_over_time"
+        )
+    }
+
     fn drop_metric_name(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
         let Some(marker) = Self::metric_name_column(input.schema())? else {
             return Ok(input);
@@ -2164,9 +2179,11 @@ impl PromPlanner {
         // some special functions that are not expression but a plan
         match func.name {
             SPECIAL_HISTOGRAM_QUANTILE | SPECIAL_HISTOGRAM_FRACTION => {
-                return self
+                let plan = self
                     .create_histogram_plan(func.name, args, query_engine_state)
-                    .await;
+                    .await?;
+                // Keep the input identity through folding, then drop it from the result.
+                return self.drop_metric_name(plan);
             }
             SPECIAL_VECTOR_FUNCTION => return self.create_vector_plan(args).await,
             SCALAR_FUNCTION => return self.create_scalar_plan(args, query_engine_state).await,
@@ -2254,6 +2271,7 @@ impl PromPlanner {
             .context(DataFusionPlanningSnafu)?
             .filter(self.create_empty_values_filter_expr(true)?)
             .context(DataFusionPlanningSnafu)?;
+        let result_schema = builder.schema().clone();
 
         let builder = match func.name {
             "sort" => builder
@@ -2266,6 +2284,7 @@ impl PromPlanner {
                 .sort(Self::create_sort_exprs_by_tags(
                     func.name,
                     args.literals,
+                    &result_schema,
                     true,
                 )?)
                 .context(DataFusionPlanningSnafu)?,
@@ -2273,6 +2292,7 @@ impl PromPlanner {
                 .sort(Self::create_sort_exprs_by_tags(
                     func.name,
                     args.literals,
+                    &result_schema,
                     false,
                 )?)
                 .context(DataFusionPlanningSnafu)?,
@@ -2307,7 +2327,13 @@ impl PromPlanner {
         }
         common_telemetry::debug!("Created PromQL function plan: {plan:?} for {call_expr:?}");
 
-        Ok(plan)
+        if Self::keeps_metric_name(func.name) {
+            Ok(plan)
+        } else {
+            // Ordinary functions drop the metric-name identity of their input. Dropping it on
+            // the completed result leaves the identity visible to the function itself.
+            self.drop_metric_name(plan)
+        }
     }
 
     async fn prom_ext_expr_to_plan(
@@ -4457,6 +4483,7 @@ impl PromPlanner {
     fn create_sort_exprs_by_tags(
         func: &str,
         tags: Vec<DfExpr>,
+        input_schema: &DFSchemaRef,
         asc: bool,
     ) -> Result<Vec<SortExpr>> {
         ensure!(
@@ -4464,10 +4491,26 @@ impl PromPlanner {
             FunctionInvalidArgumentSnafu { fn_name: func }
         );
 
+        let metric_name_column = Self::metric_name_column(input_schema)?;
         tags.iter()
             .map(|col| match col {
                 DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
-                    Ok(DfExpr::Column(Column::from_name(label)).sort(asc, false))
+                    // `__name__` is not a physical column: the metric identity lives in the
+                    // marked column of the input. Without one, the label keeps its ordinary
+                    // missing-label behavior.
+                    let column = match (label.as_str(), &metric_name_column) {
+                        (METRIC_NAME, Some(metric_name_column)) => metric_name_column.clone(),
+                        (METRIC_NAME, None) => {
+                            return Err(datafusion::common::field_not_found(
+                                None::<datafusion::common::TableReference>,
+                                label,
+                                input_schema.as_ref(),
+                            ))
+                            .context(DataFusionPlanningSnafu);
+                        }
+                        _ => Column::from_name(label),
+                    };
+                    Ok(DfExpr::Column(column).sort(asc, false))
                 }
                 other => UnexpectedPlanExprSnafu {
                     desc: format!("expected label string literal, but found {:?}", other),
