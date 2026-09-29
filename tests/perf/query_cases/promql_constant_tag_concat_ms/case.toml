@@ -58,6 +58,23 @@ step_nanos = 15_000_000_000
 time_range_layout = "non_overlapping_per_sst"
 series_layout = "timestamp_major"
 
+# Range-vector qualification for the #9274 millisecond fast path: only the
+# matrix selector `count_over_time(...[5m])` reaches RangeManipulateStream on
+# this TIMESTAMP(3) fixture with zero offset, so ANALYZE VERBOSE is used to keep
+# `PromRangeManipulateExec` in each measured sample. The instant selectors below
+# remain the negative control (they never enter RangeManipulateStream). As the
+# first configured query, this entry is also the runner's extra untimed
+# pre-measurement validation probe.
+[[scenario.queries]]
+name = "range_count_over_time_5m_analyze"
+kind = "tql"
+query = "TQL ANALYZE VERBOSE (1704069000, 1704069900, '15s') count_over_time(promql_constant_tag_concat_ms[5m])"
+warmup = 3
+iterations = 9
+
+[scenario.queries.thresholds]
+max_candidate_latency_regression_pct = 10
+
 [[scenario.queries]]
 name = "selector_full"
 kind = "tql"
