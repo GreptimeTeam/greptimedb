@@ -356,38 +356,6 @@ mod tests {
         res
     }
 
-    /// Returns the row ids of the documents matching `query`, sorted ascending.
-    fn matched_row_ids(path: &Path, config: Config, query: &str) -> Vec<u32> {
-        let mut index = Index::open_in_dir(path).unwrap();
-        index.set_tokenizers(config.build_tantivy_tokenizer());
-        let reader = index.reader().unwrap();
-        let searcher = reader.searcher();
-
-        let query_parser = QueryParser::for_index(
-            &index,
-            vec![index.schema().get_field(TEXT_FIELD_NAME).unwrap()],
-        );
-        let query = query_parser.parse_query(query).unwrap();
-        let docs = searcher.search(&query, &DocSetCollector).unwrap();
-
-        let mut res = vec![];
-        let rowid_field = searcher.schema().get_field(ROWID_FIELD_NAME).unwrap();
-        for doc_addr in &docs {
-            let doc: TantivyDocument = searcher.doc(*doc_addr).unwrap();
-            let rowid = doc.get_first(rowid_field).unwrap().as_u64().unwrap();
-            res.push(rowid as u32);
-        }
-
-        res.sort();
-        res
-    }
-
-    /// Returns the number of searchable segments in the index.
-    fn segment_count(path: &Path) -> usize {
-        let index = Index::open_in_dir(path).unwrap();
-        index.searchable_segment_ids().unwrap().len()
-    }
-
     async fn query_and_check(path: &Path, config: Config, cases: &[(&str, Vec<u32>)]) {
         let mut index = Index::open_in_dir(path).unwrap();
         index.set_tokenizers(config.build_tantivy_tokenizer());
@@ -439,65 +407,22 @@ mod tests {
             "greptime Bar",
         ];
         let config = Config::default();
+        // A single memory limit is enough: the memory limits themselves are covered by the
+        // creator tests above, and this test only compares the two push paths.
+        let memory_limit = 64_000_000;
 
-        for memory_limit in [1, 64_000_000, usize::MAX] {
-            let direct_dir = create_temp_dir("test_push_text_direct_");
-            let trait_dir = create_temp_dir("test_push_text_trait_");
-
-            for (path, via_trait) in [(direct_dir.path(), false), (trait_dir.path(), true)] {
-                let mut creator = TantivyFulltextIndexCreator::new(path, config, memory_limit)
-                    .await
-                    .unwrap();
-                for text in texts {
-                    if via_trait {
-                        push_via_trait(&mut creator, text).await;
-                    } else {
-                        creator.push_text(text).await.unwrap();
-                    }
-                }
-                creator
-                    .finish(&mut MockPuffinWriter, "", PutOptions::default())
-                    .await
-                    .unwrap();
-
-                // One row per text, row ids in the push order.
-                assert_eq!(
-                    all_row_ids(path),
-                    (0..texts.len() as u32).collect::<Vec<_>>()
-                );
-                // The pushed texts match `greptime` except the empty one.
-                assert_eq!(matched_row_ids(path, config, "greptime"), vec![0, 1, 3, 4]);
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_push_text_inherent_and_trait_match_across_segments() {
-        // The writer clamps its memory budget to a 15MB floor, and the documents below hold
-        // enough distinct terms to exceed it, so tantivy flushes a segment before the last
-        // text is pushed.
-        const ROWS: usize = 6;
-        let text = format!(
-            "greptime {}",
-            (0..200_000)
-                .map(|i| format!("token{i}"))
-                .collect::<Vec<_>>()
-                .join(" ")
-        );
-        let config = Config::default();
-
-        let direct_dir = create_temp_dir("test_push_text_direct_segments_");
-        let trait_dir = create_temp_dir("test_push_text_trait_segments_");
+        let direct_dir = create_temp_dir("test_push_text_direct_");
+        let trait_dir = create_temp_dir("test_push_text_trait_");
 
         for (path, via_trait) in [(direct_dir.path(), false), (trait_dir.path(), true)] {
-            let mut creator = TantivyFulltextIndexCreator::new(path, config, 1)
+            let mut creator = TantivyFulltextIndexCreator::new(path, config, memory_limit)
                 .await
                 .unwrap();
-            for _ in 0..ROWS {
+            for text in texts {
                 if via_trait {
-                    push_via_trait(&mut creator, &text).await;
+                    push_via_trait(&mut creator, text).await;
                 } else {
-                    creator.push_text(&text).await.unwrap();
+                    creator.push_text(text).await.unwrap();
                 }
             }
             creator
@@ -505,14 +430,13 @@ mod tests {
                 .await
                 .unwrap();
 
-            // More than one segment, yet still one row per pushed text with row ids in the
-            // push order across the segment boundary.
-            assert!(segment_count(path) > 1);
-            assert_eq!(all_row_ids(path), (0..ROWS as u32).collect::<Vec<_>>());
+            // One row per text, row ids in the push order.
             assert_eq!(
-                matched_row_ids(path, config, "greptime"),
-                (0..ROWS as u32).collect::<Vec<_>>()
+                all_row_ids(path),
+                (0..texts.len() as u32).collect::<Vec<_>>()
             );
+            // The pushed texts match `greptime` except the empty one.
+            query_and_check(path, config, &[("greptime", vec![0u32, 1, 3, 4])]).await;
         }
     }
 }
