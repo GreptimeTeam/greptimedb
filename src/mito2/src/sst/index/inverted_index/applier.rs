@@ -364,10 +364,16 @@ impl InvertedIndexApplier {
     ///
     /// Returns `None` when no compatible predicate remains for this SST.
     pub fn plan_for_sst(&self, sst_metadata: &RegionMetadataRef) -> Result<Option<SstApplyPlan>> {
-        let mut compatible_predicates = BTreeMap::new();
+        // Borrowed first pass: only detect whether some predicate column is
+        // incompatible with this SST and whether any compatible predicate
+        // remains. Nothing is cloned here, so no map is allocated when the SST
+        // is fully compatible.
         let mut has_type_mismatch = false;
+        let mut has_compatible_predicate = false;
 
         for (col_id, expected) in &self.expected_predicate_col_types {
+            // A column missing from the SST is compatible: the index lookup
+            // reports it as not found instead of mismatching the predicate.
             if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
                 && sst_col.column_schema.data_type != *expected
             {
@@ -375,18 +381,38 @@ impl InvertedIndexApplier {
                 continue;
             }
 
-            if let Some(predicates) = self.predicates.get(col_id) {
-                compatible_predicates.insert(*col_id, predicates.clone());
+            // The predicate map entry is what makes a column applicable, so an
+            // entry holding an empty predicate list still counts.
+            if self.predicates.contains_key(col_id) {
+                has_compatible_predicate = true;
             }
         }
 
-        if compatible_predicates.is_empty() {
+        if !has_compatible_predicate {
             return Ok(None);
         }
 
         if !has_type_mismatch {
             return Ok(Some(self.default_plan.clone()));
         }
+
+        // Slow path: build a plan from the compatible predicates only. Cloning
+        // the predicate lists happens here, not on the fully compatible path.
+        let compatible_predicates = self
+            .expected_predicate_col_types
+            .iter()
+            .filter_map(|(col_id, expected)| {
+                if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
+                    && sst_col.column_schema.data_type != *expected
+                {
+                    return None;
+                }
+
+                self.predicates
+                    .get(col_id)
+                    .map(|predicates| (*col_id, predicates.clone()))
+            })
+            .collect();
 
         let plan = Self::build_apply_plan(&compatible_predicates)?;
         Ok(Some(plan))
@@ -495,6 +521,177 @@ mod tests {
             .plan_for_sst(&mock_region_metadata())
             .unwrap();
         assert!(plan.is_none());
+    }
+
+    /// Expected outcome of [`InvertedIndexApplier::plan_for_sst`] for one case.
+    enum ExpectedPlan {
+        /// No compatible predicate remains, so no plan is built.
+        NoPlan,
+        /// The default plan is reused as is, sharing the same applier.
+        DefaultPlan,
+        /// A plan is built from the compatible predicates only.
+        Filtered(BTreeMap<ColumnId, Vec<Predicate>>),
+    }
+
+    /// One case of [`InvertedIndexApplier::plan_for_sst`].
+    struct PlanForSstCase {
+        name: &'static str,
+        /// Predicates collected for the query.
+        predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+        /// Expected predicate column types from the latest region metadata.
+        expected_col_types: BTreeMap<ColumnId, ConcreteDataType>,
+        expected: ExpectedPlan,
+    }
+
+    fn regex_match_predicate(pattern: &str) -> Predicate {
+        Predicate::RegexMatch(RegexMatchPredicate {
+            pattern: pattern.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_plan_for_sst_cases() {
+        // `mock_region_metadata` holds column 1 (String tag) and column 2
+        // (TimestampMillisecond).
+        let sst_metadata = mock_region_metadata();
+        let (_d, puffin_manager_factory) =
+            PuffinManagerFactory::new_for_test_async("test_plan_for_sst_cases_").await;
+        let object_store = ObjectStore::new(Memory::default()).unwrap();
+
+        let cases = vec![
+            PlanForSstCase {
+                name: "fully compatible reuses the default plan",
+                predicates: BTreeMap::from_iter([(1, vec![regex_match_predicate("foo")])]),
+                expected_col_types: BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]),
+                expected: ExpectedPlan::DefaultPlan,
+            },
+            PlanForSstCase {
+                name: "missing sst column is compatible",
+                predicates: BTreeMap::from_iter([(3, vec![regex_match_predicate("foo")])]),
+                expected_col_types: BTreeMap::from_iter([(3, ConcreteDataType::string_datatype())]),
+                expected: ExpectedPlan::DefaultPlan,
+            },
+            PlanForSstCase {
+                name: "present empty predicate list counts as compatible",
+                predicates: BTreeMap::from_iter([(1, vec![])]),
+                expected_col_types: BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]),
+                expected: ExpectedPlan::DefaultPlan,
+            },
+            PlanForSstCase {
+                name: "empty predicate map yields no plan",
+                predicates: BTreeMap::new(),
+                expected_col_types: BTreeMap::new(),
+                expected: ExpectedPlan::NoPlan,
+            },
+            PlanForSstCase {
+                name: "expected column without predicate entry yields no plan",
+                predicates: BTreeMap::new(),
+                expected_col_types: BTreeMap::from_iter([(1, ConcreteDataType::string_datatype())]),
+                expected: ExpectedPlan::NoPlan,
+            },
+            PlanForSstCase {
+                name: "fully mismatched yields no plan",
+                predicates: BTreeMap::from_iter([(1, vec![regex_match_predicate("foo")])]),
+                expected_col_types: BTreeMap::from_iter([(1, ConcreteDataType::int64_datatype())]),
+                expected: ExpectedPlan::NoPlan,
+            },
+            PlanForSstCase {
+                name: "partial mismatch keeps compatible predicates",
+                predicates: BTreeMap::from_iter([
+                    (1, vec![regex_match_predicate("foo")]),
+                    (2, vec![regex_match_predicate("bar")]),
+                ]),
+                expected_col_types: BTreeMap::from_iter([
+                    (1, ConcreteDataType::string_datatype()),
+                    (2, ConcreteDataType::timestamp_second_datatype()),
+                ]),
+                expected: ExpectedPlan::Filtered(BTreeMap::from_iter([(
+                    1,
+                    vec![regex_match_predicate("foo")],
+                )])),
+            },
+            PlanForSstCase {
+                name: "mismatch without predicate entry rebuilds the plan",
+                predicates: BTreeMap::from_iter([(1, vec![regex_match_predicate("foo")])]),
+                expected_col_types: BTreeMap::from_iter([
+                    (1, ConcreteDataType::string_datatype()),
+                    (2, ConcreteDataType::timestamp_second_datatype()),
+                ]),
+                expected: ExpectedPlan::Filtered(BTreeMap::from_iter([(
+                    1,
+                    vec![regex_match_predicate("foo")],
+                )])),
+            },
+            PlanForSstCase {
+                name: "mismatch keeps compatible missing column",
+                predicates: BTreeMap::from_iter([
+                    (2, vec![regex_match_predicate("bar")]),
+                    (3, vec![regex_match_predicate("baz")]),
+                ]),
+                expected_col_types: BTreeMap::from_iter([
+                    (2, ConcreteDataType::timestamp_second_datatype()),
+                    (3, ConcreteDataType::string_datatype()),
+                ]),
+                expected: ExpectedPlan::Filtered(BTreeMap::from_iter([(
+                    3,
+                    vec![regex_match_predicate("baz")],
+                )])),
+            },
+        ];
+
+        for case in cases {
+            let PlanForSstCase {
+                name,
+                predicates,
+                expected_col_types,
+                expected,
+            } = case;
+
+            let applier = InvertedIndexApplier::new(
+                "table_dir".to_string(),
+                PathType::Bare,
+                object_store.clone(),
+                puffin_manager_factory.clone(),
+                predicates,
+                expected_col_types,
+            )
+            .unwrap();
+
+            let plan = applier.plan_for_sst(&sst_metadata).unwrap();
+
+            match expected {
+                ExpectedPlan::NoPlan => {
+                    assert!(plan.is_none(), "case [{name}] expects no plan");
+                }
+                ExpectedPlan::DefaultPlan => {
+                    let Some(plan) = plan else {
+                        panic!("case [{name}] expects a plan");
+                    };
+                    assert!(
+                        Arc::ptr_eq(&plan.index_applier, &applier.default_plan.index_applier),
+                        "case [{name}] expects the default plan applier to be reused"
+                    );
+                    assert_eq!(
+                        plan.predicate_key, applier.default_plan.predicate_key,
+                        "case [{name}] expects the default predicate key"
+                    );
+                }
+                ExpectedPlan::Filtered(compatible) => {
+                    let Some(plan) = plan else {
+                        panic!("case [{name}] expects a plan");
+                    };
+                    assert!(
+                        !Arc::ptr_eq(&plan.index_applier, &applier.default_plan.index_applier),
+                        "case [{name}] expects a plan rebuilt from compatible predicates"
+                    );
+                    assert_eq!(
+                        plan.predicate_key,
+                        PredicateKey::new_inverted(Arc::new(compatible)),
+                        "case [{name}] expects only compatible predicates"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
