@@ -237,6 +237,14 @@ impl FlightCompression {
     }
 }
 
+/// The wrapped OTLP Arrow service type used by [`GrpcServer`].
+type OtelArrowService = MemoryLimiterExtensionService<
+    InterceptedService<
+        ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
+        HeaderInterceptor,
+    >,
+>;
+
 pub struct GrpcServer {
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
@@ -248,14 +256,7 @@ pub struct GrpcServer {
     // tls config
     tls_config: Option<ServerTlsConfig>,
     // Otel arrow service
-    otel_arrow_service: Mutex<
-        Option<
-            InterceptedService<
-                ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
-                HeaderInterceptor,
-            >,
-        >,
-    >,
+    otel_arrow_service: Mutex<Option<OtelArrowService>>,
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
     config: GrpcServerConfig,
