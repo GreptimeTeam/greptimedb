@@ -226,9 +226,23 @@ mod tests {
         build.into_inner().unwrap()
     }
 
+    /// Serializes a valid FST for an empty map. This is not the same as zero
+    /// bytes, which are not a valid FST encoding.
+    fn empty_fst_bytes() -> Vec<u8> {
+        MapBuilder::memory().into_inner().unwrap()
+    }
+
     #[tokio::test]
     async fn test_fst_vec_shares_the_reader_bytes() {
-        let fst_bytes = Bytes::from(mock_fst_bytes());
+        // Place the FST payload at a nonzero offset inside a larger allocation
+        // that stays alive, so sharing cannot be mistaken for an alias of a
+        // buffer that merely happens to start at offset zero.
+        let mut payload = vec![0xAA; 32];
+        let fst_offset = payload.len();
+        payload.extend_from_slice(&mock_fst_bytes());
+        let payload = Bytes::from(payload);
+        let fst_bytes = payload.slice(fst_offset..);
+        assert_ne!(fst_offset, 0);
         let data_ptr = fst_bytes.as_ptr();
 
         let mut reader = BytesReader(vec![fst_bytes.clone()]);
@@ -240,24 +254,44 @@ mod tests {
         let fst = &fsts[0];
         // The map is backed by the exact buffer the reader returned instead of
         // a copy of the FST payload: the pointer is compared while the caller
-        // side handle is still alive, so a copy could not alias it.
+        // side handles are still alive, so a copy could not alias it.
         assert_eq!(fst.as_fst().as_inner().as_ptr(), data_ptr);
-        assert_eq!(fst.as_fst().as_bytes().as_ptr(), data_ptr);
         assert_eq!(fst.as_fst().as_bytes().len(), fst_bytes.len());
         assert_eq!(fst.get("key1"), Some(1));
         assert_eq!(fst.get("key2"), Some(2));
 
         // Dropping the caller-side references keeps the map usable: the map
-        // holds a shared handle to the same allocation.
+        // holds a shared handle to the same (larger) allocation.
         drop(reader);
         drop(fst_bytes);
+        drop(payload);
         assert_eq!(fst.get("key1"), Some(1));
         assert_eq!(fst.get("key2"), Some(2));
         assert_eq!(fst.get("key3"), None);
     }
 
     #[tokio::test]
-    async fn test_fst_vec_rejects_empty_and_malformed_bytes() {
+    async fn test_fst_vec_accepts_a_valid_empty_fst() {
+        let empty_fst = empty_fst_bytes();
+        assert!(!empty_fst.is_empty());
+
+        let size = empty_fst.len() as u64;
+        let mut reader = BytesReader(vec![Bytes::from(empty_fst)]);
+        let mut metrics = InvertedIndexReadMetrics::default();
+        let fsts = reader
+            .fst_vec(&[0..size], Some(&mut metrics))
+            .await
+            .unwrap();
+
+        assert_eq!(fsts.len(), 1);
+        assert_eq!(fsts[0].len(), 0);
+        assert_eq!(fsts[0].get("key1"), None);
+    }
+
+    #[tokio::test]
+    async fn test_fst_vec_rejects_malformed_bytes() {
+        // Zero bytes are not a valid FST encoding, unlike a finalized FST for
+        // an empty map.
         for payload in [vec![], b"not an fst".to_vec()] {
             let size = payload.len() as u64;
             let mut reader = BytesReader(vec![Bytes::from(payload)]);

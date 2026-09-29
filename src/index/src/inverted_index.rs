@@ -17,7 +17,9 @@ pub mod error;
 pub mod format;
 pub mod search;
 
-/// A finite state transducer map that shares ownership of its backing bytes
-/// with the reader that produced it, so the FST payload is not copied into
-/// the map.
+/// A finite state transducer map backed by reference-counted [`bytes::Bytes`].
+///
+/// The map owns its handle to those bytes and shares the underlying allocation
+/// with any other handle to it, so FST payload already held as [`bytes::Bytes`]
+/// is reused instead of copied into the map.
 pub type FstMap = fst::Map<bytes::Bytes>;
