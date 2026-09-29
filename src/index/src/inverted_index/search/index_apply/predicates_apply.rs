@@ -167,9 +167,9 @@ impl TryFrom<Vec<(String, Vec<Predicate>)>> for PredicatesIndexApplier {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::VecDeque;
     use std::sync::Arc;
 
+    use bytes::Bytes;
     use greptime_proto::v1::index::{BitmapType, InvertedIndexMeta};
 
     use super::*;
@@ -213,6 +213,13 @@ mod tests {
         bytemuck::cast::<_, u64>([offset, size])
     }
 
+    /// Serializes `bitmap` so it can be returned as a raw `read_vec` response.
+    fn serialized(bitmap: &Bitmap, bitmap_type: BitmapType) -> Bytes {
+        let mut buf = Vec::new();
+        bitmap.serialize_into(bitmap_type, &mut buf).unwrap();
+        Bytes::from(buf)
+    }
+
     #[tokio::test]
     async fn test_index_applier_apply_get_key() {
         // An index applier that point-gets "tag-0_value-0" on tag "tag-0"
@@ -231,19 +238,14 @@ mod tests {
             ])
         });
 
-        mock_reader
-            .expect_bitmap_deque()
-            .returning(|arg, _metrics| {
-                assert_eq!(arg.len(), 1);
-                let range = &arg[0].0;
-                let bitmap_type = arg[0].1;
-                assert_eq!(*range, 2..3);
-                assert_eq!(bitmap_type, BitmapType::Roaring);
-                Ok(VecDeque::from([Bitmap::from_lsb0_bytes(
-                    &[0b10101010],
-                    bitmap_type,
-                )]))
-            });
+        mock_reader.expect_read_vec().returning(|ranges, _metrics| {
+            assert_eq!(ranges.len(), 1);
+            assert_eq!(ranges[0], 2..3);
+            Ok(vec![serialized(
+                &Bitmap::from_lsb0_bytes(&[0b10101010], BitmapType::Roaring),
+                BitmapType::Roaring,
+            )])
+        });
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader, None)
             .await
@@ -298,26 +300,26 @@ mod tests {
             }
             Ok(output)
         });
-        mock_reader
-            .expect_bitmap_deque()
-            .returning(|ranges, _metrics| {
-                let mut output = VecDeque::new();
-                for (range, bitmap_type) in ranges {
-                    let offset = range.start;
-                    let size = range.end - range.start;
-                    match (offset, size, bitmap_type) {
-                        (1, 1, BitmapType::Roaring) => {
-                            output.push_back(Bitmap::from_lsb0_bytes(&[0b10101010], *bitmap_type))
-                        }
-                        (2, 1, BitmapType::Roaring) => {
-                            output.push_back(Bitmap::from_lsb0_bytes(&[0b11011011], *bitmap_type))
-                        }
-                        _ => unreachable!(),
-                    }
+        mock_reader.expect_read_vec().returning(|ranges, _metrics| {
+            let mut output = Vec::with_capacity(ranges.len());
+            for range in ranges {
+                let offset = range.start;
+                let size = range.end - range.start;
+                match (offset, size) {
+                    (1, 1) => output.push(serialized(
+                        &Bitmap::from_lsb0_bytes(&[0b10101010], BitmapType::Roaring),
+                        BitmapType::Roaring,
+                    )),
+                    (2, 1) => output.push(serialized(
+                        &Bitmap::from_lsb0_bytes(&[0b11011011], BitmapType::Roaring),
+                        BitmapType::Roaring,
+                    )),
+                    _ => unreachable!(),
                 }
+            }
 
-                Ok(output)
-            });
+            Ok(output)
+        });
 
         let output = applier
             .apply(SearchContext::default(), &mut mock_reader, None)
