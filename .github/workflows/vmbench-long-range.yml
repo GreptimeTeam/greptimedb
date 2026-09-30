@@ -20,8 +20,18 @@ on:
         - 1mo
         default: 1w
         required: true
+      compare_greptimedb:
+        description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
+        type: boolean
+        default: false
+        required: false
+      baseline_greptimedb_tag:
+        description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
+        type: string
+        default: v1.2.1
+        required: false
       greptimedb_tag:
-        description: Docker Hub greptime/greptimedb tag
+        description: Candidate Docker Hub greptime/greptimedb tag
         type: string
         default: latest
         required: true
@@ -79,6 +89,8 @@ on:
 permissions:
   contents: read
 env:
+  COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
   RANGE_PRESET: ${{ inputs.range_preset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
@@ -107,6 +119,12 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate version comparison
+      env:
+        RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
+      run: |
+        python3 greptimedb/tests/perf/test_benchmark_version_comparison.py
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py validate
     - name: Resolve CI runner
       id: runner
       run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -146,6 +164,9 @@ jobs:
         args=(--workload vmbench-long-range --range-preset "$RANGE_PRESET"
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           --run-classification controlled_server_benchmark --no-open-browser)
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          args+=(--target "greptimedb:name=greptimedb-baseline,image=greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG,url=http://127.0.0.1:14000/v1/prometheus/api/v1/query_range")
+        fi
         # Tags become target-spec fields; reject separators before passing them to the planner.
         for target in greptimedb victoriametrics; do
           case "$target" in
@@ -303,6 +324,10 @@ jobs:
       if: always()
       run: |
         docker ps -aq --filter "label=o11ybench.run-id=$RUN_ID-warm" | xargs -r docker rm -fv
+    - name: GreptimeDB version comparison
+      if: always() && inputs.compare_greptimedb
+      run: |
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind long-range --root "$ARTIFACT_ROOT-warm" >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |

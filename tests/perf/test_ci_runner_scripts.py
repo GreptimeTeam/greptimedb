@@ -553,10 +553,13 @@ class BenchmarkImagePullTest(unittest.TestCase):
         ''')
         images[0] = 'greptime/greptimedb:v1.3.0-beta.1'
         self.env.update(METADATA_ROOT=str(self.root), GREPTIMEDB_TAG='v1.3.0-beta.1',
-                        GITHUB_ENV=str(self.root / 'env'))
-        for selected in (('greptimedb',), ('tempo',), ('greptimedb', 'victoriatraces', 'tempo')):
+                        GITHUB_ENV=str(self.root / 'env'), BASELINE_GREPTIMEDB_TAG='v1.2.1')
+        for selected, compare in ((('greptimedb',), False), (('tempo',), False),
+                                  (('greptimedb', 'victoriatraces', 'tempo'), False),
+                                  (('greptimedb',), True), (('greptimedb', 'victoriatraces', 'tempo'), True)):
             with self.subTest(selected=selected):
                 self.env['TARGETS'] = ','.join(selected)
+                self.env['COMPARE_GREPTIMEDB'] = str(compare).lower()
                 (self.root / 'env').write_text('')
                 (self.root / 'docker.log').unlink(missing_ok=True)
                 result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
@@ -564,10 +567,15 @@ class BenchmarkImagePullTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 selected_images = [image for target, image in zip(('greptimedb', 'victoriatraces', 'tempo'), images)
                                    if target in selected]
+                if compare:
+                    selected_images.append('greptime/greptimedb:v1.2.1')
                 self.assertEqual(self.lines('docker'),
                                  [call for image in selected_images for call in (f'pull {image}', f'image inspect {image}')])
                 expected_env = 'GREPTIMEDB_IMAGE=greptime/greptimedb@sha256:' + 'a' * 64 + '\n'
-                self.assertEqual((self.root / 'env').read_text(), expected_env if 'greptimedb' in selected else '')
+                expected_env = expected_env if 'greptimedb' in selected else ''
+                if compare:
+                    expected_env += 'BASELINE_GREPTIMEDB_IMAGE=greptime/greptimedb@sha256:' + 'a' * 64 + '\n'
+                self.assertEqual((self.root / 'env').read_text(), expected_env)
         (self.root / 'docker.log').unlink()
         self.env['PULL_FAIL_IMAGE'] = images[1]
         result = subprocess.run(['bash', '-c', command], cwd=self.root, env=self.env,
