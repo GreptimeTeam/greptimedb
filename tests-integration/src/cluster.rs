@@ -38,6 +38,11 @@ use common_base::Plugins;
 use common_grpc::channel_manager::{ChannelConfig, ChannelManager};
 use common_meta::DatanodeId;
 use common_meta::cache::{CacheRegistryBuilder, LayeredCacheRegistryBuilder};
+use common_meta::heartbeat::handler::HandlerGroupExecutor;
+use common_meta::heartbeat::handler::invalidate_table_cache::InvalidateCacheHandler;
+use common_meta::heartbeat::handler::parse_mailbox_message::ParseMailboxMessageHandler;
+use common_meta::key::TableMetadataManager;
+use common_meta::key::flow::FlowMetadataManager;
 use common_meta::kv_backend::KvBackendRef;
 use common_meta::kv_backend::chroot::ChrootKvBackend;
 use common_meta::kv_backend::etcd::EtcdStore;
@@ -45,11 +50,16 @@ use common_meta::kv_backend::memory::MemoryKvBackend;
 use common_meta::peer::Peer;
 use common_runtime::Builder as RuntimeBuilder;
 use common_runtime::runtime::BuilderBuild;
+use common_stat::ResourceStatImpl;
 use common_test_util::temp_dir::create_temp_dir;
 use common_time::util::DefaultSystemTimer;
 use common_wal::config::{DatanodeWalConfig, MetasrvWalConfig};
 use datanode::config::DatanodeOptions;
 use datanode::datanode::{Datanode, DatanodeBuilder, ProcedureConfig};
+use flow::heartbeat::HeartbeatTask;
+use flow::{
+    FlownodeBuilder, FlownodeInstance, FlownodeOptions, FlownodeServiceBuilder, FrontendClient,
+};
 use frontend::frontend::{Frontend, FrontendOptions};
 use frontend::instance::Instance as FeInstance;
 use frontend::instance::builder::FrontendBuilder;
@@ -82,6 +92,12 @@ use crate::test_util::{
     create_tmp_dir_and_datanode_opts,
 };
 
+/// The base node id of the flownodes started by [`GreptimeDbClusterBuilder`].
+///
+/// Datanodes use the node ids starting from 1, so flownodes start from a higher base to avoid
+/// mixing up the two.
+const FLOWNODE_ID_BASE: u64 = 100;
+
 pub struct GreptimeDbCluster {
     pub guards: Vec<TestGuard>,
     pub datanode_options: Vec<DatanodeOptions>,
@@ -90,6 +106,7 @@ pub struct GreptimeDbCluster {
     pub kv_backend: KvBackendRef,
     pub metasrv: Arc<Metasrv>,
     pub frontend: Arc<Frontend>,
+    pub flownodes: Vec<FlownodeInstance>,
 }
 
 impl GreptimeDbCluster {
@@ -171,6 +188,8 @@ pub struct GreptimeDbClusterBuilder {
     metasrv_gc_config: GcSchedulerOptions,
     shared_home_dir: Option<Arc<TempDir>>,
     meta_selector: Option<SelectorRef>,
+    plugins: Option<Plugins>,
+    flownodes: Option<u32>,
 }
 
 impl GreptimeDbClusterBuilder {
@@ -204,6 +223,8 @@ impl GreptimeDbClusterBuilder {
             metasrv_gc_config: GcSchedulerOptions::default(),
             shared_home_dir: None,
             meta_selector: None,
+            plugins: None,
+            flownodes: None,
         }
     }
 
@@ -260,6 +281,23 @@ impl GreptimeDbClusterBuilder {
         self
     }
 
+    /// Sets the [Plugins] used by the metasrv and the flownodes of this cluster.
+    #[must_use]
+    pub fn with_plugins(mut self, plugins: Plugins) -> Self {
+        self.plugins = Some(plugins);
+        self
+    }
+
+    /// Sets the number of flownodes to start in this cluster.
+    ///
+    /// Flownodes require the frontend servers to be started, i.e. `build(true)` or
+    /// `build_with(.., true, ..)`.
+    #[must_use]
+    pub fn with_flownodes(mut self, flownodes: u32) -> Self {
+        self.flownodes = Some(flownodes);
+        self
+    }
+
     pub async fn build_with(
         &self,
         datanode_options: Vec<DatanodeOptions>,
@@ -267,6 +305,12 @@ impl GreptimeDbClusterBuilder {
         guards: Vec<TestGuard>,
     ) -> GreptimeDbCluster {
         let datanodes = datanode_options.len();
+        let flownodes = self.flownodes.unwrap_or(0);
+        assert!(
+            flownodes == 0 || start_frontend_servers,
+            "Flownodes require the frontend servers to be started"
+        );
+
         let channel_config = ChannelConfig::new().timeout(Some(Duration::from_secs(20)));
         let datanode_clients = Arc::new(NodeClients::new(channel_config));
 
@@ -291,14 +335,29 @@ impl GreptimeDbClusterBuilder {
         test_util::prepare_another_catalog_and_schema_with_kv_backend(self.kv_backend.clone())
             .await;
 
-        let metasrv = meta_srv::mocks::mock(
-            opt,
-            self.kv_backend.clone(),
-            self.meta_selector.clone(),
-            Some(datanode_clients.clone()),
-            None,
-        )
-        .await;
+        let metasrv = match &self.plugins {
+            Some(plugins) => {
+                meta_srv::mocks::mock_with_plugins(
+                    opt,
+                    self.kv_backend.clone(),
+                    self.meta_selector.clone(),
+                    Some(datanode_clients.clone()),
+                    None,
+                    plugins.clone(),
+                )
+                .await
+            }
+            None => {
+                meta_srv::mocks::mock(
+                    opt,
+                    self.kv_backend.clone(),
+                    self.meta_selector.clone(),
+                    Some(datanode_clients.clone()),
+                    None,
+                )
+                .await
+            }
+        };
 
         let datanode_instances = self
             .build_datanodes_with_options(&metasrv, &datanode_options)
@@ -319,6 +378,20 @@ impl GreptimeDbClusterBuilder {
 
         frontend.start().await.unwrap();
 
+        if flownodes > 0 {
+            self.wait_frontend_alive(metasrv.metasrv.meta_peer_client(), 1)
+                .await;
+        }
+
+        let flownode_instances = self
+            .build_flownodes(&metasrv, datanode_clients.clone(), flownodes)
+            .await;
+
+        if !flownode_instances.is_empty() {
+            self.wait_flownodes_alive(metasrv.metasrv.meta_peer_client(), flownode_instances.len())
+                .await;
+        }
+
         GreptimeDbCluster {
             datanode_options,
             guards,
@@ -326,6 +399,7 @@ impl GreptimeDbClusterBuilder {
             kv_backend: self.kv_backend.clone(),
             metasrv: metasrv.metasrv,
             frontend: Arc::new(frontend),
+            flownodes: flownode_instances,
         }
     }
 
@@ -421,6 +495,51 @@ impl GreptimeDbClusterBuilder {
             tokio::time::sleep(Duration::from_micros(100)).await
         }
         panic!("Some Datanodes are not alive in 10 seconds!")
+    }
+
+    async fn wait_frontend_alive(
+        &self,
+        meta_peer_client: &MetaPeerClientRef,
+        expected_frontends: usize,
+    ) {
+        for _ in 0..100 {
+            let alive_frontends = discovery::utils::alive_frontend_infos(
+                &DefaultSystemTimer,
+                meta_peer_client.as_ref(),
+                Duration::from_secs(u64::MAX),
+            )
+            .await
+            .unwrap()
+            .len();
+            if alive_frontends == expected_frontends {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await
+        }
+        panic!("Some Frontends are not alive in 10 seconds!")
+    }
+
+    async fn wait_flownodes_alive(
+        &self,
+        meta_peer_client: &MetaPeerClientRef,
+        expected_flownodes: usize,
+    ) {
+        for _ in 0..100 {
+            let alive_flownodes = discovery::utils::alive_flownode_infos(
+                &DefaultSystemTimer,
+                meta_peer_client.as_ref(),
+                Duration::from_secs(u64::MAX),
+                None,
+            )
+            .await
+            .unwrap()
+            .len();
+            if alive_flownodes == expected_flownodes {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await
+        }
+        panic!("Some Flownodes are not alive in 10 seconds!")
     }
 
     async fn create_datanode(&self, opts: DatanodeOptions, metasrv: MockInfo) -> Datanode {
@@ -528,6 +647,120 @@ impl GreptimeDbClusterBuilder {
         }
     }
 
+    async fn build_flownodes(
+        &self,
+        metasrv: &MockInfo,
+        datanode_clients: Arc<NodeClients>,
+        flownodes: u32,
+    ) -> Vec<FlownodeInstance> {
+        let mut instances = Vec::with_capacity(flownodes as usize);
+
+        for i in 0..flownodes {
+            let node_id = FLOWNODE_ID_BASE + i as u64;
+            instances.push(
+                self.create_flownode(node_id, metasrv, datanode_clients.clone())
+                    .await,
+            );
+        }
+
+        instances
+    }
+
+    async fn create_flownode(
+        &self,
+        node_id: u64,
+        metasrv: &MockInfo,
+        datanode_clients: Arc<NodeClients>,
+    ) -> FlownodeInstance {
+        let mut meta_client = MetaClientBuilder::flownode_default_options(node_id)
+            .channel_manager(metasrv.channel_manager.clone())
+            .build();
+        meta_client.start(&[&metasrv.server_addr]).await.unwrap();
+        let meta_client = Arc::new(meta_client);
+
+        let readonly_meta_backend = new_read_only_meta_kv_backend(meta_client.clone());
+        let cached_meta_backend =
+            Arc::new(CachedKvBackendBuilder::new(readonly_meta_backend.clone()).build());
+
+        let layered_cache_builder = LayeredCacheRegistryBuilder::default().add_cache_registry(
+            CacheRegistryBuilder::default()
+                .add_cache(cached_meta_backend.clone())
+                .build(),
+        );
+        let fundamental_cache_registry =
+            build_fundamental_cache_registry(readonly_meta_backend.clone());
+        let cache_registry = Arc::new(
+            with_default_composite_cache_registry(
+                layered_cache_builder.add_cache_registry(fundamental_cache_registry),
+            )
+            .unwrap()
+            .build(),
+        );
+
+        let information_extension = Arc::new(DistributedInformationExtension::new(
+            meta_client.clone(),
+            datanode_clients,
+        ));
+        let catalog_manager = KvBackendCatalogManagerBuilder::new(
+            information_extension,
+            cached_meta_backend.clone(),
+            cache_registry.clone(),
+        )
+        .build();
+
+        let table_metadata_manager =
+            Arc::new(TableMetadataManager::new(cached_meta_backend.clone()));
+        let flow_metadata_manager = Arc::new(FlowMetadataManager::new(cached_meta_backend.clone()));
+
+        let mut opts = FlownodeOptions::default();
+        let grpc_addr = self.choose_random_flownode_addr();
+        opts.node_id = Some(node_id);
+        opts.grpc.bind_addr = grpc_addr.clone();
+        opts.grpc.server_addr = grpc_addr;
+
+        let executor = HandlerGroupExecutor::new(vec![
+            Arc::new(ParseMailboxMessageHandler),
+            Arc::new(InvalidateCacheHandler::new(cache_registry.clone())),
+        ]);
+        let mut resource_stat = ResourceStatImpl::default();
+        resource_stat.start_collect_cpu_usage();
+        let heartbeat_task = HeartbeatTask::new(
+            &opts,
+            meta_client.clone(),
+            Arc::new(executor),
+            Arc::new(resource_stat),
+        );
+
+        let frontend_client = FrontendClient::from_meta_client(
+            meta_client.clone(),
+            opts.query.clone(),
+            opts.flow.batching_mode.clone(),
+        )
+        .unwrap();
+        let frontend_client = Arc::new(frontend_client);
+
+        let builder = FlownodeBuilder::new(
+            opts.clone(),
+            self.plugins.clone().unwrap_or_default(),
+            table_metadata_manager,
+            catalog_manager,
+            flow_metadata_manager,
+            frontend_client,
+        )
+        .with_heartbeat_task(heartbeat_task);
+
+        let mut flownode = builder.build().await.unwrap();
+
+        let services = FlownodeServiceBuilder::new(&opts)
+            .with_default_grpc_server(flownode.flownode_server())
+            .build()
+            .unwrap();
+        flownode.setup_services(services);
+        flownode.start().await.unwrap();
+
+        flownode
+    }
+
     fn build_frontend_options(&self) -> FrontendOptions {
         let mut fe_opts = FrontendOptions::default();
 
@@ -556,6 +789,19 @@ impl GreptimeDbClusterBuilder {
             construct_addr(self.choose_random_unused_port(port_range, max_attempts, localhost));
 
         fe_opts
+    }
+
+    // Choose a random unused port between [14000, 24000] for the flownode's gRPC service.
+    fn choose_random_flownode_addr(&self) -> String {
+        let port_range = 14000..=24000;
+        let max_attempts = 10;
+        let localhost = "127.0.0.1";
+
+        format!(
+            "{}:{}",
+            localhost,
+            self.choose_random_unused_port(port_range, max_attempts, localhost)
+        )
     }
 
     // Choose a random unused port between [start, end].
@@ -840,6 +1086,42 @@ mod tests {
         flownode.setup_services(services);
         flownode.start().await.unwrap();
         flownode
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_build_cluster_with_plugins_and_flownodes() {
+        // Arrange & Act: build a cluster with plugins and a single flownode.
+        let cluster = GreptimeDbClusterBuilder::new("test_plugins_and_flownodes")
+            .await
+            .with_datanodes(1)
+            .with_plugins(Plugins::default())
+            .with_flownodes(1)
+            .build(true)
+            .await;
+
+        // Assert: the flownode is started and its heartbeat is registered in the metasrv.
+        assert_eq!(1, cluster.flownodes.len());
+        let alive_flownodes = discovery::utils::alive_flownode_infos(
+            &DefaultSystemTimer,
+            cluster.metasrv.meta_peer_client().as_ref(),
+            Duration::from_secs(u64::MAX),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(1, alive_flownodes.len());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic(expected = "Flownodes require the frontend servers to be started")]
+    async fn test_flownodes_require_frontend_servers() {
+        // Arrange & Act: build a cluster with a flownode but without the frontend servers.
+        let _cluster = GreptimeDbClusterBuilder::new("flownodes_require_frontend_servers")
+            .await
+            .with_datanodes(1)
+            .with_flownodes(1)
+            .build(false)
+            .await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
