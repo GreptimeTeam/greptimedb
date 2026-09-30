@@ -721,28 +721,44 @@ impl RangeManipulateStream {
             let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
-            // Single pass through arrow's infallible unary kernel: an i128
-            // intermediate holds any native timestamp shift; only the final
-            // millisecond result must fit i64. Overflow sets a Cell flag instead
-            // of returning Err per sample, so the closure is a plain i64 -> i64
-            // mapping that LLVM can vectorize. Nulls are preserved.
+            // Single pass over the timestamps: an i128 intermediate holds any native
+            // timestamp shift; only the final millisecond result must fit i64. Null-free
+            // batches (the dominant PromQL case) take arrow's infallible `unary` kernel,
+            // which LLVM can vectorize, and report overflow through a shared cell. But
+            // `unary` visits NULL slots' underlying values, so a NULL slot holding an
+            // arbitrary overflowing value would raise a false batch-wide error; nullable
+            // batches therefore take `try_unary`, which applies the closure to valid rows
+            // only.
             let offset_ns = (self.offset as i128) * 1_000_000;
-            let overflow = std::cell::Cell::new(false);
-            let timestamp_values = compute::unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
-                let shifted_ns = (v as i128) * scale + offset_ns;
-                let shifted_ms = shifted_ns / 1_000_000;
-                if let Ok(ms) = i64::try_from(shifted_ms) {
-                    ms
-                } else {
-                    overflow.set(true);
-                    0 // placeholder, never used
+            let timestamp_values = if timestamps.null_count() == 0 {
+                let overflow = std::cell::Cell::new(false);
+                let shifted = compute::unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+                    let shifted_ns = (v as i128) * scale + offset_ns;
+                    let shifted_ms = shifted_ns / 1_000_000;
+                    match i64::try_from(shifted_ms) {
+                        Ok(ms) => ms,
+                        Err(_) => {
+                            overflow.set(true);
+                            0
+                        }
+                    }
+                });
+                if overflow.get() {
+                    return Err(DataFusionError::Execution(
+                        "RangeManipulate timestamp payload overflow".into(),
+                    ));
                 }
-            });
-            if overflow.get() {
-                return Err(DataFusionError::Execution(
-                    "RangeManipulate timestamp payload overflow".into(),
-                ));
-            }
+                shifted
+            } else {
+                compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+                    let shifted_ns = (v as i128) * scale + offset_ns;
+                    i64::try_from(shifted_ns / 1_000_000).map_err(|_| {
+                        ArrowError::ComputeError(
+                            "RangeManipulate timestamp payload overflow".into(),
+                        )
+                    })
+                })?
+            };
             Arc::new(TimestampMillisecondArray::new(
                 timestamp_values.values().clone(),
                 timestamp_values.nulls().cloned(),
@@ -2966,6 +2982,62 @@ mod test {
             payload_millis(&plain),
             payload_millis(&zoned),
             "the zero-copy and the converted path must agree"
+        );
+    }
+
+    /// A NULL slot's underlying value must never trigger the payload overflow
+    /// error: a nullable batch is converted with arrow's `try_unary`, which applies
+    /// the closure to valid rows only. The same value as a *valid* sample must still
+    /// error, through the null-free `unary` + overflow-cell path.
+    #[test]
+    fn manipulate_null_slot_underlying_value_does_not_overflow() {
+        // Second-slot underlying value i64::MAX seconds overflows on conversion,
+        // but the slot is NULL so the conversion must not see it. offset=1ms
+        // keeps the batch off the zero-copy path. The query range must be bounded
+        // and contain the first sample: with `end == 0` no range is selected and
+        // the conversion (and so the regression) is skipped, while an unbounded
+        // `end` makes the range scan visit `end - start` evaluation points.
+        let timestamps = [0i64, i64::MAX];
+        let validity = NullBuffer::from(vec![true, false]);
+        let array: ArrayRef = Arc::new(TimestampSecondArray::new(
+            timestamps.to_vec().into(),
+            Some(validity),
+        ));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Second, None),
+            true,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+
+        let mut stream = payload_stream(1, 0, 1_000, 1, 1_000);
+        stream.time_unit = TimeUnit::Second;
+        let output = stream
+            .manipulate(batch)
+            .expect("a NULL slot's underlying value must not overflow the payload")
+            .expect("the first sample (0s + 1ms) is inside the query range");
+        assert_eq!(
+            payload_millis(&output)[0],
+            1,
+            "the valid sample must be converted to its shifted millisecond payload"
+        );
+
+        // Same underlying value, but now valid: the conversion must reject it.
+        let array: ArrayRef = Arc::new(TimestampSecondArray::from(timestamps.to_vec()));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Second, None),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+        let mut stream = payload_stream(1, 0, 1_000, 1, 1_000);
+        stream.time_unit = TimeUnit::Second;
+        let error = stream
+            .manipulate(batch)
+            .expect_err("a valid overflowing timestamp must still error");
+        assert!(
+            error.to_string().contains("timestamp payload overflow"),
+            "unexpected error: {error}"
         );
     }
 }
