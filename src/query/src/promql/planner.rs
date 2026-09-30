@@ -108,9 +108,10 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, ReservedMetricNameColumnSnafu, Result,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -1058,8 +1059,9 @@ impl PromPlanner {
     /// Whether a plan can hold such rows is not a property of one operator - nesting hides the
     /// operator that produced them from the one that drops the name - so every drop asserts the
     /// unique label set unless the identity provably cannot distinguish two rows:
-    /// [`Self::column_is_constant`] follows the marked column to the node that computes it and
-    /// checks that every row of the plan carries the same value in it, and a label that is the
+    /// [`Self::column_is_constant`] follows the marked column to the node that computes it,
+    /// through the nodes that hand the rows of their input on and stopping at every other one,
+    /// and checks that every row of the plan carries the same value in it; a label that is the
     /// same in every row cannot tell two of them apart. A plan without such a column (nothing is
     /// dropped) needs no check either.
     fn drop_metric_name(&mut self, mut input: LogicalPlan) -> Result<LogicalPlan> {
@@ -1106,10 +1108,11 @@ impl PromPlanner {
     ///
     /// The value of a column is decided by the node that computes it: a literal is the same in
     /// every row, and a reference to another column keeps whatever that column holds, so the walk
-    /// follows references down to the node that produces the value. A node that combines the rows
-    /// of several inputs can decide a column per row out of data no single input holds - a union
-    /// of two metrics takes the name from the operand the row came from - so those nodes answer
-    /// `false`, as does anything the walk cannot follow to a literal.
+    /// follows references down to the node that produces the value - and only through nodes
+    /// known to keep the rows of their input and the values of its columns. A node that combines
+    /// the rows of several inputs can decide a column per row out of data no single input holds -
+    /// a union of two metrics takes the name from the operand the row came from - so those nodes
+    /// answer `false`, as does anything the walk cannot follow to a literal.
     fn column_is_constant(plan: &LogicalPlan, column: &str) -> bool {
         Self::column_reference_is_constant(plan, &Column::from_name(column))
     }
@@ -1118,7 +1121,9 @@ impl PromPlanner {
     ///
     /// A qualified reference is resolved where the inputs of a plan meet, since only the node
     /// that keeps the rows of both of them can tell which one holds the value; everywhere else
-    /// the walk follows the column by name.
+    /// the walk follows the column by name. Following a node is only safe when its output is its
+    /// input's rows and columns, so the walk goes through the nodes [`Self::hands_rows_through`]
+    /// lists and stops at every other node.
     fn column_reference_is_constant(plan: &LogicalPlan, source: &Column) -> bool {
         if let LogicalPlan::Projection(projection) = plan {
             let Some(expr) = projection
@@ -1147,12 +1152,47 @@ impl PromPlanner {
                 _ => false,
             };
         }
+        let follows_input = Self::hands_rows_through(plan);
+        if !follows_input {
+            return false;
+        }
         match plan.inputs().as_slice() {
             // A node that combines several inputs decides a column per row out of all of them.
             [_, _, ..] => false,
             [input] => Self::column_reference_is_constant(input, source),
             // A leaf holds no marked column.
             [] => false,
+        }
+    }
+
+    /// Whether `plan` hands the rows of its single input on - dropping, reordering, copying or
+    /// qualifying them, but never recomputing what one of their columns holds.
+    ///
+    /// Only such a node keeps the value of a column of its input, so only such a node may be
+    /// followed by [`Self::column_reference_is_constant`]. Every other node may decide the column
+    /// per row out of data the walk cannot see - a node the walk does not know about above all -
+    /// so it is not followed and the caller checks the label set instead of assuming the value is
+    /// the same in every row.
+    fn hands_rows_through(plan: &LogicalPlan) -> bool {
+        match plan {
+            LogicalPlan::Filter(_)
+            | LogicalPlan::Sort(_)
+            | LogicalPlan::Limit(_)
+            | LogicalPlan::Window(_)
+            | LogicalPlan::SubqueryAlias(_)
+            | LogicalPlan::Distinct(_)
+            | LogicalPlan::Repartition(_) => true,
+            // The PromQL planner's own row manipulators: they replay, reorder or divide the rows
+            // of their input and add columns of their own, while the columns they carry keep the
+            // values they came in with.
+            LogicalPlan::Extension(extension) => {
+                let node = extension.node.as_any();
+                node.is::<InstantManipulate>()
+                    || node.is::<RangeManipulate>()
+                    || node.is::<SeriesDivide>()
+                    || node.is::<SeriesNormalize>()
+            }
+            _ => false,
         }
     }
 
@@ -3859,6 +3899,24 @@ impl PromPlanner {
             res => res.context(CatalogSnafu)?,
         };
         let table = self.table_from_source(&source)?;
+
+        // `__name__` is the metric name of a series in PromQL and nothing else, so a table that
+        // brings a column of that spelling has no way to be evaluated: the reserved name would
+        // have to be the name of the table's series and that column at once, and no reader of the
+        // result - the Prometheus HTTP API above all - could tell which one a row carries. The
+        // schema read here is the table's own, before the planner attaches anything, so every
+        // column it holds is a column the user wrote.
+        if table
+            .schema()
+            .column_schemas()
+            .iter()
+            .any(|column| column.name == METRIC_NAME)
+        {
+            return ReservedMetricNameColumnSnafu {
+                table: table_ref.to_quoted_string(),
+            }
+            .fail();
+        }
 
         // set time index column name
         let time_index = table
