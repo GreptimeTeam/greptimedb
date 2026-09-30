@@ -43,8 +43,8 @@
 | `grpc` | -- | -- | The gRPC server options. |
 | `grpc.bind_addr` | String | `127.0.0.1:4001` | The address to bind the gRPC server. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
-| `grpc.enable_cors` | Bool | `false` | gRPC CORS support is disabled by default; set to true to enable it.<br/>This allows browsers to access external gRPC-Web APIs without CORS restrictions. |
-| `grpc.cors_allowed_origins` | Array | Unset | Customize allowed origins for gRPC CORS. |
+| `grpc.enable_cors` | Bool | `false` | Enable CORS for gRPC-Web clients in browsers. Disabled by default. |
+| `grpc.cors_allowed_origins` | Array | Unset | Origins allowed by gRPC CORS. An empty list allows any origin. |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
@@ -305,8 +305,8 @@
 | `grpc.server_addr` | String | `127.0.0.1:4001` | The address advertised to the metasrv, and used for connections from outside the host.<br/>If left empty or unset, the server will automatically use the IP address of the first network interface<br/>on the host, with the same port number as the one specified in `grpc.bind_addr`. |
 | `grpc.runtime_size` | Integer | `8` | The number of server worker threads. |
 | `grpc.flight_compression` | String | `arrow_ipc` | Compression mode for frontend side Arrow IPC service. Available options:<br/>- `none`: disable all compression<br/>- `transport`: only enable gRPC transport compression (zstd)<br/>- `arrow_ipc`: only enable Arrow IPC compression (lz4)<br/>- `all`: enable all compression.<br/>Default to `none` |
-| `grpc.enable_cors` | Bool | `false` | gRPC CORS support is disabled by default; set to true to enable it.<br/>This allows browsers to access external gRPC-Web APIs without CORS restrictions. |
-| `grpc.cors_allowed_origins` | Array | Unset | Customize allowed origins for gRPC CORS. |
+| `grpc.enable_cors` | Bool | `false` | Enable CORS for gRPC-Web clients in browsers. Disabled by default. |
+| `grpc.cors_allowed_origins` | Array | Unset | Origins allowed by gRPC CORS. An empty list allows any origin. |
 | `grpc.max_connection_age` | String | Unset | The maximum connection age for gRPC connection.<br/>The value can be a human-readable time string. For example: `10m` for ten minutes or `1h` for one hour.<br/>Refer to https://grpc.io/docs/guides/keepalive/ for more details. |
 | `grpc.tls` | -- | -- | gRPC server TLS options, see `mysql.tls` section. |
 | `grpc.tls.mode` | String | `disable` | TLS mode. |
