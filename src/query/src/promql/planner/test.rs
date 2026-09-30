@@ -9713,42 +9713,34 @@ async fn test_topk_bottomk_preserve_metric_name_and_samples() {
     }
 }
 
-/// `count_values("__name__", ...)` writes the sample value under the semantic name as an
-/// *ordinary* label: the generated column is a plain string column in Prometheus' textual form,
-/// no field carries the identity role, and the identity of the input does not survive it. A
-/// plain aggregate argument must not be able to forge the internal marker, so nothing later has
-/// an identity to drop here - an enclosing expression that drops the name of its input leaves the
-/// generated label alone and the result stays a vector.
+/// `count_values("__name__", ...)` writes the sample value as the *metric name* of its result: the
+/// generated column carries the identity role, it is named the way every other name the planner
+/// writes is named (the identity of the input taken over, or a free internal name), and the name
+/// behaves like a metric name from there on - an enclosing `sum by (__name__)` groups by it, while
+/// an enclosing function that drops the name of its input cannot drop it next to another series of
+/// the same label set. Only this aggregate writes the name, and it writes it because the user asked
+/// for the semantic `__name__`; no ordinary column or alias can forge the role by its spelling.
 #[tokio::test]
-async fn test_count_values_semantic_name_is_an_ordinary_label() {
+async fn test_count_values_semantic_name_writes_the_metric_name() {
     let state = build_query_engine_state();
     // (query, expected `(generated label value, aggregated value)` rows)
     for (query, expected) in [
+        // Without a modifier the samples are grouped by their value, and the result series are
+        // named after it: the two samples of 1.0 count 2, the sample of 2.0 counts 1.
         (
             r#"count_values("__name__", cv_metric)"#,
             vec![("1", 2.0), ("2", 1.0)],
         ),
+        // A `by(...)` clause adds its labels to that grouping key.
         (
             r#"count_values("__name__", cv_metric) by (__name__)"#,
             vec![("1", 2.0), ("2", 1.0)],
         ),
+        // The destination is the name, so it is not an ordinary label of the input: `by (k)` keeps
+        // the series tag in the grouping and the generated name stays the value of each group.
         (
-            r#"count_values("__name__", abs(cv_metric))"#,
-            vec![("1", 2.0), ("2", 1.0)],
-        ),
-        // An enclosing unary or binary operator drops the name of its input, which is already
-        // gone: the generated label is a label, not an identity, and the samples are untouched.
-        (
-            r#"abs(count_values("__name__", cv_metric))"#,
-            vec![("1", 2.0), ("2", 1.0)],
-        ),
-        (
-            r#"-count_values("__name__", cv_metric)"#,
-            vec![("1", -2.0), ("2", -1.0)],
-        ),
-        (
-            r#"count_values("__name__", cv_metric) + 0"#,
-            vec![("1", 2.0), ("2", 1.0)],
+            r#"count_values("__name__", cv_metric) by (k)"#,
+            vec![("1", 1.0), ("1", 1.0), ("2", 1.0)],
         ),
     ] {
         let plan = PromPlanner::stmt_to_plan(
@@ -9759,48 +9751,59 @@ async fn test_count_values_semantic_name_is_an_ordinary_label() {
         .await
         .unwrap_or_else(|err| panic!("{query}: {err}"));
 
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{query}: the generated column must be the metric name: {}",
+                    plan.display_indent()
+                )
+            });
+        // The generated name is the marked column, whatever its physical name is: a column spelled
+        // like the semantic name is never part of that.
         assert!(
-            PromPlanner::metric_name_column(plan.schema())
-                .unwrap()
-                .is_none(),
-            "{query}: the generated label must not be an identity: {}",
-            plan.display_indent()
-        );
-        let generated = plan
-            .schema()
-            .fields()
-            .iter()
-            .filter(|field| field.name() == METRIC_NAME)
-            .collect::<Vec<_>>();
-        assert_eq!(generated.len(), 1, "{query}: {}", plan.display_indent());
-        assert!(
-            generated[0].metadata().get(PROMQL_FIELD_ROLE_KEY).is_none(),
-            "{query}: the generated label must be ordinary: {}",
-            plan.display_indent()
-        );
-        // The identity of the input does not survive as a second column of that name.
-        assert!(
-            plan.schema()
-                .field_with_unqualified_name(PROMQL_METRIC_NAME_COLUMN)
-                .is_err(),
+            !plan
+                .schema()
+                .fields()
+                .iter()
+                .any(|field| field.name() == METRIC_NAME),
             "{query}: {}",
             plan.display_indent()
         );
 
         let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, &marker.name);
         assert_eq!(
-            count_values_rows(&batches, METRIC_NAME),
+            count_values_rows(&batches, &marker.name),
             expected,
             "{query}"
         );
-        assert_unique_label_set_per_timestamp(&batches, METRIC_NAME);
     }
 
-    // The generated column is a physical label spelled `__name__`, and the planner reads
-    // `__name__` only through a marked identity: `by (__name__)` next to such a result groups by
-    // nothing, exactly like `by (__name__)` on a plan without an identity. The label stays in the
-    // schema and in the output rows of the inner result, but it is not reachable as the name.
+    // The name survives an aggregation the user asks to group by, exactly like the name of a
+    // selected series does: the two value groups stay two series.
     let query = r#"sum by (__name__) (count_values("__name__", cv_metric))"#;
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider().await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .unwrap_or_else(|| panic!("{query}: the name must survive the aggregation"));
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_in_batches(&batches, &marker.name);
+    assert_eq!(
+        count_values_rows(&batches, &marker.name),
+        vec![("1", 2.0), ("2", 1.0)],
+        "{query}"
+    );
+
+    // Dropping the name of that result leaves two rows of one label set - the generated name was
+    // the only thing that told them apart - so the vector is refused instead of losing a series.
+    let query = r#"abs(count_values("__name__", cv_metric))"#;
     let plan = PromPlanner::stmt_to_plan(
         build_count_values_table_provider().await,
         &operator_eval_stmt(query),
@@ -9815,51 +9818,75 @@ async fn test_count_values_semantic_name_is_an_ordinary_label() {
         "{query}: {}",
         plan.display_indent()
     );
+    let err = execute_err(plan, &state).await;
     assert!(
-        plan.schema()
-            .field_with_unqualified_name(METRIC_NAME)
-            .is_err(),
-        "the semantic name is not a label to group by here: {}",
+        err.contains("vector cannot contain metrics with the same labelset"),
+        "{query}: expected the duplicate-label-set refusal, got {err}"
+    );
+
+    // `without(...)` excludes the destination from the grouping key: the name is not one of the
+    // grouping labels of the result either, so nothing is generated and the samples of every value
+    // fall into the groups the modifier leaves.
+    let query = r#"count_values without(k) ("__name__", cv_metric)"#;
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider().await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none(),
+        "{query}: `without` never keeps the name: {}",
         plan.display_indent()
     );
-    let (_, batches) = execute(plan, &state).await;
-    let mut actual = batches
+    assert!(
+        !plan
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME),
+        "{query}: the destination is not a label of the result: {}",
+        plan.display_indent()
+    );
+    let count_column = plan
+        .schema()
+        .fields()
         .iter()
-        .flat_map(|batch| {
-            let value_index = batch
-                .schema()
-                .fields()
-                .iter()
-                .position(|field| {
-                    matches!(
-                        field.data_type(),
-                        ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
-                    )
-                })
-                .expect("no numeric value column");
-            datafusion::arrow::compute::cast(batch.column(value_index), &ArrowDataType::Float64)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<Float64Array>()
-                .unwrap()
-                .values()
-                .to_vec()
+        .find(|field| {
+            matches!(
+                field.data_type(),
+                ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+            )
         })
-        .collect::<Vec<_>>();
-    actual.sort_by(f64::total_cmp);
-    // The three samples of the two generated groups are summed into one series.
-    assert_eq!(actual, vec![3.0], "{query}");
+        .expect("no aggregated count column")
+        .name()
+        .clone();
+    let (_, batches) = execute(plan, &state).await;
+    assert_eq!(
+        batches.iter().map(RecordBatch::num_rows).sum::<usize>(),
+        1,
+        "{query}"
+    );
+    assert_eq!(
+        numeric_values(&batches, &count_column),
+        vec![3.0],
+        "{query}"
+    );
 }
 
-/// Dropping the metric name inserts a label-set check only where the input can actually hold two
-/// rows of one label set. A set of series the name did not distinguish stays readable - the check
-/// would only add a group-by assertion nothing can violate - and a `count_values` result carries
-/// its generated name as an ordinary label, so dropping an input name next to it is as safe.
+/// Dropping a metric name needs no label-set check when the name cannot tell two rows apart: the
+/// name of a selector's own series is the same in every row of it, so removing it from a label set
+/// leaves the set as unique as it was, and a plan whose identity an inner operator already dropped
+/// has nothing left to drop.
 #[tokio::test]
-async fn test_dropping_metric_name_adds_no_check_without_a_union() {
+async fn test_dropping_an_absent_metric_name_adds_no_check() {
     let state = build_query_engine_state();
-    // Three series that stay distinct without the name: the samples are read as they are.
     for (query, expected) in [
+        // The name of the selector's series is the name of the metric in every row, so dropping it
+        // cannot make two series of one label set.
         (
             "abs(cv_metric)",
             vec![
@@ -9876,6 +9903,24 @@ async fn test_dropping_metric_name_adds_no_check_without_a_union() {
                 ("k2".to_string(), 1.0),
             ],
         ),
+        // `sum by (k)` drops the identity of its input, so the enclosing `abs` has no name to
+        // drop and no group to check.
+        (
+            "abs(sum by (k) (cv_metric))",
+            vec![
+                ("k0".to_string(), 1.0),
+                ("k1".to_string(), 2.0),
+                ("k2".to_string(), 1.0),
+            ],
+        ),
+        (
+            "sum by (k) (cv_metric) + 0",
+            vec![
+                ("k0".to_string(), 1.0),
+                ("k1".to_string(), 2.0),
+                ("k2".to_string(), 1.0),
+            ],
+        ),
     ] {
         let plan = PromPlanner::stmt_to_plan(
             build_count_values_table_provider().await,
@@ -9884,6 +9929,13 @@ async fn test_dropping_metric_name_adds_no_check_without_a_union() {
         )
         .await
         .unwrap_or_else(|err| panic!("{query}: {err}"));
+        assert!(
+            PromPlanner::metric_name_column(plan.schema())
+                .unwrap()
+                .is_none(),
+            "{query}: the aggregation already dropped the name: {}",
+            plan.display_indent()
+        );
         assert!(
             !plan
                 .display_indent()
@@ -9904,69 +9956,32 @@ async fn test_dropping_metric_name_adds_no_check_without_a_union() {
             "{query}"
         );
     }
-
-    // The generated name of `count_values("__name__", ...)` is a label, not an identity, so an
-    // enclosing expression that drops the name of its input has nothing to refuse.
-    for (query, expected) in [
-        (
-            r#"abs(count_values("__name__", cv_metric))"#,
-            vec![("1", 2.0), ("2", 1.0)],
-        ),
-        (
-            r#"count_values("__name__", cv_metric) + 0"#,
-            vec![("1", 2.0), ("2", 1.0)],
-        ),
-    ] {
-        let plan = PromPlanner::stmt_to_plan(
-            build_count_values_table_provider().await,
-            &operator_eval_stmt(query),
-            &state,
-        )
-        .await
-        .unwrap_or_else(|err| panic!("{query}: {err}"));
-        assert!(
-            !plan
-                .display_indent()
-                .to_string()
-                .contains("prom_assert_unique_match_group"),
-            "{query}: no label-set check may be inserted: {}",
-            plan.display_indent()
-        );
-
-        let (_, batches) = execute(plan, &state).await;
-        assert_eq!(
-            count_values_rows(&batches, METRIC_NAME),
-            expected,
-            "{query}"
-        );
-    }
 }
 
-/// `count_values("__name__", ...)` behaves like any other destination next to a physical column
-/// of the input: the generated label is named `__name__` and is always ordinary - never marked -
-/// so a physical label of that name is taken over by the generated one, and a physical column
-/// occupying the internal marker's name stays a label of its own.
+/// A physical column spelled like the semantic `__name__`, or like the internal column the marker
+/// is attached under, is an ordinary label of its input and never the identity: the planner writes
+/// the name only through the marked column and reads it only through that mark, so no physical
+/// column is promoted to the role.
+///
+/// A destination written as `__name__` next to `without(...)` writes no name at all, and the name
+/// it was written as is not a grouping label of the result either: the label of that spelling is
+/// taken over by the destination and dropped with it, while a column of any other spelling stays
+/// an ordinary label of the result.
 #[tokio::test]
 async fn test_count_values_semantic_name_next_to_physical_columns() {
     let state = build_query_engine_state();
-    for (tag, expected_rows, expected_tag_values, query) in [
-        // The generated label takes the name over, exactly like an ordinary destination does:
-        // `__name__` is the only column of that name, the samples of the three input series group
-        // into one row, and that row carries the generated value instead of the physical labels.
+    // (physical label column, query)
+    for (tag, query) in [
         (
             METRIC_NAME,
-            vec![("1", 3.0)],
-            vec!["1"],
-            r#"count_values("__name__", cv_metric) without(job)"#,
+            r#"count_values without(job) ("__name__", abs(cv_metric))"#,
         ),
-        // Next to an ordinary label named like the internal marker the generated label is a
-        // second, distinct label: three series of one sample value stay three groups, each with
-        // its own sample of the tag.
+        // A physical column occupying the internal name of the marker is not the identity and not
+        // the destination: it stays an ordinary label, is part of the grouping of `without` and
+        // keeps its own values, so the three series stay three groups.
         (
             PROMQL_METRIC_NAME_COLUMN,
-            vec![("1", 1.0), ("1", 1.0), ("1", 1.0)],
-            vec!["k0", "k1", "k2"],
-            r#"count_values("__name__", abs(cv_metric)) without(job)"#,
+            r#"count_values without(job) ("__name__", abs(cv_metric))"#,
         ),
     ] {
         let plan = PromPlanner::stmt_to_plan(
@@ -9975,44 +9990,192 @@ async fn test_count_values_semantic_name_next_to_physical_columns() {
             &state,
         )
         .await
-        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        .unwrap_or_else(|err| panic!("{tag}: {query}: {err}"));
 
         assert!(
             plan.schema()
                 .fields()
                 .iter()
                 .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none()),
-            "{query}: no field may carry the identity role: {}",
-            plan.display_indent()
-        );
-        assert_eq!(
-            plan.schema()
-                .fields()
-                .iter()
-                .filter(|field| field.name() == METRIC_NAME)
-                .count(),
-            1,
-            "{query}: {}",
+            "{tag}: no field may carry the identity role: {}",
             plan.display_indent()
         );
 
+        let has_name_column = plan
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME);
+        let plan_display = plan.display_indent().to_string();
+        let count_column = plan
+            .schema()
+            .fields()
+            .iter()
+            .find(|field| {
+                matches!(
+                    field.data_type(),
+                    ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+                )
+            })
+            .expect("no aggregated count column")
+            .name()
+            .clone();
         let (_, batches) = execute(plan, &state).await;
-        assert_eq!(
-            count_values_rows(&batches, METRIC_NAME),
-            expected_rows,
-            "{query}"
-        );
-        let mut actual_physical = string_values(&batches, tag);
-        actual_physical.sort();
-        assert_eq!(
-            actual_physical,
-            expected_tag_values
-                .iter()
-                .map(|value| Some((*value).to_string()))
-                .collect::<Vec<_>>(),
-            "{query}"
-        );
+        let mut actual_counts = numeric_values(&batches, &count_column);
+        actual_counts.sort_by(f64::total_cmp);
+        if tag == METRIC_NAME {
+            // The destination was written as the only label of the input, and with `without` the
+            // name is not a label of the result: the three samples of one value form one group.
+            assert!(
+                !has_name_column,
+                "{query}: the destination is not a label of the result: {plan_display}"
+            );
+            assert_eq!(actual_counts, vec![3.0], "{tag}: {query}");
+        } else {
+            assert_eq!(actual_counts, vec![1.0, 1.0, 1.0], "{tag}: {query}");
+            let mut tag_values = string_values(&batches, tag)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            tag_values.sort();
+            assert_eq!(tag_values, vec!["k0", "k1", "k2"], "{tag}: {query}");
+        }
     }
+
+    // A marked input next to a physical label spelled like the semantic name: the marked column is
+    // the name of the result and the physical label of that spelling is not part of it, so the
+    // three samples - all of value 1 - form one group named `1` instead of three named after their
+    // label.
+    let query = r#"count_values("__name__", cv_metric)"#;
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_collision_table_provider(METRIC_NAME).await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .unwrap_or_else(|| panic!("{query}: the generated column must be the name"));
+    assert!(
+        !plan
+            .schema()
+            .fields()
+            .iter()
+            .any(|field| field.name() == METRIC_NAME),
+        "{query}: the physical label cannot stay next to the name: {}",
+        plan.display_indent()
+    );
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_in_batches(&batches, &marker.name);
+    assert_eq!(
+        count_values_rows(&batches, &marker.name),
+        vec![("1", 3.0)],
+        "{query}"
+    );
+}
+
+/// A `count_values` destination is a label of the result and the label takes the physical name it
+/// is written with, so a destination spelled like the column the marked identity occupies would
+/// take that column over and lose the identity - which `by(__name__)` reads afterwards to build
+/// its grouping key. The identity moves to a free name before the grouping key is built, so the
+/// destination keeps the name the user asked for while the grouping still resolves the name of
+/// every series.
+#[tokio::test]
+async fn test_count_values_destination_moves_the_metric_name_out_of_its_name() {
+    let state = build_query_engine_state();
+    // Two metrics of one ordinary label set and one sample value: the identity is the only thing
+    // telling their rows apart, and the destination is the physical name it occupies.
+    let query = r#"count_values("__promql_metric_name", a or on(__name__) b) by (__name__)"#;
+    let plan = PromPlanner::stmt_to_plan(
+        build_user_tagged_table_provider("k", &[("a", "x", 1.0), ("b", "x", 1.0)]),
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+    let marker = PromPlanner::metric_name_column(plan.schema())
+        .unwrap()
+        .unwrap_or_else(|| {
+            panic!(
+                "{query}: the identity must survive the aggregation: {}",
+                plan.display_indent()
+            )
+        });
+    assert_ne!(
+        marker.name,
+        "__promql_metric_name",
+        "{query}: the destination takes that name: {}",
+        plan.display_indent()
+    );
+    // The generated label keeps the name it was written with, so a physical label of that name is
+    // not part of the result.
+    assert_eq!(
+        plan.schema()
+            .fields()
+            .iter()
+            .filter(|field| field.name() == "__promql_metric_name")
+            .count(),
+        1,
+        "{query}: {}",
+        plan.display_indent()
+    );
+
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_in_batches(&batches, &marker.name);
+    // Each metric keeps its own group: the generated label and the sample value are the same for
+    // both of them, so only the identity tells the two groups apart - a lost grouping key would
+    // merge them into one group of count 2 under a single name.
+    let mut rows = batches
+        .iter()
+        .flat_map(|batch| {
+            let name = batch
+                .column_by_name(&marker.name)
+                .expect("no metric-name column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the metric-name column must be a string column");
+            let generated = batch
+                .column_by_name("__promql_metric_name")
+                .expect("no generated label column")
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("the generated label must be a string column");
+            let count_column = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|field| {
+                    matches!(
+                        field.data_type(),
+                        ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+                    )
+                })
+                .expect("no count column");
+            let count = batch.column(count_column);
+            let count = datafusion::arrow::compute::cast(count, &ArrowDataType::Float64).unwrap();
+            let count = count.as_any().downcast_ref::<Float64Array>().unwrap();
+            (0..batch.num_rows())
+                .map(|row| {
+                    (
+                        name.value(row).to_string(),
+                        generated.value(row).to_string(),
+                        count.value(row),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(
+        rows,
+        vec![
+            ("a".to_string(), "1".to_string(), 1.0),
+            ("b".to_string(), "1".to_string(), 1.0),
+        ],
+        "{query}"
+    );
 }
 
 /// `absent()` drops the metric-name identity of its input - even when the selector matched no
@@ -10656,6 +10819,69 @@ async fn test_dropped_metric_name_rejects_duplicate_label_sets() {
         assert_metric_name_not_in_batches(&batches);
         assert_eq!(values(&batches, &sample_column), expected, "{query}");
     }
+}
+
+/// Whether dropping the metric name can leave two rows of one label set is not a property of one
+/// operator, so the check is not conditioned on one: a label rewrite that removes the labels
+/// distinguishing two series of one metric collapses them as surely as a union of two metrics, and
+/// only dropping the name makes the collision visible. The plan refuses them where it drops the
+/// name, while the same series keep executing when their labels still tell them apart.
+#[tokio::test]
+async fn test_dropped_metric_name_checks_a_rewritten_input() {
+    let state = build_query_engine_state();
+    // The inner `label_join` renames each series after its own `k`, the outer one empties `k`, so
+    // the two series of the fixture end up with no ordinary label at all and differ only in the
+    // name: `abs` cannot drop it.
+    let query = r#"abs(label_join(label_join(cv_metric, "__name__", "", "k"), "k", ""))"#;
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider_with_values(&[1.0, 2.0]).await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    assert!(
+        plan.display_indent()
+            .to_string()
+            .contains("prom_assert_unique_match_group"),
+        "{query}: dropping the name must check the label set: {}",
+        plan.display_indent()
+    );
+    let err = execute_err(plan, &state).await;
+    assert!(
+        err.contains("vector cannot contain metrics with the same labelset"),
+        "{query}: expected the duplicate-label-set refusal, got {err}"
+    );
+
+    // The same fixture read as it is: a metric names its series by their labels, so dropping the
+    // name of the selector's own series leaves every label set unique and the samples are read as
+    // they are.
+    let query = "abs(cv_metric)";
+    let plan = PromPlanner::stmt_to_plan(
+        build_count_values_table_provider_with_values(&[1.0, 2.0]).await,
+        &operator_eval_stmt(query),
+        &state,
+    )
+    .await
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    assert!(
+        PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .is_none(),
+        "{query}: {}",
+        plan.display_indent()
+    );
+    let sample_column = float_sample_column(&plan);
+    let (_, batches) = execute(plan, &state).await;
+    assert_metric_name_not_in_batches(&batches);
+    assert_eq!(
+        cv_rows(&batches, &sample_column),
+        vec![
+            ("k0".to_string(), 1_000, 1.0),
+            ("k1".to_string(), 1_000, 2.0)
+        ],
+        "{query}"
+    );
 }
 
 /// An explicit `on(...)`/`ignoring(...)`/`group_x(...)` label list reads the same semantic labels
