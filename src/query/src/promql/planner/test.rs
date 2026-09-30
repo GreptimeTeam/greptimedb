@@ -620,6 +620,22 @@ async fn execute(plan: LogicalPlan, state: &QueryEngineState) -> (LogicalPlan, V
     (optimized, batches)
 }
 
+/// Like [`execute`], but reports the error a plan that cannot be computed as a vector fails with
+/// instead of panicking: series that end up sharing one label set are refused while the plan runs.
+async fn execute_err(plan: LogicalPlan, state: &QueryEngineState) -> String {
+    let context = QueryEngineContext::new(state.session_state(), QueryContext::arc());
+    let optimized = state.optimize_by_extension_rules(plan, &context).unwrap();
+    let physical = state
+        .session_state()
+        .create_physical_plan(&optimized)
+        .await
+        .unwrap();
+    datafusion::physical_plan::collect(physical, state.session_state().task_ctx())
+        .await
+        .expect_err("the vector must be refused")
+        .to_string()
+}
+
 async fn run(
     left: &DirectOrSource,
     right: &DirectOrSource,
@@ -4609,14 +4625,16 @@ async fn predict_linear_injects_the_eval_timestamp() {
     // recovers from the row's time index (here: no `@` and no `offset`, so the step itself).
     let query = "predict_linear(some_metric[5m], 60)";
     let expected = String::from(
-        "Filter: prom_predict_linear(timestamp_range,field_0,Float64(60)) IS NOT NULL [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
-        \n  Projection: some_metric.timestamp, prom_predict_linear(timestamp_range, field_0, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms))) AS prom_predict_linear(timestamp_range,field_0,Float64(60)), some_metric.tag_0 [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
-        \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
-        \n      PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n            Filter: some_metric.timestamp >= TimestampMillisecond(-299999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n              TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        "Projection: some_metric.timestamp, prom_predict_linear(timestamp_range,field_0,Float64(60)), some_metric.tag_0 [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8]\
+            \n  Filter: prom_predict_linear(timestamp_range,field_0,Float64(60)) IS NOT NULL [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n    Projection: some_metric.timestamp, prom_predict_linear(timestamp_range, field_0, CAST(Float64(60) AS Int64), CAST(CAST(some_metric.timestamp AS Int64) + Int64(0) AS Timestamp(ms))) AS prom_predict_linear(timestamp_range,field_0,Float64(60)), some_metric.tag_0, __promql_metric_name [timestamp:Timestamp(ms), prom_predict_linear(timestamp_range,field_0,Float64(60)):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n      Projection: some_metric.tag_0, some_metric.timestamp, field_0, timestamp_range, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms)), __promql_metric_name:Utf8]\
+            \n        PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[300000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n          PromSeriesNormalize: offset=[0], time index=[timestamp], filter NaN: [true] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n            PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n              Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                Filter: some_metric.timestamp >= TimestampMillisecond(-299999, None) AND some_metric.timestamp <= TimestampMillisecond(100000000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
 
     indie_query_plan_compare(query, expected).await;
@@ -5590,17 +5608,19 @@ async fn count_over_time_subquery() {
 async fn count_over_time_subquery_with_offset() {
     let query = "count_over_time(some_metric[10m:1m] offset 5m)";
     let expected = String::from(
-        "Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
-        \n  Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
-        \n    PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
-        \n      PromSeriesNormalize: offset=[300000], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n        PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n          Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n            PromInstantManipulate: range=[-840000..99700000], lookback=[1000], interval=[60000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n              PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n                Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n                  Filter: some_metric.timestamp >= TimestampMillisecond(-840999, None) AND some_metric.timestamp <= TimestampMillisecond(99700000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
-        \n                    TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
+        "Projection: some_metric.timestamp, prom_count_over_time(timestamp_range,field_0), some_metric.tag_0 [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8]\
+            \n  Filter: prom_count_over_time(timestamp_range,field_0) IS NOT NULL [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n    Projection: some_metric.timestamp, prom_count_over_time(timestamp_range, field_0) AS prom_count_over_time(timestamp_range,field_0), some_metric.tag_0, __promql_metric_name [timestamp:Timestamp(ms), prom_count_over_time(timestamp_range,field_0):Float64;N, tag_0:Utf8, __promql_metric_name:Utf8]\
+            \n      PromRangeManipulate: req range=[0..100000000], interval=[5000], eval range=[600000], time index=[timestamp], values=[\"field_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Dictionary(Int64, Float64);N, __promql_metric_name:Utf8, timestamp_range:Dictionary(Int64, Timestamp(ms))]\
+            \n        PromSeriesNormalize: offset=[300000], time index=[timestamp], filter NaN: [false] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+            \n          PromSeriesDivide: tags=[\"tag_0\", \"__promql_metric_name\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+            \n            Sort: some_metric.tag_0 ASC NULLS FIRST, __promql_metric_name ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+            \n              Projection: some_metric.tag_0, some_metric.timestamp, some_metric.field_0, Utf8(\"some_metric\") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]\
+            \n                PromInstantManipulate: range=[-840000..99700000], lookback=[1000], interval=[60000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                  PromSeriesDivide: tags=[\"tag_0\"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                    Sort: some_metric.tag_0 ASC NULLS FIRST, some_metric.timestamp ASC NULLS FIRST [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                      Filter: some_metric.timestamp >= TimestampMillisecond(-840999, None) AND some_metric.timestamp <= TimestampMillisecond(99700000, None) [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]\
+            \n                        TableScan: some_metric [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]",
     );
     indie_query_plan_compare(query, expected).await;
 }
@@ -7020,7 +7040,7 @@ async fn test_label_join() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
-  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
+  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
     Projection: up.tag_0, up.tag_1, up.tag_2, up.tag_3, up.timestamp, up.field_0, Utf8("up") AS __promql_metric_name [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]
       PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -7056,7 +7076,7 @@ async fn test_label_replace() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
-  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
+  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
     Projection: up.tag_0, up.timestamp, up.field_0, Utf8("up") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]
       PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -9928,7 +9948,7 @@ async fn test_histogram_quantile_folds_with_identity_then_drops_it() {
         .iter()
         .flat_map(|batch| {
             let tags = batch
-                .column_by_name("tag")
+                .column_by_name("service.name")
                 .expect("no series tag column")
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -11363,8 +11383,9 @@ async fn test_label_functions_semantic_name_destination_avoids_physical_collisio
 
 /// An ordinary `label_replace`/`label_join` - neither source nor destination names `__name__` -
 /// keeps the existing handling: the destination label receives `regexp_replace` output even
-/// without a match, a missing component of a join is NULL and skipped, the historical shortcuts
-/// stay in place, and an already present destination is still refused.
+/// without a match, a missing component of a join joins as the empty string and keeps the
+/// separator it joins with, the historical shortcuts stay in place, and an already present
+/// destination is still refused.
 #[tokio::test]
 async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
     let state = build_query_engine_state();
@@ -11400,14 +11421,15 @@ async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
                 Some("addressed".to_string()),
             ],
         ),
-        // A missing component of an ordinary join is skipped, so it contributes no separator.
+        // A missing component of an ordinary join joins as the empty string, so it keeps the
+        // separator it joins with.
         (
             r#"label_join(cv_metric, "joined", ",", "k", "missing_label")"#,
             "joined",
             vec![
-                Some("k0".to_string()),
-                Some("k1".to_string()),
-                Some("k2".to_string()),
+                Some("k0,".to_string()),
+                Some("k1,".to_string()),
+                Some("k2,".to_string()),
             ],
         ),
     ] {
@@ -11468,8 +11490,8 @@ async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
     .expect_err(query)
     .to_string();
     assert!(
-        err.contains("labelset"),
-        "{query}: expected the same-label-set refusal, got {err}"
+        err.contains("Invalid destination label name in label_replace(): k"),
+        "{query}: expected the existing-destination refusal, got {err}"
     );
 }
 
@@ -11687,20 +11709,22 @@ async fn test_label_replace_empty_regex_matches_empty_source() {
 }
 
 /// Replacing the semantic name into a label the input already carries overwrites that label in
-/// place: a matching regex writes the replacement without projecting the label twice, and a
-/// non-matching one keeps the label and the samples of every series.
+/// place: a matching regex writes the replacement without projecting the label twice, but gives
+/// every series the same label set, which PromQL refuses; a non-matching one keeps the label and
+/// the samples of every series.
 #[tokio::test]
 async fn test_label_replace_semantic_source_into_existing_ordinary_label() {
     let state = build_query_engine_state();
-    // (query, expected `k` values, one per series)
+    // (query, expected `k` values, one per series, or `None` when the replacement collapses
+    // every series onto one label set)
     for (query, expected_k) in [
         (
             r#"label_replace(cv_metric, "k", "$1", "__name__", "(.*)")"#,
-            vec!["cv_metric", "cv_metric", "cv_metric"],
+            None,
         ),
         (
             r#"label_replace(cv_metric, "k", "renamed_$1", "__name__", "nomatch(.*)")"#,
-            vec!["k0", "k1", "k2"],
+            Some(vec!["k0", "k1", "k2"]),
         ),
     ] {
         let plan = PromPlanner::stmt_to_plan(
@@ -11725,8 +11749,19 @@ async fn test_label_replace_semantic_source_into_existing_ordinary_label() {
         let marker = PromPlanner::metric_name_column(plan.schema())
             .unwrap()
             .expect("the input identity must survive");
-        let sample_column = float_sample_column(&plan);
 
+        // A label the metric name is written into is the label set of every series of the input,
+        // which cannot be represented as a vector.
+        let Some(expected_k) = expected_k else {
+            let err = execute_err(plan, &state).await;
+            assert!(
+                err.contains("vector cannot contain metrics with the same labelset"),
+                "{query}: expected the duplicate-label-set refusal, got {err}"
+            );
+            continue;
+        };
+
+        let sample_column = float_sample_column(&plan);
         let (_, batches) = execute(plan, &state).await;
         assert_metric_name_in_batches(&batches, &marker.name);
         let mut labels = string_values(&batches, "k");
