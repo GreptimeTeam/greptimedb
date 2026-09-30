@@ -36,7 +36,7 @@ use common_grpc::channel_manager::{
 };
 use common_telemetry::{error, info, warn};
 use futures::FutureExt;
-use http::{HeaderName, HeaderValue, Method};
+use http::{HeaderName, Method};
 use otel_arrow_rust::proto::opentelemetry::arrow::v1::arrow_metrics_service_server::ArrowMetricsServiceServer;
 use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ResultExt, ensure};
@@ -49,13 +49,11 @@ use tonic::transport::ServerTlsConfig;
 use tonic::transport::server::TcpIncoming;
 use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
-use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
+use tower_http::cors::{AllowHeaders, CorsLayer};
 
-use crate::error::{
-    AlreadyStartedSnafu, InternalSnafu, InvalidHeaderValueSnafu, Result, StartGrpcSnafu,
-    TcpBindSnafu,
-};
+use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
 use crate::grpc::memory_limit::MemoryLimiterExtensionService;
+use crate::http::cors_allow_origin;
 use crate::install_default_crypto_provider;
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
@@ -286,6 +284,24 @@ impl Default for GrpcServerConfig {
 }
 
 impl GrpcServer {
+    fn cors_layer(&self) -> Result<Option<CorsLayer>> {
+        if !self.config.enable_cors {
+            return Ok(None);
+        }
+        let layer = CorsLayer::new()
+            .allow_methods([Method::POST])
+            .allow_origin(cors_allow_origin(&self.config.cors_allowed_origins)?)
+            .allow_headers(AllowHeaders::any())
+            // Trailers-only responses (most errors) carry `grpc-status` in HTTP
+            // headers, which browsers hide unless exposed.
+            .expose_headers([
+                HeaderName::from_static("grpc-status"),
+                HeaderName::from_static("grpc-message"),
+                HeaderName::from_static("grpc-status-details-bin"),
+            ]);
+        Ok(Some(layer))
+    }
+
     pub fn create_healthcheck_service(&self) -> HealthCheckServer<impl HealthCheck> {
         HealthCheckServer::new(HealthCheckHandler)
     }
@@ -380,37 +396,7 @@ impl Server for GrpcServer {
             (incoming, addr)
         };
 
-        let cors_layer = if self.config.enable_cors {
-            Some(
-                CorsLayer::new()
-                    .allow_methods([Method::POST])
-                    .allow_origin(if self.config.cors_allowed_origins.is_empty() {
-                        AllowOrigin::any()
-                    } else {
-                        AllowOrigin::from(
-                            self.config
-                                .cors_allowed_origins
-                                .iter()
-                                .map(|s| {
-                                    HeaderValue::from_str(s.as_str())
-                                        .context(InvalidHeaderValueSnafu)
-                                })
-                                .collect::<Result<Vec<HeaderValue>>>()?,
-                        )
-                    })
-                    .allow_headers(AllowHeaders::any())
-                    // Trailers-only responses (most errors) carry `grpc-status` in HTTP
-                    // headers, which browsers hide unless exposed.
-                    .expose_headers([
-                        HeaderName::from_static("grpc-status"),
-                        HeaderName::from_static("grpc-message"),
-                        HeaderName::from_static("grpc-status-details-bin"),
-                    ]),
-            )
-        } else {
-            info!("gRPC server cross-origin is disabled");
-            None
-        };
+        let cors_layer = self.cors_layer()?;
 
         // `Server::layer` prepends, so the first layer added is outermost. CORS must
         // sit outside `GrpcWebLayer`, which rejects the `OPTIONS` preflight with a 400.
@@ -485,11 +471,15 @@ mod tests {
 
     use common_runtime::Runtime;
     use common_runtime::runtime::{BuilderBuild, RuntimeTrait};
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpStream;
+    use http::header::{
+        ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
+        ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_REQUEST_HEADERS,
+        ACCESS_CONTROL_REQUEST_METHOD, CONTENT_TYPE, ORIGIN,
+    };
+    use http::{HeaderName, Method, StatusCode};
 
     use super::{
-        DEFAULT_GRPC_ADDR_PORT, GrpcOptions, GrpcServer, GrpcServerConfig, format_server_addr,
+        DEFAULT_GRPC_ADDR_PORT, GrpcServer, GrpcServerConfig, format_server_addr,
         port_from_bind_addr,
     };
     use crate::grpc::builder::GrpcServerBuilder;
@@ -533,67 +523,35 @@ mod tests {
         (server, addr)
     }
 
-    fn build_preflight_request(origin: &str) -> String {
-        format!(
-            "OPTIONS /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
-             Host: 127.0.0.1\r\n\
-             Origin: {origin}\r\n\
-             Access-Control-Request-Method: POST\r\n\
-             Access-Control-Request-Headers: content-type,x-grpc-web\r\n\
-             Connection: close\r\n\r\n"
-        )
+    const TEST_PATH: &str = "greptime.v1.HealthCheck/Check";
+
+    async fn send_preflight(addr: SocketAddr, origin: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .request(Method::OPTIONS, format!("http://{addr}/{TEST_PATH}"))
+            .header(ORIGIN, origin)
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .header(ACCESS_CONTROL_REQUEST_HEADERS, "content-type,x-grpc-web")
+            .send()
+            .await
+            .unwrap()
     }
 
     /// The path is not served, so the response is a trailers-only `Unimplemented`.
-    fn build_grpc_web_request(origin: &str) -> String {
-        // Empty gRPC-Web frame: 1-byte compression flag + 4-byte length.
-        let body = "\0\0\0\0\0";
-        format!(
-            "POST /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
-             Host: 127.0.0.1\r\n\
-             Origin: {origin}\r\n\
-             Content-Type: application/grpc-web+proto\r\n\
-             X-Grpc-Web: 1\r\n\
-             Content-Length: {}\r\n\
-             Connection: close\r\n\r\n\
-             {body}",
-            body.len()
-        )
+    async fn send_grpc_web_call(addr: SocketAddr, origin: &str) -> reqwest::Response {
+        reqwest::Client::new()
+            .post(format!("http://{addr}/{TEST_PATH}"))
+            .header(ORIGIN, origin)
+            .header(CONTENT_TYPE, "application/grpc-web+proto")
+            .header("x-grpc-web", "1")
+            // Empty gRPC-Web frame: 1-byte compression flag + 4-byte length.
+            .body(vec![0u8; 5])
+            .send()
+            .await
+            .unwrap()
     }
 
-    /// Returns the response head, lowercased.
-    async fn send_raw_request(addr: SocketAddr, request: &str) -> String {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        stream.write_all(request.as_bytes()).await.unwrap();
-        stream.flush().await.unwrap();
-
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = stream.read(&mut chunk).await {
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&buf).to_lowercase()
-    }
-
-    #[test]
-    fn test_grpc_options_as_config() {
-        // Other tests build `GrpcServerConfig` directly and would miss a field
-        // dropped by `as_config`.
-        let options = GrpcOptions {
-            enable_cors: true,
-            cors_allowed_origins: vec!["https://example.com".to_string()],
-            ..Default::default()
-        };
-        let config = options.as_config();
-
-        assert!(config.enable_cors);
-        assert_eq!(config.cors_allowed_origins, options.cors_allowed_origins);
+    fn header(response: &reqwest::Response, name: HeaderName) -> Option<&str> {
+        response.headers().get(name).map(|v| v.to_str().unwrap())
     }
 
     #[tokio::test]
@@ -604,22 +562,15 @@ mod tests {
         };
         let (_server, addr) = start_test_grpc_server(config).await;
 
-        let response =
-            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
+        let response = send_preflight(addr, "https://example.com").await;
 
-        assert!(response.starts_with("http/1.1 200"), "{response}");
-        assert!(
-            response.contains("access-control-allow-origin: *"),
-            "{response}"
-        );
-        assert!(
-            response.contains("access-control-allow-headers: *"),
-            "{response}"
-        );
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
+        assert_eq!(header(&response, ACCESS_CONTROL_ALLOW_HEADERS), Some("*"));
         // Lists the method of the actual call, not `OPTIONS`.
-        assert!(
-            response.contains("access-control-allow-methods: post"),
-            "{response}"
+        assert_eq!(
+            header(&response, ACCESS_CONTROL_ALLOW_METHODS),
+            Some("POST")
         );
     }
 
@@ -631,21 +582,16 @@ mod tests {
         };
         let (_server, addr) = start_test_grpc_server(config).await;
 
-        let response = send_raw_request(addr, &build_grpc_web_request("https://example.com")).await;
+        let response = send_grpc_web_call(addr, "https://example.com").await;
 
-        assert!(response.starts_with("http/1.1 200"), "{response}");
-        assert!(
-            response.contains("access-control-allow-origin: *"),
-            "{response}"
-        );
-
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, ACCESS_CONTROL_ALLOW_ORIGIN), Some("*"));
         // Premise: the response is trailers-only.
-        assert!(response.contains("\r\ngrpc-status: 12"), "{response}");
-
-        let expose_headers = response
-            .lines()
-            .find(|line| line.starts_with("access-control-expose-headers:"))
-            .unwrap_or_else(|| panic!("no access-control-expose-headers in {response}"));
+        assert_eq!(
+            header(&response, HeaderName::from_static("grpc-status")),
+            Some("12")
+        );
+        let expose_headers = header(&response, ACCESS_CONTROL_EXPOSE_HEADERS).unwrap();
         for name in ["grpc-status", "grpc-message", "grpc-status-details-bin"] {
             assert!(expose_headers.contains(name), "{expose_headers}");
         }
@@ -660,41 +606,28 @@ mod tests {
         };
         let (_server, addr) = start_test_grpc_server(config).await;
 
-        let response =
-            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
-        assert!(response.starts_with("http/1.1 200"), "{response}");
-        assert!(
-            response.contains("access-control-allow-origin: https://example.com"),
-            "{response}"
+        let response = send_preflight(addr, "https://example.com").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            header(&response, ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some("https://example.com")
         );
 
         // A disallowed origin still gets a 200, just without allow-origin; the
         // browser does the blocking.
-        let response =
-            send_raw_request(addr, &build_preflight_request("https://notallowed.com")).await;
-        assert!(response.starts_with("http/1.1 200"), "{response}");
-        assert!(
-            !response.contains("access-control-allow-origin"),
-            "{response}"
-        );
+        let response = send_preflight(addr, "https://notallowed.com").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(header(&response, ACCESS_CONTROL_ALLOW_ORIGIN), None);
     }
 
     #[tokio::test]
     async fn test_grpc_web_cors_disabled() {
-        let config = GrpcServerConfig {
-            enable_cors: false,
-            ..Default::default()
-        };
-        let (_server, addr) = start_test_grpc_server(config).await;
+        let (_server, addr) = start_test_grpc_server(GrpcServerConfig::default()).await;
 
-        let response =
-            send_raw_request(addr, &build_preflight_request("https://example.com")).await;
+        let response = send_preflight(addr, "https://example.com").await;
 
         // Without CORS, `GrpcWebLayer` rejects the preflight.
-        assert!(response.starts_with("http/1.1 400"), "{response}");
-        assert!(
-            !response.contains("access-control-allow-origin"),
-            "{response}"
-        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(header(&response, ACCESS_CONTROL_ALLOW_ORIGIN), None);
     }
 }

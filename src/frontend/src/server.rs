@@ -534,6 +534,7 @@ mod tests {
     use client::{Client, Database};
     use common_grpc::channel_manager::ChannelManager;
     use meta_client::client::MetaClientBuilder;
+    use reqwest::header::{ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN};
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
     use tonic::{Code, Request, Response, Status, Streaming};
@@ -1089,38 +1090,20 @@ mod tests {
         let internal = send_cors_preflight(internal_addr).await;
         services.shutdown_all().await.unwrap();
 
-        assert!(public.contains("access-control-allow-origin"), "{public}");
-        assert!(
-            !internal.contains("access-control-allow-origin"),
-            "{internal}"
-        );
+        assert!(public.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
+        assert!(!internal.headers().contains_key(ACCESS_CONTROL_ALLOW_ORIGIN));
     }
 
-    /// Returns the response head, lowercased.
-    async fn send_cors_preflight(addr: std::net::SocketAddr) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let request = "OPTIONS /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
-                       Host: 127.0.0.1\r\n\
-                       Origin: https://example.com\r\n\
-                       Access-Control-Request-Method: POST\r\n\
-                       Access-Control-Request-Headers: content-type,x-grpc-web\r\n\
-                       Connection: close\r\n\r\n";
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        stream.write_all(request.as_bytes()).await.unwrap();
-        stream.flush().await.unwrap();
-
-        let mut buf = Vec::new();
-        let mut chunk = [0u8; 1024];
-        while let Ok(n) = stream.read(&mut chunk).await {
-            if n == 0 {
-                break;
-            }
-            buf.extend_from_slice(&chunk[..n]);
-            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
-        String::from_utf8_lossy(&buf).to_lowercase()
+    async fn send_cors_preflight(addr: std::net::SocketAddr) -> reqwest::Response {
+        reqwest::Client::new()
+            .request(
+                reqwest::Method::OPTIONS,
+                format!("http://{addr}/greptime.v1.HealthCheck/Check"),
+            )
+            .header(ORIGIN, "https://example.com")
+            .header(ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .send()
+            .await
+            .unwrap()
     }
 }
