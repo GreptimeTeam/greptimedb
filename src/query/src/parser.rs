@@ -224,11 +224,18 @@ impl QueryLanguageParser {
             // also report rfc3339 error if float parsing fails
             .map_err(|_| rfc3339_result.unwrap_err())?;
 
-        let duration =
-            Duration::try_from_secs_f64(secs).context(TryIntoDurationSnafu { raw: timestamp })?;
-        SystemTime::UNIX_EPOCH
-            .checked_add(duration)
-            .context(AddSystemTimeOverflowSnafu { duration })
+        // Prometheus accepts timestamps before the Unix epoch.
+        let duration = Duration::try_from_secs_f64(secs.abs())
+            .context(TryIntoDurationSnafu { raw: timestamp })?;
+        if secs.is_sign_negative() {
+            SystemTime::UNIX_EPOCH
+                .checked_sub(duration)
+                .context(AddSystemTimeOverflowSnafu { duration })
+        } else {
+            SystemTime::UNIX_EPOCH
+                .checked_add(duration)
+                .context(AddSystemTimeOverflowSnafu { duration })
+        }
     }
 }
 
@@ -377,6 +384,18 @@ mod test {
                 assert_eq!(eval.query, "http_requests_total");
             }
             _ => panic!("Expected TQL eval statement, got {stmt:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_promql_timestamp_before_epoch() {
+        for (input, millis) in [("-30000.5", 30_000_500), ("-0.001", 1)] {
+            let result = QueryLanguageParser::parse_promql_timestamp(input).unwrap();
+            assert_eq!(
+                SystemTime::UNIX_EPOCH.duration_since(result).unwrap(),
+                Duration::from_millis(millis),
+                "{input}"
+            );
         }
     }
 

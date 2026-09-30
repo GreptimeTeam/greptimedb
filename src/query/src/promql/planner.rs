@@ -21,7 +21,7 @@ mod set_operator;
 
 use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::datatypes::IntervalDayTime;
 use async_recursion::async_recursion;
@@ -241,8 +241,13 @@ impl BinaryResultLabels {
 
 impl PromPlannerContext {
     fn from_eval_stmt(stmt: &EvalStmt) -> Self {
-        let start = stmt.start.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
-        let end = stmt.end.duration_since(UNIX_EPOCH).unwrap().as_millis() as Millisecond;
+        // Evaluation times before the Unix epoch are valid in Prometheus.
+        let millis = |time: SystemTime| match time.duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_millis() as Millisecond,
+            Err(err) => -(err.duration().as_millis() as Millisecond),
+        };
+        let start = millis(stmt.start);
+        let end = millis(stmt.end);
         Self {
             start,
             end,
