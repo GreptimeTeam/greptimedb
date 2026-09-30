@@ -139,26 +139,44 @@ impl OptionMap {
     }
 
     pub fn kv_pairs(&self) -> Vec<String> {
-        let mut result = Vec::with_capacity(self.options.len() + self.secrets.len());
-        for (k, v) in self
-            .options
-            .iter()
-            .filter_map(|(k, v)| v.as_string().map(|v| (k, v)))
-        {
-            if k.contains(".") {
-                result.push(format!("'{k}' = '{}'", v.escape_debug()));
-            } else {
-                result.push(format!("{k} = '{}'", v.escape_debug()));
+        self.sql_pairs(false).map(|pair| pair.to_string()).collect()
+    }
+
+    /// Streams the same pairs as `kv_pairs`, or all actual values for size validation.
+    pub(super) fn write_sql(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        separator: &str,
+        prefix: &str,
+        complete: bool,
+    ) -> std::fmt::Result {
+        for (index, pair) in self.sql_pairs(complete).enumerate() {
+            if index > 0 {
+                f.write_str(separator)?;
             }
+            write!(f, "{prefix}{pair}")?;
         }
-        for (k, _) in self.secrets.iter() {
-            if k.contains(".") {
-                result.push(format!("'{k}' = '******'"));
+        Ok(())
+    }
+
+    fn sql_pairs(&self, complete: bool) -> impl Iterator<Item = SqlPair<'_>> {
+        let options = self.options.iter().filter_map(move |(key, value)| {
+            let value = match value.as_string() {
+                Some(value) => Either::Right(value),
+                None if complete => Either::Left(value),
+                None => return None,
+            };
+            Some(SqlPair { key, value })
+        });
+        let secrets = self.secrets.iter().map(move |(key, value)| SqlPair {
+            key,
+            value: Either::Right(if complete {
+                value.expose_secret()
             } else {
-                result.push(format!("{k} = '******'"));
-            }
-        }
-        result
+                "******"
+            }),
+        });
+        options.chain(secrets)
     }
 
     pub fn entries(&self) -> impl Iterator<Item = (&str, Either<&OptionValue, &str>)> {
@@ -171,6 +189,25 @@ impl OptionMap {
             .keys()
             .map(|k| (k.as_str(), Either::Right("******")));
         std::iter::chain(options, secrets)
+    }
+}
+
+struct SqlPair<'a> {
+    key: &'a str,
+    value: Either<&'a OptionValue, &'a str>,
+}
+
+impl std::fmt::Display for SqlPair<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.key.contains('.') {
+            write!(f, "'{}'", self.key)?;
+        } else {
+            f.write_str(self.key)?;
+        }
+        match self.value {
+            Either::Left(value) => write!(f, " = {value}"),
+            Either::Right(value) => write!(f, " = '{}'", value.escape_debug()),
+        }
     }
 }
 

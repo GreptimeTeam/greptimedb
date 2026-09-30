@@ -826,48 +826,19 @@ impl Instance {
                 err_msg: "logical-table batch requires 1 to 128 statements"
             }
         );
-        let measure_rewritten_sql = || -> std::fmt::Result {
-            use std::fmt::Write;
-
-            struct SizeBudget(usize);
-            impl std::fmt::Write for SizeBudget {
-                fn write_str(&mut self, value: &str) -> std::fmt::Result {
-                    self.0 = self.0.checked_sub(value.len()).ok_or(std::fmt::Error)?;
-                    Ok(())
-                }
-            }
-            let mut budget = SizeBudget(MAX_LOGICAL_TABLE_DDL_BYTES - (statements.len() - 1));
-            for statement in &statements {
-                let Statement::CreateTable(create) = statement else {
-                    return Err(std::fmt::Error);
-                };
-                let mut create = create.clone();
-                let options = std::mem::take(&mut create.options);
-                write!(budget, "{create}")?;
-                // CREATE's Display redacts secrets and omits non-scalar options.
-                write!(budget, "WITH(")?;
-                for (index, (key, _)) in options.entries().enumerate() {
-                    if index > 0 {
-                        write!(budget, ",")?;
-                    }
-                    write!(budget, "'{}'=", key.escape_debug())?;
-                    if let Some(value) = options.get(key) {
-                        write!(budget, "'{}'", value.escape_debug())?;
-                    } else if let Some(value) = options.value(key) {
-                        write!(budget, "{value}")?;
-                    }
-                }
-                write!(budget, ")")?;
-            }
-            Ok(())
+        let measure_rewritten_sql = || {
+            let mut remaining = MAX_LOGICAL_TABLE_DDL_BYTES - (statements.len() - 1);
+            statements.iter().all(|statement| {
+                matches!(statement, Statement::CreateTable(create) if create.consume_sql_size_budget(&mut remaining))
+            })
         };
         ensure!(
             original_statements
                 .as_ref()
                 .is_none_or(|original| original == &statements)
-                || measure_rewritten_sql().is_ok(),
+                || measure_rewritten_sql(),
             InvalidSqlSnafu {
-                err_msg: "rewritten logical-table DDL exceeds 1 MiB"
+                err_msg: "invalid or oversized rewritten logical-table DDL"
             }
         );
         for statement in &statements {
@@ -4339,6 +4310,45 @@ mod tests {
                             }
                         }
                     }
+                    "partition_shape" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.partitions = Some(sql::statements::create::Partitions {
+                                column_list: vec![],
+                                exprs: vec![sqlparser::ast::Expr::Identifier(sqlparser::ast::Ident::new("hidden"))],
+                            });
+                        }
+                    }
+                    "vector_hidden" => {
+                        statements[1] = parse_one_sql("CREATE TABLE allowed2 (ts TIMESTAMP TIME INDEX, v VECTOR(3)) ENGINE=metric WITH (on_physical_table='phy')");
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.columns[1].column_def.options.push(sqlparser::ast::ColumnOptionDef {
+                                name: None,
+                                option: sqlparser::ast::ColumnOption::Comment("private-value".repeat(200_000)),
+                            });
+                        }
+                    }
+                    mode if mode.starts_with("fulltext_") || mode.starts_with("skipping_")
+                        || mode.starts_with("inverted_") || mode.starts_with("vector_") => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            let (kind, value_type) = mode.split_once('_').unwrap();
+                            let value = "x".repeat(if value_type == "small" { 10 } else { 2 * 1024 * 1024 });
+                            let extensions = &mut create.columns[1].extensions;
+                            let options = match kind {
+                                "fulltext" => &mut extensions.fulltext_index_options,
+                                "skipping" => &mut extensions.skipping_index_options,
+                                "inverted" => &mut extensions.inverted_index_options,
+                                _ => &mut extensions.vector_options,
+                            }.get_or_insert_default();
+                            if kind == "vector" {
+                                options.insert("dim".to_string(), "3".to_string());
+                            }
+                            if value_type == "array" {
+                                options.insert_options("non_scalar", vec![value.as_str()].into());
+                            } else {
+                                options.insert("secret_access_key".to_string(), value);
+                            }
+                        }
+                    }
                     "physical_null" | "physical_array" => {
                         let value = if self.0 == "physical_null" { "NULL" } else { "['x']" };
                         statements[1] = parse_one_sql(&format!(
@@ -4370,6 +4380,20 @@ mod tests {
             "small_option",
             "physical_null",
             "physical_array",
+            "fulltext_secret",
+            "fulltext_array",
+            "fulltext_small",
+            "skipping_secret",
+            "skipping_array",
+            "skipping_small",
+            "inverted_secret",
+            "inverted_array",
+            "inverted_small",
+            "vector_secret",
+            "vector_array",
+            "vector_small",
+            "vector_hidden",
+            "partition_shape",
             "pre_execute",
             "cross_catalog",
             "valid",
@@ -4393,7 +4417,7 @@ mod tests {
             .await?;
             let create = |name| {
                 format!(
-                    "CREATE TABLE {name} (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')"
+                    "CREATE TABLE {name} (ts TIMESTAMP TIME INDEX, host STRING) ENGINE=metric WITH (on_physical_table='phy')"
                 )
             };
             let sql = format!(
@@ -4407,13 +4431,20 @@ mod tests {
             );
             let result =
                 SqlQueryHandler::create_logical_tables(&instance, &sql, QueryContext::arc()).await;
+            let submits = matches!(mode, "valid" | "small_option")
+                || (mode.ends_with("_small") && !mode.starts_with("vector_"));
             if matches!(mode, "none" | "target") {
-                assert_permission_denied(result);
+                let err = result.unwrap_err();
+                assert_eq!(
+                    err.status_code(),
+                    StatusCode::PermissionDenied,
+                    "{mode}: {err}"
+                );
             } else {
                 assert_eq!(
                     result.unwrap_err().status_code(),
                     match mode {
-                        "valid" | "small_option" => StatusCode::Unsupported,
+                        _ if submits => StatusCode::Unsupported,
                         "cross_catalog" => StatusCode::AccessDenied,
                         _ => StatusCode::InvalidArguments,
                     },
@@ -4422,7 +4453,7 @@ mod tests {
             }
             assert_eq!(
                 executor.submitted.lock().unwrap().len(),
-                usize::from(matches!(mode, "valid" | "small_option")),
+                usize::from(submits),
                 "{mode}"
             );
         }
