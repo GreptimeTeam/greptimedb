@@ -254,6 +254,16 @@ pub enum Error {
         #[snafu(implicit)]
         location: Location,
     },
+
+    #[snafu(display(
+        "Table {} cannot be queried with PromQL: column '__name__' conflicts with the reserved metric name",
+        table
+    ))]
+    ReservedMetricNameColumn {
+        table: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 impl ErrorExt for Error {
@@ -281,7 +291,8 @@ impl ErrorExt for Error {
             | SystemTimeOutOfRange { .. }
             | AtModifierTimestampOutOfRange { .. }
             | InvalidRegularExpression { .. }
-            | InvalidDestinationLabelName { .. } => StatusCode::InvalidArguments,
+            | InvalidDestinationLabelName { .. }
+            | ReservedMetricNameColumn { .. } => StatusCode::InvalidArguments,
 
             UnknownTable { .. } => StatusCode::Internal,
 
