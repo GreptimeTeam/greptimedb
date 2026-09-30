@@ -83,6 +83,9 @@ pub const DEFAULT_ROW_GROUP_SIZE: usize = 100 * 1024;
 /// it is safe. Chunk statistics stay untruncated because pruning decodes primary keys
 /// from them. Without truncation every page of a large string column stores its whole
 /// min and max values, uncompressed.
+///
+/// Truncated values are only bounds: code that starts reading the column index must not
+/// decode primary keys from it.
 pub(crate) const COLUMN_INDEX_TRUNCATE_LENGTH: Option<usize> =
     parquet::file::properties::DEFAULT_COLUMN_INDEX_TRUNCATE_LENGTH;
 
