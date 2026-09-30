@@ -25,45 +25,6 @@ use crate::error::{InvalidArgumentsSnafu, Result, UnexpectedSnafu};
 const MAX_STATEMENTS: usize = 128;
 const MAX_SQL_BYTES: usize = 128 * 1024;
 
-fn show_create_sql(kind: &str, catalog: &str, schema: &str, table: Option<&str>) -> String {
-    let mut sql = format!(
-        "SHOW CREATE {kind} \"{}\".\"{}\"",
-        escape_sql_identifier(catalog),
-        escape_sql_identifier(schema),
-    );
-    if let Some(table) = table {
-        sql.push_str(&format!(".\"{}\"", escape_sql_identifier(table)));
-    }
-    sql.push_str(";\n");
-    sql
-}
-
-fn next_batch(
-    statements: &mut std::iter::Peekable<impl Iterator<Item = String>>,
-) -> Result<Vec<String>> {
-    let mut batch = Vec::new();
-    let mut bytes = 0;
-    while let Some(sql) = statements.peek() {
-        if sql.len() > MAX_SQL_BYTES {
-            return InvalidArgumentsSnafu {
-                msg: format!(
-                    "SHOW CREATE exceeds {MAX_SQL_BYTES} SQL bytes ({}): {sql}",
-                    sql.len()
-                ),
-            }
-            .fail();
-        }
-        if batch.len() == MAX_STATEMENTS || bytes + sql.len() > MAX_SQL_BYTES {
-            break;
-        }
-        bytes += sql.len();
-        if let Some(sql) = statements.next() {
-            batch.push(sql);
-        }
-    }
-    Ok(batch)
-}
-
 /// Appends DDL in dependency order supplied by the caller using bounded requests.
 pub(crate) fn append_schema_ddl<'a>(
     client: &'a DatabaseClient,
@@ -93,6 +54,47 @@ pub(crate) fn append_schema_ddl<'a>(
             append_results(&batch, &response, ddl)?;
         }
     }
+}
+
+fn show_create_sql(kind: &str, catalog: &str, schema: &str, table: Option<&str>) -> String {
+    let mut sql = format!(
+        "SHOW CREATE {kind} \"{}\".\"{}\"",
+        escape_sql_identifier(catalog),
+        escape_sql_identifier(schema),
+    );
+    if let Some(table) = table {
+        sql.push_str(".\"");
+        sql.push_str(&escape_sql_identifier(table));
+        sql.push('"');
+    }
+    sql.push_str(";\n");
+    sql
+}
+
+fn next_batch(
+    statements: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<Vec<String>> {
+    let mut batch = Vec::new();
+    let mut bytes = 0;
+    while let Some(sql) = statements.peek() {
+        if sql.len() > MAX_SQL_BYTES {
+            return InvalidArgumentsSnafu {
+                msg: format!(
+                    "SHOW CREATE exceeds {MAX_SQL_BYTES} SQL bytes ({}): {sql}",
+                    sql.len()
+                ),
+            }
+            .fail();
+        }
+        if batch.len() == MAX_STATEMENTS || bytes + sql.len() > MAX_SQL_BYTES {
+            break;
+        }
+        bytes += sql.len();
+        if let Some(sql) = statements.next() {
+            batch.push(sql);
+        }
+    }
+    Ok(batch)
 }
 
 fn append_results(
@@ -249,58 +251,61 @@ mod tests {
         }
     }
 
-    // A single accepted connection makes loss of pool reuse fail at the next read.
-    async fn responses(
+    async fn start_mock_sql_server(
         bodies: Vec<(u16, String)>,
     ) -> (DatabaseClient, tokio::task::JoinHandle<Vec<String>>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (socket, _) = listener.accept().await.unwrap();
-            let mut socket = BufReader::new(socket);
-            let mut queries = Vec::new();
-            for (status, body) in bodies {
-                let mut headers = String::new();
-                loop {
-                    let mut line = String::new();
-                    if socket.read_line(&mut line).await.unwrap() == 0 {
-                        assert!(headers.is_empty());
-                        return queries;
+            tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+                let (socket, _) = listener.accept().await.unwrap();
+                let mut socket = BufReader::new(socket);
+                let mut queries = Vec::new();
+                for (status, body) in bodies {
+                    let mut headers = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if socket.read_line(&mut line).await.unwrap() == 0 {
+                            assert!(headers.is_empty());
+                            return queries;
+                        }
+                        headers.push_str(&line);
+                        if line == "\r\n" {
+                            break;
+                        }
                     }
-                    headers.push_str(&line);
-                    if line == "\r\n" {
-                        break;
-                    }
-                }
-                let headers = headers.to_lowercase();
-                assert!(headers.starts_with("post /v1/sql "));
-                assert!(headers.contains("authorization: basic dxnlcjpwyxnzd29yza=="));
-                assert!(headers.contains("x-greptime-timeout: 7s"));
-                let length: usize = headers
-                    .lines()
-                    .find_map(|line| line.strip_prefix("content-length: "))
-                    .unwrap()
-                    .parse()
-                    .unwrap();
-                let mut form = vec![0; length];
-                socket.read_exact(&mut form).await.unwrap();
-                let params: std::collections::HashMap<_, _> =
-                    url::form_urlencoded::parse(&form).into_owned().collect();
-                assert_eq!(params["db"], "catalog-public");
-                queries.push(params["sql"].clone());
-                socket
-                    .get_mut()
-                    .write_all(
-                        format!(
-                            "HTTP/1.1 {status} Response\r\nContent-Length: {}\r\n\r\n{body}",
-                            body.len()
+                    let headers = headers.to_lowercase();
+                    assert!(headers.starts_with("post /v1/sql "));
+                    assert!(headers.contains("authorization: basic dxnlcjpwyxnzd29yza=="));
+                    assert!(headers.contains("x-greptime-timeout: 7s"));
+                    let length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    let mut form = vec![0; length];
+                    socket.read_exact(&mut form).await.unwrap();
+                    let params: std::collections::HashMap<_, _> =
+                        url::form_urlencoded::parse(&form).into_owned().collect();
+                    assert_eq!(params["db"], "catalog-public");
+                    queries.push(params["sql"].clone());
+                    socket
+                        .get_mut()
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 {status} Response\r\nContent-Length: {}\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
                         )
-                        .as_bytes(),
-                    )
-                    .await
-                    .unwrap();
-            }
-            queries
+                        .await
+                        .unwrap();
+                }
+                queries
+            })
+            .await
+            .expect("mock SQL exchange timed out")
         });
         let client = DatabaseClient::new(
             address.to_string(),
@@ -329,7 +334,7 @@ mod tests {
                 )
             })
             .collect();
-        let (client, server) = responses(bodies).await;
+        let (client, server) = start_mock_sql_server(bodies).await;
         let mut ddl = String::new();
         append_schema_ddl(
             &client.clone(),
@@ -348,12 +353,13 @@ mod tests {
                 .collect::<String>()
         );
         let queries = server.await.unwrap();
-        assert_eq!(queries.len(), 2);
-        assert!(
-            queries[0].starts_with("SHOW CREATE TABLE \"catalog\".\"schema\".\"表.0\"\";x\";\n")
+        let expected: Vec<_> = (0..129)
+            .map(|i| format!("SHOW CREATE TABLE \"catalog\".\"schema\".\"表.{i}\"\";x\";\n"))
+            .collect();
+        assert_eq!(
+            queries,
+            vec![expected[..128].concat(), expected[128..].concat()]
         );
-        assert!(queries[0].ends_with(".\"表.127\"\";x\";\n"));
-        assert!(queries[1].ends_with(".\"表.128\"\";x\";\n"));
     }
 
     #[tokio::test]
@@ -400,7 +406,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
         for target in ["schema", "all"] {
-            let (client, server) = responses(bodies.clone()).await;
+            let (client, server) = start_mock_sql_server(bodies.clone()).await;
             let dir = tempfile::tempdir().unwrap();
             let command = ExportCommand::parse_from([
                 "export",
@@ -452,7 +458,7 @@ mod tests {
             (200, json!({"output": [{"code": 3001, "records": records("first", echoed)["records"]}], "execution_time_ms": 0}).to_string()),
         ];
         let count = bodies.len();
-        let (client, server) = responses(bodies).await;
+        let (client, server) = start_mock_sql_server(bodies).await;
         for _ in 0..count {
             let error = client
                 .sql_response(&sql, "public")
@@ -480,7 +486,7 @@ mod tests {
             (200, "not json".into()),
         ];
         let count = bodies.len();
-        let (client, server) = responses(bodies).await;
+        let (client, server) = start_mock_sql_server(bodies).await;
         for _ in 0..count {
             let mut ddl = String::new();
             let error = append_schema_ddl(

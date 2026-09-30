@@ -621,7 +621,7 @@ impl ExportCreate {
         info!("Exported {} schemas", schema_snapshot.schemas.len());
 
         // 5. Export DDL files for import recovery.
-        let mut sorted_schemas = schema_names.clone();
+        let mut sorted_schemas = schema_names;
         sorted_schemas.sort();
         for schema in sorted_schemas {
             let ddl = self.build_schema_ddl(&schema).await?;
