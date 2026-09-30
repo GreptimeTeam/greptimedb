@@ -69,15 +69,12 @@ impl SimplePredicate {
             }
             Self::IsNull { .. } => Some(self.clone()),
             Self::Constant(value) => Some(Self::Constant(Some(value.unwrap_or(false)))),
-            Self::InList { literals, negated } => {
+            Self::OrEqChain { literals } => {
                 let mut converted = Vec::with_capacity(literals.len());
                 for literal in literals {
                     let scalar = ScalarValue::try_from_array(literal.get().0, 0).ok()?;
                     let (value, unit) = timestamp_scalar_parts(&scalar)?;
                     let Some(value) = value else {
-                        if *negated {
-                            return Some(Self::Constant(Some(false)));
-                        }
                         continue;
                     };
                     let cast = div_mod_units(value, unit.into(), target_unit.into())?;
@@ -86,11 +83,10 @@ impl SimplePredicate {
                     }
                 }
                 if converted.is_empty() {
-                    return Some(Self::Constant(Some(*negated)));
+                    return Some(Self::Constant(Some(false)));
                 }
-                Some(Self::InList {
+                Some(Self::OrEqChain {
                     literals: converted,
-                    negated: *negated,
                 })
             }
             Self::Comparison { literal, op, .. } => {
@@ -184,12 +180,6 @@ mod tests {
             col("ts")
                 .eq(lit(ts_us(500)))
                 .or(col("ts").gt_eq(lit(ts_us(1500)))),
-            col("ts").in_list(vec![lit(ts_us(500)), lit(ts_us(1000)), null()], false),
-            col("ts").in_list(vec![lit(ts_us(500)), lit(ts_us(1000))], true),
-            col("ts").in_list(vec![lit(ts_us(500)), null()], true),
-            col("ts")
-                .is_null()
-                .or(col("ts").in_list(vec![lit(ts_us(500)), null()], true)),
             col("ts")
                 .is_not_null()
                 .and(col("ts").not_eq(lit(ts_us(500)))),

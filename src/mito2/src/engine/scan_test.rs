@@ -151,19 +151,6 @@ async fn test_nullable_label_filters_in_memtables_and_ssts() {
                 (
                     column
                         .clone()
-                        .in_list(vec![lit("ext4"), lit(ScalarValue::Utf8(None))], false),
-                    vec![3],
-                ),
-                (column.clone().in_list(vec![lit("tmpfs")], true), vec![1, 3]),
-                (
-                    column
-                        .clone()
-                        .in_list(vec![lit("tmpfs"), lit(ScalarValue::Utf8(None))], true),
-                    vec![],
-                ),
-                (
-                    column
-                        .clone()
                         .is_null()
                         .or(column.clone().not_eq(lit("tmpfs")))
                         .and(column.clone().is_null().or(column.clone().not_eq(lit("")))),
@@ -239,14 +226,6 @@ async fn test_compound_time_filters_before_last_row() {
         let cases = [
             (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), vec![1, 3]),
             (col("ts").gt_eq(ts(1)).and(col("ts").lt(ts(3))), vec![1, 2]),
-            (col("ts").in_list(vec![ts(2), ts(4)], true), vec![0, 1, 3]),
-            (
-                col("ts").in_list(
-                    vec![ts(4), lit(ScalarValue::TimestampMillisecond(None, None))],
-                    true,
-                ),
-                vec![],
-            ),
             (col("ts").is_null().or(col("ts").lt(ts(2))), vec![0, 1]),
         ];
         for flushed in [false, true] {

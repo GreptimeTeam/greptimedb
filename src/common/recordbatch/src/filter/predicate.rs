@@ -40,9 +40,8 @@ pub(crate) enum SimplePredicate {
         regex: Option<Regex>,
         regex_negative: bool,
     },
-    InList {
+    OrEqChain {
         literals: Vec<Scalar<ArrayRef>>,
-        negated: bool,
     },
     IsNull {
         negated: bool,
@@ -53,10 +52,7 @@ pub(crate) enum SimplePredicate {
 }
 
 impl SimplePredicate {
-    pub(crate) fn try_new(
-        expr: &Expr,
-        column_type: &impl Fn(&str) -> Option<DataType>,
-    ) -> Option<Self> {
+    pub(crate) fn try_new(expr: &Expr, column_type: Option<&DataType>) -> Option<Self> {
         match expr {
             Expr::BinaryExpr(binary) if matches!(binary.op, Operator::And | Operator::Or) => {
                 let left = Self::try_new(&binary.left, column_type)?;
@@ -69,10 +65,7 @@ impl SimplePredicate {
                     (left.equality_literals(), right.equality_literals())
                 {
                     lhs.extend(rhs);
-                    return Some(Self::InList {
-                        literals: lhs,
-                        negated: false,
-                    });
+                    return Some(Self::OrEqChain { literals: lhs });
                 }
                 Some(Self::Or(Box::new(left), Box::new(right)))
             }
@@ -117,39 +110,22 @@ impl SimplePredicate {
                     negated: matches!(expr, Expr::IsNotNull(_)),
                 })
             }
-            Expr::InList(list) => {
-                Self::check_column(&list.expr, column_type)?;
-                let literals = list
-                    .list
-                    .iter()
-                    .map(|expr| {
-                        let Expr::Literal(value, _) = expr else {
-                            return None;
-                        };
-                        value.to_scalar().ok()
-                    })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(Self::InList {
-                    literals,
-                    negated: list.negated,
-                })
-            }
             Expr::Literal(ScalarValue::Boolean(value), _) => Some(Self::Constant(*value)),
             _ => None,
         }
     }
 
-    fn check_column(expr: &Expr, column_type: &impl Fn(&str) -> Option<DataType>) -> Option<()> {
+    fn check_column(expr: &Expr, column_type: Option<&DataType>) -> Option<()> {
         match expr {
             Expr::Column(_) => Some(()),
             Expr::Cast(cast) if cast.field.data_type() == &DataType::Utf8 => {
-                let Expr::Column(column) = &*cast.expr else {
+                let Expr::Column(_) = &*cast.expr else {
                     return None;
                 };
-                match column_type(&column.name)? {
+                match column_type? {
                     DataType::Utf8 => Some(()),
                     DataType::Dictionary(key, value)
-                        if *key == DataType::UInt32 && *value == DataType::Utf8 =>
+                        if **key == DataType::UInt32 && **value == DataType::Utf8 =>
                     {
                         Some(())
                     }
@@ -167,10 +143,7 @@ impl SimplePredicate {
                 op: Operator::Eq,
                 ..
             } => Some(vec![literal.clone()]),
-            Self::InList {
-                literals,
-                negated: false,
-            } => Some(literals.clone()),
+            Self::OrEqChain { literals } => Some(literals.clone()),
             _ => None,
         }
     }
@@ -203,17 +176,13 @@ impl SimplePredicate {
                 }
             }
             .context(ArrowComputeSnafu),
-            Self::InList { literals, negated } => {
+            Self::OrEqChain { literals } => {
                 let mut result = BooleanArray::from(vec![false; len]);
                 for literal in literals {
                     let rhs = cmp::eq(input, literal).context(ArrowComputeSnafu)?;
                     result = or_kleene(&result, &rhs).context(ArrowComputeSnafu)?;
                 }
-                if *negated {
-                    datatypes::compute::not(&result).context(ArrowComputeSnafu)
-                } else {
-                    Ok(result)
-                }
+                Ok(result)
             }
             Self::IsNull { negated } => {
                 let values = match input.get().0.logical_nulls() {
@@ -409,7 +378,6 @@ mod tests {
     use datafusion::physical_expr::create_physical_expr;
     use datafusion_common::arrow::array::ArrayRef;
     use datafusion_common::arrow::buffer::BooleanBuffer;
-    use datafusion_common::cast::as_boolean_array;
     use datafusion_common::{Column, DFSchema, ScalarValue};
     use datatypes::arrow::array::{Array, DictionaryArray, RecordBatch};
     use datatypes::arrow::datatypes::{DataType, Field, Schema, TimeUnit, UInt32Type};
@@ -417,7 +385,7 @@ mod tests {
     use regex::Regex;
 
     use crate::filter::predicate::{SimplePredicate, regexp_is_match_dictionary};
-    use crate::filter::{SimpleFilterEvaluator, batch_filter, boolean_array_to_scan_mask};
+    use crate::filter::{SimpleFilterEvaluator, batch_filter};
 
     #[test]
     fn unsupported_filter_op() {
@@ -456,6 +424,13 @@ mod tests {
             right: Box::new(1.lit()),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+        for negated in [false, true] {
+            let membership = col("label").in_list(vec![lit(""), lit("lo")], negated);
+            assert!(SimpleFilterEvaluator::try_new(&membership).is_none());
+            assert!(
+                SimpleFilterEvaluator::try_new(&col("label").is_null().or(membership)).is_none()
+            );
+        }
         for expr in [
             col("other").is_null().or(col("label").not_eq(lit("lo"))),
             col("a.label")
@@ -546,12 +521,6 @@ mod tests {
                 .eq(lit("lo"))
                 .or(col("label").eq(lit("eth0")))
                 .or(col("label").eq(lit(""))),
-            col("label").in_list(vec![lit(""), lit("lo"), null()], false),
-            col("label").in_list(vec![lit(""), lit("lo")], true),
-            col("label").in_list(vec![lit("lo"), null()], true),
-            col("label")
-                .is_null()
-                .or(col("label").in_list(vec![lit("lo"), null()], true)),
             col("label").eq(null()).or(col("label").eq(lit("eth0"))),
             col("label").gt(lit("a")).and(col("label").lt(lit("z"))),
             lit("lo").not_eq(col("label")),
@@ -652,62 +621,6 @@ mod tests {
                         mask = &mask & &evaluate(&filter);
                     }
                     assert_eq!(selected(mask), expected, "optimized: {plan}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn float_membership_matches_datafusion() {
-        use datatypes::arrow::array::Float64Array;
-
-        let input: ArrayRef = Arc::new(Float64Array::from(vec![
-            None,
-            Some(-0.0),
-            Some(0.0),
-            Some(f64::NAN),
-            Some(-f64::NAN),
-            Some(f64::NEG_INFINITY),
-            Some(f64::INFINITY),
-            Some(1.0),
-        ]));
-        let schema = Schema::new(vec![Field::new("value", DataType::Float64, true)]);
-        let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![input.clone()]).unwrap();
-        for literals in [
-            vec![lit(0.0), lit(f64::NAN)],
-            vec![lit(-0.0)],
-            vec![lit(f64::NAN), lit(ScalarValue::Float64(None))],
-        ] {
-            for negated in [false, true] {
-                let membership = col("value").in_list(literals.clone(), negated);
-                for expr in [membership.clone(), col("value").is_null().or(membership)] {
-                    let physical = create_physical_expr(
-                        &expr,
-                        &DFSchema::try_from(schema.clone()).unwrap(),
-                        &ExecutionProps::new(),
-                        &PhysicalPlanningContext::default(),
-                    )
-                    .unwrap();
-                    let result = physical
-                        .evaluate(&batch)
-                        .unwrap()
-                        .into_array(input.len())
-                        .unwrap();
-                    let expected = boolean_array_to_scan_mask(as_boolean_array(&result).unwrap());
-                    let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
-                    assert_eq!(
-                        evaluator.evaluate_array(&input).unwrap(),
-                        *expected.values(),
-                        "{expr}"
-                    );
-                    for i in 0..input.len() {
-                        let scalar = ScalarValue::try_from_array(&input, i).unwrap();
-                        assert_eq!(
-                            evaluator.evaluate_scalar(&scalar).unwrap(),
-                            expected.value(i),
-                            "{expr}, row={i}"
-                        );
-                    }
                 }
             }
         }

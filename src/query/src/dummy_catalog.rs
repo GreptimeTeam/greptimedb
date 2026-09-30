@@ -666,6 +666,8 @@ mod tests {
             col("k0").is_null().or(cast_label.not_eq(lit("lo"))),
             col("k0").is_null().or(col("v0").not_eq(lit(1.0))),
             cast_field.eq(lit("1")),
+            col("k0").in_list(vec![lit(""), lit("lo")], false),
+            col("k0").in_list(vec![lit(""), lit("lo")], true),
         ];
         assert_eq!(
             provider
@@ -674,6 +676,8 @@ mod tests {
             vec![
                 TableProviderFilterPushDown::Exact,
                 TableProviderFilterPushDown::Exact,
+                TableProviderFilterPushDown::Inexact,
+                TableProviderFilterPushDown::Inexact,
                 TableProviderFilterPushDown::Inexact,
                 TableProviderFilterPushDown::Inexact,
             ]

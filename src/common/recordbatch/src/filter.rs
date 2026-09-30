@@ -90,9 +90,11 @@ impl SimpleFilterEvaluator {
         if columns.len() != 1 {
             return None;
         }
+        let column_name = columns.into_iter().next()?.name.clone();
+        let column_type = column_type(&column_name);
         Some(Self {
-            column_name: columns.into_iter().next()?.name.clone(),
-            predicate: SimplePredicate::try_new(predicate, column_type)?,
+            column_name,
+            predicate: SimplePredicate::try_new(predicate, column_type.as_ref())?,
         })
     }
 
@@ -156,12 +158,9 @@ impl SimpleFilterEvaluator {
         )
     }
 
-    /// Returns true for a positive IN list or an OR chain of equality comparisons.
+    /// Returns true for an OR chain of equality comparisons.
     pub fn is_or_eq_chain(&self) -> bool {
-        matches!(
-            self.predicate,
-            SimplePredicate::InList { negated: false, .. }
-        )
+        matches!(self.predicate, SimplePredicate::OrEqChain { .. })
     }
 
     /// Returns the literal of a bare comparison, without discarding compound conditions.
@@ -172,13 +171,9 @@ impl SimpleFilterEvaluator {
         Value::try_from(ScalarValue::try_from_array(literal.get().0, 0).ok()?).ok()
     }
 
-    /// Returns positive IN-list literals, or None for other predicates or unsupported values.
+    /// Returns equality-OR literals, or None for other predicates or unsupported values.
     pub fn literal_list_values(&self) -> Option<Vec<Value>> {
-        let SimplePredicate::InList {
-            literals,
-            negated: false,
-        } = &self.predicate
-        else {
+        let SimplePredicate::OrEqChain { literals } = &self.predicate else {
             return None;
         };
         literals
