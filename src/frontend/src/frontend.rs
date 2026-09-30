@@ -61,8 +61,8 @@ pub struct FrontendOptions {
     pub http: HttpOptions,
     pub grpc: GrpcOptions,
     /// The internal gRPC options for the frontend service.
-    /// It serves the same services as the public gRPC server plus the frontend
-    /// internal handler, and never serves CORS.
+    /// It serves the same services as the public one plus the internal handler.
+    /// CORS is always off on it.
     pub internal_grpc: Option<GrpcOptions>,
     pub mysql: MysqlOptions,
     pub postgres: PostgresOptions,

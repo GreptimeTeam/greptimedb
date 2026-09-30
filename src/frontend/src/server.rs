@@ -215,10 +215,8 @@ where
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
-        // The internal gRPC server is only ever called by the cluster's own
-        // components, never by a browser, so it never serves CORS, whatever the
-        // configuration says. Enforcing it here rather than at the call site keeps
-        // any future internal caller covered.
+        // Browsers never talk to the internal server, so CORS stays off there
+        // regardless of configuration.
         let grpc = if external {
             grpc.clone()
         } else {
@@ -1046,8 +1044,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_internal_grpc_server_never_serves_cors() {
-        // `enable_cors` is forced off for the internal gRPC server, so even setting
-        // it in the configuration cannot open the internal listener to browsers.
         let options = FrontendOptions {
             http: HttpOptions {
                 addr: "127.0.0.1:0".to_string(),
@@ -1093,8 +1089,6 @@ mod tests {
         let internal = send_cors_preflight(internal_addr).await;
         services.shutdown_all().await.unwrap();
 
-        // The same option, enabled in both sections, is answered on the public
-        // listener and ignored on the internal one.
         assert!(public.contains("access-control-allow-origin"), "{public}");
         assert!(
             !internal.contains("access-control-allow-origin"),
@@ -1102,8 +1096,7 @@ mod tests {
         );
     }
 
-    /// Sends the `OPTIONS` preflight that a browser sends before a gRPC-Web call,
-    /// and returns the response head, lowercased.
+    /// Returns the response head, lowercased.
     async fn send_cors_preflight(addr: std::net::SocketAddr) -> String {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 

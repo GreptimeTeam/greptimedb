@@ -92,16 +92,10 @@ pub struct GrpcOptions {
     /// The HTTP/2 keep-alive timeout.
     #[serde(with = "humantime_serde")]
     pub http2_keep_alive_timeout: Duration,
-    /// Whether to enable CORS on the gRPC server. Required by gRPC-Web clients
-    /// running in a browser, which send an `OPTIONS` preflight request first.
-    ///
-    /// It is off by default.
-    ///
-    /// The frontend never serves CORS on its internal gRPC server: it forces
-    /// this option off there, whatever the configuration says.
+    /// Whether to enable CORS, required by gRPC-Web clients in browsers.
+    /// Always off on the frontend's internal gRPC server.
     pub enable_cors: bool,
-    /// The origins allowed to access the gRPC server. An empty list allows any
-    /// origin. Only takes effect when `enable_cors` is true.
+    /// Origins allowed by CORS. Empty allows any origin.
     pub cors_allowed_origins: Vec<String>,
 }
 
@@ -182,7 +176,7 @@ impl Default for GrpcOptions {
 impl GrpcOptions {
     /// Default options for internal gRPC server.
     /// The internal gRPC server is used for communication between different nodes in cluster.
-    /// It is not exposed to the outside world and never serves CORS.
+    /// It is not exposed to the outside world.
     pub fn internal_default() -> Self {
         Self {
             bind_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
@@ -273,12 +267,8 @@ pub struct GrpcServerConfig {
     /// Useful when the server wants to control the reconnection of its clients.
     /// Default to `None`, means infinite.
     pub max_connection_age: Option<Duration>,
-    /// Whether to enable CORS on the gRPC server.
-    ///
-    /// Always `false` on the frontend's internal gRPC server.
     pub enable_cors: bool,
-    /// The origins allowed to access the gRPC server. An empty list allows any
-    /// origin.
+    /// Empty allows any origin.
     pub cors_allowed_origins: Vec<String>,
 }
 
@@ -409,8 +399,8 @@ impl Server for GrpcServer {
                         )
                     })
                     .allow_headers(AllowHeaders::any())
-                    // Trailers-only responses (most errors) carry `grpc-status` as HTTP
-                    // headers, which a browser can only read when they are exposed.
+                    // Trailers-only responses (most errors) carry `grpc-status` in HTTP
+                    // headers, which browsers hide unless exposed.
                     .expose_headers([
                         HeaderName::from_static("grpc-status"),
                         HeaderName::from_static("grpc-message"),
@@ -422,10 +412,8 @@ impl Server for GrpcServer {
             None
         };
 
-        // `tonic::transport::Server::layer` prepends to the layer stack, so the
-        // layer added first ends up outermost. CORS has to stay outside of the
-        // gRPC-Web layer, which rejects any non-gRPC-Web HTTP/1.1 request,
-        // including the `OPTIONS` preflight, with a 400.
+        // `Server::layer` prepends, so the first layer added is outermost. CORS must
+        // sit outside `GrpcWebLayer`, which rejects the `OPTIONS` preflight with a 400.
         let middleware_layer = tower::ServiceBuilder::new()
             .layer(MetricsMiddlewareLayer)
             .option_layer(cors_layer)
@@ -533,8 +521,7 @@ mod tests {
         );
     }
 
-    /// Starts a gRPC server on an ephemeral port. The returned handle owns the
-    /// shutdown sender, so it has to outlive the requests sent to the server.
+    /// The returned server owns the shutdown sender and must outlive the requests.
     async fn start_test_grpc_server(config: GrpcServerConfig) -> (GrpcServer, SocketAddr) {
         let runtime = Runtime::builder().build().unwrap();
         let mut server = GrpcServerBuilder::new(config, runtime).build();
@@ -546,8 +533,6 @@ mod tests {
         (server, addr)
     }
 
-    /// Builds the `OPTIONS` preflight request a gRPC-Web client sends before the
-    /// actual call, asking the server whether `origin` may call it.
     fn build_preflight_request(origin: &str) -> String {
         format!(
             "OPTIONS /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
@@ -559,12 +544,9 @@ mod tests {
         )
     }
 
-    /// Builds the actual gRPC-Web `POST` a client sends once the preflight has
-    /// passed. The path is not served, so the call comes back as a trailers-only
-    /// `Unimplemented` response.
+    /// The path is not served, so the response is a trailers-only `Unimplemented`.
     fn build_grpc_web_request(origin: &str) -> String {
-        // One gRPC-Web message frame: a compression flag, a four byte message
-        // length, and an empty payload.
+        // Empty gRPC-Web frame: 1-byte compression flag + 4-byte length.
         let body = "\0\0\0\0\0";
         format!(
             "POST /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
@@ -579,7 +561,7 @@ mod tests {
         )
     }
 
-    /// Sends a raw HTTP/1.1 request and returns the response head, lowercased.
+    /// Returns the response head, lowercased.
     async fn send_raw_request(addr: SocketAddr, request: &str) -> String {
         let mut stream = TcpStream::connect(addr).await.unwrap();
         stream.write_all(request.as_bytes()).await.unwrap();
@@ -601,9 +583,8 @@ mod tests {
 
     #[test]
     fn test_grpc_options_as_config() {
-        // The CORS options only reach the server through `as_config`. Every test
-        // below builds `GrpcServerConfig` directly, so none of them would notice
-        // a field that `as_config` forgot to carry over.
+        // Other tests build `GrpcServerConfig` directly and would miss a field
+        // dropped by `as_config`.
         let options = GrpcOptions {
             enable_cors: true,
             cors_allowed_origins: vec!["https://example.com".to_string()],
@@ -617,9 +598,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_preflight() {
-        // The preflight must be answered by the CORS layer, which is stacked
-        // outside of the gRPC-Web layer; with the order reversed the gRPC-Web
-        // layer would reject the request as a non-gRPC-Web one with a 400.
         let config = GrpcServerConfig {
             enable_cors: true,
             ..Default::default()
@@ -638,8 +616,7 @@ mod tests {
             response.contains("access-control-allow-headers: *"),
             "{response}"
         );
-        // `allow_methods` describes the methods allowed for the actual call,
-        // not the preflight, which the CORS layer answers on its own.
+        // Lists the method of the actual call, not `OPTIONS`.
         assert!(
             response.contains("access-control-allow-methods: post"),
             "{response}"
@@ -648,9 +625,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_expose_headers() {
-        // A failed call comes back trailers-only, with `grpc-status` in the HTTP
-        // headers rather than the status line. Browsers drop unexposed headers, so
-        // the client would see a successful response and never learn of the failure.
         let config = GrpcServerConfig {
             enable_cors: true,
             ..Default::default()
@@ -659,15 +633,13 @@ mod tests {
 
         let response = send_raw_request(addr, &build_grpc_web_request("https://example.com")).await;
 
-        // The call itself is allowed, not only the preflight.
         assert!(response.starts_with("http/1.1 200"), "{response}");
         assert!(
             response.contains("access-control-allow-origin: *"),
             "{response}"
         );
 
-        // The premise of the assertions below: the call really did come back as a
-        // trailers-only response, with the status carried by the headers.
+        // Premise: the response is trailers-only.
         assert!(response.contains("\r\ngrpc-status: 12"), "{response}");
 
         let expose_headers = response
@@ -696,9 +668,8 @@ mod tests {
             "{response}"
         );
 
-        // An origin outside of the allow list is not rejected with an error
-        // status. The preflight simply carries no allow-origin header, and it
-        // is the browser that blocks the actual request.
+        // A disallowed origin still gets a 200, just without allow-origin; the
+        // browser does the blocking.
         let response =
             send_raw_request(addr, &build_preflight_request("https://notallowed.com")).await;
         assert!(response.starts_with("http/1.1 200"), "{response}");
@@ -719,8 +690,7 @@ mod tests {
         let response =
             send_raw_request(addr, &build_preflight_request("https://example.com")).await;
 
-        // Without the CORS layer, `GrpcWebLayer` rejects the preflight as a
-        // non-gRPC-Web HTTP/1.1 request.
+        // Without CORS, `GrpcWebLayer` rejects the preflight.
         assert!(response.starts_with("http/1.1 400"), "{response}");
         assert!(
             !response.contains("access-control-allow-origin"),
