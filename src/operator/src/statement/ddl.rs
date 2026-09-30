@@ -118,6 +118,7 @@ use crate::error::{
     UnrecognizedTableOptionSnafu, ViewAlreadyExistsSnafu,
 };
 use crate::expr_helper::{self, RepartitionRequest, RepartitionSource};
+use crate::insert::is_instant_ttl;
 use crate::statement::StatementExecutor;
 use crate::statement::show::create_partitions_stmt;
 use crate::utils::{to_executor_context, to_executor_context_with_origin_frontend};
@@ -472,10 +473,14 @@ impl StatementExecutor {
                 .table_options
                 .contains_key(LOGICAL_TABLE_METADATA_KEY)
         {
-            if create_table.table_options.contains_key(TTL_KEY) {
+            if create_table
+                .table_options
+                .get(TTL_KEY)
+                .is_some_and(|ttl| !is_instant_ttl(ttl))
+            {
                 return CreateLogicalTablesSnafu {
                     reason: format!(
-                        "TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
                     ),
                 }
                 .fail();
@@ -2045,20 +2050,20 @@ impl StatementExecutor {
         } else {
             // This is logical table. Annotation alters only rewrite its own
             // metadata; `AlterLogicalTablesProcedure` only handles column adds.
-            let alters_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
+            // `ttl='instant'` stays supported on logical tables (the Inserter
+            // uses it to forward rows to flows); retention TTLs are rejected.
+            let alters_retention_ttl = expr.kind.as_ref().is_some_and(|kind| match kind {
                 Kind::SetTableOptions(options) => options
                     .table_options
                     .iter()
-                    .any(|option| option.key == TTL_KEY),
-                Kind::UnsetTableOptions(options) => {
-                    options.keys.iter().any(|key| key == TTL_KEY)
-                }
+                    .any(|option| option.key == TTL_KEY && !is_instant_ttl(&option.value)),
+                Kind::UnsetTableOptions(options) => options.keys.iter().any(|key| key == TTL_KEY),
                 _ => false,
             });
-            if alters_ttl {
+            if alters_retention_ttl {
                 return CreateLogicalTablesSnafu {
                     reason: format!(
-                        "TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
+                        "Retention TTL is not supported on metric logical tables; set `{TTL_KEY}` on the physical table instead"
                     ),
                 }
                 .fail();

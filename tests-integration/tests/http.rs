@@ -183,6 +183,7 @@ macro_rules! http_tests {
                 test_prometheus_remote_write_batched_microsecond_physical_table,
                 test_prometheus_remote_write_batched_conflicting_physical_selections,
                 test_prometheus_remote_special_labels,
+                test_prometheus_remote_write_with_ttl_hint,
                 test_prometheus_remote_schema_labels,
                 test_prometheus_remote_write_with_pipeline,
                 test_vm_proto_remote_write,
@@ -4677,6 +4678,84 @@ pub async fn test_prometheus_remote_special_labels(store_type: StorageType) {
         expected,
     )
     .await;
+
+    guard.remove_all().await;
+}
+
+pub async fn test_prometheus_remote_write_with_ttl_hint(store_type: StorageType) {
+    common_telemetry::init_default_ut_logging();
+    let (app, mut guard) =
+        setup_test_prom_app_with_frontend(store_type, "test_prometheus_remote_write_ttl_hint")
+            .await;
+    let client = TestClient::new(app).await;
+
+    // write snappy encoded data with an ingest TTL hint
+    let write_request = WriteRequest {
+        timeseries: vec![TimeSeries {
+            labels: vec![
+                Label {
+                    name: prom_store::METRIC_NAME_LABEL.to_string(),
+                    value: "ttl_hint_metric".to_string(),
+                },
+                Label {
+                    name: "host".to_string(),
+                    value: "host1".to_string(),
+                },
+            ],
+            samples: vec![Sample {
+                value: 1.0f64,
+                timestamp: 1664370459457,
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let serialized_request = write_request.encode_to_vec();
+    let compressed_request =
+        prom_store::snappy_compress(&serialized_request).expect("failed to encode snappy");
+
+    let res = client
+        .post("/v1/prometheus/write")
+        .header("Content-Encoding", "snappy")
+        .header("x-greptime-hints", "ttl=7d")
+        .body(compressed_request)
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+    // The hinted ingestion path must be usable end to end.
+    let expected = "[[1664370459457,1.0,\"host1\"]]";
+    validate_data(
+        "test_prometheus_remote_write_ttl_hint_select",
+        &client,
+        "select * from ttl_hint_metric",
+        expected,
+    )
+    .await;
+
+    // The automatically created physical metric table carries the retention TTL hint.
+    let res = client
+        .get("/v1/sql?sql=show create table greptime_physical_table")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        resp.contains("ttl = '7d'") || resp.contains("ttl = '7days'"),
+        "expected ttl = '7d' in SHOW CREATE TABLE output for physical table, got: {resp}"
+    );
+
+    // The logical table must not inherit the retention TTL.
+    let res = client
+        .get("/v1/sql?sql=show create table ttl_hint_metric")
+        .send()
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let resp = res.text().await;
+    assert!(
+        !resp.contains("ttl = '7d'") && !resp.contains("ttl = '7days'"),
+        "did not expect retention ttl in SHOW CREATE TABLE output for logical table, got: {resp}"
+    );
 
     guard.remove_all().await;
 }

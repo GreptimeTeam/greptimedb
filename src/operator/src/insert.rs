@@ -1861,6 +1861,14 @@ pub fn validate_trace_table_model(table_info: &TableInfo, ctx: &QueryContextRef)
     Ok(())
 }
 
+/// Returns true if the TTL option value is `instant`, per the engine's TTL
+/// semantics (`TimeToLive::Instant`), as opposed to a retention duration.
+pub fn is_instant_ttl(ttl: &str) -> bool {
+    common_time::ttl::TimeToLive::from_humantime_or_str(ttl)
+        .map(|ttl| ttl.is_instant())
+        .unwrap_or(false)
+}
+
 /// Fill table options for a new table by create type.
 pub fn fill_table_options_for_create(
     table_options: &mut std::collections::HashMap<String, String>,
@@ -1882,7 +1890,16 @@ pub fn fill_table_options_for_create(
 
     match create_type {
         AutoCreateTableType::Logical(physical_table) => {
-            table_options.remove(TTL_KEY);
+            // `ttl='instant'` must stay on the logical table: the Inserter reads
+            // it from the logical table to forward rows to flows without
+            // persisting them. Only retention TTLs are reserved for the
+            // physical table.
+            if table_options
+                .get(TTL_KEY)
+                .is_some_and(|ttl| !is_instant_ttl(ttl))
+            {
+                table_options.remove(TTL_KEY);
+            }
             table_options.insert(
                 LOGICAL_TABLE_METADATA_KEY.to_string(),
                 physical_table.clone(),
@@ -2988,7 +3005,7 @@ mod tests {
     }
 
     #[test]
-    fn test_logical_create_options_do_not_copy_ttl() {
+    fn test_logical_create_options_do_not_copy_retention_ttl() {
         let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
         ctx.set_extension(TTL_KEY, "1s");
         let ctx = Arc::new(ctx);
@@ -3001,6 +3018,35 @@ mod tests {
         );
 
         assert!(!table_options.contains_key(TTL_KEY));
+    }
+
+    #[test]
+    fn test_logical_create_options_keep_instant_ttl() {
+        let mut ctx = QueryContext::with(DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME);
+        ctx.set_extension(TTL_KEY, "instant");
+        let ctx = Arc::new(ctx);
+        let mut table_options = Default::default();
+
+        fill_table_options_for_create(
+            &mut table_options,
+            &AutoCreateTableType::Logical("physical".to_string()),
+            &ctx,
+        );
+
+        assert_eq!(
+            table_options.get(TTL_KEY).map(String::as_str),
+            Some("instant")
+        );
+    }
+
+    #[test]
+    fn test_is_instant_ttl() {
+        assert!(is_instant_ttl("instant"));
+        assert!(is_instant_ttl("Instant"));
+        assert!(!is_instant_ttl("7d"));
+        assert!(!is_instant_ttl("forever"));
+        assert!(!is_instant_ttl(""));
+        assert!(!is_instant_ttl("not-a-duration"));
     }
 
     #[test]
