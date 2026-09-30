@@ -96,8 +96,8 @@ runtime_size = 8
 ## - `all`: enable all compression.
 ## Default to `none`
 flight_compression = "arrow_ipc"
-## gRPC CORS support, it's turned off by default; set to `true` to enable.
-## This allows browser to access the gRPC-Web APIs without CORS restrictions
+## gRPC CORS support is disabled by default; set to true to enable it.
+## This allows browsers to access external gRPC-Web APIs without CORS restrictions.
 #+ enable_cors = false
 ## Customize allowed origins for gRPC CORS.
 ## @toml2docs:none-default

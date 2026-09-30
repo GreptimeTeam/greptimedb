@@ -100,6 +100,9 @@ pub struct GrpcOptions {
     /// apart from `[internal_grpc]`, so a default of `true` would also turn CORS
     /// on for the cluster-internal gRPC listeners (the internal gRPC server,
     /// datanode and flownode), which do not authenticate their callers.
+    ///
+    /// The frontend never serves CORS on its internal gRPC server: it forces
+    /// this option off there, whatever the configuration says.
     pub enable_cors: bool,
     /// The origins allowed to access the gRPC server. An empty list allows any
     /// origin. Only takes effect when `enable_cors` is true.
@@ -183,7 +186,7 @@ impl Default for GrpcOptions {
 impl GrpcOptions {
     /// Default options for internal gRPC server.
     /// The internal gRPC server is used for communication between different nodes in cluster.
-    /// It is not exposed to the outside world.
+    /// It is not exposed to the outside world and never serves CORS.
     pub fn internal_default() -> Self {
         Self {
             bind_addr: format!("127.0.0.1:{}", DEFAULT_INTERNAL_GRPC_ADDR_PORT),
@@ -275,6 +278,8 @@ pub struct GrpcServerConfig {
     /// Default to `None`, means infinite.
     pub max_connection_age: Option<Duration>,
     /// Whether to enable CORS on the gRPC server.
+    ///
+    /// Always `false` on the frontend's internal gRPC server.
     pub enable_cors: bool,
     /// The origins allowed to access the gRPC server. An empty list allows any
     /// origin.

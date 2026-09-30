@@ -111,8 +111,8 @@ api_server_addr = "127.0.0.1:4006"
 bind_addr = "127.0.0.1:4001"
 ## The number of server worker threads.
 runtime_size = 8
-## gRPC CORS support, it's turned off by default; set to `true` to enable.
-## This allows browser to access the gRPC-Web APIs without CORS restrictions
+## gRPC CORS support is disabled by default; set to true to enable it.
+## This allows browsers to access external gRPC-Web APIs without CORS restrictions.
 #+ enable_cors = false
 ## Customize allowed origins for gRPC CORS.
 ## @toml2docs:none-default
