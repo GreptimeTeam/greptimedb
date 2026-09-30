@@ -1911,9 +1911,9 @@ impl PromPlanner {
         let projection = plan
             .schema()
             .iter()
-            .filter_map(|(qualifier, field)| {
-                (field.name() != &marker.name)
-                    .then(|| DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone())))
+            .filter(|(_, field)| field.name() != &marker.name)
+            .map(|(qualifier, field)| {
+                DfExpr::Column(Column::new(qualifier.cloned(), field.name().clone()))
             })
             .collect::<Vec<_>>();
         LogicalPlanBuilder::from(plan)
@@ -4631,8 +4631,12 @@ impl PromPlanner {
         // `dst_label` set to the expanded replacement; any other series is left unchanged.
         // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
         let anchored = format!("^(?s:{regex})$");
-        regex::Regex::new(&anchored)
-            .map_err(|_| InvalidRegularExpressionSnafu { regex: regex.clone() }.build())?;
+        regex::Regex::new(&anchored).map_err(|_| {
+            InvalidRegularExpressionSnafu {
+                regex: regex.clone(),
+            }
+            .build()
+        })?;
         let dst_exists = self.ctx.tag_columns.contains(&dst_label);
 
         // `__name__` is not a physical column: the semantic source resolves through the marked
