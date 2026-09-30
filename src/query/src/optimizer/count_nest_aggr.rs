@@ -22,6 +22,7 @@ use datafusion_common::Result;
 use datafusion_common::tree_node::{Transformed, TreeNode};
 use datafusion_expr::{Expr, UserDefinedLogicalNodeCore, lit};
 use promql::extension_plan::{InstantManipulate, SeriesDivide, SeriesNormalize};
+use promql::functions::Extremum;
 use store_api::metric_engine_consts::DATA_SCHEMA_TSID_COLUMN_NAME;
 
 use crate::QueryEngineContext;
@@ -253,9 +254,19 @@ impl CountNestAggrRule {
     }
 
     fn is_supported_inner_aggregate(name: &str) -> bool {
+        // PromQL `min`/`max` plan to `prom_min`/`prom_max`, which return NULL for the same
+        // groups as the builtin ones.
         matches!(
             name,
-            "count" | "sum" | "avg" | "min" | "max" | "stddev_pop" | "var_pop"
+            "count"
+                | "sum"
+                | "avg"
+                | "min"
+                | "max"
+                | Extremum::MIN_NAME
+                | Extremum::MAX_NAME
+                | "stddev_pop"
+                | "var_pop"
         )
     }
 
