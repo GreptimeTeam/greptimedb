@@ -2936,6 +2936,7 @@ mod tests {
             per_peer_rows,
         ));
 
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
         FlowMirrorTask { requests }
             .detach(node_manager, pending.clone())
             .unwrap();
@@ -2949,9 +2950,14 @@ mod tests {
 
         // Let both tasks finish and check that the budget lands back on its
         // starting value: over-releasing a shared reservation would saturate it.
+        // The gauge is checked too because `release_mirror_pending_rows` moves
+        // the budget before the gauge; exiting on the budget alone could leak a
+        // pending `gauge.sub` into the next test holding the metrics lock.
         gate.add_permits(2);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while pending.load(Ordering::Relaxed) != start {
+        while pending.load(Ordering::Relaxed) != start
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the mirror tasks must release exactly their own shares"
