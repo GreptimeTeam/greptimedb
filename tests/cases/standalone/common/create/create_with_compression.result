@@ -1,0 +1,79 @@
+CREATE TABLE spans (
+    ts TIMESTAMP TIME INDEX,
+    trace_id STRING SKIPPING INDEX,
+    prompt STRING COMPRESSION WITH (type = 'zstd', level = 3, page_size = '8MiB'),
+    reply STRING COMPRESSION WITH (level = 9),
+    tokens BIGINT COMPRESSION WITH (page_size = '64KiB'),
+) WITH (append_mode = 'true');
+
+Affected Rows: 0
+
+SHOW CREATE TABLE spans;
+
++-------+--------------------------------------------------------------------------------------------------------------------+
+| Table | Create Table                                                                                                       |
++-------+--------------------------------------------------------------------------------------------------------------------+
+| spans | CREATE TABLE IF NOT EXISTS "spans" (                                                                               |
+|       |   "ts" TIMESTAMP(3) NOT NULL,                                                                                      |
+|       |   "trace_id" STRING NULL SKIPPING INDEX WITH(false_positive_rate = '0.01', granularity = '10240', type = 'BLOOM'), |
+|       |   "prompt" STRING NULL COMPRESSION WITH(level = '3', page_size = '8MiB', type = 'zstd'),                           |
+|       |   "reply" STRING NULL COMPRESSION WITH(level = '9', type = 'zstd'),                                                |
+|       |   "tokens" BIGINT NULL COMPRESSION WITH(page_size = '64KiB', type = 'zstd'),                                       |
+|       |   TIME INDEX ("ts")                                                                                                |
+|       | )                                                                                                                  |
+|       |                                                                                                                    |
+|       | ENGINE=mito                                                                                                        |
+|       | WITH(                                                                                                              |
+|       |   append_mode = 'true'                                                                                             |
+|       | )                                                                                                                  |
++-------+--------------------------------------------------------------------------------------------------------------------+
+
+INSERT INTO spans VALUES
+    (1, 't1', 'fix the flaky test', 'running it', 120),
+    (2, 't1', 'fix the flaky test\nrunning it', 'patched', 340),
+    (3, 't2', 'another prompt', NULL, NULL);
+
+Affected Rows: 3
+
+ADMIN flush_table('spans');
+
++----------------------------+
+| ADMIN flush_table('spans') |
++----------------------------+
+| 0                          |
++----------------------------+
+
+SELECT ts, trace_id, prompt, reply, tokens FROM spans ORDER BY ts;
+
++-------------------------+----------+--------------------------------+------------+--------+
+| ts                      | trace_id | prompt                         | reply      | tokens |
++-------------------------+----------+--------------------------------+------------+--------+
+| 1970-01-01T00:00:00.001 | t1       | fix the flaky test             | running it | 120    |
+| 1970-01-01T00:00:00.002 | t1       | fix the flaky test\nrunning it | patched    | 340    |
+| 1970-01-01T00:00:00.003 | t2       | another prompt                 |            |        |
++-------------------------+----------+--------------------------------+------------+--------+
+
+DROP TABLE spans;
+
+Affected Rows: 0
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level = 0));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid level: 0, expected: an integer in 1..=22
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (type = 'lz4'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid type: lz4, expected: 'zstd'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (page_size = 'large'));
+
+Error: 1004(InvalidArguments), Invalid compression option: invalid page_size: large, expected: a positive size such as '8MiB'
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec = 'zstd'));
+
+Error: 1004(InvalidArguments), Invalid column option, column name: s, error: invalid COMPRESSION option: codec
+
+CREATE TABLE bad (ts TIMESTAMP TIME INDEX, j JSON2 COMPRESSION WITH (level = 3));
+
+Error: 1004(InvalidArguments), Invalid compression option: compression options are not supported on column j of type Json2"<Null>"
+
