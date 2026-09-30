@@ -496,6 +496,77 @@ candidate_setup_sql = ["CREATE TABLE candidate_table", "ALTER TABLE candidate_ta
             ]
         );
     }
+
+    #[test]
+    fn per_table_layout_overrides_only_the_table_volume() {
+        let case: CaseFile = toml::from_str(
+            r#"
+[scenario]
+kind = "direct_readable_sst"
+
+[scenario.layout]
+regions = 1
+sst_count = 2
+rows_per_sst = 8
+row_group_size = 4
+series_count = 4
+start_unix_nanos = 1704067200000000000
+step_nanos = 1000000000
+time_range_layout = "non_overlapping_per_sst"
+series_layout = "round_robin"
+
+[[scenario.tables]]
+database = "public"
+name = "fact"
+engine = "mito"
+sst_count = 5
+rows_per_sst = 100
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+
+[[scenario.tables]]
+database = "public"
+name = "dim"
+engine = "mito"
+primary_key = ["host"]
+time_index = "ts"
+
+[[scenario.tables.columns]]
+name = "host"
+type = "STRING"
+semantic = "tag"
+
+[[scenario.tables.columns]]
+name = "ts"
+type = "TIMESTAMP(9)"
+semantic = "timestamp"
+"#,
+        )
+        .unwrap();
+        let scenario = case.scenario.direct_readable_sst();
+
+        let fact = scenario.layout.for_table(&scenario.tables[0]);
+        assert_eq!(fact.sst_count, 5);
+        assert_eq!(fact.rows_per_sst, 100);
+        // Everything else stays shared.
+        assert_eq!(fact.row_group_size, 4);
+        assert_eq!(fact.series_count.get(), 4);
+        assert_eq!(fact.series_layout, "round_robin");
+
+        let dim = scenario.layout.for_table(&scenario.tables[1]);
+        assert_eq!(dim.sst_count, scenario.layout.sst_count);
+        assert_eq!(dim.rows_per_sst, scenario.layout.rows_per_sst);
+    }
 }
 
 impl Scenario {
@@ -527,6 +598,14 @@ pub(super) struct TableConfig {
     pub(super) primary_key: Vec<String>,
     pub(super) time_index: String,
     pub(super) columns: Vec<ColumnConfig>,
+    /// Per-table override of the shared [`LayoutConfig::sst_count`]. Cases that mix tables of
+    /// very different volume, e.g. a fact table joined with a small dimension table, size each
+    /// table on its own; everything else of the shared layout still applies.
+    #[serde(default)]
+    pub(super) sst_count: Option<usize>,
+    /// Per-table override of the shared [`LayoutConfig::rows_per_sst`].
+    #[serde(default)]
+    pub(super) rows_per_sst: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -550,7 +629,7 @@ pub(super) enum Distribution {
     DeterministicWave { min: f64, max: f64 },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct LayoutConfig {
     pub(super) regions: usize,
     pub(super) sst_count: usize,
@@ -561,4 +640,20 @@ pub(super) struct LayoutConfig {
     pub(super) step_nanos: i64,
     pub(super) time_range_layout: String,
     pub(super) series_layout: String,
+}
+
+impl LayoutConfig {
+    /// The layout of `table`: the shared layout with the per-table size overrides of
+    /// [`TableConfig::sst_count`] and [`TableConfig::rows_per_sst`] applied.
+    ///
+    /// The remaining fields stay shared, so the tables of a case keep one deterministic time
+    /// layout and one deterministic series layout; only the volume of a table is decided by the
+    /// table itself.
+    pub(super) fn for_table(&self, table: &TableConfig) -> LayoutConfig {
+        LayoutConfig {
+            sst_count: table.sst_count.unwrap_or(self.sst_count),
+            rows_per_sst: table.rows_per_sst.unwrap_or(self.rows_per_sst),
+            ..self.clone()
+        }
+    }
 }

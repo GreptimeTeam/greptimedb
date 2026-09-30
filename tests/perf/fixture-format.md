@@ -58,6 +58,25 @@ warmup = 0
 iterations = 1
 ```
 
+A table can override the volume of the shared layout with its own `sst_count`
+and `rows_per_sst`; the remaining layout fields stay shared. This keeps mixed
+cases, such as a join of a large fact table with a small dimension table, in one
+deterministic layout:
+
+```toml
+[[scenario.tables]]
+database = "public"
+name = "fact"
+sst_count = 32
+rows_per_sst = 8192
+
+[[scenario.tables]]
+database = "public"
+name = "dim"
+sst_count = 1
+rows_per_sst = 16
+```
+
 ### Query kinds
 
 `kind = "prom_http"` runs a Prometheus range query by POSTing form fields to
@@ -83,6 +102,24 @@ SST format is written, each completed generated batch is physically sorted by
 encoded primary key ascending, timestamp ascending, and sequence descending, as
 required by the Mito Parquet writer; sorting preserves every generated column and
 row, including deterministic-wave values.
+
+A query can list `candidate_session_sql` statements that the candidate target
+sends before the query itself, for example:
+
+```toml
+[[scenario.queries]]
+name = "join_dist_broadcast"
+kind = "sql"
+query = "SELECT f.host, avg(f.value) FROM fact f JOIN dim d ON f.host = d.host GROUP BY f.host"
+candidate_session_sql = ["SET experimental_dist_join = true"]
+```
+
+Every `/v1/sql` request is answered in its own session context, so a session
+setting only affects the statements of the request that carries it: the runner
+sends the statements and the query as one multi-statement SQL string for the
+validation, warmup, and measurement requests of that query. Only the candidate
+target runs them, so a base build that does not know the setting measures the
+same query with the default behavior.
 
 `[scenario]` is required. Other scenario variants are intentionally unsupported
 for now, but `scenario.kind` leaves room for future `write_then_query` and
