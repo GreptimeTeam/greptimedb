@@ -348,6 +348,20 @@ seed = 12345
 The outer driver currently supports `direct_readable_sst`,
 `prom_remote_write_then_query`, and `otlp_trace_load`.
 
+A direct-SST case sizes its tables with the shared `[scenario.layout]` and can
+override `sst_count` and `rows_per_sst` per table, so a case can join a large fact
+table with a small dimension table. Before measuring, the runner waits until
+every table of the case has one leader region report with a non-zero disk size in
+`information_schema.region_statistics`: the datanode reports those statistics on
+each heartbeat, and a rewrite that prices tables by them (such as the nested
+broadcast join) would otherwise measure the un-rewritten plan. A query can list
+`candidate_session_sql` statements that only the candidate target runs; the
+runner sends them in the same `/v1/sql` request as the query itself (validation,
+warmup and measurement), because every request gets its own session context and a
+`SET` statement only affects the statements of its own request. A base build that
+does not know a setting yet therefore keeps measuring the query without it, which
+is what makes `SET experimental_dist_join = true` a candidate-only opt-in.
+
 ## Metrics
 
 Primary gates should compare query work rather than plan text:
@@ -565,3 +579,10 @@ Additional SQL optimizer cases:
   `LIMIT`.
 - `sql_join_filter_order`: two direct-SST tables joined on a shared tag with
   time filters, aggregate ordering, and `LIMIT`.
+- `sql_join_dist_broadcast`: a 32-SST fact table joined with a 16-row dimension
+  table, comparing the join on the frontend with the nested broadcast join
+  rewrite of the experimental `experimental_dist_join` opt-in. Only the
+  candidate target sends the opt-in, through `candidate_session_sql`.
+
+These cases are not part of the routine default case group; run them by path, for
+example `--cases tests/perf/query_cases/sql_join_dist_broadcast/case.toml`.
