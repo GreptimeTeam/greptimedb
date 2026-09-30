@@ -47,6 +47,11 @@ lazy_static! {
         "table operator mirror pending rows"
     )
     .unwrap();
+    pub static ref DIST_MIRROR_DROPPED_ROW_COUNT: IntCounter = register_int_counter!(
+        "greptime_operator_dist_mirror_dropped_rows",
+        "table operator mirror rows dropped because the pending mirror row limit was exceeded"
+    )
+    .unwrap();
     pub static ref DIST_DELETE_ROW_COUNT: IntCounterVec = register_int_counter_vec!(
         "greptime_table_operator_delete_rows",
         "table operator delete rows",
