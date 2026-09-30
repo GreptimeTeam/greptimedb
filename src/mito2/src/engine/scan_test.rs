@@ -203,6 +203,110 @@ async fn test_nullable_label_filters_in_memtables_and_ssts() {
 }
 
 #[tokio::test]
+async fn test_compound_time_filters_before_last_row() {
+    for (flat, memtable) in [
+        (false, "time_series"),
+        (true, "time_series"),
+        (true, "bulk"),
+    ] {
+        let mut env = TestEnv::new().await;
+        let engine = env
+            .create_engine(MitoConfig {
+                default_flat_format: flat,
+                ..Default::default()
+            })
+            .await;
+        let region_id = RegionId::new(1, 1);
+        let request = CreateRequestBuilder::new()
+            .insert_option("memtable.type", memtable)
+            .build();
+        let schema = test_util::rows_schema(&request);
+        engine
+            .handle_request(region_id, RegionRequest::Create(request))
+            .await
+            .unwrap();
+        let rows = (0..5)
+            .map(|i| {
+                row(vec![
+                    ValueData::StringValue("series".into()),
+                    ValueData::F64Value(i as f64),
+                    ValueData::TimestampMillisecondValue(i),
+                ])
+            })
+            .collect();
+        test_util::put_rows(&engine, region_id, Rows { schema, rows }).await;
+        let ts = |value| lit(ScalarValue::TimestampMillisecond(Some(value), None));
+        let cases = [
+            (col("ts").eq(ts(1)).or(col("ts").eq(ts(3))), vec![1, 3]),
+            (col("ts").gt_eq(ts(1)).and(col("ts").lt(ts(3))), vec![1, 2]),
+            (col("ts").in_list(vec![ts(2), ts(4)], true), vec![0, 1, 3]),
+            (
+                col("ts").in_list(
+                    vec![ts(4), lit(ScalarValue::TimestampMillisecond(None, None))],
+                    true,
+                ),
+                vec![],
+            ),
+            (col("ts").is_null().or(col("ts").lt(ts(2))), vec![0, 1]),
+        ];
+        for flushed in [false, true] {
+            if flushed {
+                test_util::flush_region(&engine, region_id, None).await;
+            }
+            // Alternate predicates twice to exercise reuse of row-group and range caches.
+            for _ in 0..2 {
+                for (filter, expected) in &cases {
+                    for selector in [
+                        None,
+                        Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                        Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                    ] {
+                        let stream = engine
+                            .scan_to_stream(
+                                region_id,
+                                ScanRequest {
+                                    filters: vec![
+                                        col("tag_0").is_null().or(col("tag_0").eq(lit("series"))),
+                                        filter.clone(),
+                                    ],
+                                    distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                                    series_row_selector: selector,
+                                    ..Default::default()
+                                },
+                            )
+                            .await
+                            .unwrap();
+                        let batches = RecordBatches::try_collect(stream).await.unwrap();
+                        let mut actual = Vec::new();
+                        for batch in batches.iter() {
+                            actual.extend(
+                                batch
+                                    .column_by_name("ts")
+                                    .unwrap()
+                                    .as_primitive::<TimestampMillisecondType>()
+                                    .values()
+                                    .iter()
+                                    .copied(),
+                            );
+                        }
+                        actual.sort_unstable();
+                        let expected = if selector.is_some() {
+                            expected.last().copied().into_iter().collect::<Vec<_>>()
+                        } else {
+                            expected.clone()
+                        };
+                        assert_eq!(
+                            actual, expected,
+                            "flat={flat}, memtable={memtable}, flushed={flushed}, selector={selector:?}, {filter}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_json_type_hint_pushdown_scanner_returns_batches() -> WhateverResult<()> {
     // Create a region with a JSON2 field whose physical Parquet representation is a nested struct.
     // The scan below will only ask for field_0.a.x.

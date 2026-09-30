@@ -192,9 +192,13 @@ impl SimpleFilterEvaluator {
         Value::try_from(ScalarValue::try_from_array(literal.get().0, 0).ok()?).ok()
     }
 
-    /// Returns IN-list literals, or None for other predicates or unsupported values.
+    /// Returns positive IN-list literals, or None for other predicates or unsupported values.
     pub fn literal_list_values(&self) -> Option<Vec<Value>> {
-        let SimplePredicate::InList { literals, .. } = &self.predicate else {
+        let SimplePredicate::InList {
+            literals,
+            negated: false,
+        } = &self.predicate
+        else {
             return None;
         };
         literals
@@ -366,10 +370,14 @@ impl SimpleFilterEvaluator {
                     Operator::Eq => TimestampUnitCast::Pruned,
                     Operator::NotEq if divisible => filter(Operator::NotEq),
                     Operator::NotEq => TimestampUnitCast::Matched,
+                    // The quotient is floor(L), including negative timestamps.
+                    // v > L is v > quotient whether or not L is representable.
                     Operator::Gt => filter(Operator::Gt),
                     Operator::GtEq if divisible => filter(Operator::GtEq),
+                    // Between target values, v >= L is v > quotient.
                     Operator::GtEq => filter(Operator::Gt),
                     Operator::Lt if divisible => filter(Operator::Lt),
+                    // Between target values, v < L is v <= quotient.
                     Operator::Lt => filter(Operator::LtEq),
                     Operator::LtEq => filter(Operator::LtEq),
                     _ => return None,
@@ -1063,6 +1071,50 @@ mod test {
                 .unwrap(),
             )
             .unwrap();
+            // Compare nested predicates with DataFusion's three-valued logic.
+            // Check scalars as well: primary-key filtering evaluates one series at a time.
+            for left in &predicates {
+                for right in &predicates {
+                    for expr in [
+                        left.clone().and(right.clone()),
+                        left.clone().or(right.clone()),
+                    ] {
+                        let schema =
+                            Schema::new(vec![Field::new("label", input.data_type().clone(), true)]);
+                        let batch =
+                            RecordBatch::try_new(Arc::new(schema.clone()), vec![input.clone()])
+                                .unwrap();
+                        let physical = create_physical_expr(
+                            &expr,
+                            &DFSchema::try_from(schema).unwrap(),
+                            &ExecutionProps::new(),
+                            &PhysicalPlanningContext::default(),
+                        )
+                        .unwrap();
+                        let result = physical
+                            .evaluate(&batch)
+                            .unwrap()
+                            .into_array(input.len())
+                            .unwrap();
+                        let expected =
+                            boolean_array_to_scan_mask(as_boolean_array(&result).unwrap());
+                        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+                        assert_eq!(
+                            evaluator.evaluate_array(&input).unwrap(),
+                            *expected.values(),
+                            "{expr}"
+                        );
+                        for i in 0..input.len() {
+                            let scalar = ScalarValue::try_from_array(&input, i).unwrap();
+                            assert_eq!(
+                                evaluator.evaluate_scalar(&scalar).unwrap(),
+                                expected.value(i),
+                                "{expr}, row={i}"
+                            );
+                        }
+                    }
+                }
+            }
             for expr in &predicates {
                 let df = ctx
                     .table("labels")
@@ -1122,6 +1174,62 @@ mod test {
     }
 
     #[test]
+    fn float_membership_matches_datafusion() {
+        use datatypes::arrow::array::Float64Array;
+
+        let input: ArrayRef = Arc::new(Float64Array::from(vec![
+            None,
+            Some(-0.0),
+            Some(0.0),
+            Some(f64::NAN),
+            Some(-f64::NAN),
+            Some(f64::NEG_INFINITY),
+            Some(f64::INFINITY),
+            Some(1.0),
+        ]));
+        let schema = Schema::new(vec![Field::new("value", DataType::Float64, true)]);
+        let batch = RecordBatch::try_new(Arc::new(schema.clone()), vec![input.clone()]).unwrap();
+        for literals in [
+            vec![lit(0.0), lit(f64::NAN)],
+            vec![lit(-0.0)],
+            vec![lit(f64::NAN), lit(ScalarValue::Float64(None))],
+        ] {
+            for negated in [false, true] {
+                let membership = col("value").in_list(literals.clone(), negated);
+                for expr in [membership.clone(), col("value").is_null().or(membership)] {
+                    let physical = create_physical_expr(
+                        &expr,
+                        &DFSchema::try_from(schema.clone()).unwrap(),
+                        &ExecutionProps::new(),
+                        &PhysicalPlanningContext::default(),
+                    )
+                    .unwrap();
+                    let result = physical
+                        .evaluate(&batch)
+                        .unwrap()
+                        .into_array(input.len())
+                        .unwrap();
+                    let expected = boolean_array_to_scan_mask(as_boolean_array(&result).unwrap());
+                    let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+                    assert_eq!(
+                        evaluator.evaluate_array(&input).unwrap(),
+                        *expected.values(),
+                        "{expr}"
+                    );
+                    for i in 0..input.len() {
+                        let scalar = ScalarValue::try_from_array(&input, i).unwrap();
+                        assert_eq!(
+                            evaluator.evaluate_scalar(&scalar).unwrap(),
+                            expected.value(i),
+                            "{expr}, row={i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn compound_timestamp_filters_preserve_unit_conversion() {
         use datatypes::arrow::array::TimestampMicrosecondArray;
 
@@ -1154,7 +1262,15 @@ mod test {
             false,
         )]));
         let batch = RecordBatch::try_new(schema.clone(), vec![native]).unwrap();
-        for expr in predicates {
+        let composed = predicates.iter().flat_map(|left| {
+            predicates.iter().flat_map(move |right| {
+                [
+                    left.clone().and(right.clone()),
+                    left.clone().or(right.clone()),
+                ]
+            })
+        });
+        for expr in predicates.iter().cloned().chain(composed) {
             let physical = create_physical_expr(
                 &expr,
                 &DFSchema::try_from(schema.as_ref().clone()).unwrap(),
