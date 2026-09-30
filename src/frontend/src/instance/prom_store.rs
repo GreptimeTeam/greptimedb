@@ -54,7 +54,7 @@ use servers::query_handler::{
 use session::context::QueryContextRef;
 use snafu::{OptionExt, ResultExt};
 use store_api::metric_engine_consts::{METRIC_ENGINE_NAME, PHYSICAL_TABLE_METADATA_KEY};
-use store_api::mito_engine_options::SST_FORMAT_KEY;
+use store_api::mito_engine_options::{SST_FORMAT_KEY, TTL_KEY};
 use table::TableRef;
 use table::table_reference::TableReference;
 use tracing::instrument;
@@ -693,6 +693,13 @@ impl Instance {
         .map_err(BoxedError::new)
         .context(error::ExecuteGrpcQuerySnafu)?;
         create_table_expr.engine = METRIC_ENGINE_NAME.to_string();
+        // Apply the ingest TTL hint so the auto-created physical metric table
+        // carries the retention TTL from `x-greptime-hints: ttl=...`.
+        if let Some(ttl) = ctx.extension(TTL_KEY) {
+            create_table_expr
+                .table_options
+                .insert(TTL_KEY.to_string(), ttl.to_string());
+        }
         fill_metric_physical_table_options(&mut create_table_expr.table_options);
 
         self.statement_executor
