@@ -41,186 +41,166 @@ use snafu::ResultExt;
 
 use crate::error::{ArrowComputeSnafu, Result, ToArrowScalarSnafu, UnsupportedOperationSnafu};
 
-/// An inplace expr evaluator for simple filter. Only support
-/// - `col` `op` `literal`
-/// - `literal` `op` `col`
-///
-/// And the `op` is one of `=`, `!=`, `>`, `>=`, `<`, `<=`,
-/// or regex operators: `~`, `~*`, `!~`, `!~*`.
-///
-/// This struct contains normalized predicate expr. In the form of
-/// `col` `op` `literal` where the `col` is provided from input.
+/// Evaluates supported single-column predicates with precompiled regular expressions.
+/// Compound predicates preserve SQL null semantics until conversion to a scan mask.
 #[derive(Debug, Clone)]
 pub struct SimpleFilterEvaluator {
-    /// Name of the referenced column.
     column_name: String,
-    /// The literal value.
-    literal: Scalar<ArrayRef>,
-    /// The operator.
-    op: Operator,
-    /// Only used when the operator is `Or`-chain.
-    literal_list: Vec<Scalar<ArrayRef>>,
-    /// Pre-compiled regex.
-    /// Only used when the operator is regex operators.
-    /// If the regex is empty, it is also `None`.
-    regex: Option<Regex>,
-    /// Whether the regex is negative.
-    regex_negative: bool,
+    predicate: SimplePredicate,
+}
+
+#[derive(Debug, Clone)]
+enum SimplePredicate {
+    Comparison {
+        literal: Scalar<ArrayRef>,
+        op: Operator,
+        regex: Option<Regex>,
+        regex_negative: bool,
+    },
+    InList {
+        literals: Vec<Scalar<ArrayRef>>,
+        negated: bool,
+    },
+    IsNull {
+        negated: bool,
+    },
+    Constant(Option<bool>),
+    And(Box<Self>, Box<Self>),
+    Or(Box<Self>, Box<Self>),
 }
 
 impl SimpleFilterEvaluator {
     pub fn new<T: Literal>(column_name: String, lit: T, op: Operator) -> Option<Self> {
-        match op {
+        if !matches!(
+            op,
             Operator::Eq
-            | Operator::NotEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Gt
-            | Operator::GtEq => {}
-            _ => return None,
+                | Operator::NotEq
+                | Operator::Lt
+                | Operator::LtEq
+                | Operator::Gt
+                | Operator::GtEq
+        ) {
+            return None;
         }
-
-        let Expr::Literal(val, _) = lit.lit() else {
+        let Expr::Literal(value, _) = lit.lit() else {
             return None;
         };
-
         Some(Self {
             column_name,
-            literal: val.to_scalar().ok()?,
-            op,
-            literal_list: vec![],
-            regex: None,
-            regex_negative: false,
+            predicate: SimplePredicate::Comparison {
+                literal: value.to_scalar().ok()?,
+                op,
+                regex: None,
+                regex_negative: false,
+            },
         })
     }
 
     pub fn try_new(predicate: &Expr) -> Option<Self> {
-        match predicate {
-            Expr::BinaryExpr(binary) => {
-                // check if the expr is in the supported form
-                match binary.op {
-                    Operator::Eq
-                    | Operator::NotEq
-                    | Operator::Lt
-                    | Operator::LtEq
-                    | Operator::Gt
-                    | Operator::GtEq
-                    | Operator::RegexMatch
-                    | Operator::RegexIMatch
-                    | Operator::RegexNotMatch
-                    | Operator::RegexNotIMatch => {}
-                    Operator::Or => {
-                        let lhs = Self::try_new(&binary.left)?;
-                        let rhs = Self::try_new(&binary.right)?;
-                        if lhs.column_name != rhs.column_name
-                            || !matches!(lhs.op, Operator::Eq | Operator::Or)
-                            || !matches!(rhs.op, Operator::Eq | Operator::Or)
-                        {
-                            return None;
-                        }
-                        let mut list = vec![];
-                        let placeholder_literal = lhs.literal.clone();
-                        // above check guarantees the op is either `Eq` or `Or`
-                        if matches!(lhs.op, Operator::Or) {
-                            list.extend(lhs.literal_list);
-                        } else {
-                            list.push(lhs.literal);
-                        }
-                        if matches!(rhs.op, Operator::Or) {
-                            list.extend(rhs.literal_list);
-                        } else {
-                            list.push(rhs.literal);
-                        }
-                        return Some(Self {
-                            column_name: lhs.column_name,
-                            literal: placeholder_literal,
-                            op: Operator::Or,
-                            literal_list: list,
-                            regex: None,
-                            regex_negative: false,
-                        });
-                    }
-                    _ => return None,
-                }
-
-                // swap the expr if it is in the form of `literal` `op` `col`
-                let mut op = binary.op;
-                let (lhs, rhs) = match (&*binary.left, &*binary.right) {
-                    (Expr::Column(col), Expr::Literal(lit, _)) => (col, lit),
-                    (Expr::Literal(lit, _), Expr::Column(col)) => {
-                        // safety: The previous check ensures the operator is able to swap.
-                        op = op.swap().unwrap();
-                        (col, lit)
-                    }
-                    _ => return None,
-                };
-
-                let (regex, regex_negative) = Self::maybe_build_regex(op, rhs).ok()?;
-                let literal = rhs.to_scalar().ok()?;
-                Some(Self {
-                    column_name: lhs.name.clone(),
-                    literal,
-                    op,
-                    literal_list: vec![],
-                    regex,
-                    regex_negative,
-                })
-            }
-            _ => None,
-        }
+        Self::try_new_with_column_type(predicate, &|_| None)
     }
 
-    /// Get the name of the referenced column.
+    /// Recognizes single-column filters, including lossless string dictionary casts
+    /// when the caller can resolve the column's type.
+    pub fn try_new_with_column_type(
+        predicate: &Expr,
+        column_type: &impl Fn(&str) -> Option<DataType>,
+    ) -> Option<Self> {
+        let columns = predicate.column_refs();
+        if columns.len() != 1 {
+            return None;
+        }
+        Some(Self {
+            column_name: columns.into_iter().next()?.name.clone(),
+            predicate: SimplePredicate::try_new(predicate, column_type)?,
+        })
+    }
+
+    /// Returns the referenced column name.
     pub fn column_name(&self) -> &str {
         &self.column_name
     }
 
     pub fn is_eq(&self) -> bool {
-        matches!(self.op, Operator::Eq)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::Eq,
+                ..
+            }
+        )
     }
-
     pub fn is_not_eq(&self) -> bool {
-        matches!(self.op, Operator::NotEq)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::NotEq,
+                ..
+            }
+        )
     }
-
     pub fn is_lt(&self) -> bool {
-        matches!(self.op, Operator::Lt)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::Lt,
+                ..
+            }
+        )
     }
-
     pub fn is_lt_eq(&self) -> bool {
-        matches!(self.op, Operator::LtEq)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::LtEq,
+                ..
+            }
+        )
     }
-
     pub fn is_gt(&self) -> bool {
-        matches!(self.op, Operator::Gt)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::Gt,
+                ..
+            }
+        )
     }
-
     pub fn is_gt_eq(&self) -> bool {
-        matches!(self.op, Operator::GtEq)
+        matches!(
+            self.predicate,
+            SimplePredicate::Comparison {
+                op: Operator::GtEq,
+                ..
+            }
+        )
     }
 
-    /// Returns true if this filter represents an `OR` chain of equality comparisons, e.g.
-    /// `col = lit1 OR col = lit2 ...`.
+    /// Returns true for a positive IN list or an OR chain of equality comparisons.
     pub fn is_or_eq_chain(&self) -> bool {
-        matches!(self.op, Operator::Or)
+        matches!(
+            self.predicate,
+            SimplePredicate::InList { negated: false, .. }
+        )
     }
 
-    /// Returns the literal as a [`Value`]. It returns `None` if the literal can't be converted.
+    /// Returns the literal of a bare comparison, without discarding compound conditions.
     pub fn literal_value(&self) -> Option<Value> {
-        let array = self.literal.get().0;
-        let scalar = ScalarValue::try_from_array(array, 0).ok()?;
-        Value::try_from(scalar).ok()
+        let SimplePredicate::Comparison { literal, .. } = &self.predicate else {
+            return None;
+        };
+        Value::try_from(ScalarValue::try_from_array(literal.get().0, 0).ok()?).ok()
     }
 
-    /// Returns the literal list as a list of [`Value`]s. It returns `None` if any literal can't be
-    /// converted.
+    /// Returns IN-list literals, or None for other predicates or unsupported values.
     pub fn literal_list_values(&self) -> Option<Vec<Value>> {
-        self.literal_list
+        let SimplePredicate::InList { literals, .. } = &self.predicate else {
+            return None;
+        };
+        literals
             .iter()
-            .map(|scalar| {
-                let array = scalar.get().0;
-                let scalar = ScalarValue::try_from_array(array, 0).ok()?;
-                Value::try_from(scalar).ok()
+            .map(|literal| {
+                Value::try_from(ScalarValue::try_from_array(literal.get().0, 0).ok()?).ok()
             })
             .collect()
     }
@@ -229,8 +209,7 @@ impl SimpleFilterEvaluator {
         let input = input
             .to_scalar()
             .with_context(|_| ToArrowScalarSnafu { v: input.clone() })?;
-        let result = self.evaluate_datum(&input, 1)?;
-        Ok(result.value(0))
+        Ok(self.evaluate_datum(&input, 1)?.value(0))
     }
 
     pub fn evaluate_array(&self, input: &ArrayRef) -> Result<BooleanBuffer> {
@@ -238,40 +217,12 @@ impl SimpleFilterEvaluator {
     }
 
     pub fn evaluate_vector(&self, input: &VectorRef) -> Result<BooleanBuffer> {
-        self.evaluate_datum(&input.to_arrow_array(), input.len())
+        self.evaluate_array(&input.to_arrow_array())
     }
 
-    fn evaluate_datum(&self, input: &impl Datum, input_len: usize) -> Result<BooleanBuffer> {
-        let result = match self.op {
-            Operator::Eq => cmp::eq(input, &self.literal),
-            Operator::NotEq => cmp::neq(input, &self.literal),
-            Operator::Lt => cmp::lt(input, &self.literal),
-            Operator::LtEq => cmp::lt_eq(input, &self.literal),
-            Operator::Gt => cmp::gt(input, &self.literal),
-            Operator::GtEq => cmp::gt_eq(input, &self.literal),
-            Operator::RegexMatch => self.regex_match(input),
-            Operator::RegexIMatch => self.regex_match(input),
-            Operator::RegexNotMatch => self.regex_match(input),
-            Operator::RegexNotIMatch => self.regex_match(input),
-            Operator::Or => {
-                // OR operator stands for OR-chained EQs (or INLIST in other words)
-                let mut result: BooleanArray = vec![false; input_len].into();
-                for literal in &self.literal_list {
-                    let rhs = cmp::eq(input, literal).context(ArrowComputeSnafu)?;
-                    result = or_kleene(&result, &rhs).context(ArrowComputeSnafu)?;
-                }
-                Ok(result)
-            }
-            _ => {
-                return UnsupportedOperationSnafu {
-                    reason: format!("{:?}", self.op),
-                }
-                .fail();
-            }
-        };
-        result
-            .context(ArrowComputeSnafu)
-            .map(|array| boolean_array_to_scan_mask(&array).values().clone())
+    fn evaluate_datum(&self, input: &impl Datum, len: usize) -> Result<BooleanBuffer> {
+        let result = self.predicate.evaluate(input, len)?;
+        Ok(boolean_array_to_scan_mask(&result).values().clone())
     }
 
     /// Builds a regex pattern from a scalar value and operator.
@@ -315,13 +266,313 @@ impl SimpleFilterEvaluator {
         }
     }
 
-    fn regex_match(&self, input: &impl Datum) -> std::result::Result<BooleanArray, ArrowError> {
+    /// Adapts timestamp predicates to an older SST's timestamp unit without rounding
+    /// away boundary rows. Nonrepresentable equality literals cannot match a row.
+    pub fn cast_timestamp_unit(&self, target: &ConcreteDataType) -> Option<TimestampUnitCast> {
+        let DataType::Timestamp(target_unit, _) = target.as_arrow_type() else {
+            return None;
+        };
+        let wrap = |predicate| Self {
+            column_name: self.column_name.clone(),
+            predicate,
+        };
+        match &self.predicate {
+            SimplePredicate::And(left, right) | SimplePredicate::Or(left, right) => {
+                let left = wrap(*left.clone()).cast_timestamp_unit(target)?;
+                let right = wrap(*right.clone()).cast_timestamp_unit(target)?;
+                let and = matches!(self.predicate, SimplePredicate::And(..));
+                match (left, right) {
+                    (TimestampUnitCast::Pruned, _) | (_, TimestampUnitCast::Pruned) if and => {
+                        Some(TimestampUnitCast::Pruned)
+                    }
+                    (TimestampUnitCast::Matched, _) | (_, TimestampUnitCast::Matched) if !and => {
+                        Some(TimestampUnitCast::Matched)
+                    }
+                    (TimestampUnitCast::Matched, other) | (other, TimestampUnitCast::Matched)
+                        if and =>
+                    {
+                        Some(other)
+                    }
+                    (TimestampUnitCast::Pruned, other) | (other, TimestampUnitCast::Pruned)
+                        if !and =>
+                    {
+                        Some(other)
+                    }
+                    (TimestampUnitCast::Filter(left), TimestampUnitCast::Filter(right)) => {
+                        let left = Box::new(left.predicate);
+                        let right = Box::new(right.predicate);
+                        Some(TimestampUnitCast::Filter(wrap(if and {
+                            SimplePredicate::And(left, right)
+                        } else {
+                            SimplePredicate::Or(left, right)
+                        })))
+                    }
+                    _ => None,
+                }
+            }
+            SimplePredicate::IsNull { .. } => Some(TimestampUnitCast::Filter(self.clone())),
+            SimplePredicate::Constant(Some(true)) => Some(TimestampUnitCast::Matched),
+            SimplePredicate::Constant(_) => Some(TimestampUnitCast::Pruned),
+            SimplePredicate::InList { literals, negated } => {
+                let mut converted = Vec::with_capacity(literals.len());
+                for literal in literals {
+                    let scalar = ScalarValue::try_from_array(literal.get().0, 0).ok()?;
+                    let (value, unit) = timestamp_scalar_parts(&scalar)?;
+                    let Some(value) = value else {
+                        if *negated {
+                            return Some(TimestampUnitCast::Pruned);
+                        }
+                        continue;
+                    };
+                    let cast = div_mod_units(value, unit.into(), target_unit.into())?;
+                    if cast.remainder == 0 {
+                        converted.push(timestamp_scalar(cast.quotient, target_unit)?);
+                    }
+                }
+                if converted.is_empty() {
+                    return Some(if *negated {
+                        TimestampUnitCast::Matched
+                    } else {
+                        TimestampUnitCast::Pruned
+                    });
+                }
+                Some(TimestampUnitCast::Filter(wrap(SimplePredicate::InList {
+                    literals: converted,
+                    negated: *negated,
+                })))
+            }
+            SimplePredicate::Comparison { literal, op, .. } => {
+                let scalar = ScalarValue::try_from_array(literal.get().0, 0).ok()?;
+                let (value, unit) = timestamp_scalar_parts(&scalar)?;
+                let Some(value) = value else {
+                    return Some(TimestampUnitCast::Pruned);
+                };
+                if unit == target_unit {
+                    return Some(TimestampUnitCast::Filter(self.clone()));
+                }
+                let cast = div_mod_units(value, unit.into(), target_unit.into())?;
+                let divisible = cast.remainder == 0;
+                let literal = timestamp_scalar(cast.quotient, target_unit)?;
+                let filter = |op| {
+                    TimestampUnitCast::Filter(wrap(SimplePredicate::Comparison {
+                        literal: literal.clone(),
+                        op,
+                        regex: None,
+                        regex_negative: false,
+                    }))
+                };
+                Some(match op {
+                    Operator::Eq if divisible => filter(Operator::Eq),
+                    Operator::Eq => TimestampUnitCast::Pruned,
+                    Operator::NotEq if divisible => filter(Operator::NotEq),
+                    Operator::NotEq => TimestampUnitCast::Matched,
+                    Operator::Gt => filter(Operator::Gt),
+                    Operator::GtEq if divisible => filter(Operator::GtEq),
+                    Operator::GtEq => filter(Operator::Gt),
+                    Operator::Lt if divisible => filter(Operator::Lt),
+                    Operator::Lt => filter(Operator::LtEq),
+                    Operator::LtEq => filter(Operator::LtEq),
+                    _ => return None,
+                })
+            }
+        }
+    }
+}
+
+impl SimplePredicate {
+    fn try_new(expr: &Expr, column_type: &impl Fn(&str) -> Option<DataType>) -> Option<Self> {
+        match expr {
+            Expr::BinaryExpr(binary) if matches!(binary.op, Operator::And | Operator::Or) => {
+                let left = Self::try_new(&binary.left, column_type)?;
+                let right = Self::try_new(&binary.right, column_type)?;
+                if binary.op == Operator::And {
+                    return Some(Self::And(Box::new(left), Box::new(right)));
+                }
+                // Preserve the encoded-key IN-list fast path for pure equality disjunctions.
+                if let (Some(mut lhs), Some(rhs)) =
+                    (left.equality_literals(), right.equality_literals())
+                {
+                    lhs.extend(rhs);
+                    return Some(Self::InList {
+                        literals: lhs,
+                        negated: false,
+                    });
+                }
+                Some(Self::Or(Box::new(left), Box::new(right)))
+            }
+            Expr::BinaryExpr(binary) => {
+                let mut op = binary.op;
+                if !matches!(
+                    op,
+                    Operator::Eq
+                        | Operator::NotEq
+                        | Operator::Lt
+                        | Operator::LtEq
+                        | Operator::Gt
+                        | Operator::GtEq
+                        | Operator::RegexMatch
+                        | Operator::RegexIMatch
+                        | Operator::RegexNotMatch
+                        | Operator::RegexNotIMatch
+                ) {
+                    return None;
+                }
+                let literal = if let Expr::Literal(literal, _) = &*binary.right {
+                    Self::check_column(&binary.left, column_type)?;
+                    literal
+                } else if let Expr::Literal(literal, _) = &*binary.left {
+                    Self::check_column(&binary.right, column_type)?;
+                    op = op.swap()?;
+                    literal
+                } else {
+                    return None;
+                };
+                let (regex, regex_negative) =
+                    SimpleFilterEvaluator::maybe_build_regex(op, literal).ok()?;
+                Some(Self::Comparison {
+                    literal: literal.to_scalar().ok()?,
+                    op,
+                    regex,
+                    regex_negative,
+                })
+            }
+            Expr::IsNull(column) | Expr::IsNotNull(column) => {
+                Self::check_column(column, column_type)?;
+                Some(Self::IsNull {
+                    negated: matches!(expr, Expr::IsNotNull(_)),
+                })
+            }
+            Expr::InList(list) => {
+                Self::check_column(&list.expr, column_type)?;
+                let literals = list
+                    .list
+                    .iter()
+                    .map(|expr| {
+                        let Expr::Literal(value, _) = expr else {
+                            return None;
+                        };
+                        value.to_scalar().ok()
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Self::InList {
+                    literals,
+                    negated: list.negated,
+                })
+            }
+            Expr::Literal(ScalarValue::Boolean(value), _) => Some(Self::Constant(*value)),
+            _ => None,
+        }
+    }
+
+    fn check_column(expr: &Expr, column_type: &impl Fn(&str) -> Option<DataType>) -> Option<()> {
+        match expr {
+            Expr::Column(_) => Some(()),
+            Expr::Cast(cast) if cast.field.data_type() == &DataType::Utf8 => {
+                let Expr::Column(column) = &*cast.expr else {
+                    return None;
+                };
+                match column_type(&column.name)? {
+                    DataType::Utf8 => Some(()),
+                    DataType::Dictionary(key, value)
+                        if *key == DataType::UInt32 && *value == DataType::Utf8 =>
+                    {
+                        Some(())
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn equality_literals(&self) -> Option<Vec<Scalar<ArrayRef>>> {
+        match self {
+            Self::Comparison {
+                literal,
+                op: Operator::Eq,
+                ..
+            } => Some(vec![literal.clone()]),
+            Self::InList {
+                literals,
+                negated: false,
+            } => Some(literals.clone()),
+            _ => None,
+        }
+    }
+
+    fn evaluate(&self, input: &impl Datum, len: usize) -> Result<BooleanArray> {
+        match self {
+            Self::Comparison {
+                literal,
+                op,
+                regex,
+                regex_negative,
+            } => match op {
+                Operator::Eq => cmp::eq(input, literal),
+                Operator::NotEq => cmp::neq(input, literal),
+                Operator::Lt => cmp::lt(input, literal),
+                Operator::LtEq => cmp::lt_eq(input, literal),
+                Operator::Gt => cmp::gt(input, literal),
+                Operator::GtEq => cmp::gt_eq(input, literal),
+                Operator::RegexMatch
+                | Operator::RegexIMatch
+                | Operator::RegexNotMatch
+                | Operator::RegexNotIMatch => {
+                    Self::regex_match(input, regex.as_ref(), *regex_negative)
+                }
+                _ => {
+                    return UnsupportedOperationSnafu {
+                        reason: format!("{op:?}"),
+                    }
+                    .fail();
+                }
+            }
+            .context(ArrowComputeSnafu),
+            Self::InList { literals, negated } => {
+                let mut result = BooleanArray::from(vec![false; len]);
+                for literal in literals {
+                    let rhs = cmp::eq(input, literal).context(ArrowComputeSnafu)?;
+                    result = or_kleene(&result, &rhs).context(ArrowComputeSnafu)?;
+                }
+                if *negated {
+                    datatypes::compute::not(&result).context(ArrowComputeSnafu)
+                } else {
+                    Ok(result)
+                }
+            }
+            Self::IsNull { negated } => {
+                let values = match input.get().0.logical_nulls() {
+                    Some(nulls) if *negated => nulls.inner().clone(),
+                    Some(nulls) => !nulls.inner(),
+                    None if *negated => BooleanBuffer::new_set(len),
+                    None => BooleanBuffer::new_unset(len),
+                };
+                Ok(BooleanArray::new(values, None))
+            }
+            Self::Constant(value) => Ok(BooleanArray::from(vec![*value; len])),
+            Self::And(left, right) => datatypes::compute::and_kleene(
+                &left.evaluate(input, len)?,
+                &right.evaluate(input, len)?,
+            )
+            .context(ArrowComputeSnafu),
+            Self::Or(left, right) => {
+                or_kleene(&left.evaluate(input, len)?, &right.evaluate(input, len)?)
+                    .context(ArrowComputeSnafu)
+            }
+        }
+    }
+
+    fn regex_match(
+        input: &impl Datum,
+        regex: Option<&Regex>,
+        negative: bool,
+    ) -> std::result::Result<BooleanArray, ArrowError> {
         let array = input.get().0;
 
         // Try to cast to StringArray first
         if let Ok(string_array) = as_string_array(array) {
-            let mut result = regexp_is_match_scalar(string_array, self.regex.as_ref())?;
-            if self.regex_negative {
+            let mut result = regexp_is_match_scalar(string_array, regex)?;
+            if negative {
                 result = datatypes::compute::not(&result)?;
             }
             return Ok(result);
@@ -329,8 +580,8 @@ impl SimpleFilterEvaluator {
 
         // Try to cast to StringDictionaryArray
         if let Some(dict_array) = array.as_any().downcast_ref::<DictionaryArray<UInt32Type>>() {
-            let mut result = regexp_is_match_dictionary(dict_array, self.regex.as_ref())?;
-            if self.regex_negative {
+            let mut result = regexp_is_match_dictionary(dict_array, regex)?;
+            if negative {
                 result = datatypes::compute::not(&result)?;
             }
             return Ok(result);
@@ -340,99 +591,6 @@ impl SimpleFilterEvaluator {
             "Cannot cast {:?} to StringArray or StringDictionaryArray",
             array.data_type()
         )))
-    }
-
-    /// Casts the filter's timestamp literal into the unit of the `target`
-    /// timestamp type, so it can be evaluated against a column stored in that
-    /// unit (e.g. an old-unit SST after the time index unit was widened).
-    ///
-    /// When the literal is not representable in `target`'s unit (e.g.
-    /// `ts = 7_000_500us` against a millisecond column), the outcome keeps the
-    /// row set instead of rounding the literal: `=` prunes / `!=` matches, and
-    /// inequalities strengthen the operator (e.g. `>= 2_500_500us` becomes
-    /// `> 2500ms`) so the excluded boundary row stays excluded.
-    ///
-    /// Returns `None` when the filter doesn't compare against a tz-naive
-    /// timestamp literal, or `target` is not a timestamp type.
-    pub fn cast_timestamp_unit(&self, target: &ConcreteDataType) -> Option<TimestampUnitCast> {
-        let target_unit = match target.as_arrow_type() {
-            DataType::Timestamp(unit, _) => unit,
-            _ => return None,
-        };
-
-        // An `OR` chain of equalities (an IN list): convert each literal
-        // with `=` semantics; literals not representable in the target unit
-        // cannot match any row and simply drop out of the chain.
-        if self.op == Operator::Or {
-            let mut literal_list = Vec::with_capacity(self.literal_list.len());
-            for literal in &self.literal_list {
-                let scalar = ScalarValue::try_from_array(literal.get().0, 0).ok()?;
-                let Some((value, unit)) = timestamp_scalar_parts(&scalar) else {
-                    continue;
-                };
-                let Some(value) = value else {
-                    continue;
-                };
-                let cast = div_mod_units(value, unit.into(), target_unit.into())?;
-                if cast.remainder == 0 {
-                    literal_list.push(timestamp_scalar(cast.quotient, target_unit)?);
-                }
-            }
-            if literal_list.is_empty() {
-                return Some(TimestampUnitCast::Pruned);
-            }
-            let literal = literal_list[0].clone();
-            return Some(TimestampUnitCast::Filter(Self {
-                column_name: self.column_name.clone(),
-                literal,
-                op: Operator::Or,
-                literal_list,
-                regex: None,
-                regex_negative: false,
-            }));
-        }
-
-        let scalar = ScalarValue::try_from_array(self.literal.get().0, 0).ok()?;
-        let (value, unit) = timestamp_scalar_parts(&scalar)?;
-        let Some(value) = value else {
-            // A NULL literal never compares true (arrow comparison
-            // semantics: null results are filtered out).
-            return Some(TimestampUnitCast::Pruned);
-        };
-        if unit == target_unit {
-            return Some(TimestampUnitCast::Filter(self.clone()));
-        }
-        let cast = div_mod_units(value, unit.into(), target_unit.into())?;
-        let divisible = cast.remainder == 0;
-        let literal = timestamp_scalar(cast.quotient, target_unit)?;
-        let filter = |op: Operator| Self {
-            column_name: self.column_name.clone(),
-            literal: literal.clone(),
-            op,
-            literal_list: vec![],
-            regex: None,
-            regex_negative: false,
-        };
-
-        Some(match self.op {
-            Operator::Eq if divisible => TimestampUnitCast::Filter(filter(Operator::Eq)),
-            Operator::Eq => TimestampUnitCast::Pruned,
-            Operator::NotEq if divisible => TimestampUnitCast::Filter(filter(Operator::NotEq)),
-            Operator::NotEq => TimestampUnitCast::Matched,
-            // v > L holds exactly for v > quotient, whether or not L is
-            // representable in the target unit.
-            Operator::Gt => TimestampUnitCast::Filter(filter(Operator::Gt)),
-            Operator::GtEq if divisible => TimestampUnitCast::Filter(filter(Operator::GtEq)),
-            // L strictly between two target values: v >= L is v > quotient.
-            Operator::GtEq => TimestampUnitCast::Filter(filter(Operator::Gt)),
-            Operator::Lt if divisible => TimestampUnitCast::Filter(filter(Operator::Lt)),
-            // L strictly between two target values: v < L is v <= quotient.
-            Operator::Lt => TimestampUnitCast::Filter(filter(Operator::LtEq)),
-            // v <= L holds exactly for v <= quotient.
-            Operator::LtEq => TimestampUnitCast::Filter(filter(Operator::LtEq)),
-            // Regex predicates don't apply to timestamps.
-            _ => return None,
-        })
     }
 }
 
@@ -665,6 +823,363 @@ mod test {
     }
 
     #[test]
+    fn null_disjunct_matches_string_labels() {
+        use datatypes::arrow::array::{StringArray, UInt32Array};
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![
+            None,
+            Some(""),
+            Some("lo"),
+            Some("eth0"),
+            None,
+        ]));
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![None, Some(0), Some(1), Some(2), Some(3)]),
+            Arc::new(StringArray::from(vec![
+                Some(""),
+                Some("lo"),
+                Some("eth0"),
+                None,
+            ])),
+        ));
+        for input in [strings, dictionary] {
+            for (op, literal, expected) in [
+                (Operator::Eq, "", vec![true, true, false, false, true]),
+                (Operator::NotEq, "lo", vec![true, true, false, true, true]),
+                (
+                    Operator::RegexNotMatch,
+                    "^(?:lo)$",
+                    vec![true, true, false, true, true],
+                ),
+                (
+                    Operator::RegexMatch,
+                    "^(?:|eth0)$",
+                    vec![true, true, false, true, true],
+                ),
+            ] {
+                let comparison = Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(col("label")),
+                    op,
+                    Box::new(lit(literal)),
+                ));
+                for expr in [
+                    col("label").is_null().or(comparison.clone()),
+                    comparison.or(col("label").is_null()),
+                ] {
+                    let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
+                    assert_eq!(
+                        evaluator.evaluate_array(&input).unwrap(),
+                        BooleanBuffer::from(expected.clone())
+                    );
+                    assert!(evaluator.evaluate_scalar(&ScalarValue::Utf8(None)).unwrap());
+                    assert_eq!(
+                        evaluator
+                            .evaluate_scalar(&ScalarValue::Utf8(Some("lo".into())))
+                            .unwrap(),
+                        expected[2]
+                    );
+                }
+            }
+        }
+        for expr in [
+            col("other").is_null().or(col("label").not_eq(lit("lo"))),
+            col("a.label")
+                .is_null()
+                .or(col("b.label").not_eq(lit("lo"))),
+            col("label").is_null().or(col("label").eq(col("other"))),
+            col("label")
+                .is_null()
+                .or(Expr::Cast(datafusion::logical_expr::Cast::new(
+                    Box::new(col("label")),
+                    DataType::Int64,
+                ))
+                .eq(lit("lo"))),
+        ] {
+            assert!(SimpleFilterEvaluator::try_new(&expr).is_none(), "{expr}");
+        }
+    }
+
+    #[test]
+    fn string_cast_requires_matching_column_type() {
+        let cast = Expr::Cast(datafusion::logical_expr::Cast::new(
+            Box::new(col("label")),
+            DataType::Utf8,
+        ));
+        let expr = col("label").is_null().or(cast.not_eq(lit("lo")));
+        for data_type in [
+            DataType::Int64,
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            DataType::Binary,
+        ] {
+            assert!(
+                SimpleFilterEvaluator::try_new_with_column_type(&expr, &|_| Some(
+                    data_type.clone()
+                ))
+                .is_none()
+            );
+        }
+        assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
+    }
+
+    #[tokio::test]
+    async fn optimized_nullable_label_filters() {
+        use datafusion::prelude::SessionContext;
+        use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+        use datatypes::arrow::array::{StringArray, UInt32Array};
+
+        let strings: ArrayRef = Arc::new(StringArray::from(vec![
+            None,
+            Some(""),
+            Some("tmpfs"),
+            Some("ext4"),
+        ]));
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![None, Some(0), Some(1), Some(2)]),
+            Arc::new(StringArray::from(vec!["", "tmpfs", "ext4"])),
+        ));
+        for input in [strings, dictionary] {
+            let ctx = SessionContext::new();
+            let schema = Arc::new(Schema::new(vec![Field::new(
+                "label",
+                input.data_type().clone(),
+                true,
+            )]));
+            ctx.register_batch(
+                "labels",
+                RecordBatch::try_new(schema, vec![input.clone()]).unwrap(),
+            )
+            .unwrap();
+            for (op, pattern) in [
+                (Operator::RegexNotMatch, "^(?:tmpfs|vfat)$"),
+                (Operator::NotEq, "tmpfs"),
+            ] {
+                let comparison = Expr::BinaryExpr(BinaryExpr::new(
+                    Box::new(col("label")),
+                    op,
+                    Box::new(lit(pattern)),
+                ));
+                let expr = col("label").is_null().or(comparison);
+                let df = ctx.table("labels").await.unwrap().filter(expr).unwrap();
+                let plan = df.into_optimized_plan().unwrap();
+                let mut filters = Vec::new();
+                plan.apply(|plan| {
+                    if let datafusion::logical_expr::LogicalPlan::Filter(filter) = plan {
+                        filters.push(filter.predicate.clone());
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+                assert!(!filters.is_empty(), "{plan}");
+                for filter in filters {
+                    let evaluator =
+                        SimpleFilterEvaluator::try_new_with_column_type(&filter, &|name| {
+                            (name == "label").then(|| input.data_type().clone())
+                        })
+                        .unwrap_or_else(|| panic!("unsupported optimized filter: {filter}"));
+                    assert_eq!(
+                        evaluator.evaluate_array(&input).unwrap(),
+                        BooleanBuffer::from(vec![true, true, false, true])
+                    );
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn single_column_predicates_match_datafusion() {
+        use datafusion::prelude::SessionContext;
+        use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
+        use datatypes::arrow::array::{Int32Array, StringArray, UInt32Array};
+
+        let values = vec![
+            None,
+            Some(""),
+            Some("lo"),
+            Some("eth0"),
+            Some("a\nb"),
+            Some("服务"),
+            None,
+        ];
+        let strings: ArrayRef = Arc::new(StringArray::from(values));
+        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
+            UInt32Array::from(vec![
+                None,
+                Some(0),
+                Some(1),
+                Some(2),
+                Some(3),
+                Some(4),
+                Some(5),
+            ]),
+            Arc::new(StringArray::from(vec![
+                Some(""),
+                Some("lo"),
+                Some("eth0"),
+                Some("a\nb"),
+                Some("服务"),
+                None,
+            ])),
+        ));
+        let null = || lit(ScalarValue::Utf8(None));
+        let predicates = [
+            col("label").is_null(),
+            col("label").is_not_null(),
+            col("label")
+                .is_null()
+                .or(col("label").eq(lit("")))
+                .and(col("label").is_not_null()),
+            col("label")
+                .not_eq(lit("lo"))
+                .and(col("label").not_eq(lit("eth0"))),
+            col("label")
+                .eq(lit("lo"))
+                .or(col("label").eq(lit("eth0")))
+                .or(col("label").eq(lit(""))),
+            col("label").in_list(vec![lit(""), lit("lo"), null()], false),
+            col("label").in_list(vec![lit(""), lit("lo")], true),
+            col("label").in_list(vec![lit("lo"), null()], true),
+            col("label")
+                .is_null()
+                .or(col("label").in_list(vec![lit("lo"), null()], true)),
+            col("label").eq(null()).or(col("label").eq(lit("eth0"))),
+            col("label").gt(lit("a")).and(col("label").lt(lit("z"))),
+            lit("lo").not_eq(col("label")),
+        ];
+        for input in [strings, dictionary] {
+            let ctx = SessionContext::new();
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("label", input.data_type().clone(), true),
+                Field::new("id", DataType::Int32, false),
+            ]));
+            ctx.register_batch(
+                "labels",
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        input.clone(),
+                        Arc::new(Int32Array::from_iter_values(0..input.len() as i32)),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            for expr in &predicates {
+                let df = ctx
+                    .table("labels")
+                    .await
+                    .unwrap()
+                    .filter(expr.clone())
+                    .unwrap();
+                let plan = df.clone().into_optimized_plan().unwrap();
+                let expected = df
+                    .collect()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .flat_map(|batch| {
+                        batch
+                            .column_by_name("id")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int32Array>()
+                            .unwrap()
+                            .values()
+                            .to_vec()
+                    })
+                    .collect::<Vec<_>>();
+                let evaluate = |expr: &Expr| {
+                    SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
+                        (name == "label").then(|| input.data_type().clone())
+                    })
+                    .unwrap_or_else(|| panic!("unsupported: {expr}"))
+                    .evaluate_array(&input)
+                    .unwrap()
+                };
+                let selected = |mask: BooleanBuffer| {
+                    mask.iter()
+                        .enumerate()
+                        .filter_map(|(i, matched)| matched.then_some(i as i32))
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(selected(evaluate(expr)), expected, "{expr}");
+                let mut filters = Vec::new();
+                plan.apply(|plan| {
+                    if let datafusion::logical_expr::LogicalPlan::Filter(filter) = plan {
+                        filters.push(filter.predicate.clone());
+                    }
+                    Ok(TreeNodeRecursion::Continue)
+                })
+                .unwrap();
+                if !filters.is_empty() {
+                    let mut mask = BooleanBuffer::new_set(input.len());
+                    for filter in filters {
+                        mask = &mask & &evaluate(&filter);
+                    }
+                    assert_eq!(selected(mask), expected, "optimized: {plan}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compound_timestamp_filters_preserve_unit_conversion() {
+        use datatypes::arrow::array::TimestampMicrosecondArray;
+
+        let null = || lit(ScalarValue::TimestampMicrosecond(None, None));
+        let predicates = [
+            col("ts")
+                .gt(lit(ts_us(-1500)))
+                .and(col("ts").lt(lit(ts_us(500)))),
+            col("ts")
+                .eq(lit(ts_us(500)))
+                .or(col("ts").gt_eq(lit(ts_us(1500)))),
+            col("ts").in_list(vec![lit(ts_us(500)), lit(ts_us(1000)), null()], false),
+            col("ts").in_list(vec![lit(ts_us(500)), lit(ts_us(1000))], true),
+            col("ts").in_list(vec![lit(ts_us(500)), null()], true),
+            col("ts")
+                .is_null()
+                .or(col("ts").in_list(vec![lit(ts_us(500)), null()], true)),
+            col("ts")
+                .is_not_null()
+                .and(col("ts").not_eq(lit(ts_us(500)))),
+            col("ts").eq(null()).or(col("ts").eq(lit(ts_us(-1000)))),
+        ];
+        let native: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![
+            -2000, -1000, 0, 1000, 2000,
+        ]));
+        let old: ArrayRef = Arc::new(TimestampMillisecondArray::from(vec![-2, -1, 0, 1, 2]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "ts",
+            native.data_type().clone(),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![native]).unwrap();
+        for expr in predicates {
+            let physical = create_physical_expr(
+                &expr,
+                &DFSchema::try_from(schema.as_ref().clone()).unwrap(),
+                &ExecutionProps::new(),
+                &PhysicalPlanningContext::default(),
+            )
+            .unwrap();
+            let result = physical
+                .evaluate(&batch)
+                .unwrap()
+                .into_array(batch.num_rows())
+                .unwrap();
+            let expected = boolean_array_to_scan_mask(as_boolean_array(&result).unwrap())
+                .values()
+                .clone();
+            let actual = match cast_to_ms(&expr).unwrap() {
+                TimestampUnitCast::Matched => BooleanBuffer::new_set(old.len()),
+                TimestampUnitCast::Pruned => BooleanBuffer::new_unset(old.len()),
+                TimestampUnitCast::Filter(filter) => filter.evaluate_array(&old).unwrap(),
+            };
+            assert_eq!(actual, expected, "{expr}");
+        }
+    }
+
+    #[test]
     fn supported_filter_op() {
         // equal
         let expr = Expr::BinaryExpr(BinaryExpr {
@@ -681,7 +1196,7 @@ mod test {
             right: Box::new(Expr::Column(Column::from_name("foo"))),
         });
         let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
-        assert_eq!(evaluator.op, Operator::Gt);
+        assert!(evaluator.is_gt());
         assert_eq!(evaluator.column_name, "foo".to_string());
     }
 
@@ -779,11 +1294,10 @@ mod test {
         // Check that SimpleFilterEvaluator can handle OR chain
         let or_evaluator = SimpleFilterEvaluator::try_new(&col_or_expr).unwrap();
         assert_eq!(or_evaluator.column_name, "col");
-        assert_eq!(or_evaluator.op, Operator::Or);
-        assert_eq!(or_evaluator.literal_list.len(), 3);
+        assert!(or_evaluator.is_or_eq_chain());
         assert_eq!(
-            format!("{:?}", or_evaluator.literal_list),
-            "[Scalar(StringArray\n[\n  \"B\",\n]), Scalar(StringArray\n[\n  \"C\",\n]), Scalar(StringArray\n[\n  \"D\",\n])]"
+            or_evaluator.literal_list_values().unwrap(),
+            vec![Value::from("B"), Value::from("C"), Value::from("D")]
         );
 
         // Create a schema and batch for testing
@@ -1195,12 +1709,9 @@ mod test {
         let TimestampUnitCast::Filter(f) = cast else {
             panic!("expected Filter, got {cast:?}")
         };
-        assert_eq!(filter.op, f.op);
+        assert!(filter.is_eq() && f.is_eq());
         assert_eq!(filter.column_name(), f.column_name());
-        assert_eq!(
-            ts_us(7_000_000),
-            ScalarValue::try_from_array(f.literal.get().0, 0).unwrap()
-        );
+        assert_eq!(filter.literal_value(), f.literal_value());
     }
 
     #[test]
