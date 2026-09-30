@@ -13,8 +13,9 @@
 // limitations under the License.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use ahash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use api::v1::alter_table_expr::Kind;
@@ -1687,9 +1688,104 @@ struct CreateAlterTableResult {
 /// source table still serves queries and the datanode write path is unaffected.
 const MAX_MIRROR_PENDING_ROWS: usize = 1_000_000;
 
+/// How often at most a dropped mirror batch is reported to the log.
+///
+/// A saturated frontend rejects a mirror batch on nearly every write, so logging
+/// each drop would flood the log. Drops inside the interval are accumulated and
+/// reported by the next warning.
+const MIRROR_DROP_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Sentinel for [`MirrorDropLog::last_log_millis`] before the first report.
+const MIRROR_DROP_NEVER_LOGGED_MILLIS: u64 = u64::MAX;
+
+/// Rate-limited reporter for mirror batches dropped by the pending-rows limit.
+///
+/// Every field is atomic so all write paths share one reporter: exactly one of
+/// the concurrently dropped batches claims a report, and it reports everything
+/// dropped since the previous report.
+struct MirrorDropLog {
+    /// Timestamp in milliseconds, see [`mirror_drop_log_millis`], of the last
+    /// emitted warning, or [`MIRROR_DROP_NEVER_LOGGED_MILLIS`] before the first
+    /// one.
+    last_log_millis: AtomicU64,
+    /// Batches dropped since the last emitted warning.
+    batches: AtomicU64,
+    /// Rows dropped since the last emitted warning.
+    rows: AtomicU64,
+}
+
+impl MirrorDropLog {
+    const fn new() -> Self {
+        Self {
+            last_log_millis: AtomicU64::new(MIRROR_DROP_NEVER_LOGGED_MILLIS),
+            batches: AtomicU64::new(0),
+            rows: AtomicU64::new(0),
+        }
+    }
+
+    /// Accounts for a dropped batch of `num_rows` and warns about the drops
+    /// accumulated since the previous report if the report interval elapsed.
+    fn on_dropped_batch(&self, num_rows: u64, pending: u64) {
+        let Some((batches, rows)) = self.claim_report(mirror_drop_log_millis(), num_rows) else {
+            return;
+        };
+
+        warn!(
+            "Flow mirror write dropped: {} pending rows exceeds limit {}, dropped {} rows in {} \
+             batches in the last {}s",
+            pending,
+            MAX_MIRROR_PENDING_ROWS,
+            rows,
+            batches,
+            MIRROR_DROP_LOG_INTERVAL.as_secs()
+        );
+    }
+
+    /// Counts a dropped batch and returns the `(batches, rows)` accumulated
+    /// since the previous report, including this call's own batch (the counters
+    /// are reset by the report itself), or `None` while inside the report
+    /// interval. `now_millis` is a parameter so tests can drive the interval
+    /// without waiting for it.
+    fn claim_report(&self, now_millis: u64, num_rows: u64) -> Option<(u64, u64)> {
+        self.batches.fetch_add(1, Ordering::Relaxed);
+        self.rows.fetch_add(num_rows, Ordering::Relaxed);
+
+        let last = self.last_log_millis.load(Ordering::Relaxed);
+        if last != MIRROR_DROP_NEVER_LOGGED_MILLIS
+            && now_millis.saturating_sub(last) < MIRROR_DROP_LOG_INTERVAL.as_millis() as u64
+        {
+            return None;
+        }
+
+        // Only one concurrent drop may claim a report; the losers keep their
+        // counts for the next report instead of reporting them twice.
+        if self
+            .last_log_millis
+            .compare_exchange(last, now_millis, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return None;
+        }
+
+        Some((
+            self.batches.swap(0, Ordering::Relaxed),
+            self.rows.swap(0, Ordering::Relaxed),
+        ))
+    }
+}
+
+/// The process-wide [`MirrorDropLog`] used by the flow mirror drop path.
+static MIRROR_DROP_LOG: MirrorDropLog = MirrorDropLog::new();
+
+/// Milliseconds since the first call, so the drop log is rate limited on a
+/// monotonic clock instead of the wall clock, which can jump.
+fn mirror_drop_log_millis() -> u64 {
+    static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+    START.elapsed().as_millis() as u64
+}
+
 struct FlowMirrorTask {
     requests: HashMap<Peer, RegionInsertRequests>,
-    num_rows: usize,
 }
 
 impl FlowMirrorTask {
@@ -1699,7 +1795,6 @@ impl FlowMirrorTask {
     ) -> Result<Self> {
         let mut src_table_reqs: HashMap<TableId, Option<(Vec<Peer>, RegionInsertRequests)>> =
             HashMap::new();
-        let mut num_rows = 0;
 
         for req in requests {
             let table_id = RegionId::from_u64(req.region_id).table_id();
@@ -1723,11 +1818,6 @@ impl FlowMirrorTask {
                     if !peers.is_empty() {
                         let mut reqs = RegionInsertRequests::default();
                         reqs.requests.push(req.clone());
-                        num_rows += reqs
-                            .requests
-                            .iter()
-                            .map(|r| r.rows.as_ref().unwrap().rows.len())
-                            .sum::<usize>();
                         src_table_reqs.insert(table_id, Some((peers, reqs)));
                     } else {
                         // insert a empty entry to avoid repeat query
@@ -1763,10 +1853,19 @@ impl FlowMirrorTask {
             }
         }
 
-        Ok(Self {
-            requests: inserts,
-            num_rows,
-        })
+        Ok(Self { requests: inserts })
+    }
+
+    /// Rows of row data this task keeps alive once detached: the payload it
+    /// spawns per peer, not the source requests it was built from.
+    ///
+    /// A source table mapped to several flownodes clones its requests per peer
+    /// and every clone owns its own copy of the rows, so reserving from
+    /// `self.requests` is what the per-peer shares released by [`Self::detach`]
+    /// sum to. Counting the source requests instead under-reserves whenever a
+    /// batch holds several requests for the same source table.
+    fn pending_rows(&self) -> u64 {
+        self.requests.values().map(region_inserts_rows).sum()
     }
 
     fn detach(
@@ -1774,35 +1873,29 @@ impl FlowMirrorTask {
         node_manager: NodeManagerRef,
         mirror_pending_rows: Arc<AtomicU64>,
     ) -> Result<()> {
-        if self.num_rows == 0 {
-            return Ok(());
-        }
-
         // Reserve this batch before spawning anything: mirroring is best-effort,
         // so a full budget drops the batch instead of keeping even more row data
         // alive until the flownode write times out.
-        let num_rows = self.num_rows as u64;
-        let prev = mirror_pending_rows.fetch_add(num_rows, Ordering::Relaxed);
-        let pending = prev + num_rows;
+        let num_rows = self.pending_rows();
+        if num_rows == 0 {
+            return Ok(());
+        }
+
+        let pending = reserve_mirror_pending_rows(&mirror_pending_rows, num_rows);
         if pending > MAX_MIRROR_PENDING_ROWS as u64 {
             release_mirror_pending_rows(&mirror_pending_rows, num_rows);
             crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.inc_by(num_rows);
-            warn!(
-                "Flow mirror write dropped: {} pending rows exceeds limit {}, dropping {} rows",
-                pending, MAX_MIRROR_PENDING_ROWS, num_rows
-            );
+            // Report the drop at most once per interval; a saturated frontend
+            // reaches this path on nearly every write.
+            MIRROR_DROP_LOG.on_dropped_batch(num_rows, pending);
             return Ok(());
         }
-        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.set(pending as i64);
 
         for (peer, inserts) in self.requests {
-            // Each task releases only its own share of the reservation.
-            let peer_rows = inserts
-                .requests
-                .iter()
-                .filter_map(|req| req.rows.as_ref())
-                .map(|rows| rows.rows.len() as u64)
-                .sum::<u64>();
+            // Each spawned task releases exactly its own share of the
+            // reservation. The shares are computed over the same per-peer
+            // payload as `pending_rows`, so they sum to the reservation.
+            let peer_rows = region_inserts_rows(&inserts);
             let node_manager = node_manager.clone();
             let mirror_pending_rows = mirror_pending_rows.clone();
             common_runtime::spawn_global(async move {
@@ -1832,21 +1925,47 @@ impl FlowMirrorTask {
     }
 }
 
-/// Releases `rows` of the pending mirror budget and keeps the
-/// `DIST_MIRROR_PENDING_ROW_COUNT` gauge in sync with the counter.
+/// Rows of row data carried by `inserts`. A request without a `rows` payload
+/// carries nothing to keep buffered and contributes zero.
+fn region_inserts_rows(inserts: &RegionInsertRequests) -> u64 {
+    inserts
+        .requests
+        .iter()
+        .filter_map(|req| req.rows.as_ref())
+        .map(|rows| rows.rows.len() as u64)
+        .sum()
+}
+
+/// Reserves `rows` of the pending mirror budget and returns the resulting
+/// pending row count. The caller must [`release_mirror_pending_rows`] exactly
+/// these rows once they are no longer buffered, whether it spawns the batch or
+/// drops it.
+fn reserve_mirror_pending_rows(mirror_pending_rows: &AtomicU64, rows: u64) -> u64 {
+    let pending = mirror_pending_rows.fetch_add(rows, Ordering::Relaxed) + rows;
+    // Keep the gauge in step by applying the same increment, never by setting an
+    // absolute value: another task may move the budget in between.
+    crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.add(rows as i64);
+    pending
+}
+
+/// Releases `rows` of the pending mirror budget.
 ///
-/// Requests are cloned per peer when a source table maps to several flownodes,
-/// so the per-task releases may add up to more than the reservation: saturate at
-/// zero to keep the budget from wrapping around.
+/// Every release mirrors the reservation it hands back, so a well-behaved
+/// release never subtracts more than is pending; the saturating update only
+/// keeps a duplicated release from wrapping the shared budget around.
 fn release_mirror_pending_rows(mirror_pending_rows: &AtomicU64, rows: u64) {
-    let _ = mirror_pending_rows
+    let prev = mirror_pending_rows
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |pending| {
             Some(pending.saturating_sub(rows))
         })
         .unwrap_or_else(|prev| prev);
-    // Publish the latest budget to the gauge after the budget itself moved.
-    crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT
-        .set(mirror_pending_rows.load(Ordering::Relaxed) as i64);
+    // Subtract from the gauge with the opposite sign of
+    // [`reserve_mirror_pending_rows`]; reading the budget here and `set`-ting it
+    // would publish a stale value whenever another task releases concurrently.
+    let released = rows.min(prev);
+    if released > 0 {
+        crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.sub(released as i64);
+    }
 }
 
 #[cfg(test)]
@@ -2753,18 +2872,18 @@ mod tests {
     }
 
     // The tests below share the process-wide mirror metrics, so they take
-    // `MIRROR_METRIC_TEST_LOCK` and assert on the values their own budget
-    // publishes instead of on increments over an unknown starting point.
+    // `MIRROR_METRIC_TEST_LOCK` and assert on the difference their own budget
+    // publishes instead of on absolute values.
     #[test]
     fn flow_mirror_dropped_when_pending_exceeds_limit() {
         let _guard = lock_mirror_metrics();
         let pending = Arc::new(AtomicU64::new(MAX_MIRROR_PENDING_ROWS as u64));
         let dropped_before = crate::metrics::DIST_MIRROR_DROPPED_ROW_COUNT.get();
+        let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
         let num_rows = 100;
 
         let task = FlowMirrorTask {
             requests: mirror_requests(&flownode_peer(), num_rows),
-            num_rows,
         };
         // The budget is already full, so nothing may be spawned for this batch.
         task.detach(
@@ -2782,11 +2901,63 @@ mod tests {
             MAX_MIRROR_PENDING_ROWS as u64,
             pending.load(Ordering::Relaxed)
         );
+        // The reservation taken before the limit check is released again, so the
+        // gauge nets out and keeps matching the pending budget.
         assert_eq!(
-            pending.load(Ordering::Relaxed) as i64,
+            gauge_before,
             crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
-            "the pending gauge must match the pending budget"
+            "a dropped batch must not change the pending gauge"
         );
+    }
+
+    /// A source table mapped to several flownodes clones its requests per peer,
+    /// so the reservation must cover every clone and each spawned task must hand
+    /// back exactly its own share; otherwise the shared budget drifts.
+    #[test]
+    fn flow_mirror_reserves_and_releases_per_peer_shares() {
+        let _guard = lock_mirror_metrics();
+        let per_peer_rows = 10;
+        let total_rows = (2 * per_peer_rows) as u64;
+        // Exactly enough room for the whole batch, cloned rows included.
+        let start = MAX_MIRROR_PENDING_ROWS as u64 - total_rows;
+        let pending = Arc::new(AtomicU64::new(start));
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let node_manager = Arc::new(MockFlownodeManager::new(GatedFlownodeHandler {
+            gate: gate.clone(),
+            affected_rows: per_peer_rows as u64,
+        }));
+
+        let mut requests = mirror_requests(&flownode_peer(), per_peer_rows);
+        requests.extend(mirror_requests(
+            &Peer {
+                id: 2,
+                addr: "127.0.0.1:4002".to_string(),
+            },
+            per_peer_rows,
+        ));
+
+        FlowMirrorTask { requests }
+            .detach(node_manager, pending.clone())
+            .unwrap();
+
+        // Both per-peer payloads are counted, so the budget is exactly full
+        // instead of over-reserved by the duplicated rows.
+        assert_eq!(
+            MAX_MIRROR_PENDING_ROWS as u64,
+            pending.load(Ordering::Relaxed)
+        );
+
+        // Let both tasks finish and check that the budget lands back on its
+        // starting value: over-releasing a shared reservation would saturate it.
+        gate.add_permits(2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while pending.load(Ordering::Relaxed) != start {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the mirror tasks must release exactly their own shares"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
     }
 
     #[test]
@@ -2803,7 +2974,6 @@ mod tests {
         let gauge_before = crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get();
         FlowMirrorTask {
             requests: HashMap::new(),
-            num_rows: 0,
         }
         .detach(node_manager.clone(), pending.clone())
         .unwrap();
@@ -2819,7 +2989,6 @@ mod tests {
 
         FlowMirrorTask {
             requests: mirror_requests(&flownode_peer(), num_rows),
-            num_rows,
         }
         .detach(node_manager, pending.clone())
         .unwrap();
@@ -2829,7 +2998,7 @@ mod tests {
         assert_eq!(num_rows as u64, pending.load(Ordering::Relaxed));
         assert_eq!(
             num_rows as i64,
-            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
+            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() - gauge_before,
             "the pending gauge must track the pending rows"
         );
         assert_eq!(
@@ -2842,17 +3011,31 @@ mod tests {
         // back, so no task is left holding the shared metrics after this test.
         gate.add_permits(1);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while pending.load(Ordering::Relaxed) != 0 {
+        while pending.load(Ordering::Relaxed) != 0
+            || crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get() != gauge_before
+        {
             assert!(
                 std::time::Instant::now() < deadline,
                 "the mirror task did not release its pending reservation"
             );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
-        assert_eq!(
-            0,
-            crate::metrics::DIST_MIRROR_PENDING_ROW_COUNT.get(),
-            "a finished task must release the pending gauge"
-        );
+    }
+
+    #[test]
+    fn mirror_drop_log_is_rate_limited() {
+        let log = MirrorDropLog::new();
+
+        // The first drop is reported right away.
+        assert_eq!(Some((1, 10)), log.claim_report(1_000, 10));
+        // Drops inside the interval are accumulated instead of reported.
+        assert_eq!(None, log.claim_report(1_500, 5));
+        assert_eq!(None, log.claim_report(10_999, 7));
+        // The next report covers everything dropped since the previous one,
+        // which already reset the counters.
+        assert_eq!(Some((3, 12)), log.claim_report(11_000, 0));
+        // ... and starts a new interval.
+        assert_eq!(None, log.claim_report(11_001, 4));
+        assert_eq!(Some((2, 4)), log.claim_report(21_000, 0));
     }
 }
