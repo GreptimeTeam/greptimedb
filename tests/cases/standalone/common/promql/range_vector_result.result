@@ -1,0 +1,96 @@
+-- An instant query of a range-vector expression returns the selected samples
+-- with their own timestamps. Expected results are from Prometheus 3.
+create table range_vector_result (
+    ts timestamp time index,
+    val double,
+    host string primary key
+);
+
+Affected Rows: 0
+
+insert into range_vector_result values
+    (0, 1.0, 'a'),
+    (10000, 2.0, 'a'),
+    (20000, 3.0, 'a'),
+    (30000, 4.0, 'a'),
+    (0, 10.0, 'b'),
+    (20000, 30.0, 'b');
+
+Affected Rows: 6
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[20s];
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:00:20 | 3.0  | a    |
+| 1970-01-01T00:00:20 | 30.0 | b    |
+| 1970-01-01T00:00:30 | 4.0  | a    |
++---------------------+------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[20s] offset 10s;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:00:10 | 2.0  | a    |
+| 1970-01-01T00:00:20 | 3.0  | a    |
+| 1970-01-01T00:00:20 | 30.0 | b    |
++---------------------+------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[15s] @ 20;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:00:10 | 2.0  | a    |
+| 1970-01-01T00:00:20 | 3.0  | a    |
+| 1970-01-01T00:00:20 | 30.0 | b    |
++---------------------+------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[30s:10s];
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:00:10 | 10.0 | b    |
+| 1970-01-01T00:00:10 | 2.0  | a    |
+| 1970-01-01T00:00:20 | 3.0  | a    |
+| 1970-01-01T00:00:20 | 30.0 | b    |
+| 1970-01-01T00:00:30 | 30.0 | b    |
+| 1970-01-01T00:00:30 | 4.0  | a    |
++---------------------+------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (30, 30, '1s') range_vector_result[35s:10s] offset 5s;
+
++---------------------+------+------+
+| ts                  | val  | host |
++---------------------+------+------+
+| 1970-01-01T00:00:00 | 1.0  | a    |
+| 1970-01-01T00:00:00 | 10.0 | b    |
+| 1970-01-01T00:00:10 | 10.0 | b    |
+| 1970-01-01T00:00:10 | 2.0  | a    |
+| 1970-01-01T00:00:20 | 3.0  | a    |
+| 1970-01-01T00:00:20 | 30.0 | b    |
++---------------------+------+------+
+
+tql eval (35, 35, '1s') range_vector_result[4s:10s];
+
++----+-----+------+
+| ts | val | host |
++----+-----+------+
++----+-----+------+
+
+tql eval (0, 30, '10s') range_vector_result[20s];
+
+Error: 1004(InvalidArguments), invalid expression type "range vector" for range query, must be Scalar or instant Vector
+
+drop table range_vector_result;
+
+Affected Rows: 0
+

@@ -131,6 +131,14 @@ pub enum Error {
     },
 
     #[snafu(display(
+        "invalid expression type \"range vector\" for range query, must be Scalar or instant Vector"
+    ))]
+    RangeVectorInRangeQuery {
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display(
         "The end time must be greater than start time, start: {:?}, end: {:?}",
         start,
         end
@@ -243,6 +251,7 @@ impl ErrorExt for Error {
             | MultipleVector { .. }
             | ExpectRangeSelector { .. }
             | ZeroRangeSelector { .. }
+            | RangeVectorInRangeQuery { .. }
             | InvalidTimeRange { .. }
             | ColumnNotFound { .. }
             | FunctionInvalidArgument { .. }

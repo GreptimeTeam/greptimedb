@@ -107,9 +107,10 @@ use crate::promql::error::{
     CatalogSnafu, ColumnNotFoundSnafu, DataFusionPlanningSnafu, ExpectRangeSelectorSnafu,
     FunctionInvalidArgumentSnafu, InvalidDestinationLabelNameSnafu, InvalidRegularExpressionSnafu,
     InvalidTimeRangeSnafu, MultiFieldsNotSupportedSnafu, MultipleMetricMatchersSnafu,
-    MultipleVectorSnafu, NoMetricMatcherSnafu, Result, TableNameNotFoundSnafu,
-    TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu, UnknownTableSnafu,
-    UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu, ZeroRangeSelectorSnafu,
+    MultipleVectorSnafu, NoMetricMatcherSnafu, RangeVectorInRangeQuerySnafu, Result,
+    TableNameNotFoundSnafu, TimeIndexNotFoundSnafu, UnexpectedPlanExprSnafu, UnexpectedTokenSnafu,
+    UnknownTableSnafu, UnsupportedExprSnafu, UnsupportedMatcherOpSnafu, ValueNotFoundSnafu,
+    ZeroRangeSelectorSnafu,
 };
 use crate::query_engine::QueryEngineState;
 
@@ -312,9 +313,21 @@ impl PromPlanner {
             promql_annotations,
         };
 
-        let plan = planner
-            .prom_expr_to_plan(&stmt.expr, query_engine_state)
-            .await?;
+        let plan = if stmt.expr.value_type() == ValueType::Matrix {
+            // Prometheus only accepts a range-vector expression in an instant query, whose
+            // result is the matrix of samples the expression selects.
+            ensure!(
+                planner.ctx.start == planner.ctx.end,
+                RangeVectorInRangeQuerySnafu
+            );
+            planner
+                .prom_range_vector_result_to_plan(&stmt.expr, query_engine_state)
+                .await?
+        } else {
+            planner
+                .prom_expr_to_plan(&stmt.expr, query_engine_state)
+                .await?
+        };
 
         // Never leak internal series identifier to output.
         planner.strip_tsid_column(plan)
@@ -395,6 +408,105 @@ impl PromPlanner {
         };
 
         Ok(res)
+    }
+
+    /// Plans the result of a range-vector expression in an instant query: the raw samples of a
+    /// range selector, or the evaluation points of a subquery, with their own timestamps.
+    ///
+    /// Range functions consume the same expressions through [`RangeManipulate`], whose range
+    /// arrays are an internal representation that must not reach the query output.
+    async fn prom_range_vector_result_to_plan(
+        &mut self,
+        prom_expr: &PromExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let mut expr = prom_expr;
+        while let PromExpr::Paren(ParenExpr { expr: inner }) = expr {
+            expr = inner;
+        }
+        match expr {
+            PromExpr::MatrixSelector(selector) => {
+                self.prom_range_selector_samples_to_plan(selector).await
+            }
+            PromExpr::Subquery(subquery) => {
+                self.prom_subquery_samples_to_plan(subquery, query_engine_state)
+                    .await
+            }
+            _ => UnsupportedExprSnafu {
+                name: format!("range vector result of {expr:?}"),
+            }
+            .fail(),
+        }
+    }
+
+    /// Selects the samples of `selector` in `(t - offset - range, t - offset]`, where `t` is the
+    /// evaluation time or the `@` anchor. Stale markers are dropped and timestamps are kept.
+    async fn prom_range_selector_samples_to_plan(
+        &mut self,
+        selector: &MatrixSelector,
+    ) -> Result<LogicalPlan> {
+        let MatrixSelector { vs, range } = selector;
+        let VectorSelector {
+            name,
+            offset,
+            matchers,
+            at,
+        } = vs;
+        let matchers = self.preprocess_label_matchers(matchers, name)?;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        self.ctx.range = Some(range.as_millis() as _);
+        let offset_ms = match self.at_modifier_offset(at, offset)? {
+            Some(at_offset) => at_offset,
+            None => Self::offset_millis(offset),
+        };
+        if let Some(empty_plan) = self.setup_context().await? {
+            return Ok(empty_plan);
+        }
+        self.selector_to_series_normalize_plan(offset_ms, matchers, true)
+            .await
+    }
+
+    /// Evaluates the inner expression of `subquery` at the multiples of its step in
+    /// `(t - offset - range, t - offset]`, where `t` is the evaluation time or the `@` anchor.
+    async fn prom_subquery_samples_to_plan(
+        &mut self,
+        subquery: &SubqueryExpr,
+        query_engine_state: &QueryEngineState,
+    ) -> Result<LogicalPlan> {
+        let SubqueryExpr {
+            expr,
+            range,
+            step,
+            offset,
+            at,
+            ..
+        } = subquery;
+        ensure!(!range.is_zero(), ZeroRangeSelectorSnafu);
+        let end = match self.at_ref_time(at, offset)? {
+            Some(anchor) => anchor,
+            None => Self::anchor_sub(self.ctx.end, Self::offset_millis(offset))?,
+        };
+        if let Some(step) = step {
+            self.ctx.interval = step.as_millis() as _;
+        }
+        let interval = self.ctx.interval;
+        let lower = Self::anchor_sub(end, range.as_millis() as Millisecond)?;
+        // Prometheus aligns subquery evaluation to absolute multiples of the step, and the
+        // window is left-open.
+        let start = lower.div_euclid(interval) * interval + interval;
+        if start > end {
+            self.ctx.start = end;
+            self.ctx.end = end;
+            let plan = self.prom_expr_to_plan(expr, query_engine_state).await?;
+            return LogicalPlanBuilder::from(plan)
+                .filter(lit(false))
+                .context(DataFusionPlanningSnafu)?
+                .build()
+                .context(DataFusionPlanningSnafu);
+        }
+        self.ctx.start = start;
+        self.ctx.end = end;
+        self.prom_expr_to_plan(expr, query_engine_state).await
     }
 
     async fn prom_subquery_expr_to_plan(
