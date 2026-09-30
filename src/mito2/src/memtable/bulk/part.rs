@@ -71,7 +71,7 @@ use crate::sst::SeriesEstimator;
 use crate::sst::index::IndexOutput;
 use crate::sst::parquet::flat_format::primary_key_column_index;
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyArrayBuilder};
-use crate::sst::parquet::{PARQUET_METADATA_KEY, SstInfo};
+use crate::sst::parquet::{COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo};
 
 const INIT_DICT_VALUE_CAPACITY: usize = 8;
 
@@ -1348,7 +1348,7 @@ impl BulkPartEncoder {
                 .set_write_batch_size(row_group_size)
                 .set_max_row_group_row_count(Some(row_group_size))
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
-                .set_column_index_truncate_length(None)
+                .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None)
                 .build(),
         );
