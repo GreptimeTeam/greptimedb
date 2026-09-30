@@ -626,47 +626,31 @@ impl PromPlanner {
                     // label only. Dropping it from the projected tag columns is required as well:
                     // projecting both would emit two columns with the same name (rejected as an
                     // ambiguous reference).
-                    let metric_name = label == METRIC_NAME;
-                    // The semantic `__name__` replaces the marked identity further below, so only
-                    // an ordinary input label is overwritten here.
-                    if !metric_name {
-                        self.ctx.tag_columns.retain(|tag| tag != label);
-                        group_exprs.retain(
-                            |expr| !matches!(expr, DfExpr::Column(column) if column.name == label),
-                        );
-                    }
-                    // The generated column reuses the name of the identity it replaces, or a free
-                    // internal name when the input carries no identity.
-                    let label_column = if metric_name {
-                        match Self::metric_name_column(builder.schema())? {
-                            Some(column) => column.name,
-                            None => {
-                                let occupied = builder
-                                    .schema()
-                                    .fields()
-                                    .iter()
-                                    .map(|field| field.name().as_str())
-                                    .collect::<HashSet<_>>();
-                                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
-                                while occupied.contains(name.as_str()) {
-                                    name.push('_');
-                                }
-                                name
-                            }
+                    //
+                    // The generated label is always an ordinary label, whatever it is named: the
+                    // marked metric-name identity is metadata the planner attaches where it knows
+                    // a real metric name is written, so a plain aggregate argument must not be
+                    // able to forge it from a sample value. The semantic `__name__` is therefore
+                    // an ordinary column of the result, spelled like the label the user asked
+                    // for.
+                    let label_column = label.to_string();
+                    self.ctx.tag_columns.retain(|tag| tag != &label_column);
+                    group_exprs.retain(
+                        |expr| !matches!(expr, DfExpr::Column(column) if column.name == label_column),
+                    );
+                    if label == METRIC_NAME {
+                        // The destination names the semantic `__name__`, which the input carries
+                        // as its marked identity: the generated label replaces it, so the
+                        // identity must not stay grouped or projected next to it.
+                        if let Some(marker) = Self::metric_name_column(builder.schema())? {
+                            self.ctx
+                                .aggregation_field_labels
+                                .retain(|tag| tag != &marker.name);
+                            self.ctx.tag_columns.retain(|tag| tag != &marker.name);
+                            group_exprs.retain(|expr| {
+                                !matches!(expr, DfExpr::Column(column) if column.name == marker.name)
+                            });
                         }
-                    } else {
-                        label.to_string()
-                    };
-                    if metric_name {
-                        // The overwritten identity must not stay grouped or projected: the
-                        // generated label is the only marked column.
-                        self.ctx
-                            .aggregation_field_labels
-                            .retain(|tag| tag != &label_column);
-                        self.ctx.tag_columns.retain(|tag| tag != &label_column);
-                        group_exprs.retain(
-                            |expr| !matches!(expr, DfExpr::Column(column) if column.name == label_column),
-                        );
                     }
                     // The tag columns projected below are unqualified `Column` references, so they
                     // end up qualified with whatever qualifier they carry in the input plan. Give
@@ -720,21 +704,14 @@ impl PromPlanner {
                                     expr.schema_name().to_string(),
                                 )),
                             };
-                            // The generated name carries the identity role, like the selector
-                            // marker it replaces.
-                            let metadata = metric_name.then(|| {
-                                let mut metadata = std::collections::HashMap::new();
-                                metadata.insert(
-                                    PROMQL_FIELD_ROLE_KEY.to_string(),
-                                    PROMQL_METRIC_NAME_ROLE.to_string(),
-                                );
-                                metadata.into()
-                            });
+                            // The generated label is an ordinary label of the result: the identity
+                            // role is never inferred from a name, only attached where a real
+                            // metric name is written.
                             DfExpr::Alias(Alias {
                                 expr: Box::new(value),
                                 relation: label_qualifier.clone(),
                                 name: label_column.clone(),
-                                metadata,
+                                metadata: None,
                             })
                         })
                         .collect::<Vec<_>>();
@@ -2023,16 +2000,13 @@ impl PromPlanner {
                 desc: "metric-name identity already attached"
             }
         );
-        let occupied = input
-            .schema()
-            .fields()
-            .iter()
-            .map(|field| field.name().as_str())
-            .collect::<HashSet<_>>();
-        let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
-        while occupied.contains(name.as_str()) {
-            name.push('_');
-        }
+        let name = Self::free_metric_name_column_name(
+            input
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str()),
+        );
         let mut exprs = input
             .schema()
             .iter()
@@ -2075,6 +2049,19 @@ impl PromPlanner {
             name: name.to_string(),
             metadata: Some(metadata.into()),
         })
+    }
+
+    /// The first name free among `occupied` for the marked metric-name identity: the internal
+    /// name, with `_` appended until no listed column carries it. A free name keeps the identity
+    /// out of the way of every real column, so a physical name spelled like the internal one is
+    /// never the identity.
+    fn free_metric_name_column_name<'a>(occupied: impl IntoIterator<Item = &'a str>) -> String {
+        let occupied = occupied.into_iter().collect::<HashSet<_>>();
+        let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
+        while occupied.contains(name.as_str()) {
+            name.push('_');
+        }
+        name
     }
 
     /// The labels a vector matching compares by default and under `ignoring(...)`. The marked
@@ -2139,12 +2126,20 @@ impl PromPlanner {
     /// Physical columns an explicit `on(...)`/`ignoring(...)`/`group_x(...)` label list names.
     /// `__name__` is semantic: it names the marked identity column and never a physical column
     /// of that name. Without a marked column the label is not one the operands carry.
+    ///
+    /// The physical name of the marked identity is not a label either: no series carries it, so a
+    /// label spelled like it - the internal name is not a name a user could have meant, and the
+    /// identity is metadata, not a label - is not a label of the operands and matches as the
+    /// absent label every operand reads as the empty value. A real user column of that spelling
+    /// keeps the identity out of its way: the marker is attached under the first free name, so
+    /// the comparison below reaches only the identity's own name.
     fn binary_match_label_mask(labels: &[String], metric_name: Option<&str>) -> BTreeSet<String> {
         labels
             .iter()
             .filter_map(|label| match (label.as_str(), metric_name) {
                 (METRIC_NAME, Some(metric_name)) => Some(metric_name.to_string()),
                 (METRIC_NAME, None) => None,
+                (label, Some(metric_name)) if label == metric_name => None,
                 _ => Some(label.clone()),
             })
             .collect()
@@ -2221,13 +2216,7 @@ impl PromPlanner {
             .find(|name| !occupied.contains(*name));
         let target = match reused {
             Some(name) => name.clone(),
-            None => {
-                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
-                while occupied.contains(&name) {
-                    name.push('_');
-                }
-                name
-            }
+            None => Self::free_metric_name_column_name(occupied.iter().map(String::as_str)),
         };
 
         if let Some(marker) = &left_marker
@@ -2691,6 +2680,9 @@ impl PromPlanner {
         // `create_function_expr`: the function that reads it (`predict_linear`) then depends on an
         // argument instead of on planner state written by the selector below it.
         let range_fold_offset = self.ctx.range_fold_offset.take();
+        // A label function writes its destination as a label of the result; the label takes the
+        // physical name it is written with, so the marked identity moves out of that name first.
+        let input = self.move_metric_name_out_of_label_destination(func, &args.literals, input)?;
         let input_tag_columns = self.ctx.tag_columns.clone();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
@@ -4784,15 +4776,12 @@ impl PromPlanner {
         let (dst_name, dst_qualifier) = match Self::metric_name_column(input_schema)? {
             Some(column) => (column.name, column.relation),
             None => {
-                let occupied = input_schema
-                    .fields()
-                    .iter()
-                    .map(|field| field.name().as_str())
-                    .collect::<HashSet<_>>();
-                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
-                while occupied.contains(name.as_str()) {
-                    name.push('_');
-                }
+                let name = Self::free_metric_name_column_name(
+                    input_schema
+                        .fields()
+                        .iter()
+                        .map(|field| field.name().as_str()),
+                );
                 // Project the identity like the tag columns it is projected next to.
                 let qualifier = ctx
                     .time_index_column
@@ -4821,6 +4810,47 @@ impl PromPlanner {
             }),
             dst_name,
         ))
+    }
+
+    /// Move the marked identity out of the physical name an ordinary label destination writes.
+    ///
+    /// A label function writes its destination as a label of its result, and the label is a
+    /// column the result carries. When the destination is spelled like the physical column of the
+    /// input's marked identity - the identity is attached under the first free name, so nothing
+    /// else can be spelled like it and this reaches only the identity - the label would take that
+    /// column over and the identity would be lost. The identity is metadata, not a label, so it
+    /// moves to a free name first and the destination keeps the name it was written with. The
+    /// semantic `__name__` has no such collision: [`Self::write_destination_label`] writes it into
+    /// the identity itself.
+    fn move_metric_name_out_of_label_destination(
+        &mut self,
+        func: &Function,
+        literals: &[DfExpr],
+        input: LogicalPlan,
+    ) -> Result<LogicalPlan> {
+        if !matches!(func.name, "label_join" | "label_replace") {
+            return Ok(input);
+        }
+        let Some(DfExpr::Literal(ScalarValue::Utf8(Some(dst_label)), _)) = literals.first() else {
+            return Ok(input);
+        };
+        if dst_label.as_str() == METRIC_NAME {
+            return Ok(input);
+        }
+        let Some(marker) = Self::metric_name_column(input.schema())? else {
+            return Ok(input);
+        };
+        if marker.name.as_str() != dst_label.as_str() {
+            return Ok(input);
+        }
+        let target = Self::free_metric_name_column_name(
+            input
+                .schema()
+                .fields()
+                .iter()
+                .map(|field| field.name().as_str()),
+        );
+        Self::rename_metric_name_column(input, &mut self.ctx, &marker.name, &target)
     }
 
     /// Build expr for `label_join` function
@@ -5047,10 +5077,22 @@ impl PromPlanner {
                 DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
                     // PromQL sorts by the value of the label of a series, where a label the series
                     // does not carry - the semantic `__name__` of an input that dropped its
-                    // identity included - is the empty value, i.e. NULL among NULLs.
+                    // identity included - is the empty value. A missing value is read as that
+                    // empty string here instead of sorting as NULL: ascending would otherwise
+                    // order the series with the empty value after the series that carry the label,
+                    // where Prometheus sorts them first, and descending last.
                     let expr = match Self::resolve_label_col(input_schema, label)? {
+                        // Only a string column is a label; a NULL inside one is the empty value
+                        // as well, so the key keeps comparing the text.
+                        Some(column)
+                            if Self::field_column_type(input_schema, &column.name)
+                                .and_then(Self::string_value_data_type)
+                                .is_some() =>
+                        {
+                            Self::label_value_expr(&column.name, input_schema)?
+                        }
                         Some(column) => DfExpr::Column(column),
-                        None => lit(ScalarValue::Utf8(None)),
+                        None => lit(""),
                     };
                     Ok(expr.sort(asc, false))
                 }
