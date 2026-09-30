@@ -51,6 +51,8 @@ pub mod listener;
 #[cfg(test)]
 mod merge_mode_test;
 #[cfg(test)]
+mod object_store_wal_recovery_test;
+#[cfg(test)]
 mod object_store_wal_test;
 #[cfg(test)]
 mod open_test;

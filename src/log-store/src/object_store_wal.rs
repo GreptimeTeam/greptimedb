@@ -62,6 +62,5 @@ mod format;
 mod io;
 mod store;
 
-#[allow(unused_imports)]
-pub(crate) use batch::entry_id;
+pub use batch::entry_id;
 pub use store::ObjectStoreLogStore;
