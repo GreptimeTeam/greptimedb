@@ -193,9 +193,10 @@ fn region(engine: &MitoEngine, region_id: RegionId) -> MitoRegionRef {
     engine.get_region(region_id).unwrap()
 }
 
-/// The entry ids a region tracks in memory and in its manifest.
+/// The entry ids a region tracks in memory and in its manifest, and the
+/// rows its memtables hold.
 #[derive(Debug, PartialEq, Eq)]
-struct EntryIds {
+struct RegionRecoveryState {
     flushed_entry_id: u64,
     last_entry_id: u64,
     topic_latest_entry_id: u64,
@@ -203,11 +204,11 @@ struct EntryIds {
     memtable_rows: u64,
 }
 
-async fn entry_ids(engine: &MitoEngine, region_id: RegionId) -> EntryIds {
+async fn region_recovery_state(engine: &MitoEngine, region_id: RegionId) -> RegionRecoveryState {
     let region = region(engine, region_id);
     let current = region.version_control.current();
     let manifest = region.manifest_ctx.manifest().await;
-    EntryIds {
+    RegionRecoveryState {
         flushed_entry_id: current.version.flushed_entry_id,
         last_entry_id: current.last_entry_id,
         topic_latest_entry_id: region.topic_latest_entry_id.load(Ordering::Relaxed),
@@ -216,8 +217,8 @@ async fn entry_ids(engine: &MitoEngine, region_id: RegionId) -> EntryIds {
     }
 }
 
-/// Entry ids of a region that holds nothing.
-const NO_ENTRIES: EntryIds = EntryIds {
+/// The recovery state of a region that holds nothing.
+const EMPTY_RECOVERY_STATE: RegionRecoveryState = RegionRecoveryState {
     flushed_entry_id: 0,
     last_entry_id: 0,
     topic_latest_entry_id: 0,
@@ -327,14 +328,14 @@ async fn test_reopen_after_partial_flush_replays_only_unflushed_regions(#[case] 
     // Flushing empties the memtables, so the topic latest entry id follows
     // the store.
     flush_region(&engine, REGION_A, None).await;
-    let flushed_a = EntryIds {
+    let flushed_a = RegionRecoveryState {
         flushed_entry_id: entry_id(2, 1),
         last_entry_id: entry_id(2, 1),
         topic_latest_entry_id: entry_id(2, 1),
         manifest_flushed_entry_id: entry_id(2, 1),
         memtable_rows: 0,
     };
-    assert_eq!(flushed_a, entry_ids(&engine, REGION_A).await);
+    assert_eq!(flushed_a, region_recovery_state(&engine, REGION_A).await);
     let rows_a = scan_rows(&engine, REGION_A).await;
     let rows_b = scan_rows(&engine, REGION_B).await;
 
@@ -354,14 +355,14 @@ async fn test_reopen_after_partial_flush_replays_only_unflushed_regions(#[case] 
 
     // Region A replays nothing: it flushed both entries, so the topic latest
     // entry id comes from the store. Region B replays both of its entries.
-    assert_eq!(flushed_a, entry_ids(&engine, REGION_A).await);
+    assert_eq!(flushed_a, region_recovery_state(&engine, REGION_A).await);
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(2, 1),
             memtable_rows: 5,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_B).await
+        region_recovery_state(&engine, REGION_B).await
     );
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     assert_eq!(entry_id(2, 1), latest(&store, REGION_B));
@@ -375,8 +376,8 @@ async fn test_reopen_after_partial_flush_replays_only_unflushed_regions(#[case] 
 #[case(AckMode::Durable)]
 #[case(AckMode::Enqueued)]
 #[tokio::test]
-async fn test_reopen_after_abrupt_drop_replays_durable_entries_once(#[case] ack_mode: AckMode) {
-    let mut env = TestEnv::with_prefix("object-store-wal-abrupt-drop").await;
+async fn test_reopen_after_crash_replays_durable_entries_once(#[case] ack_mode: AckMode) {
+    let mut env = TestEnv::with_prefix("object-store-wal-crash").await;
     let object_store = memory_store();
     let store = open_store(&object_store, ack_mode).await;
     let engine = new_engine(&mut env, store.clone()).await;
@@ -400,12 +401,12 @@ async fn test_reopen_after_abrupt_drop_replays_durable_entries_once(#[case] ack_
         .unwrap();
 
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(1, 1),
             memtable_rows: 3,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(entry_id(1, 1), latest(&store, REGION_A));
     assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
@@ -479,11 +480,17 @@ async fn test_reopen_on_empty_prefix_without_durable_entries() {
 
     assert_eq!(0, latest(&store, REGION_A));
     assert_eq!(0, latest(&store, REGION_B));
-    assert_eq!(NO_ENTRIES, entry_ids(&engine, REGION_A).await);
+    assert_eq!(
+        EMPTY_RECOVERY_STATE,
+        region_recovery_state(&engine, REGION_A).await
+    );
     // Region B keeps the object store provider but wrote nothing to it; its
     // rows come back from the SST alone.
     assert_eq!(provider(REGION_B), region(&engine, REGION_B).provider);
-    assert_eq!(0, entry_ids(&engine, REGION_B).await.memtable_rows);
+    assert_eq!(
+        0,
+        region_recovery_state(&engine, REGION_B).await.memtable_rows
+    );
     assert_eq!(rows_b, scan_rows(&engine, REGION_B).await);
 
     // The region is usable and its first entry lands in the first object
@@ -496,7 +503,7 @@ async fn test_reopen_on_empty_prefix_without_durable_entries() {
     assert_eq!(entry_id(1, 1), latest(&store, REGION_A));
     assert_eq!(
         entry_id(1, 1),
-        entry_ids(&engine, REGION_A).await.last_entry_id
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
@@ -535,14 +542,14 @@ async fn test_entry_ids_continue_across_two_restarts(#[case] ack_mode: AckMode) 
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             flushed_entry_id: entry_id(1, 1),
             last_entry_id: entry_id(2, 1),
             topic_latest_entry_id: entry_id(1, 1),
             manifest_flushed_entry_id: entry_id(1, 1),
             memtable_rows: 2,
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(4, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 
@@ -555,7 +562,7 @@ async fn test_entry_ids_continue_across_two_restarts(#[case] ack_mode: AckMode) 
     assert_eq!(entry_id(4, 1), latest(&store, REGION_A));
     assert_eq!(
         entry_id(4, 1),
-        entry_ids(&engine, REGION_A).await.last_entry_id
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     flush_region(&engine, REGION_A, None).await;
     writer
@@ -575,14 +582,14 @@ async fn test_entry_ids_continue_across_two_restarts(#[case] ack_mode: AckMode) 
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             flushed_entry_id: entry_id(4, 1),
             last_entry_id: entry_id(5, 1),
             topic_latest_entry_id: entry_id(4, 1),
             manifest_flushed_entry_id: entry_id(4, 1),
             memtable_rows: 2,
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(entry_id(5, 1), latest(&store, REGION_A));
     assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
@@ -677,12 +684,12 @@ async fn test_reopen_after_a_failed_create_shows_only_the_acknowledged_write() {
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(2, 1),
             memtable_rows: 1,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(expected, scan_rows(&engine, REGION_A).await);
 }
@@ -757,12 +764,12 @@ async fn test_flush_waits_until_the_wal_is_durable() {
     store.hold_creates();
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(1, 1),
             memtable_rows: 3,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(0, latest(&store, REGION_A));
 
@@ -776,7 +783,9 @@ async fn test_flush_waits_until_the_wal_is_durable() {
     assert!(!seal.is_finished());
     assert_eq!(
         0,
-        entry_ids(&engine, REGION_A).await.manifest_flushed_entry_id
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
     );
     assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
@@ -793,14 +802,14 @@ async fn test_flush_waits_until_the_wal_is_durable() {
         .unwrap();
     assert_eq!(entry_id(1, 1), latest(&store, REGION_A));
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             flushed_entry_id: entry_id(1, 1),
             last_entry_id: entry_id(1, 1),
             topic_latest_entry_id: entry_id(1, 1),
             manifest_flushed_entry_id: entry_id(1, 1),
             memtable_rows: 0,
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(3, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
@@ -819,7 +828,7 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     assert_eq!(
         entry_id(1, 1),
-        entry_ids(&engine, REGION_A).await.last_entry_id
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     let flush = spawn_flush(&engine, REGION_A);
     let seal = spawn_seal(&store);
@@ -828,7 +837,9 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     assert!(!flush.is_finished());
     assert_eq!(
         0,
-        entry_ids(&engine, REGION_A).await.manifest_flushed_entry_id
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
     );
     assert_eq!(vec![0], wal_object_seqs(&object_store).await);
 
@@ -848,7 +859,10 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     open_region(&engine, REGION_A, &table_dir, &[])
         .await
         .unwrap();
-    assert_eq!(NO_ENTRIES, entry_ids(&engine, REGION_A).await);
+    assert_eq!(
+        EMPTY_RECOVERY_STATE,
+        region_recovery_state(&engine, REGION_A).await
+    );
     assert_eq!(0, latest(&store, REGION_A));
     let mut writer = SealedWriter::new(&store);
     writer
@@ -857,7 +871,7 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     assert_eq!(
         entry_id(2, 1),
-        entry_ids(&engine, REGION_A).await.last_entry_id
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     assert_eq!(vec![0, 1, 2], wal_object_seqs(&object_store).await);
     let rows_before = scan_rows(&engine, REGION_A).await;
@@ -873,12 +887,12 @@ async fn test_enqueued_crash_before_the_object_exists_replays_durable_entries() 
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(2, 1),
             memtable_rows: 2,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(entry_id(2, 1), latest(&store, REGION_A));
     assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
@@ -955,7 +969,7 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
     put_rows(&engine, REGION_A, rows(&schema, 0, 3)).await;
     assert_eq!(
         entry_id(1, 1),
-        entry_ids(&engine, REGION_A).await.last_entry_id
+        region_recovery_state(&engine, REGION_A).await.last_entry_id
     );
     let truncate = {
         let engine = engine.clone();
@@ -990,7 +1004,10 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
     open_region(&engine, REGION_A, &table_dir, &[])
         .await
         .unwrap();
-    assert_eq!(NO_ENTRIES, entry_ids(&engine, REGION_A).await);
+    assert_eq!(
+        EMPTY_RECOVERY_STATE,
+        region_recovery_state(&engine, REGION_A).await
+    );
     let mut writer = SealedWriter::new(&store);
     writer
         .put_and_seal(&engine, vec![(REGION_A, rows(&schema, 3, 5))])
@@ -1007,12 +1024,12 @@ async fn test_enqueued_truncate_waits_until_the_wal_is_durable(
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             last_entry_id: entry_id(2, 1),
             memtable_rows: 2,
-            ..NO_ENTRIES
+            ..EMPTY_RECOVERY_STATE
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(rows_before, scan_rows(&engine, REGION_A).await);
     assert_eq!(2, engine.get_region_statistic(REGION_A).unwrap().num_rows);
@@ -1076,14 +1093,14 @@ async fn test_enqueued_truncate_completes_once_the_wal_is_durable(
         .await
         .unwrap();
     assert_eq!(
-        EntryIds {
+        RegionRecoveryState {
             flushed_entry_id: entry_id(1, 1),
             last_entry_id: entry_id(1, 1),
             topic_latest_entry_id: entry_id(1, 1),
             manifest_flushed_entry_id: entry_id(1, 1),
             memtable_rows: 0,
         },
-        entry_ids(&engine, REGION_A).await
+        region_recovery_state(&engine, REGION_A).await
     );
     assert_eq!(0, engine.get_region_statistic(REGION_A).unwrap().num_rows);
 }
@@ -1126,7 +1143,9 @@ async fn test_flush_does_not_publish_a_frontier_for_a_lost_enqueued_backlog() {
     );
     assert_eq!(
         0,
-        entry_ids(&engine, REGION_A).await.manifest_flushed_entry_id
+        region_recovery_state(&engine, REGION_A)
+            .await
+            .manifest_flushed_entry_id
     );
     assert!(store.stop().await.is_err());
 }
