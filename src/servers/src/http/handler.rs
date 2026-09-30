@@ -280,14 +280,21 @@ pub async fn create_logical_tables(
         .create_logical_tables(&sql, query_ctx)
         .await
     {
-        Ok(outputs) => outputs.into_iter().map(Ok).collect(),
-        Err(error) => {
+        Ok(outputs)
+            if outputs
+                .iter()
+                .all(|output| matches!(output.data, OutputData::AffectedRows(0))) =>
+        {
+            outputs.into_iter().map(Ok).collect()
+        }
+        other => {
+            let status = match other {
+                Err(error) => error.status_code(),
+                Ok(_) => StatusCode::Internal,
+            };
             return HttpResponse::Error(
-                ErrorResponse::from_error_message(
-                    error.status_code(),
-                    "logical-table batch failed".to_string(),
-                )
-                .with_execution_time(start.elapsed().as_millis() as u64),
+                ErrorResponse::from_error_message(status, "logical-table batch failed".to_string())
+                    .with_execution_time(start.elapsed().as_millis() as u64),
             );
         }
     };

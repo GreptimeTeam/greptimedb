@@ -904,7 +904,7 @@ async fn check_logical_ddl_http(distributed: bool) {
             .is_none()
     );
 
-    struct FailAfterExecution;
+    struct FailAfterExecution(&'static str);
     impl servers::interceptor::SqlQueryInterceptor for FailAfterExecution {
         type Error = frontend::error::Error;
         fn post_execute(
@@ -912,34 +912,61 @@ async fn check_logical_ddl_http(distributed: bool) {
             _: common_query::Output,
             _: QueryContextRef,
         ) -> frontend::error::Result<common_query::Output> {
-            frontend::error::InvalidSqlSnafu {
-                err_msg: "sensitive-option-value",
+            use common_query::Output;
+            match self.0 {
+                "rows" => Ok(Output::new_with_affected_rows(1)),
+                "records" => Ok(Output::new_with_record_batches(
+                    common_recordbatch::RecordBatches::empty(),
+                )),
+                "stream" => Ok(Output::new_with_stream(Box::pin(
+                    common_recordbatch::RecordBatchStreamWrapper::new(
+                        Arc::new(datatypes::schema::Schema::new(vec![])),
+                        futures::stream::iter([Err::<common_recordbatch::RecordBatch, _>(
+                            common_recordbatch::error::CreateRecordBatchesSnafu {
+                                reason: "sensitive-option-value",
+                            }
+                            .build(),
+                        )]),
+                    ),
+                ))),
+                _ => frontend::error::InvalidSqlSnafu {
+                    err_msg: "sensitive-option-value",
+                }
+                .fail(),
             }
-            .fail()
         }
     }
     frontend
         .plugins()
         .insert::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>>(Arc::new(
-            FailAfterExecution,
+            FailAfterExecution("error"),
         ));
-    let response = client
-        .post("/v1/ddl/logical-tables")
-        .form(&[("sql", logical_ddl("created_before_error"))])
-        .send()
-        .await;
-    assert!(!response.status().is_success());
-    let body = response.json::<Value>().await;
-    assert!(body.get("output").is_none());
-    assert!(!body.to_string().contains("sensitive-option-value"));
-    assert!(
+    for mode in ["error", "rows", "records", "stream"] {
         frontend
-            .catalog_manager()
-            .table("greptime", "public", "created_before_error", None)
-            .await
-            .unwrap()
-            .is_some()
-    );
+            .plugins()
+            .map_mut::<servers::interceptor::SqlQueryInterceptorRef<frontend::error::Error>, _, _>(
+                |plugin| *plugin.unwrap() = Arc::new(FailAfterExecution(mode)),
+            );
+        let name = format!("created_before_error_{mode}");
+        let response = client
+            .post("/v1/ddl/logical-tables")
+            .form(&[("sql", logical_ddl(&name))])
+            .send()
+            .await;
+        assert!(!response.status().is_success(), "{mode}");
+        assert!(!format!("{:?}", response.headers()).contains("sensitive-option-value"));
+        let body = response.json::<Value>().await;
+        assert!(body.get("output").is_none());
+        assert_eq!(body["error"], "logical-table batch failed");
+        assert!(
+            frontend
+                .catalog_manager()
+                .table("greptime", "public", &name, None)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
     instance.shutdown().await;
 }
 

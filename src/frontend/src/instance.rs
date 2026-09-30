@@ -826,17 +826,46 @@ impl Instance {
                 err_msg: "logical-table batch requires 1 to 128 statements"
             }
         );
+        let measure_rewritten_sql = || -> std::fmt::Result {
+            use std::fmt::Write;
+
+            struct SizeBudget(usize);
+            impl std::fmt::Write for SizeBudget {
+                fn write_str(&mut self, value: &str) -> std::fmt::Result {
+                    self.0 = self.0.checked_sub(value.len()).ok_or(std::fmt::Error)?;
+                    Ok(())
+                }
+            }
+            let mut budget = SizeBudget(MAX_LOGICAL_TABLE_DDL_BYTES - (statements.len() - 1));
+            for statement in &statements {
+                let Statement::CreateTable(create) = statement else {
+                    return Err(std::fmt::Error);
+                };
+                let mut create = create.clone();
+                let options = std::mem::take(&mut create.options);
+                write!(budget, "{create}")?;
+                // CREATE's Display redacts secrets and omits non-scalar options.
+                write!(budget, "WITH(")?;
+                for (index, (key, _)) in options.entries().enumerate() {
+                    if index > 0 {
+                        write!(budget, ",")?;
+                    }
+                    write!(budget, "'{}'=", key.escape_debug())?;
+                    if let Some(value) = options.get(key) {
+                        write!(budget, "'{}'", value.escape_debug())?;
+                    } else if let Some(value) = options.value(key) {
+                        write!(budget, "{value}")?;
+                    }
+                }
+                write!(budget, ")")?;
+            }
+            Ok(())
+        };
         ensure!(
             original_statements
                 .as_ref()
                 .is_none_or(|original| original == &statements)
-                || statements
-                    .iter()
-                    .map(|s| s.to_string().len())
-                    .sum::<usize>()
-                    + statements.len()
-                    - 1
-                    <= MAX_LOGICAL_TABLE_DDL_BYTES,
+                || measure_rewritten_sql().is_ok(),
             InvalidSqlSnafu {
                 err_msg: "rewritten logical-table DDL exceeds 1 MiB"
             }
@@ -4300,6 +4329,22 @@ mod tests {
                         "CREATE TABLE allowed_{i} (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')"
                     ))).collect(),
                     "type" => statements[1] = parse_one_sql("SELECT 1"),
+                    "secret_bytes" | "array_bytes" | "small_option" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            let value = "x".repeat(if self.0 == "small_option" { 10 } else { 2 * 1024 * 1024 });
+                            if self.0 == "array_bytes" {
+                                create.options.insert_options("non_scalar", vec![value.as_str()].into());
+                            } else {
+                                create.options.insert("secret_access_key".to_string(), value);
+                            }
+                        }
+                    }
+                    "physical_null" | "physical_array" => {
+                        let value = if self.0 == "physical_null" { "NULL" } else { "['x']" };
+                        statements[1] = parse_one_sql(&format!(
+                            "CREATE TABLE allowed2 (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy', physical_metric_table={value})"
+                        ));
+                    }
                     "ast_bytes" => {
                         if let Statement::CreateTable(create) = &mut statements[1] {
                             create.name =
@@ -4320,6 +4365,11 @@ mod tests {
             "type",
             "sql_bytes",
             "ast_bytes",
+            "secret_bytes",
+            "array_bytes",
+            "small_option",
+            "physical_null",
+            "physical_array",
             "pre_execute",
             "cross_catalog",
             "valid",
@@ -4363,7 +4413,7 @@ mod tests {
                 assert_eq!(
                     result.unwrap_err().status_code(),
                     match mode {
-                        "valid" => StatusCode::Unsupported,
+                        "valid" | "small_option" => StatusCode::Unsupported,
                         "cross_catalog" => StatusCode::AccessDenied,
                         _ => StatusCode::InvalidArguments,
                     },
@@ -4372,7 +4422,7 @@ mod tests {
             }
             assert_eq!(
                 executor.submitted.lock().unwrap().len(),
-                usize::from(mode == "valid"),
+                usize::from(matches!(mode, "valid" | "small_option")),
                 "{mode}"
             );
         }

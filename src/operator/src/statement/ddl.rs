@@ -403,7 +403,10 @@ impl StatementExecutor {
             ensure!(
                 statement.engine == METRIC_ENGINE_NAME
                     && statement.options.get(LOGICAL_TABLE_METADATA_KEY).is_some()
-                    && statement.options.get(PHYSICAL_TABLE_METADATA_KEY).is_none(),
+                    && statement
+                        .options
+                        .value(PHYSICAL_TABLE_METADATA_KEY)
+                        .is_none(),
                 InvalidSqlSnafu {
                     err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
                 }
