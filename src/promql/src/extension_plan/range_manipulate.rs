@@ -21,7 +21,7 @@ use std::task::{Context, Poll};
 use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, Int64Type, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -710,25 +710,19 @@ impl RangeManipulateStream {
             .ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
-        let timestamp_values = timestamps
-            .values()
-            .iter()
-            .enumerate()
-            .map(|(index, timestamp)| {
-                if !input.column(self.time_index).is_valid(index) {
-                    return Ok(None);
-                }
-                let shifted_ns = (*timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
-                i64::try_from(shifted_ns / 1_000_000)
-                    .map(Some)
-                    .map_err(|_| {
-                        ArrowError::ComputeError(
-                            "RangeManipulate timestamp payload overflow".into(),
-                        )
-                    })
+        // Single vectorized pass: i128 intermediate holds any native timestamp shift;
+        // only the final millisecond result must fit i64. try_unary preserves nulls.
+        let offset_ns = (self.offset as i128) * 1_000_000;
+        let timestamp_values = compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+            let shifted_ns = (v as i128) * scale + offset_ns;
+            i64::try_from(shifted_ns / 1_000_000).map_err(|_| {
+                ArrowError::ComputeError("RangeManipulate timestamp payload overflow".into())
             })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let timestamp_values = TimestampMillisecondArray::from(timestamp_values);
+        })?;
+        let timestamp_values = TimestampMillisecondArray::new(
+            timestamp_values.values().clone(),
+            timestamp_values.nulls().cloned(),
+        );
         let ts_range_column = RangeArray::from_ranges(Arc::new(timestamp_values), ranges.clone())
             .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
             .into_dict();
@@ -818,48 +812,91 @@ impl RangeManipulateStream {
             end,
         );
         let ranges = match narrow {
-            Some(scan) => self.scan_ranges::<i64>(timestamps, start, end, &scan),
+            Some(scan) => scan_ranges::<i64>(self.interval, timestamps, start, end, &scan),
             None => {
                 let scan = ScanNanoseconds::<i128>::wide(self.time_unit, self.offset, self.range);
-                self.scan_ranges::<i128>(timestamps, start, end, &scan)
+                scan_ranges::<i128>(self.interval, timestamps, start, end, &scan)
             }
         };
 
         Ok((ranges, (start, end)))
     }
 
-    /// Cursor scan over the aligned evaluation points, in `Ns` nanoseconds.
-    fn scan_ranges<Ns: Nanoseconds>(
-        &self,
+    /// Cursor scan of `timestamps` through the narrow `i64` carrier, for benchmarks.
+    ///
+    /// `bench_range_fn` times the fast path directly, next to the exact `i128` fallback in
+    /// [`RangeManipulateStream::bench_scan_wide`]; production selects the carrier through
+    /// [`narrow_scan`] inside `calculate_range`. Returns `None` when that carrier is
+    /// rejected, which is exactly the condition that makes the operator fall back to `i128`.
+    #[doc(hidden)]
+    pub fn bench_scan_narrow(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        window: Millisecond,
+        interval: Millisecond,
         timestamps: &[i64],
         start: Millisecond,
         end: Millisecond,
-        scan: &ScanNanoseconds<Ns>,
-    ) -> Vec<(u32, u32)> {
-        let len = timestamps.len();
-        let mut ranges = Vec::new();
-        let mut left = 0usize;
-        let mut right = 0usize;
-        for curr_ts in (start..=end).step_by(self.interval as _) {
-            let curr_ts_ns = scan.instant(curr_ts);
-            let start_ts = scan.window_start(curr_ts_ns);
-
-            while left < len && scan.shift(timestamps[left]) <= start_ts {
-                left += 1;
-            }
-            right = right.max(left);
-            while right < len && scan.shift(timestamps[right]) <= curr_ts_ns {
-                right += 1;
-            }
-
-            if left == right {
-                ranges.push((0, 0));
-            } else {
-                ranges.push((left as _, (right - left) as _));
-            }
-        }
-        ranges
+    ) -> Option<Vec<(u32, u32)>> {
+        let scan = narrow_scan(time_unit, offset, window, timestamps, start, end)?;
+        Some(scan_ranges::<i64>(interval, timestamps, start, end, &scan))
     }
+
+    /// Cursor scan of `timestamps` through the exact `i128` carrier, for benchmarks.
+    ///
+    /// The carrier is exact for every input, so this times the fallback that
+    /// [`narrow_scan`] selects whenever the narrow baselines would overflow.
+    #[doc(hidden)]
+    pub fn bench_scan_wide(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        window: Millisecond,
+        interval: Millisecond,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+    ) -> Vec<(u32, u32)> {
+        scan_ranges::<i128>(
+            interval,
+            timestamps,
+            start,
+            end,
+            &ScanNanoseconds::<i128>::wide(time_unit, offset, window),
+        )
+    }
+}
+
+/// Cursor scan over the aligned evaluation points, in `Ns` nanoseconds.
+fn scan_ranges<Ns: Nanoseconds>(
+    interval: Millisecond,
+    timestamps: &[i64],
+    start: Millisecond,
+    end: Millisecond,
+    scan: &ScanNanoseconds<Ns>,
+) -> Vec<(u32, u32)> {
+    let len = timestamps.len();
+    let mut ranges = Vec::new();
+    let mut left = 0usize;
+    let mut right = 0usize;
+    for curr_ts in (start..=end).step_by(interval as _) {
+        let curr_ts_ns = scan.instant(curr_ts);
+        let start_ts = scan.window_start(curr_ts_ns);
+
+        while left < len && scan.shift(timestamps[left]) <= start_ts {
+            left += 1;
+        }
+        right = right.max(left);
+        while right < len && scan.shift(timestamps[right]) <= curr_ts_ns {
+            right += 1;
+        }
+
+        if left == right {
+            ranges.push((0, 0));
+        } else {
+            ranges.push((left as _, (right - left) as _));
+        }
+    }
+    ranges
 }
 
 /// Cursor scan baselines in nanoseconds, shared with `InstantManipulate`.
@@ -969,6 +1006,9 @@ mod test {
     use super::*;
 
     const TIME_INDEX_COLUMN: &str = "timestamp";
+
+    /// The `(offset, length)` selections of one cursor scan.
+    type RangeSelections = Vec<(u32, u32)>;
 
     fn project_batch(batch: &RecordBatch, indices: &[usize]) -> RecordBatch {
         let fields = indices
@@ -2062,6 +2102,751 @@ mod test {
                 actual, expected,
                 "case={case}, timestamps={timestamps:?}, query=({query_start}, {query_end}), \
                  interval={interval}, range={range}, bounds=({start}, {end})"
+            );
+        }
+    }
+
+    /// Nanoseconds per native tick, as kept by the narrow carrier.
+    fn native_scale(time_unit: TimeUnit) -> i64 {
+        i64::try_from(nanoseconds_per_native_tick(time_unit)).unwrap()
+    }
+
+    /// Shifted nanoseconds of a sample, computed in the exact `i128` carrier.
+    fn shifted_nanoseconds(time_unit: TimeUnit, offset: Millisecond, timestamp: i64) -> i128 {
+        (timestamp as i128) * nanoseconds_per_native_tick(time_unit) + (offset as i128) * 1_000_000
+    }
+
+    /// Shifted milliseconds of the instant grid of a sample, flooring like `calculate_range`.
+    fn shifted_floor_millis(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        timestamp: i64,
+    ) -> Millisecond {
+        Millisecond::try_from(
+            shifted_nanoseconds(time_unit, offset, timestamp).div_euclid(1_000_000),
+        )
+        .unwrap()
+    }
+
+    /// Shifted milliseconds kept by the range payload of a sample.
+    ///
+    /// The payload conversion truncates toward zero, so samples below the epoch may keep
+    /// the millisecond above their own native tick.
+    fn shifted_millis(time_unit: TimeUnit, offset: Millisecond, timestamp: i64) -> Millisecond {
+        Millisecond::try_from(shifted_nanoseconds(time_unit, offset, timestamp) / 1_000_000)
+            .unwrap()
+    }
+
+    /// Stream whose cursor scan the differential tests below drive directly.
+    fn scan_stream_for_test(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        range: Millisecond,
+    ) -> RangeManipulateStream {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(time_unit, None),
+            false,
+        )]));
+        let empty_stream = MemoryStream::try_new(vec![], schema.clone(), None).unwrap();
+        RangeManipulateStream {
+            offset,
+            start,
+            end,
+            interval,
+            range,
+            time_index: 0,
+            time_unit,
+            field_columns: vec![],
+            aligned_ts_array: Arc::new(TimestampMillisecondArray::from(vec![0i64; 0])),
+            output_schema: schema,
+            input: Box::pin(empty_stream),
+            metric: BaselineMetrics::new(&ExecutionPlanMetricsSet::new(), 0),
+            num_series: Count::new(),
+        }
+    }
+
+    /// Exact expectations of the cursor scan, formulated outside the production loops.
+    ///
+    /// Every evaluation instant keeps the samples of `(instant - range, instant]` in
+    /// shifted nanoseconds: the lower boundary is exclusive, the upper one inclusive, and
+    /// native ticks below a millisecond stay distinct.
+    fn scan_oracle(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        range: Millisecond,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+    ) -> Vec<(u32, u32)> {
+        let window_ns = (range as i128) * 1_000_000;
+        let shifted = timestamps
+            .iter()
+            .map(|timestamp| shifted_nanoseconds(time_unit, offset, *timestamp))
+            .collect::<Vec<_>>();
+        (start..=end)
+            .step_by(interval as usize)
+            .map(|instant| {
+                let instant_ns = (instant as i128) * 1_000_000;
+                let mut offset = None;
+                let mut length = 0u32;
+                for (index, timestamp) in shifted.iter().enumerate() {
+                    if *timestamp > instant_ns - window_ns && *timestamp <= instant_ns {
+                        offset.get_or_insert(index as u32);
+                        length += 1;
+                    }
+                }
+                (offset.unwrap_or(0), length)
+            })
+            .collect()
+    }
+
+    /// Runs the cursor scan of one input through both carriers.
+    fn scan_both_carriers(
+        stream: &RangeManipulateStream,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+    ) -> (Option<RangeSelections>, RangeSelections) {
+        let exact = scan_ranges::<i128>(
+            stream.interval,
+            timestamps,
+            start,
+            end,
+            &ScanNanoseconds::<i128>::wide(stream.time_unit, stream.offset, stream.range),
+        );
+        let narrow = narrow_scan(
+            stream.time_unit,
+            stream.offset,
+            stream.range,
+            timestamps,
+            start,
+            end,
+        )
+        .map(|scan| scan_ranges::<i64>(stream.interval, timestamps, start, end, &scan));
+        // The benchmark hooks must measure the very scans the operator runs.
+        assert_eq!(
+            RangeManipulateStream::bench_scan_wide(
+                stream.time_unit,
+                stream.offset,
+                stream.range,
+                stream.interval,
+                timestamps,
+                start,
+                end,
+            ),
+            exact,
+            "the i128 benchmark hook diverged from the cursor scan"
+        );
+        if let Some(narrow) = &narrow {
+            assert_eq!(
+                RangeManipulateStream::bench_scan_narrow(
+                    stream.time_unit,
+                    stream.offset,
+                    stream.range,
+                    stream.interval,
+                    timestamps,
+                    start,
+                    end,
+                ),
+                Some(narrow.clone()),
+                "the i64 benchmark hook diverged from the cursor scan"
+            );
+        } else {
+            assert_eq!(
+                RangeManipulateStream::bench_scan_narrow(
+                    stream.time_unit,
+                    stream.offset,
+                    stream.range,
+                    stream.interval,
+                    timestamps,
+                    start,
+                    end,
+                ),
+                None,
+                "the i64 benchmark hook must report the fallback"
+            );
+        }
+        (narrow, exact)
+    }
+
+    /// Asserts the narrow carrier was taken and matches the exact scan evaluation by evaluation.
+    fn assert_narrow_carrier_agrees(
+        narrow: Option<Vec<(u32, u32)>>,
+        exact: &[(u32, u32)],
+        context: &str,
+    ) {
+        let Some(narrow) = narrow else {
+            panic!("the i64 carrier was expected, but narrow_scan rejected the input: {context}");
+        };
+        assert_eq!(
+            narrow.len(),
+            exact.len(),
+            "carriers disagree on the number of evaluations: {context}"
+        );
+        for (evaluation, (narrow_range, exact_range)) in narrow.iter().zip(exact).enumerate() {
+            assert_eq!(
+                narrow_range, exact_range,
+                "carriers disagree on evaluation {evaluation}: {context}"
+            );
+        }
+    }
+
+    /// Replays the cursor scan in checked `i64` arithmetic.
+    ///
+    /// Reports whether the narrow carrier overflows on an operation the scan evaluates,
+    /// which is what makes the `i128` fallback unavoidable for an input.
+    fn narrow_carrier_overflows(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        range: Millisecond,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+    ) -> bool {
+        let Ok(scale) = i64::try_from(nanoseconds_per_native_tick(time_unit)) else {
+            return true;
+        };
+        let Some(offset_ns) = offset.checked_mul(1_000_000) else {
+            return true;
+        };
+        let Some(window_ns) = range.checked_mul(1_000_000) else {
+            return true;
+        };
+        let shift = |timestamp: i64| timestamp.checked_mul(scale)?.checked_add(offset_ns);
+        let mut left = 0usize;
+        let mut right = 0usize;
+        for instant in (start..=end).step_by(interval as usize) {
+            let Some(instant_ns) = instant.checked_mul(1_000_000) else {
+                return true;
+            };
+            let Some(window_start) = instant_ns.checked_sub(window_ns) else {
+                return true;
+            };
+            while left < timestamps.len() {
+                let Some(shifted) = shift(timestamps[left]) else {
+                    return true;
+                };
+                if shifted <= window_start {
+                    left += 1;
+                } else {
+                    break;
+                }
+            }
+            right = right.max(left);
+            while right < timestamps.len() {
+                let Some(shifted) = shift(timestamps[right]) else {
+                    return true;
+                };
+                if shifted <= instant_ns {
+                    right += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        false
+    }
+
+    /// The checked `i64` operation that makes [`narrow_scan`] reject an input, if any.
+    ///
+    /// Mirrors the rejection criteria of [`narrow_scan`] so the deterministic cases below
+    /// can pin which boundary drives the `i128` fallback.
+    fn narrow_carrier_rejection(
+        time_unit: TimeUnit,
+        offset: Millisecond,
+        range: Millisecond,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+    ) -> Option<&'static str> {
+        let Ok(scale) = i64::try_from(nanoseconds_per_native_tick(time_unit)) else {
+            return Some("nanoseconds per native tick do not fit i64");
+        };
+        let Some(offset_ns) = offset.checked_mul(1_000_000) else {
+            return Some("offset in nanoseconds does not fit i64");
+        };
+        let Some(window_ns) = range.checked_mul(1_000_000) else {
+            return Some("range in nanoseconds does not fit i64");
+        };
+        let shift = |timestamp: i64| timestamp.checked_mul(scale)?.checked_add(offset_ns);
+        let (Some(first), Some(last)) = (timestamps.first(), timestamps.last()) else {
+            return Some("empty batch has no endpoints");
+        };
+        if shift(*first).is_none() || shift(*last).is_none() {
+            return Some("sample nanoseconds do not fit i64");
+        }
+        if start
+            .checked_mul(1_000_000)
+            .and_then(|nanoseconds| nanoseconds.checked_sub(window_ns))
+            .is_none()
+        {
+            return Some("start bound in nanoseconds does not fit i64");
+        }
+        if end
+            .checked_mul(1_000_000)
+            .and_then(|nanoseconds| nanoseconds.checked_sub(window_ns))
+            .is_none()
+        {
+            return Some("end bound in nanoseconds do not fit i64");
+        }
+        None
+    }
+
+    #[test]
+    fn scan_carriers_agree_on_range_boundaries_within_one_millisecond() {
+        // Membership is `(lower, upper]` on native ticks: the sample exactly on the lower
+        // boundary is dropped, the sample exactly on the upper boundary is kept, and the
+        // three samples sharing one millisecond payload stay distinct and survive together.
+        let cases = [
+            (
+                TimeUnit::Microsecond,
+                vec![1_000_000, 1_000_001, 1_000_999, 1_001_000, 1_001_001],
+            ),
+            (
+                TimeUnit::Nanosecond,
+                vec![
+                    1_000_000_000,
+                    1_000_000_001,
+                    1_000_000_999,
+                    1_001_000_000,
+                    1_001_000_001,
+                ],
+            ),
+        ];
+
+        for (time_unit, timestamps) in cases {
+            let (start, end, interval, range) = (1_001, 1_001, 1, 1);
+            let context = format!("unit={time_unit:?}, timestamps={timestamps:?}");
+            let stream = scan_stream_for_test(time_unit, 0, start, end, interval, range);
+
+            let oracle = scan_oracle(time_unit, 0, range, &timestamps, start, end, interval);
+            assert_eq!(
+                oracle,
+                vec![(1, 3)],
+                "{context}: (lower, upper] expectations"
+            );
+
+            let (narrow, exact) = scan_both_carriers(&stream, &timestamps, start, end);
+            assert_eq!(exact, oracle, "{context}: i128 carrier must stay exact");
+            assert_narrow_carrier_agrees(narrow, &exact, &context);
+
+            // Two distinct native ticks below the upper boundary share the millisecond
+            // payload `1_000`; they must not be deduplicated by going through that ABI.
+            let payloads = timestamps[1..4]
+                .iter()
+                .map(|timestamp| shifted_millis(time_unit, 0, *timestamp))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                payloads,
+                vec![1_000, 1_000, 1_001],
+                "{context}: kept samples in one millisecond keep both native ticks"
+            );
+            assert_ne!(
+                timestamps[1], timestamps[2],
+                "{context}: the two ticks sharing a payload must stay distinct"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_falls_back_to_i128_when_only_the_sample_tail_overflows() {
+        // `narrow_scan` inspects the sorted endpoints, so a batch whose prefix fits the
+        // `i64` carrier but whose tail does not has to take the exact carrier. The tail
+        // sample stays outside every window, so the selections keep the prefix ones.
+        struct Case {
+            time_unit: TimeUnit,
+            narrow_safe: Vec<i64>,
+            overflowing: i64,
+            start: Millisecond,
+            end: Millisecond,
+            interval: Millisecond,
+            range: Millisecond,
+        }
+
+        let cases = [
+            Case {
+                time_unit: TimeUnit::Second,
+                narrow_safe: vec![9_223_372_034, 9_223_372_035, 9_223_372_036],
+                overflowing: 9_223_372_037,
+                start: 9_223_372_034_000,
+                end: 9_223_372_036_000,
+                interval: 1_000,
+                range: 1_000,
+            },
+            Case {
+                time_unit: TimeUnit::Millisecond,
+                narrow_safe: vec![9_223_372_036_853, 9_223_372_036_854],
+                overflowing: 9_223_372_036_855,
+                start: 9_223_372_036_853,
+                end: 9_223_372_036_854,
+                interval: 1,
+                range: 1,
+            },
+            Case {
+                time_unit: TimeUnit::Microsecond,
+                narrow_safe: vec![9_223_372_036_853_999, 9_223_372_036_854_000],
+                overflowing: 9_223_372_036_854_776,
+                start: 9_223_372_036_854,
+                end: 9_223_372_036_854,
+                interval: 1,
+                range: 1,
+            },
+        ];
+
+        for case in cases {
+            let Case {
+                time_unit,
+                narrow_safe,
+                overflowing,
+                start,
+                end,
+                interval,
+                range,
+            } = case;
+            let context = format!("unit={time_unit:?}, timestamps={narrow_safe:?} + {overflowing}");
+            let scale = native_scale(time_unit);
+            // The prefix fits the narrow carrier, the tail sample does not...
+            assert!(
+                narrow_safe
+                    .iter()
+                    .all(|timestamp| timestamp.checked_mul(scale).is_some()),
+                "{context}: prefix samples must fit i64 nanoseconds"
+            );
+            assert!(
+                overflowing.checked_mul(scale).is_none(),
+                "{context}: the tail sample must overflow i64 nanoseconds"
+            );
+            // ...even though the millisecond payload of the tail stays legal.
+            let payload = shifted_millis(time_unit, 0, overflowing);
+            assert!(
+                payload.abs() < i64::MAX / 2,
+                "{context}: the shifted payload {payload} must stay legal"
+            );
+
+            let stream = scan_stream_for_test(time_unit, 0, start, end, interval, range);
+
+            let (narrow, prefix_exact) = scan_both_carriers(&stream, &narrow_safe, start, end);
+            let prefix_oracle =
+                scan_oracle(time_unit, 0, range, &narrow_safe, start, end, interval);
+            assert_eq!(
+                prefix_exact, prefix_oracle,
+                "{context}: prefix i128 carrier"
+            );
+            assert_narrow_carrier_agrees(narrow, &prefix_exact, &format!("{context} prefix"));
+
+            let mut timestamps = narrow_safe.clone();
+            timestamps.push(overflowing);
+            assert_eq!(
+                narrow_carrier_rejection(time_unit, 0, range, &timestamps, start, end),
+                Some("sample nanoseconds do not fit i64"),
+                "{context}: the overflowing endpoint must reject the narrow carrier"
+            );
+            assert!(
+                narrow_carrier_overflows(time_unit, 0, range, &timestamps, start, end, interval),
+                "{context}: the scan evaluates the overflowing tail"
+            );
+
+            let (narrow, exact) = scan_both_carriers(&stream, &timestamps, start, end);
+            assert!(
+                narrow.is_none(),
+                "{context}: the i128 carrier must be taken"
+            );
+            let oracle = scan_oracle(time_unit, 0, range, &timestamps, start, end, interval);
+            assert_eq!(exact, oracle, "{context}: exact carrier on the full batch");
+            assert_eq!(
+                exact, prefix_exact,
+                "{context}: the out-of-window tail keeps the prefix selections"
+            );
+        }
+    }
+
+    #[test]
+    fn scan_carriers_split_at_the_nanosecond_boundaries() {
+        // Nanoseconds are not scaled, so the `i64` carrier is rejected by the query bounds:
+        // below the millisecond of `i64::MIN` the start bound underflows, while a batch near
+        // `i64::MAX` still fits. Both keep a legal millisecond payload.
+        let low = i64::MIN;
+        let low_floor = shifted_floor_millis(TimeUnit::Nanosecond, 0, low);
+        assert_eq!(low_floor, -9_223_372_036_855);
+        assert!(low_floor.checked_mul(1_000_000).is_none());
+        assert_eq!(
+            shifted_millis(TimeUnit::Nanosecond, 0, low),
+            -9_223_372_036_854
+        );
+
+        let timestamps = vec![low, low + 1_000_000];
+        let (start, end, interval, range) = (low_floor, low_floor + 1, 1, 1);
+        let context = format!("nanosecond floor, timestamps={timestamps:?}");
+        let stream = scan_stream_for_test(TimeUnit::Nanosecond, 0, start, end, interval, range);
+        assert_eq!(
+            narrow_carrier_rejection(TimeUnit::Nanosecond, 0, range, &timestamps, start, end),
+            Some("start bound in nanoseconds does not fit i64"),
+            "{context}"
+        );
+        let (narrow, exact) = scan_both_carriers(&stream, &timestamps, start, end);
+        assert!(
+            narrow.is_none(),
+            "{context}: the i128 carrier must be taken"
+        );
+        let oracle = scan_oracle(
+            TimeUnit::Nanosecond,
+            0,
+            range,
+            &timestamps,
+            start,
+            end,
+            interval,
+        );
+        assert_eq!(exact, oracle, "{context}: i128 carrier must stay exact");
+
+        // The ceiling side still fits the narrow carrier, so both carriers have to agree.
+        let high = i64::MAX - 2_000_000;
+        let high_floor = shifted_floor_millis(TimeUnit::Nanosecond, 0, high);
+        assert!(high_floor.checked_mul(1_000_000).is_some());
+        let timestamps = vec![high, high + 1_000_000, high + 2_000_000];
+        let (start, end, interval, range) = (high_floor, high_floor + 2, 1, 1);
+        let context = format!("nanosecond ceiling, timestamps={timestamps:?}");
+        let stream = scan_stream_for_test(TimeUnit::Nanosecond, 0, start, end, interval, range);
+        assert_eq!(
+            narrow_carrier_rejection(TimeUnit::Nanosecond, 0, range, &timestamps, start, end),
+            None,
+            "{context}: the ceiling batch still fits the narrow carrier"
+        );
+        let (narrow, exact) = scan_both_carriers(&stream, &timestamps, start, end);
+        let oracle = scan_oracle(
+            TimeUnit::Nanosecond,
+            0,
+            range,
+            &timestamps,
+            start,
+            end,
+            interval,
+        );
+        assert_eq!(exact, oracle, "{context}: i128 carrier must stay exact");
+        assert_narrow_carrier_agrees(narrow, &exact, &context);
+    }
+
+    #[test]
+    fn scan_carriers_agree_for_seeded_native_precision_matrix() {
+        // Seeded matrix over all four native precisions: positive and negative offsets,
+        // negative times, sub-millisecond samples sharing a millisecond payload, and native
+        // extremes whose intermediate product overflows while the shifted millisecond stays
+        // legal.
+        let units = [
+            TimeUnit::Second,
+            TimeUnit::Millisecond,
+            TimeUnit::Microsecond,
+            TimeUnit::Nanosecond,
+        ];
+        // `narrow_scan` rejects the two large offsets: `offset * 1ms` overflows `i64`.
+        let offsets = [0, 1, -1, 250, -250, 9_223_372_036_855, -9_223_372_036_855];
+        let extremes = |time_unit: TimeUnit| match time_unit {
+            TimeUnit::Second => [-9_223_372_037, 9_223_372_037],
+            TimeUnit::Millisecond => [-9_223_372_036_855, 9_223_372_036_855],
+            TimeUnit::Microsecond => [-9_223_372_036_854_776, 9_223_372_036_854_776],
+            TimeUnit::Nanosecond => [i64::MIN, i64::MAX],
+        };
+        let mut prng = TinyPrng(0x5ca1_ab1e_d1ff_0001);
+        let mut narrow_cases = 0usize;
+        let mut wide_cases = 0usize;
+        let mut skipped = 0usize;
+
+        for case in 0..256usize {
+            let time_unit = units[case % units.len()];
+            let offset = offsets[(case / units.len()) % offsets.len()];
+            let [low, high] = extremes(time_unit);
+            let anchor = match prng.next_i64(0, 3) {
+                0 => prng.next_i64(-2_000, 2_000),
+                1 => -prng.next_i64(1, 2_000),
+                2 => low,
+                _ => high,
+            };
+            // Samples stay within a few milliseconds, with a native granularity small
+            // enough that sub-millisecond samples share a millisecond payload.
+            let step = match time_unit {
+                TimeUnit::Second => 1,
+                TimeUnit::Millisecond => 1,
+                TimeUnit::Microsecond => 1 + prng.next_i64(0, 9),
+                TimeUnit::Nanosecond => 1 + prng.next_i64(0, 999_999),
+            };
+            let count = 1 + prng.next_i64(0, 4);
+            let ascending = anchor != high;
+            let mut timestamps = (0..count)
+                .map(|index| {
+                    let delta = index * step;
+                    if ascending {
+                        anchor + delta
+                    } else {
+                        anchor - delta
+                    }
+                })
+                .collect::<Vec<_>>();
+            if !ascending {
+                timestamps.reverse();
+            }
+            // The review shape keeps a legal millisecond payload; skip the extremes that the
+            // large offsets push out of the millisecond space.
+            let nanoseconds = timestamps
+                .iter()
+                .map(|timestamp| shifted_nanoseconds(time_unit, offset, *timestamp))
+                .collect::<Vec<_>>();
+            if nanoseconds
+                .iter()
+                .any(|value| i64::try_from(value / 1_000_000).is_err())
+            {
+                skipped += 1;
+                continue;
+            }
+
+            let first_millis = Millisecond::try_from(nanoseconds[0].div_euclid(1_000_000)).unwrap();
+            let interval = prng.next_i64(1, 4);
+            let points = 1 + prng.next_i64(0, 4);
+            let start = first_millis - interval;
+            let end = start + interval * (points - 1);
+            let range = prng.next_i64(0, 3) * interval;
+            let context = format!(
+                "case={case}, unit={time_unit:?}, offset={offset}, start={start}, end={end}, \
+                 interval={interval}, range={range}, timestamps={timestamps:?}"
+            );
+
+            let stream = scan_stream_for_test(time_unit, offset, start, end, interval, range);
+            let oracle = scan_oracle(time_unit, offset, range, &timestamps, start, end, interval);
+            let (narrow, exact) = scan_both_carriers(&stream, &timestamps, start, end);
+            assert_eq!(exact, oracle, "{context}: i128 carrier must stay exact");
+
+            match (
+                &narrow,
+                narrow_carrier_rejection(time_unit, offset, range, &timestamps, start, end),
+            ) {
+                (Some(_), None) => {
+                    narrow_cases += 1;
+                    assert!(
+                        !narrow_carrier_overflows(
+                            time_unit,
+                            offset,
+                            range,
+                            &timestamps,
+                            start,
+                            end,
+                            interval
+                        ),
+                        "{context}: every narrow operation must fit i64"
+                    );
+                    assert_narrow_carrier_agrees(narrow, &exact, &context);
+                }
+                (None, Some(_reason)) => {
+                    wide_cases += 1;
+                }
+                (narrow, rejection) => panic!(
+                    "{context}: narrow_scan and its mirror disagree, narrow={}, rejection={rejection:?}",
+                    narrow.is_some()
+                ),
+            }
+        }
+
+        assert!(
+            narrow_cases > 0 && wide_cases > 0,
+            "both carriers must be covered: {narrow_cases} narrow, {wide_cases} wide \
+             ({skipped} skipped)"
+        );
+        assert!(
+            skipped < 64,
+            "the generator skipped too many cases: {skipped}"
+        );
+    }
+
+    /// Builds the single-column timestamp batch the cursor scans consume.
+    fn timestamp_batch(time_unit: TimeUnit, timestamps: &[i64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(time_unit, None),
+            false,
+        )]));
+        let array: ArrayRef = match time_unit {
+            TimeUnit::Second => Arc::new(TimestampSecondArray::from(timestamps.to_vec())),
+            TimeUnit::Millisecond => Arc::new(TimestampMillisecondArray::from(timestamps.to_vec())),
+            TimeUnit::Microsecond => Arc::new(TimestampMicrosecondArray::from(timestamps.to_vec())),
+            TimeUnit::Nanosecond => Arc::new(TimestampNanosecondArray::from(timestamps.to_vec())),
+        };
+        RecordBatch::try_new(schema, vec![array]).unwrap()
+    }
+
+    #[test]
+    fn calculate_range_dispatches_carriers_and_agrees_pointwise() {
+        // Production dispatch, not the hooks: `calculate_range` must scan through the narrow
+        // carrier while the batch fits and through the exact one once the shifted tail does
+        // not, and both must select the same ranges for the bounds it derives itself.
+        let narrow_timestamps = [0i64, 15_000, 30_000];
+        let wide_timestamps = [9_223_372_036_853, 9_223_372_036_854, 9_223_372_036_855];
+        let cases: [(&str, &[i64], Millisecond, Millisecond, bool); 2] = [
+            ("narrow carrier", &narrow_timestamps, 0, 30_000, true),
+            (
+                "i128 fallback",
+                &wide_timestamps,
+                wide_timestamps[0],
+                wide_timestamps[1],
+                false,
+            ),
+        ];
+
+        for (name, timestamps, query_start, query_end, expect_narrow) in cases {
+            let (interval, range) = if expect_narrow {
+                (15_000, 15_000)
+            } else {
+                (1, 1)
+            };
+            // `scan_stream_for_test` panics on an empty batch when `narrow_scan` is asked for
+            // the endpoints, so the batch below is never empty.
+            let stream = scan_stream_for_test(
+                TimeUnit::Millisecond,
+                0,
+                query_start,
+                query_end,
+                interval,
+                range,
+            );
+            let batch = timestamp_batch(TimeUnit::Millisecond, timestamps);
+            let (ranges, (start, end)) = stream.calculate_range(&batch).unwrap();
+
+            let oracle = scan_oracle(
+                TimeUnit::Millisecond,
+                0,
+                range,
+                timestamps,
+                start,
+                end,
+                interval,
+            );
+            assert_eq!(ranges, oracle, "{name}: calculate_range pointwise");
+
+            let rejection =
+                narrow_carrier_rejection(TimeUnit::Millisecond, 0, range, timestamps, start, end);
+            assert_eq!(
+                rejection.is_none(),
+                expect_narrow,
+                "{name}: carrier choice by narrow_scan, rejection={rejection:?}"
+            );
+            let (narrow, exact) = scan_both_carriers(&stream, timestamps, start, end);
+            assert_eq!(exact, ranges, "{name}: i128 carrier is the oracle");
+            assert_eq!(narrow.is_some(), expect_narrow, "{name}: narrow carrier");
+            assert_eq!(
+                RangeManipulateStream::bench_scan_wide(
+                    stream.time_unit,
+                    stream.offset,
+                    stream.range,
+                    interval,
+                    timestamps,
+                    start,
+                    end,
+                ),
+                ranges,
+                "{name}: the benchmark hook matches calculate_range"
             );
         }
     }
