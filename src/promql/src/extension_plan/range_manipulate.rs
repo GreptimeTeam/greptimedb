@@ -703,27 +703,46 @@ impl RangeManipulateStream {
             new_columns[*index] = new_column;
         }
 
-        // The timestamp range payload is always millisecond ABI. Shift in wide
-        // native precision before truncating toward zero, preserving null validity.
-        let scale = nanoseconds_per_native_tick(self.time_unit);
-        let (timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
-            .ok_or_else(|| {
+        // The timestamp range payload is always millisecond ABI. A column is reusable as-is
+        // only when its own data type already is that ABI: the output schema fixes the
+        // dictionary value type, so a millisecond column carrying a timezone must be
+        // converted like any other native unit.
+        let ts_column = input.column(self.time_index);
+        let timestamp_values: ArrayRef = if self.offset == 0
+            && matches!(
+                ts_column.data_type(),
+                DataType::Timestamp(TimeUnit::Millisecond, None)
+            ) {
+            ts_column.clone()
+        } else {
+            // Shift in wide native precision before truncating toward zero, preserving
+            // null validity.
+            let scale = nanoseconds_per_native_tick(self.time_unit);
+            let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
-        // Single vectorized pass: i128 intermediate holds any native timestamp shift;
-        // only the final millisecond result must fit i64. try_unary preserves nulls.
-        let offset_ns = (self.offset as i128) * 1_000_000;
-        let timestamp_values = compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
-            let shifted_ns = (v as i128) * scale + offset_ns;
-            i64::try_from(shifted_ns / 1_000_000).map_err(|_| {
-                ArrowError::ComputeError("RangeManipulate timestamp payload overflow".into())
-            })
-        })?;
-        let timestamp_values = TimestampMillisecondArray::new(
-            timestamp_values.values().clone(),
-            timestamp_values.nulls().cloned(),
-        );
-        let ts_range_column = RangeArray::from_ranges(Arc::new(timestamp_values), ranges.clone())
+            // Single pass through arrow's fallible unary kernel: an i128
+            // intermediate holds any native timestamp shift; only the final
+            // millisecond result must fit i64. try_unary preserves nulls and
+            // avoids the per-sample Option/Vec of a hand-written loop (its
+            // Result is not SIMD-vectorizable; the win is allocation- and
+            // branch-elimination).
+            let offset_ns = (self.offset as i128) * 1_000_000;
+            let timestamp_values =
+                compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+                    let shifted_ns = (v as i128) * scale + offset_ns;
+                    i64::try_from(shifted_ns / 1_000_000).map_err(|_| {
+                        ArrowError::ComputeError(
+                            "RangeManipulate timestamp payload overflow".into(),
+                        )
+                    })
+                })?;
+            Arc::new(TimestampMillisecondArray::new(
+                timestamp_values.values().clone(),
+                timestamp_values.nulls().cloned(),
+            ))
+        };
+        let ts_range_column = RangeArray::from_ranges(timestamp_values, ranges.clone())
             .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
             .into_dict();
         new_columns.push(Arc::new(ts_range_column));
@@ -2849,5 +2868,98 @@ mod test {
                 "{name}: the benchmark hook matches calculate_range"
             );
         }
+    }
+
+    /// Stream whose single millisecond timestamp column is folded into the range payload.
+    fn payload_stream(
+        offset: Millisecond,
+        start: Millisecond,
+        end: Millisecond,
+        interval: Millisecond,
+        range: Millisecond,
+    ) -> RangeManipulateStream {
+        let payload_type = DataType::Timestamp(TimeUnit::Millisecond, None);
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, payload_type.clone(), false),
+            Field::new(
+                RangeManipulate::build_timestamp_range_name(TIME_INDEX_COLUMN),
+                RangeArray::convert_data_type(payload_type),
+                false,
+            ),
+        ]));
+        let mut stream =
+            scan_stream_for_test(TimeUnit::Millisecond, offset, start, end, interval, range);
+        stream.output_schema = schema;
+        stream
+    }
+
+    /// Builds the single-column millisecond timestamp batch the payload tests consume.
+    fn timestamp_batch_with_timezone(timezone: Option<&str>, timestamps: &[i64]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            TIME_INDEX_COLUMN,
+            DataType::Timestamp(TimeUnit::Millisecond, timezone.map(Arc::from)),
+            false,
+        )]));
+        let array: ArrayRef = Arc::new(
+            TimestampMillisecondArray::from(timestamps.to_vec()).with_timezone_opt(timezone),
+        );
+        RecordBatch::try_new(schema, vec![array]).unwrap()
+    }
+
+    /// Millisecond payload values of the range timestamp column of a manipulated batch.
+    fn payload_millis(batch: &RecordBatch) -> Vec<i64> {
+        let dict = batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<DictionaryArray<Int64Type>>()
+            .expect("the timestamp range payload must be a folded dictionary")
+            .clone();
+        let payload = RangeArray::try_new(dict).unwrap();
+        assert_eq!(
+            payload.values().data_type(),
+            &DataType::Timestamp(TimeUnit::Millisecond, None),
+            "the payload value type must agree with the output schema"
+        );
+        payload
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap()
+            .values()
+            .to_vec()
+    }
+
+    #[test]
+    fn manipulate_timezone_time_index_skips_zero_copy_payload() {
+        // Oracle-verified regression: `Timestamp(Millisecond, Some(tz))` passes a
+        // `time_unit == Millisecond` check but is not the payload ABI. Cloning such a column
+        // would stamp a dictionary value type disagreeing with the output schema and
+        // `RecordBatch::try_new` would fail, so the reuse must be guarded on the data type.
+        let timestamps = [0i64, 1_000, 2_000, 3_000];
+        let stream = payload_stream(0, 0, 3_000, 1_000, 1_000);
+
+        // With offset 0 the data type is the only reason to convert, and the `try_unary`
+        // path is the identity for a millisecond index.
+        let zoned = stream
+            .manipulate(timestamp_batch_with_timezone(Some("+08:00"), &timestamps))
+            .expect("a timezone-carrying index must still build the output batch")
+            .expect("the ranges are not all empty");
+        assert_eq!(
+            payload_millis(&zoned),
+            timestamps,
+            "the converted payload must keep the try_unary values"
+        );
+
+        // The same logical samples without a timezone do take the zero-copy path; both paths
+        // must agree on the payload.
+        let plain = stream
+            .manipulate(timestamp_batch(TimeUnit::Millisecond, &timestamps))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            payload_millis(&plain),
+            payload_millis(&zoned),
+            "the zero-copy and the converted path must agree"
+        );
     }
 }
