@@ -7040,7 +7040,7 @@ async fn test_label_join() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
-  Projection: up.timestamp, up.field_0, concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
+  Projection: up.timestamp, up.field_0, nullif(concat_ws(Utf8(","), coalesce(up.tag_1, Utf8("")), coalesce(up.tag_2, Utf8("")), coalesce(up.tag_3, Utf8(""))), Utf8("")) AS foo, up.tag_0, up.tag_1, up.tag_2, up.tag_3, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, __promql_metric_name:Utf8]
     Projection: up.tag_0, up.tag_1, up.tag_2, up.tag_3, up.timestamp, up.field_0, Utf8("up") AS __promql_metric_name [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]
       PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         PromSeriesDivide: tags=["tag_0", "tag_1", "tag_2", "tag_3"] [tag_0:Utf8, tag_1:Utf8, tag_2:Utf8, tag_3:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -7076,7 +7076,7 @@ async fn test_label_replace() {
 
     let expected = r#"
 Filter: up.field_0 IS NOT NULL [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
-  Projection: up.timestamp, up.field_0, regexp_replace(up.tag_0, Utf8("^(?s:(.*):.*)$"), Utf8("$1")) AS foo, up.tag_0, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
+  Projection: up.timestamp, up.field_0, CASE WHEN regexp_like(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$")) THEN nullif(regexp_replace(coalesce(up.tag_0, Utf8("")), Utf8("^(?s:(.*):.*)$"), Utf8("$1")), Utf8("")) ELSE Utf8(NULL) END AS foo, up.tag_0, __promql_metric_name [timestamp:Timestamp(ms), field_0:Float64;N, foo:Utf8;N, tag_0:Utf8, __promql_metric_name:Utf8]
     Projection: up.tag_0, up.timestamp, up.field_0, Utf8("up") AS __promql_metric_name [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N, __promql_metric_name:Utf8]
       PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[timestamp] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
         PromSeriesDivide: tags=["tag_0"] [tag_0:Utf8, timestamp:Timestamp(ms), field_0:Float64;N]
@@ -9972,7 +9972,7 @@ async fn test_histogram_quantile_folds_with_identity_then_drops_it() {
 }
 
 #[tokio::test]
-async fn test_sort_by_label_semantic_name_without_marker_keeps_missing_label_error() {
+async fn test_sort_by_label_semantic_name_without_marker_sorts_as_absent() {
     let state = build_query_engine_state();
     let provider = || async {
         build_test_table_provider_with_distinct_tags(&[("collision_metric", &["__name__", "job"])])
@@ -9996,18 +9996,26 @@ async fn test_sort_by_label_semantic_name_without_marker_keeps_missing_label_err
             .is_none()
     );
     for function in ["sort_by_label", "sort_by_label_desc"] {
+        // The name is gone, so the label the sort reads is absent: it sorts as NULL among the
+        // labels the series carry instead of failing the query, and the physical `__name__`
+        // column of the input is never read as the semantic name.
         let query = format!(r#"{function}(abs(collision_metric), "__name__")"#);
-        let error =
-            PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
-                .await
-                .unwrap_err();
+        let plan = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
+            .await
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let plan_text = plan.display_indent().to_string();
         assert!(
-            matches!(
-                error,
-                crate::promql::error::Error::DataFusionPlanning { .. }
-            ),
-            "{error}"
+            plan_text.contains(&format!(
+                "Sort: Utf8(NULL) {} NULLS",
+                if function.ends_with("desc") {
+                    "DESC"
+                } else {
+                    "ASC"
+                }
+            )),
+            "{query}: {plan_text}"
         );
+
         let query = format!(r#"{function}(collision_metric, "__name__")"#);
         let plan = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
             .await
@@ -10889,6 +10897,60 @@ async fn test_name_only_vector_matching_does_not_broadcast() {
     }
 }
 
+/// Dropping the metric name can leave several series of one evaluation step with the same label
+/// set - `or on(__name__)` keeps both operands, which only the name told apart. A vector cannot
+/// hold those rows, so the query is refused instead of the HTTP layer silently picking one of
+/// them; a set of series the name did not distinguish still executes.
+#[tokio::test]
+async fn test_dropped_metric_name_rejects_duplicate_label_sets() {
+    let state = build_query_engine_state();
+    // Both metrics carry the same ordinary label `tag="shared"` at `ts=1000` and differ only in
+    // their name, so `or on(__name__)` keeps both of them.
+    for query in [
+        "abs(left_metric or on(__name__) right_metric)",
+        "-(left_metric or on(__name__) right_metric)",
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            binary_metric_name_table_provider(),
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        assert!(
+            PromPlanner::metric_name_column(plan.schema())
+                .unwrap()
+                .is_none(),
+            "{query}: the operands of the function must have dropped their names"
+        );
+        let err = execute_err(plan, &state).await;
+        assert!(
+            err.contains("vector cannot contain metrics with the same labelset"),
+            "{query}: expected the duplicate-label-set refusal, got {err}"
+        );
+    }
+
+    // Matching on the ordinary label alone selects one of the operands, so the result holds one
+    // series per label set - and dropping the name of an input that only ever had one series per
+    // label set is always fine.
+    for (query, expected) in [
+        ("abs(left_metric or right_metric)", vec![2.0]),
+        ("abs(left_metric + right_metric)", vec![5.0]),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            binary_metric_name_table_provider(),
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_not_in_batches(&batches);
+        assert_eq!(values(&batches, &sample_column), expected, "{query}");
+    }
+}
+
 /// `or` keeps every chosen row's own identity, including the typed NULL of an operand that
 /// dropped its name, and never invents an identity when neither operand has one.
 #[tokio::test]
@@ -11212,6 +11274,168 @@ async fn test_label_functions_semantic_name_destination_without_input_identity()
     }
 }
 
+/// `label_join` with no source labels joins nothing, which is the empty string: the semantic
+/// destination has no name left and the destination resolves like every other one instead of
+/// being written under a physical column of that name.
+#[tokio::test]
+async fn test_label_join_without_source_labels_removes_semantic_name() {
+    let state = build_query_engine_state();
+    for query in [
+        r#"label_join(cv_metric, "__name__", "")"#,
+        r#"label_join(cv_metric, "__name__", "-")"#,
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        // The identity the destination names is still the marked one, holdng the value that
+        // removes the name - an absent label - and no unmarked column takes its place.
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: the destination must be the marked identity"));
+        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
+        assert!(
+            plan.schema()
+                .field_with_unqualified_name(METRIC_NAME)
+                .is_err(),
+            "{query}: no physical column may be projected for the semantic name: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_metric_name_in_batches(&batches, &marker.name);
+        assert_eq!(
+            string_values(&batches, &marker.name),
+            vec![None, None, None],
+            "{query}: the joined name is absent"
+        );
+        assert_eq!(
+            cv_rows(&batches, &sample_column),
+            vec![
+                ("k0".to_string(), 1_000, 1.0),
+                ("k1".to_string(), 1_000, 2.0),
+                ("k2".to_string(), 1_000, 1.0),
+            ],
+            "{query}: the samples must be untouched"
+        );
+    }
+}
+
+/// The internal metric-name column and the metric engine's internal columns are physical
+/// details, not labels: a `by(...)` label or a `label_join` source that names one is a label the
+/// series do not carry, while a user column of that very name stays an ordinary label.
+#[tokio::test]
+async fn test_internal_metric_name_column_is_not_an_ordinary_label() {
+    let state = build_query_engine_state();
+
+    // `sum by (__promql_metric_name)` groups by a label no series carries, exactly like `sum`,
+    // instead of projecting the internal marker as a group key.
+    let query = "sum by (__promql_metric_name) (cv_metric)";
+    for provider in [
+        build_count_values_table_provider().await,
+        build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await,
+    ] {
+        let plan = PromPlanner::stmt_to_plan(provider, &operator_eval_stmt(query), &state)
+            .await
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
+        assert!(
+            PromPlanner::metric_name_column(plan.schema())
+                .unwrap()
+                .is_none(),
+            "{query}: the internal marker must not be a group key: {}",
+            plan.display_indent()
+        );
+    }
+
+    // The group keys of the two inputs tell the two resolutions apart: the plain metric has no
+    // such label and aggregates into a single series, while the collision metric groups by its
+    // user column of that name.
+    for (collision, expected) in [(false, vec![4.0]), (true, vec![1.0, 1.0, 1.0])] {
+        let provider = if collision {
+            build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await
+        } else {
+            build_count_values_table_provider().await
+        };
+        let plan = PromPlanner::stmt_to_plan(provider, &operator_eval_stmt(query), &state)
+            .await
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        // The identity is gone in both cases: the plain metric has no such label to group by,
+        // and the collision metric groups by its unmarked user column, which is a label.
+        if !collision {
+            assert_metric_name_not_in_batches(&batches);
+        } else {
+            assert!(
+                batches.iter().all(|batch| batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none())),
+                "{query}: no field may carry the metric-name role"
+            );
+        }
+        let mut actual = values(&batches, &sample_column);
+        actual.sort_by(f64::total_cmp);
+        assert_eq!(actual, expected, "{query}: collision={collision}");
+    }
+
+    // `label_join` reads the same label: the internal marker is absent - it joins as the empty
+    // string, i.e. the destination stays NULL - while a user column of that name is read.
+    let query = r#"label_join(cv_metric, "copied", "", "__promql_metric_name")"#;
+    for (collision, expected) in [
+        (false, vec![None, None, None]),
+        (
+            true,
+            vec![
+                Some("k0".to_string()),
+                Some("k1".to_string()),
+                Some("k2".to_string()),
+            ],
+        ),
+    ] {
+        let provider = if collision {
+            build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await
+        } else {
+            build_count_values_table_provider().await
+        };
+        let plan = PromPlanner::stmt_to_plan(provider, &operator_eval_stmt(query), &state)
+            .await
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
+
+        // `label_join` keeps the identity of its input, under whatever name that identity has.
+        let marker = PromPlanner::metric_name_column(plan.schema())
+            .unwrap()
+            .unwrap_or_else(|| panic!("{query}: the identity must survive"));
+        assert_eq!(
+            marker.name,
+            if collision {
+                format!("{PROMQL_METRIC_NAME_COLUMN}_")
+            } else {
+                PROMQL_METRIC_NAME_COLUMN.to_string()
+            },
+            "{query}"
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        let mut copied = string_values(&batches, "copied");
+        copied.sort();
+        assert_eq!(copied, expected, "{query}: collision={collision}");
+        assert_eq!(
+            string_values(&batches, &marker.name)
+                .iter()
+                .collect::<Vec<_>>(),
+            vec![&Some("cv_metric".to_string()); 3],
+            "{query}"
+        );
+    }
+}
+
 /// A physical label named `__name__` is an ordinary label, not the semantic metric name: the
 /// semantic source resolves through the marked identity instead, and the semantic destination
 /// overwrites the identity, while the physical label keeps its values and its unmarked metadata.
@@ -11382,12 +11606,12 @@ async fn test_label_functions_semantic_name_destination_avoids_physical_collisio
 }
 
 /// An ordinary `label_replace`/`label_join` - neither source nor destination names `__name__` -
-/// keeps the existing handling: the destination label receives `regexp_replace` output even
-/// without a match, a missing component of a join joins as the empty string and keeps the
-/// separator it joins with, the historical shortcuts stay in place, and an already present
-/// destination is still refused.
+/// follows the Prometheus semantics of the rebased planner: the destination is the expanded
+/// replacement when the anchored regex matches the source, a series whose source does not match
+/// keeps the destination it already had, an empty expansion removes it, and a source the input
+/// does not carry is the empty string the regex is matched against.
 #[tokio::test]
-async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
+async fn test_label_functions_ordinary_only_follows_prometheus_semantics() {
     let state = build_query_engine_state();
     // (query, destination column, expected `(series tag, destination value)` rows)
     for (query, column, expected) in [
@@ -11401,19 +11625,23 @@ async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
                 Some("renamed_2".to_string()),
             ],
         ),
-        // The anchored regex matches nothing, so the destination keeps the source it replaced.
+        // The anchored regex matches nothing, so the destination the input does not carry is NULL
+        // instead of the source value the replacement left unchanged.
         (
             r#"label_replace(cv_metric, "copy", "renamed", "k", "nomatch")"#,
             "copy",
-            vec![
-                Some("k0".to_string()),
-                Some("k1".to_string()),
-                Some("k2".to_string()),
-            ],
+            vec![None, None, None],
         ),
-        // A missing source with a non-empty replacement keeps the existing shortcut.
+        // An empty regex matches the empty source only, which no series of the input carries.
         (
-            r#"label_replace(cv_metric, "copy", "addressed", "missing_label", "nomatch")"#,
+            r#"label_replace(cv_metric, "copy", "renamed", "k", "")"#,
+            "copy",
+            vec![None, None, None],
+        ),
+        // A missing source label is the empty string, and a regex matching it writes its
+        // replacement on every series.
+        (
+            r#"label_replace(cv_metric, "copy", "addressed", "missing_label", "()")"#,
             "copy",
             vec![
                 Some("addressed".to_string()),
@@ -11453,8 +11681,9 @@ async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
         );
     }
 
-    // A present source and an empty regex still add no destination label at all.
-    let query = r#"label_replace(cv_metric, "copy", "renamed", "k", "")"#;
+    // A destination the input already carries is overwritten on a match - never refused as an
+    // invalid destination - and a series the regex does not match keeps its own value.
+    let query = r#"label_replace(cv_metric, "k", "fixed", "k", "k1")"#;
     let plan = PromPlanner::stmt_to_plan(
         build_count_values_table_provider().await,
         &operator_eval_stmt(query),
@@ -11462,36 +11691,70 @@ async fn test_label_functions_ordinary_only_keeps_existing_behavior() {
     )
     .await
     .unwrap_or_else(|err| panic!("{query}: {err}"));
-    assert!(
-        plan.schema().field_with_unqualified_name("copy").is_err(),
-        "{query}: {}",
-        plan.display_indent()
-    );
-    let sample_column = float_sample_column(&plan);
     let (_, batches) = execute(plan, &state).await;
+    let mut labels = string_values(&batches, "k");
+    labels.sort();
     assert_eq!(
-        cv_rows(&batches, &sample_column),
+        labels,
         vec![
-            ("k0".to_string(), 1_000, 1.0),
-            ("k1".to_string(), 1_000, 2.0),
-            ("k2".to_string(), 1_000, 1.0),
+            Some("fixed".to_string()),
+            Some("k0".to_string()),
+            Some("k2".to_string()),
         ],
         "{query}"
     );
 
-    // An already present destination is still refused on the ordinary path.
-    let query = r#"label_replace(cv_metric, "k", "x", "k", "(.*)")"#;
-    let err = PromPlanner::stmt_to_plan(
+    // The empty source either does not match the regex or expands to nothing, so the input keeps
+    // every series and gets no destination at all.
+    for query in [
+        r#"label_replace(cv_metric, "x", "new", "missing_label", ".+")"#,
+        r#"label_replace(cv_metric, "x", "$1", "missing_label", "(.*)")"#,
+        r#"label_replace(cv_metric, "copy", "addressed", "missing_label", "nomatch")"#,
+        r#"label_replace(cv_metric, "copy", "", "missing_label", "nomatch")"#,
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
+        let destination = if query.contains("\"x\"") { "x" } else { "copy" };
+        assert!(
+            plan.schema()
+                .field_with_unqualified_name(destination)
+                .is_err(),
+            "{query}: {}",
+            plan.display_indent()
+        );
+
+        let sample_column = float_sample_column(&plan);
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(
+            cv_rows(&batches, &sample_column),
+            vec![
+                ("k0".to_string(), 1_000, 1.0),
+                ("k1".to_string(), 1_000, 2.0),
+                ("k2".to_string(), 1_000, 1.0),
+            ],
+            "{query}"
+        );
+    }
+
+    // Overwriting the only label of three series with one constant collapses them onto a single
+    // label set, which is refused while the plan runs.
+    let query = r#"label_replace(cv_metric, "k", "x", "k", ".+")"#;
+    let plan = PromPlanner::stmt_to_plan(
         build_count_values_table_provider().await,
         &operator_eval_stmt(query),
         &state,
     )
     .await
-    .expect_err(query)
-    .to_string();
+    .unwrap_or_else(|err| panic!("{query}: {err}"));
+    let err = execute_err(plan, &state).await;
     assert!(
-        err.contains("Invalid destination label name in label_replace(): k"),
-        "{query}: expected the existing-destination refusal, got {err}"
+        err.contains("vector cannot contain metrics with the same labelset"),
+        "{query}: expected the duplicate-label-set refusal, got {err}"
     );
 }
 
@@ -11783,39 +12046,21 @@ async fn test_label_replace_semantic_source_into_existing_ordinary_label() {
     }
 }
 
-/// The ordinary `label_replace` destination keeps its historical value when the anchored regex
-/// does not match: the un-replaced source label, not a NULL. This is the pre-existing behavior
-/// of the function on its ordinary path.
+/// The ordinary `label_replace` destination keeps the value of its series when the anchored regex
+/// does not match: the series stays unchanged, which is why a destination the input already
+/// carries is overwritten on a match instead of being refused.
 #[tokio::test]
-async fn test_label_replace_ordinary_destination_keeps_existing_value() {
+async fn test_label_replace_ordinary_destination_keeps_its_value() {
     let state = build_query_engine_state();
-    // (query, expected `(series tag, destination value)` rows)
+    // (query, expected values of `k`, one per series)
     for (query, expected) in [
         (
-            r#"label_replace(cv_metric, "copy", "renamed_$1", "k", "k(.)")"#,
-            vec![
-                Some("renamed_0".to_string()),
-                Some("renamed_1".to_string()),
-                Some("renamed_2".to_string()),
-            ],
+            r#"label_replace(cv_metric, "k", "renamed_$1", "k", "k(.)")"#,
+            vec!["renamed_0", "renamed_1", "renamed_2"],
         ),
-        // No match: the destination holds the source value the replacement did not change.
         (
-            r#"label_replace(cv_metric, "copy", "renamed", "k", "nomatch")"#,
-            vec![
-                Some("k0".to_string()),
-                Some("k1".to_string()),
-                Some("k2".to_string()),
-            ],
-        ),
-        // A source the input does not carry keeps the historical shortcut.
-        (
-            r#"label_replace(cv_metric, "copy", "addressed", "missing_label", "nomatch")"#,
-            vec![
-                Some("addressed".to_string()),
-                Some("addressed".to_string()),
-                Some("addressed".to_string()),
-            ],
+            r#"label_replace(cv_metric, "k", "renamed", "k", "nomatch")"#,
+            vec!["k0", "k1", "k2"],
         ),
     ] {
         let plan = PromPlanner::stmt_to_plan(
@@ -11827,41 +12072,15 @@ async fn test_label_replace_ordinary_destination_keeps_existing_value() {
         .unwrap_or_else(|err| panic!("{query}: {err}"));
 
         let (_, batches) = execute(plan, &state).await;
+        let mut labels = string_values(&batches, "k");
+        labels.sort();
         assert_eq!(
-            tagged_string_rows(&batches, "copy"),
+            labels,
             expected
                 .iter()
-                .enumerate()
-                .map(|(index, value)| (format!("k{index}"), value.clone()))
+                .map(|value| Some((*value).to_string()))
                 .collect::<Vec<_>>(),
             "{query}"
         );
     }
-
-    // An empty replacement with a missing source keeps everything unchanged, so no destination
-    // label exists at all and the samples stay untouched.
-    let query = r#"label_replace(cv_metric, "copy", "", "missing_label", "nomatch")"#;
-    let plan = PromPlanner::stmt_to_plan(
-        build_count_values_table_provider().await,
-        &operator_eval_stmt(query),
-        &state,
-    )
-    .await
-    .unwrap_or_else(|err| panic!("{query}: {err}"));
-    assert!(
-        plan.schema().field_with_unqualified_name("copy").is_err(),
-        "{query}: {}",
-        plan.display_indent()
-    );
-    let sample_column = float_sample_column(&plan);
-    let (_, batches) = execute(plan, &state).await;
-    assert_eq!(
-        cv_rows(&batches, &sample_column),
-        vec![
-            ("k0".to_string(), 1_000, 1.0),
-            ("k1".to_string(), 1_000, 2.0),
-            ("k2".to_string(), 1_000, 1.0),
-        ],
-        "{query}"
-    );
 }
