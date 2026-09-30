@@ -200,6 +200,9 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Unsupported operation: {}", operation))]
+    UnsupportedOperation { operation: String },
+
     #[snafu(display("Invalid query: {}", reason))]
     InvalidQuery {
         reason: String,
@@ -767,7 +770,7 @@ impl ErrorExt for Error {
             | InvalidPromRemoteReadQueryResult { .. }
             | OtlpMetricModeIncompatible { .. } => StatusCode::IllegalState,
 
-            UnsupportedDataType { .. } => StatusCode::Unsupported,
+            UnsupportedDataType { .. } | UnsupportedOperation { .. } => StatusCode::Unsupported,
 
             #[cfg(not(windows))]
             UpdateJemallocMetrics { .. } => StatusCode::Internal,

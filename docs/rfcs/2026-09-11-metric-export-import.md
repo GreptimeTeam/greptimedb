@@ -390,13 +390,33 @@ validation, schema-option inheritance and target metadata resolution. Bound the
 request size and the importer's DDL buffering separately.
 
 The production CLI needs an authenticated server operation that checks CREATE
-authorization for every member and reuses the ordinary DDL path. Transport,
-capability discovery and request limits must be agreed before accepting this
-interface. Initially bound a batch to 128 statements and 1 MiB of SQL, with an
-explicit oversized-statement error; separately bound the importer's parsed DDL
-buffer. A target without batch-DDL capability uses ordinary DDL if it supports
+authorization for every member and reuses the ordinary DDL path. Bound the
+importer's parsed DDL buffer separately from the server request limits below.
+A target without batch-DDL capability uses ordinary DDL if it supports
 the snapshot's data layout. Do not retry an ambiguously completed batch through
 another path.
+
+The server operation is `POST /v1/ddl/logical-tables` with an
+`application/x-www-form-urlencoded` body containing `sql` and optional `db`.
+`db` uses the same catalog/schema interpretation and defaults as `/v1/sql`.
+Authenticated `GET /v1/capabilities` advertises `metric_batch_ddl: 1` when the
+SQL handler supports the operation, independently of packed import/export.
+The form body is limited to 4 MiB before decoding, or the configured HTTP body
+limit when that limit is stricter. Decoded SQL is limited to 1 MiB and 1–128
+statements. Only explicit Metric logical CREATE TABLE statements in one
+catalog/schema with one literal `on_physical_table` value are accepted;
+duplicate normalized target names are rejected.
+
+All members pass SQL interception, authorization and ordinary CREATE preparation
+before one logical-table batch procedure is submitted. Success uses the normal
+GreptimeDB v1 response with one `affectedrows: 0` output per input statement in
+order; this is CREATE's output, not a count of newly created tables. A failure
+returns one error without a partial success list. Validation failures before
+submission have no DDL side effects. Once submitted, the existing procedure may
+have applied some or all changes even if the HTTP request times out or disconnects;
+there is no cross-table rollback guarantee. `IF NOT EXISTS` keeps ordinary CREATE
+semantics. The operation does not regroup requests or retry through single-table
+CREATE.
 
 ## Packed data COPY
 

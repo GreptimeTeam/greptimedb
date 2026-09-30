@@ -782,6 +782,98 @@ impl Instance {
         query_interceptor.post_execute(Output { data, meta }, query_ctx)
     }
 
+    async fn batch_create_logical_tables(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> Result<Vec<Output>> {
+        use servers::query_handler::sql::{
+            MAX_LOGICAL_TABLE_DDL_BYTES, MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+        };
+        ensure!(!self.is_suspended(), error::SuspendedSnafu);
+        ensure!(
+            query.len() <= MAX_LOGICAL_TABLE_DDL_BYTES,
+            InvalidSqlSnafu {
+                err_msg: "logical-table DDL exceeds 1 MiB"
+            }
+        );
+        let interceptor = self.plugins.get::<SqlQueryInterceptorRef<Error>>();
+        let interceptor = interceptor.as_ref();
+        let query = interceptor.pre_parsing(query, query_ctx.clone())?;
+        ensure!(
+            query.len() <= MAX_LOGICAL_TABLE_DDL_BYTES,
+            InvalidSqlSnafu {
+                err_msg: "logical-table DDL exceeds 1 MiB"
+            }
+        );
+        let statements = parse_stmt(query.as_ref(), query_ctx.sql_dialect()).map_err(|_| {
+            InvalidSqlSnafu {
+                err_msg: "invalid logical-table DDL",
+            }
+            .build()
+        })?;
+        ensure!(
+            !statements.is_empty() && statements.len() <= MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+            InvalidSqlSnafu {
+                err_msg: "logical-table batch requires 1 to 128 statements"
+            }
+        );
+        let original_statements = interceptor.map(|_| statements.clone());
+        let statements = interceptor.post_parsing(statements, query_ctx.clone())?;
+        ensure!(
+            !statements.is_empty() && statements.len() <= MAX_LOGICAL_TABLE_DDL_STATEMENTS,
+            InvalidSqlSnafu {
+                err_msg: "logical-table batch requires 1 to 128 statements"
+            }
+        );
+        ensure!(
+            original_statements
+                .as_ref()
+                .is_none_or(|original| original == &statements)
+                || statements
+                    .iter()
+                    .map(|s| s.to_string().len())
+                    .sum::<usize>()
+                    + statements.len()
+                    - 1
+                    <= MAX_LOGICAL_TABLE_DDL_BYTES,
+            InvalidSqlSnafu {
+                err_msg: "rewritten logical-table DDL exceeds 1 MiB"
+            }
+        );
+        for statement in &statements {
+            ensure!(
+                matches!(statement, Statement::CreateTable(_)),
+                InvalidSqlSnafu {
+                    err_msg: "batch requires explicit Metric logical CREATE TABLE statements"
+                }
+            );
+            interceptor.pre_execute(Some(statement), None, query_ctx.clone())?;
+        }
+        for statement in &statements {
+            self.check_sql_permission(statement, &query_ctx).await?;
+            check_permission(self.plugins.clone(), statement, &query_ctx)?;
+        }
+        let count = statements.len();
+        let creates = statements
+            .into_iter()
+            .filter_map(|statement| {
+                if let Statement::CreateTable(create) = statement {
+                    Some(create)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        self.statement_executor
+            .batch_create_logical_tables(creates, query_ctx.clone())
+            .await
+            .context(TableOperationSnafu)?;
+        (0..count)
+            .map(|_| interceptor.post_execute(Output::new_with_affected_rows(0), query_ctx.clone()))
+            .collect()
+    }
+
     #[tracing::instrument(skip_all, name = "SqlQueryHandler::do_query")]
     async fn do_query_inner(&self, query: &str, query_ctx: QueryContextRef) -> Vec<Result<Output>> {
         if self.is_suspended() {
@@ -1113,6 +1205,21 @@ impl Instance {
 
 #[async_trait]
 impl SqlQueryHandler for Instance {
+    fn supports_metric_batch_ddl(&self) -> bool {
+        true
+    }
+
+    async fn create_logical_tables(
+        &self,
+        query: &str,
+        query_ctx: QueryContextRef,
+    ) -> server_error::Result<Vec<Output>> {
+        self.batch_create_logical_tables(query, query_ctx)
+            .await
+            .map_err(BoxedError::new)
+            .context(ExecuteQuerySnafu)
+    }
+
     async fn do_query(
         &self,
         query: &str,
@@ -4142,6 +4249,133 @@ mod tests {
             StatusCode::TableNotFound,
             "dropping a non-existent view without IF EXISTS must report TableNotFound, got {err}"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logical_ddl_validates_and_authorizes_rewritten_batch_before_submission()
+    -> TestResult<()> {
+        struct Rewrite(&'static str);
+        impl SqlQueryInterceptor for Rewrite {
+            type Error = Error;
+            fn pre_parsing<'a>(
+                &self,
+                query: &'a str,
+                _: QueryContextRef,
+            ) -> Result<std::borrow::Cow<'a, str>> {
+                Ok(if self.0 == "sql_bytes" {
+                    std::borrow::Cow::Owned(format!("{query}{}", " ".repeat(1024 * 1024 + 1)))
+                } else {
+                    std::borrow::Cow::Borrowed(query)
+                })
+            }
+            fn pre_execute(
+                &self,
+                statement: Option<&Statement>,
+                _: Option<&LogicalPlan>,
+                _: QueryContextRef,
+            ) -> Result<()> {
+                ensure!(
+                    !(self.0 == "pre_execute"
+                        && matches!(statement,
+                    Some(Statement::CreateTable(create)) if create.name.to_string() == "allowed2")),
+                    InvalidSqlSnafu {
+                        err_msg: "second member rejected by interceptor"
+                    }
+                );
+                Ok(())
+            }
+            fn post_parsing(
+                &self,
+                mut statements: Vec<Statement>,
+                _: QueryContextRef,
+            ) -> Result<Vec<Statement>> {
+                match self.0 {
+                    "target" => {
+                        statements[1] = parse_one_sql(
+                            "CREATE TABLE denied (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')",
+                        )
+                    }
+                    "count" => statements = (0..129).map(|i| parse_one_sql(&format!(
+                        "CREATE TABLE allowed_{i} (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')"
+                    ))).collect(),
+                    "type" => statements[1] = parse_one_sql("SELECT 1"),
+                    "ast_bytes" => {
+                        if let Statement::CreateTable(create) = &mut statements[1] {
+                            create.name =
+                                ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                                    sqlparser::ast::Ident::new("t".repeat(1024 * 1024)),
+                                )]);
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(statements)
+            }
+        }
+        for mode in [
+            "none",
+            "target",
+            "count",
+            "type",
+            "sql_bytes",
+            "ast_bytes",
+            "pre_execute",
+            "cross_catalog",
+            "valid",
+        ] {
+            let catalog =
+                catalog::memory::MemoryCatalogManager::new_with_table(test_table(1024, "source")?);
+            let executor = Arc::new(MockProcedureExecutor::new(catalog.clone()));
+            let plugins = Plugins::new();
+            plugins.insert::<PermissionCheckerRef>(Arc::new(RejectUnresolvedPermissionChecker));
+            plugins.insert::<SqlQueryInterceptorRef<Error>>(Arc::new(Rewrite(mode)));
+            plugins.insert(QueryOptions {
+                disallow_cross_catalog_query: mode == "cross_catalog",
+            });
+            let instance = test_instance_with_catalog_manager(
+                catalog,
+                test_table(1025, "target")?,
+                plugins,
+                None,
+                executor.clone(),
+            )
+            .await?;
+            let create = |name| {
+                format!(
+                    "CREATE TABLE {name} (ts TIMESTAMP TIME INDEX) ENGINE=metric WITH (on_physical_table='phy')"
+                )
+            };
+            let sql = format!(
+                "{};{}",
+                create("allowed"),
+                create(match mode {
+                    "none" => "denied",
+                    "cross_catalog" => "other.public.allowed2",
+                    _ => "allowed2",
+                })
+            );
+            let result =
+                SqlQueryHandler::create_logical_tables(&instance, &sql, QueryContext::arc()).await;
+            if matches!(mode, "none" | "target") {
+                assert_permission_denied(result);
+            } else {
+                assert_eq!(
+                    result.unwrap_err().status_code(),
+                    match mode {
+                        "valid" => StatusCode::Unsupported,
+                        "cross_catalog" => StatusCode::AccessDenied,
+                        _ => StatusCode::InvalidArguments,
+                    },
+                    "{mode}"
+                );
+            }
+            assert_eq!(
+                executor.submitted.lock().unwrap().len(),
+                usize::from(mode == "valid"),
+                "{mode}"
+            );
+        }
         Ok(())
     }
 
