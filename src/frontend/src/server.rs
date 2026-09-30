@@ -215,6 +215,20 @@ where
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
+        // The internal gRPC server is only ever called by the cluster's own
+        // components, never by a browser, so it never serves CORS, whatever the
+        // configuration says. Enforcing it here rather than at the call site keeps
+        // any future internal caller covered.
+        let grpc = if external {
+            grpc.clone()
+        } else {
+            GrpcOptions {
+                enable_cors: false,
+                ..grpc.clone()
+            }
+        };
+        let grpc = &grpc;
+
         let builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
@@ -1028,5 +1042,92 @@ mod tests {
 
         // Assert
         assert!(health_check.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_internal_grpc_server_never_serves_cors() {
+        // `enable_cors` is forced off for the internal gRPC server, so even setting
+        // it in the configuration cannot open the internal listener to browsers.
+        let options = FrontendOptions {
+            http: HttpOptions {
+                addr: "127.0.0.1:0".to_string(),
+                ..Default::default()
+            },
+            grpc: GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            },
+            internal_grpc: Some(GrpcOptions {
+                enable_cors: true,
+                ..GrpcOptions::default().with_bind_addr("127.0.0.1:0")
+            }),
+            mysql: crate::service_config::MysqlOptions {
+                enable: false,
+                ..Default::default()
+            },
+            postgres: crate::service_config::PostgresOptions {
+                enable: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let meta_client = Arc::new(
+            MetaClientBuilder::new(0, Role::Frontend)
+                .enable_procedure()
+                .build(),
+        );
+        let instance = Arc::new(
+            FrontendBuilder::new_test(&options, meta_client)
+                .try_build()
+                .await
+                .unwrap(),
+        );
+        let mut services = Services::new(options, instance, Default::default())
+            .build()
+            .unwrap();
+
+        services.start_all().await.unwrap();
+        let public_addr = services.addr(GRPC_SERVER).unwrap();
+        let internal_addr = services.addr("INTERNAL_GRPC_SERVER").unwrap();
+        let public = send_cors_preflight(public_addr).await;
+        let internal = send_cors_preflight(internal_addr).await;
+        services.shutdown_all().await.unwrap();
+
+        // The same option, enabled in both sections, is answered on the public
+        // listener and ignored on the internal one.
+        assert!(public.contains("access-control-allow-origin"), "{public}");
+        assert!(
+            !internal.contains("access-control-allow-origin"),
+            "{internal}"
+        );
+    }
+
+    /// Sends the `OPTIONS` preflight that a browser sends before a gRPC-Web call,
+    /// and returns the response head, lowercased.
+    async fn send_cors_preflight(addr: std::net::SocketAddr) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let request = "OPTIONS /greptime.v1.HealthCheck/Check HTTP/1.1\r\n\
+                       Host: 127.0.0.1\r\n\
+                       Origin: https://example.com\r\n\
+                       Access-Control-Request-Method: POST\r\n\
+                       Access-Control-Request-Headers: content-type,x-grpc-web\r\n\
+                       Connection: close\r\n\r\n";
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while let Ok(n) = stream.read(&mut chunk).await {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                break;
+            }
+        }
+        String::from_utf8_lossy(&buf).to_lowercase()
     }
 }
