@@ -21,8 +21,23 @@ use serde_json::{Map, Value, json};
 
 use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Scenario, Table};
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
-use crate::query_regression_runner::sql::{http_post_prom_range_query, http_post_sql, sql_ident};
+use crate::query_regression_runner::sql::{
+    extract_rows, http_post_multi_statement_sql, http_post_prom_range_query, http_post_sql,
+    row_u64, sql_ident, sql_string,
+};
 use crate::query_regression_runner::{MeasureArgs, Result};
+
+/// How long the measurement of a direct-SST case waits for the region statistics of its tables
+/// to settle before it measures anything.
+///
+/// Datanodes report the role and the size of their regions on every heartbeat (`interval` of the
+/// heartbeat options, three seconds by default) and a region is reported as a leader with a
+/// non-zero size only after the metasrv granted its lease and the datanode applied the reported
+/// role. A rewrite that prices tables by those statistics, like the nested broadcast join, sees
+/// nothing before that, so a case would measure the un-rewritten plan without noticing.
+const REGION_STATS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Poll interval of [`wait_for_region_statistics`].
+const REGION_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     if !args.http_timeout.is_finite() || args.http_timeout < 0.0 {
@@ -49,17 +64,28 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     let client = Client::builder()
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
-    let base = run_target(args.base_http_port, &tables, &configured_queries, &client).await;
-    let candidate = run_target(
+    let direct_fixture = matches!(scenario_kind(&plan), Some("direct_readable_sst"));
+    let base = run_target(
+        args.base_http_port,
+        &tables,
+        &configured_queries,
+        &client,
+        false,
+        direct_fixture,
+    )
+    .await;
+    let candidate_target = run_target(
         args.candidate_http_port,
         &tables,
         &configured_queries,
         &client,
+        true,
+        direct_fixture,
     )
     .await;
-    let thresholds = enforce_thresholds(&configured_queries, &base, &candidate)?;
+    let thresholds = enforce_thresholds(&configured_queries, &base, &candidate_target)?;
     let status = if base.status == "failed"
-        || candidate.status == "failed"
+        || candidate_target.status == "failed"
         || thresholds
             .iter()
             .any(|threshold| threshold["status"] == "failed")
@@ -75,7 +101,7 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         "queries": configured_queries,
         "query_mode": "endpoint",
         "http_timeout": args.http_timeout,
-        "targets": [target_report("base", args.base_http_port, base), target_report("candidate", args.candidate_http_port, candidate)],
+        "targets": [target_report("base", args.base_http_port, base), target_report("candidate", args.candidate_http_port, candidate_target)],
         "thresholds": thresholds,
         "status": status,
     });
@@ -109,7 +135,7 @@ fn target_report(name: &str, http_port: u16, result: QueryResult) -> Value {
 /// Routes a configured query to the right endpoint: `prom_http` queries hit
 /// the Prometheus HTTP range API (which exercises the Prometheus JSON response
 /// builder), everything else goes through `/v1/sql` (including `TQL ANALYZE`).
-async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Value {
+async fn post_query(client: &Client, port: u16, query: &Query, db: &str, candidate: bool) -> Value {
     if query.kind.as_deref() == Some("prom_http") {
         http_post_prom_range_query(
             client,
@@ -122,8 +148,118 @@ async fn post_query(client: &Client, port: u16, query: &Query, db: &str) -> Valu
         )
         .await
     } else {
-        http_post_sql(client, port, &query.query, db).await
+        let sql = query.request_sql(candidate);
+        if sql == query.query {
+            http_post_sql(client, port, &sql, db).await
+        } else {
+            // Statements of one request share the session context of that request, which is how
+            // a session setting such as `SET experimental_dist_join = true` reaches the query of
+            // the same request.
+            http_post_multi_statement_sql(client, port, &sql, db).await
+        }
     }
+}
+
+/// The scenario kind of the normalized plan, if it carries one.
+fn scenario_kind(plan: &Value) -> Option<&str> {
+    plan.get("scenario")?.get("kind")?.as_str()
+}
+
+/// The region statistics of `table`: `(regions, ready_regions)`, where a ready region has an
+/// ordinary leader report with a non-zero disk size.
+///
+/// This is the shape a rewrite that prices tables by region statistics needs, e.g. the cost
+/// heuristic of the nested broadcast join: a region that has not reported, reports zero bytes, or
+/// is not served by a leader makes the statistics of its table unusable.
+async fn region_statistics(client: &Client, port: u16, db: &str, table: &str) -> Value {
+    let sql = format!(
+        "SELECT count(*) AS regions, \
+                sum(CASE WHEN region_role = 'Leader' AND disk_size > 0 THEN 1 ELSE 0 END) \
+                    AS ready_regions \
+         FROM information_schema.region_statistics \
+         WHERE table_id = (SELECT table_id FROM information_schema.tables \
+                           WHERE table_schema = {} AND table_name = {})",
+        sql_string(db),
+        sql_string(table)
+    );
+    http_post_sql(client, port, &sql, db).await
+}
+
+/// Waits until every table of a direct-SST case has one leader report with a non-zero size per
+/// region, and returns the samples of the last round plus an error sample when the statistics did
+/// not settle in time.
+///
+/// The measurement of a case that depends on those statistics would otherwise start before the
+/// datanode reported them and silently measure the plan the case is not about.
+async fn wait_for_region_statistics(
+    client: &Client,
+    port: u16,
+    tables: &[Table],
+) -> (Vec<Value>, Option<Value>) {
+    let deadline = tokio::time::Instant::now() + REGION_STATS_TIMEOUT;
+    loop {
+        let mut samples = Vec::with_capacity(tables.len());
+        let mut pending = Vec::new();
+        for table in tables {
+            let sample = region_statistics(client, port, &table.database, &table.name).await;
+            match sample.get("response").and_then(parse_region_statistics) {
+                Some((regions, ready)) if regions > 0 && ready == regions => {}
+                Some((regions, ready)) => pending.push(json!({
+                    "table": table.name,
+                    "regions": regions,
+                    "ready_regions": ready,
+                })),
+                None => {
+                    return (
+                        samples,
+                        Some(json!({
+                            "sql": "information_schema.region_statistics",
+                            "phase": "region_statistics",
+                            "table": table.name,
+                            "error": "region statistics query failed",
+                            "response": sample.get("response"),
+                        })),
+                    );
+                }
+            }
+            samples.push(with_table(sample, table));
+        }
+        if pending.is_empty() {
+            return (samples, None);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return (
+                samples,
+                Some(json!({
+                    "sql": "information_schema.region_statistics",
+                    "phase": "region_statistics",
+                    "error": format!(
+                        "region statistics did not settle within {}s",
+                        REGION_STATS_TIMEOUT.as_secs()
+                    ),
+                    "pending": pending,
+                })),
+            );
+        }
+        tokio::time::sleep(REGION_STATS_POLL_INTERVAL).await;
+    }
+}
+
+fn with_table(mut sample: Value, table: &Table) -> Value {
+    if let Some(object) = sample.as_object_mut() {
+        object.insert("table".to_string(), Value::String(table.name.clone()));
+    }
+    sample
+}
+
+/// The `(regions, ready_regions)` row of a region statistics query.
+fn parse_region_statistics(body: &Value) -> Option<(u64, u64)> {
+    let rows = extract_rows(body);
+    let row = rows.first()?;
+    Some((
+        row_u64(row, 0, "regions").ok()?,
+        row_u64(row, 1, "ready_regions").ok()?,
+    ))
 }
 
 async fn run_target(
@@ -131,6 +267,8 @@ async fn run_target(
     tables: &[Table],
     configured_queries: &[Query],
     client: &Client,
+    candidate: bool,
+    wait_for_region_stats: bool,
 ) -> QueryResult {
     let mut queries = configured_queries.to_vec();
     if queries.is_empty() {
@@ -141,6 +279,7 @@ async fn run_target(
             start: None,
             end: None,
             step: None,
+            candidate_session_sql: Vec::new(),
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
@@ -150,6 +289,13 @@ async fn run_target(
     let db = &tables[0].database;
     let mut validation = Vec::new();
     let mut validation_errors = Vec::new();
+    if wait_for_region_stats {
+        let (stats, error) = wait_for_region_statistics(client, port, tables).await;
+        if let Some(error) = error {
+            validation_errors.push(error);
+        }
+        validation.extend(stats);
+    }
     for table in tables {
         let sql = format!("SHOW CREATE TABLE {}", sql_ident(&table.name));
         let sample = http_post_sql(client, port, &sql, &table.database).await;
@@ -170,7 +316,7 @@ async fn run_target(
         }
         validation.push(sample);
     }
-    let first = post_query(client, port, &queries[0], db).await;
+    let first = post_query(client, port, &queries[0], db, candidate).await;
     if !first["ok"].as_bool().unwrap_or(false) {
         validation_errors.push(json!({
             "sql": queries[0].query,
@@ -183,7 +329,7 @@ async fn run_target(
     let mut measurements = Vec::with_capacity(queries.len());
     for query in &queries {
         for _ in 0..query.warmup {
-            let warmup = post_query(client, port, query, db).await;
+            let warmup = post_query(client, port, query, db, candidate).await;
             if !warmup["ok"].as_bool().unwrap_or(false) {
                 validation_errors.push(json!({
                     "sql": query.query,
@@ -196,7 +342,7 @@ async fn run_target(
         let mut samples = Vec::with_capacity(query.iterations);
         let mut good_latencies = Vec::with_capacity(query.iterations);
         for _ in 0..query.iterations {
-            let mut sample = post_query(client, port, query, db).await;
+            let mut sample = post_query(client, port, query, db, candidate).await;
             let execution_time = sample
                 .get("response")
                 .and_then(|response| {
@@ -413,6 +559,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_region_statistics_counts() {
+        let body = json!({
+            "output": [{
+                "records": {
+                    "schema": {"column_schemas": [
+                        {"name": "regions", "data_type": "UInt64"},
+                        {"name": "ready_regions", "data_type": "UInt64"}
+                    ]},
+                    "rows": [[1, 1]],
+                    "total_rows": 1
+                }
+            }]
+        });
+        assert_eq!(Some((1, 1)), parse_region_statistics(&body));
+        assert_eq!(
+            Some((2, 0)),
+            parse_region_statistics(&json!({"data": [[2, 0]]}))
+        );
+        // A round without a row describes no regions and never settles.
+        assert_eq!(
+            None,
+            parse_region_statistics(&json!({"output": [{"records": {"rows": []}}]}))
+        );
+    }
+
+    #[test]
     fn prom_http_does_not_extract_execution_time_from_response() {
         let response = json!({
             "data": {
@@ -439,6 +611,7 @@ mod tests {
             start: None,
             end: None,
             step: None,
+            candidate_session_sql: Vec::new(),
             warmup: 0,
             iterations: 1,
             thresholds: Map::from_iter([
