@@ -721,22 +721,28 @@ impl RangeManipulateStream {
             let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
                 DataFusionError::Execution("Time index column is not a timestamp".into())
             })?;
-            // Single pass through arrow's fallible unary kernel: an i128
+            // Single pass through arrow's infallible unary kernel: an i128
             // intermediate holds any native timestamp shift; only the final
-            // millisecond result must fit i64. try_unary preserves nulls and
-            // avoids the per-sample Option/Vec of a hand-written loop (its
-            // Result is not SIMD-vectorizable; the win is allocation- and
-            // branch-elimination).
+            // millisecond result must fit i64. Overflow sets a Cell flag instead
+            // of returning Err per sample, so the closure is a plain i64 -> i64
+            // mapping that LLVM can vectorize. Nulls are preserved.
             let offset_ns = (self.offset as i128) * 1_000_000;
-            let timestamp_values =
-                compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
-                    let shifted_ns = (v as i128) * scale + offset_ns;
-                    i64::try_from(shifted_ns / 1_000_000).map_err(|_| {
-                        ArrowError::ComputeError(
-                            "RangeManipulate timestamp payload overflow".into(),
-                        )
-                    })
-                })?;
+            let overflow = std::cell::Cell::new(false);
+            let timestamp_values = compute::unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+                let shifted_ns = (v as i128) * scale + offset_ns;
+                let shifted_ms = shifted_ns / 1_000_000;
+                if let Ok(ms) = i64::try_from(shifted_ms) {
+                    ms
+                } else {
+                    overflow.set(true);
+                    0 // placeholder, never used
+                }
+            });
+            if overflow.get() {
+                return Err(DataFusionError::Execution(
+                    "RangeManipulate timestamp payload overflow".into(),
+                ));
+            }
             Arc::new(TimestampMillisecondArray::new(
                 timestamp_values.values().clone(),
                 timestamp_values.nulls().cloned(),
