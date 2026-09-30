@@ -92,6 +92,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::time::{self, timeout};
 use tonic::{Request, Response, Result as TonicResult};
 
+use crate::datanode::record_shutdown_error;
 use crate::error::{
     self, BuildRegionRequestsSnafu, ConcurrentQueryLimiterClosedSnafu,
     ConcurrentQueryLimiterTimeoutSnafu, DataFusionSnafu, DecodeLogicalPlanSnafu,
@@ -1948,15 +1949,19 @@ impl RegionServerInner {
 
         drop(self.mito_engine.write().unwrap().take());
         let engines = self.engines.write().unwrap().drain().collect::<Vec<_>>();
+        let mut first_error = None;
         for (engine_name, engine) in engines {
-            engine
+            let result = engine
                 .stop()
                 .await
-                .context(StopRegionEngineSnafu { name: &engine_name })?;
-            info!("Region engine {engine_name} is stopped");
+                .context(StopRegionEngineSnafu { name: &engine_name });
+            if result.is_ok() {
+                info!("Region engine {engine_name} is stopped");
+            }
+            record_shutdown_error(&mut first_error, result);
         }
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 

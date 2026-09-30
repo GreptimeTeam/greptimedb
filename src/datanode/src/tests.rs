@@ -121,6 +121,8 @@ pub type MockSyncRegionHandler = Box<
     dyn Fn(RegionId, SyncRegionFromRequest) -> Result<SyncRegionFromResponse, Error> + Send + Sync,
 >;
 
+pub type MockStopHandler = Box<dyn Fn() -> Result<(), Error> + Send + Sync>;
+
 pub struct MockRegionEngine {
     sender: Sender<(RegionId, RegionRequest)>,
     pub(crate) handle_request_delay: Option<Duration>,
@@ -128,6 +130,7 @@ pub struct MockRegionEngine {
     pub(crate) handle_set_readonly_gracefully_mock_fn: Option<MockSetReadonlyGracefullyHandler>,
     pub(crate) handle_get_metadata_mock_fn: Option<MockGetMetadataHandler>,
     pub(crate) handle_sync_region_mock_fn: Option<MockSyncRegionHandler>,
+    pub(crate) handle_stop_mock_fn: Option<MockStopHandler>,
     pub(crate) mock_role: Option<Option<RegionRole>>,
     engine: String,
 }
@@ -144,6 +147,7 @@ impl MockRegionEngine {
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: None,
                 handle_sync_region_mock_fn: None,
+                handle_stop_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -165,6 +169,7 @@ impl MockRegionEngine {
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: None,
                 handle_sync_region_mock_fn: None,
+                handle_stop_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -186,6 +191,7 @@ impl MockRegionEngine {
                 handle_set_readonly_gracefully_mock_fn: None,
                 handle_get_metadata_mock_fn: Some(mock_fn),
                 handle_sync_region_mock_fn: None,
+                handle_stop_mock_fn: None,
                 mock_role: None,
                 engine: engine.to_string(),
             }),
@@ -208,6 +214,7 @@ impl MockRegionEngine {
             handle_set_readonly_gracefully_mock_fn: None,
             handle_get_metadata_mock_fn: None,
             handle_sync_region_mock_fn: None,
+            handle_stop_mock_fn: None,
             mock_role: None,
             engine: engine.to_string(),
         };
@@ -269,6 +276,9 @@ impl RegionEngine for MockRegionEngine {
     }
 
     async fn stop(&self) -> Result<(), BoxedError> {
+        if let Some(mock_fn) = &self.handle_stop_mock_fn {
+            return mock_fn().map_err(BoxedError::new);
+        }
         Ok(())
     }
 
