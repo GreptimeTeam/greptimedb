@@ -55,7 +55,6 @@ use datafusion::logical_expr::{
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
-use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
@@ -68,7 +67,7 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
-    UnionDistinctOn, build_special_time_expr,
+    build_special_time_expr,
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
@@ -572,7 +571,20 @@ impl PromPlanner {
             param,
         } = aggr_expr;
 
-        let input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        let mut input = self.prom_expr_to_plan(expr, query_engine_state).await?;
+        if (*op).id() == token::T_COUNT_VALUES {
+            // A `count_values` destination is a label of its result, and the generated label takes
+            // the physical name it is written with. When that name is the physical column of the
+            // input's marked identity, the label would take that column over and the identity
+            // would be lost - `count_values("__promql_metric_name", a or on(__name__) b) by(__name__)`
+            // next to two metrics of one label set. The identity is metadata, not a label, so it
+            // moves to a free name first and the destination keeps the name it was written with.
+            // This runs before the grouping key is built: `by(...)`/`without(...)` resolve the
+            // identity through the name it has by then, and a group expression built from the old
+            // name would no longer be the identity of the result.
+            let label = Self::get_param_value_as_str(*op, param)?;
+            input = self.move_metric_name_out_of_label_destination(label, input)?;
+        }
         let input_has_tsid = input.schema().fields().iter().any(|field| {
             field.name() == DATA_SCHEMA_TSID_COLUMN_NAME
                 && field.data_type() == &ArrowDataType::UInt64
@@ -654,30 +666,71 @@ impl PromPlanner {
                     // projecting both would emit two columns with the same name (rejected as an
                     // ambiguous reference).
                     //
-                    // The generated label is always an ordinary label, whatever it is named: the
-                    // marked metric-name identity is metadata the planner attaches where it knows
-                    // a real metric name is written, so a plain aggregate argument must not be
-                    // able to forge it from a sample value. The semantic `__name__` is therefore
-                    // an ordinary column of the result, spelled like the label the user asked
-                    // for.
-                    let label_column = label.to_string();
-                    self.ctx.tag_columns.retain(|tag| tag != &label_column);
-                    group_exprs.retain(
-                        |expr| !matches!(expr, DfExpr::Column(column) if column.name == label_column),
-                    );
-                    if label == METRIC_NAME {
-                        // The destination names the semantic `__name__`, which the input carries
-                        // as its marked identity: the generated label replaces it, so the
-                        // identity must not stay grouped or projected next to it.
-                        if let Some(marker) = Self::metric_name_column(builder.schema())? {
-                            self.ctx
-                                .aggregation_field_labels
-                                .retain(|tag| tag != &marker.name);
-                            self.ctx.tag_columns.retain(|tag| tag != &marker.name);
-                            group_exprs.retain(|expr| {
-                                !matches!(expr, DfExpr::Column(column) if column.name == marker.name)
-                            });
+                    // The destination is the semantic `__name__` only when the user asks for the
+                    // metric name: the generated column is then the name of the result series -
+                    // the formatted sample value `count_values` gives it, the way Prometheus names
+                    // the series it counts - and it is attached like every other real metric name,
+                    // as a marked column that takes over the identity of the input when it carries
+                    // one, or a fresh one under a free internal name when it does not, so that no
+                    // physical column is ever mistaken for it. This aggregate is the one place the
+                    // planner writes the name from a sample value, and it writes it because the
+                    // user asked for the name; every other destination stays an ordinary label of
+                    // whatever spelling it was given, and no physical column or alias can forge
+                    // the role by its name.
+                    let metric_name_dst = label == METRIC_NAME;
+                    // `without(...)` never groups by the metric name: Prometheus excludes the
+                    // destination from the grouping key and from the labels of the result, so the
+                    // samples are aggregated into the groups the modifier leaves and no series of
+                    // the result carries the generated name. Nothing is generated here either: a
+                    // group of samples of several values has no single value the column could
+                    // hold.
+                    let groups_by_generated_label =
+                        !metric_name_dst || !matches!(modifier, Some(LabelModifier::Exclude(_)));
+                    let label_column = if groups_by_generated_label && metric_name_dst {
+                        match Self::metric_name_column(builder.schema())? {
+                            Some(marker) => marker.name,
+                            None => Self::free_metric_name_column_name(
+                                builder
+                                    .schema()
+                                    .fields()
+                                    .iter()
+                                    .map(|field| field.name().as_str()),
+                            ),
                         }
+                    } else {
+                        label.to_string()
+                    };
+                    let label_metadata =
+                        (groups_by_generated_label && metric_name_dst).then(|| {
+                            let mut metadata = std::collections::HashMap::new();
+                            metadata.insert(
+                                PROMQL_FIELD_ROLE_KEY.to_string(),
+                                PROMQL_METRIC_NAME_ROLE.to_string(),
+                            );
+                            metadata
+                        });
+                    // Columns the generated label takes over: a label of the input with the same
+                    // physical name, and - when the destination is the metric name - the marked
+                    // identity the input carries, whose place in the grouping key and in the
+                    // projected columns belongs to the generated name from here on.
+                    let mut replaced_columns = vec![label_column.clone()];
+                    if metric_name_dst
+                        && let Some(marker) = Self::metric_name_column(builder.schema())?
+                        && marker.name != label_column
+                    {
+                        replaced_columns.push(marker.name);
+                    }
+                    for replaced in &replaced_columns {
+                        self.ctx.tag_columns.retain(|tag| tag != replaced);
+                        group_exprs.retain(
+                            |expr| !matches!(expr, DfExpr::Column(column) if &column.name == replaced),
+                        );
+                    }
+                    if metric_name_dst {
+                        // The metric name is not a value field of any input.
+                        self.ctx
+                            .aggregation_field_labels
+                            .retain(|tag| !replaced_columns.contains(tag));
                     }
                     // The tag columns projected below are unqualified `Column` references, so they
                     // end up qualified with whatever qualifier they carry in the input plan. Give
@@ -731,38 +784,55 @@ impl PromPlanner {
                                     expr.schema_name().to_string(),
                                 )),
                             };
-                            // The generated label is an ordinary label of the result: the identity
-                            // role is never inferred from a name, only attached where a real
-                            // metric name is written.
+                            // The generated label is an ordinary label of the result when the
+                            // destination is an ordinary one, and the metric name of the result
+                            // when the user asked for the semantic `__name__`; the identity role
+                            // is never inferred from a spelling, only attached where the planner
+                            // knows a real metric name is written.
                             DfExpr::Alias(Alias {
                                 expr: Box::new(value),
                                 relation: label_qualifier.clone(),
                                 name: label_column.clone(),
-                                metadata: None,
+                                metadata: label_metadata.clone().map(Into::into),
                             })
                         })
                         .collect::<Vec<_>>();
-                    let aggregate_group_exprs = group_exprs
-                        .iter()
-                        .cloned()
-                        .chain(prev_field_exprs.clone())
-                        .collect::<Vec<_>>();
-                    group_exprs.push(DfExpr::Column(Column::from_name(&label_column)));
                     let project_fields = self
                         .create_field_column_exprs()?
                         .into_iter()
                         .chain(self.create_tag_column_exprs()?)
-                        .chain(Some(self.create_time_index_column_expr()?))
-                        .chain(count_value_exprs);
-
-                    let builder = builder
-                        .aggregate(aggregate_group_exprs, aggr_exprs)
-                        .context(DataFusionPlanningSnafu)?
-                        .project(project_fields)
-                        .context(DataFusionPlanningSnafu)?;
-                    // The generated label only exists in the output schema from here on.
-                    self.ctx.tag_columns.push(label_column);
-                    builder
+                        .chain(Some(self.create_time_index_column_expr()?));
+                    if groups_by_generated_label {
+                        // The generated label is the formatted sample value, so the value is one
+                        // of the group keys: samples of one value form one group of every label
+                        // set the modifier leaves. Without a modifier the samples of one value
+                        // are grouped together whatever their input labels - Prometheus adds the
+                        // generated label to the grouping key unless `without` asks for it - and
+                        // `by(__name__)` adds the value through the same expression, the marked
+                        // identity of the input having been replaced by it.
+                        let aggregate_group_exprs = group_exprs
+                            .iter()
+                            .cloned()
+                            .chain(prev_field_exprs.clone())
+                            .collect::<Vec<_>>();
+                        // Only the trailing sort reads the generated column; the aggregation
+                        // cannot, it does not exist before the projection below.
+                        group_exprs.push(DfExpr::Column(Column::from_name(&label_column)));
+                        let builder = builder
+                            .aggregate(aggregate_group_exprs, aggr_exprs)
+                            .context(DataFusionPlanningSnafu)?
+                            .project(project_fields.chain(count_value_exprs))
+                            .context(DataFusionPlanningSnafu)?;
+                        // The generated label only exists in the output schema from here on.
+                        self.ctx.tag_columns.push(label_column);
+                        builder
+                    } else {
+                        builder
+                            .aggregate(group_exprs.clone(), aggr_exprs)
+                            .context(DataFusionPlanningSnafu)?
+                            .project(project_fields)
+                            .context(DataFusionPlanningSnafu)?
+                    }
                 } else {
                     builder
                         .aggregate(group_exprs.clone(), aggr_exprs)
@@ -1003,11 +1073,22 @@ impl PromPlanner {
     /// Drops the metric-name identity of `input`, the result of every function, binary or unary
     /// operator that does not keep it.
     ///
-    /// The label set is what names a series in PromQL, so dropping the identity of a plan that
-    /// unions several series sets can leave rows of one evaluation step with the same label set -
-    /// `abs(a or on(__name__) b)` for two metrics that share every ordinary label. A vector cannot
-    /// hold those rows: every reader - the HTTP layer above all - would have to pick one of them,
-    /// so the plan refuses them instead, the same way a label rewrite that collapses series does.
+    /// The label set is what names a series in PromQL - `__name__` is one of its labels - so the
+    /// identity can be the only thing that tells two rows of one evaluation timestamp apart: `or`
+    /// keeps the rows of two metrics that share every ordinary label, `on(__name__)` matches them
+    /// on that identity alone, a label rewrite can take away the labels that distinguished a pair
+    /// of series, and `count_values("__name__", ...)` names its groups after their sample values.
+    /// Dropping the identity then leaves rows a vector cannot hold: every reader - the HTTP layer
+    /// above all - would have to pick one of them, so the plan refuses them instead, the same way
+    /// a label rewrite that collapses series does.
+    ///
+    /// Whether a plan can hold such rows is not a property of one operator - nesting hides the
+    /// operator that produced them from the one that drops the name - so every drop asserts the
+    /// unique label set unless the identity provably cannot distinguish two rows:
+    /// [`Self::column_is_constant`] follows the marked column to the node that computes it and
+    /// checks that every row of the plan carries the same value in it, and a label that is the
+    /// same in every row cannot tell two of them apart. A plan without such a column (nothing is
+    /// dropped) needs no check either.
     fn drop_metric_name(&mut self, mut input: LogicalPlan) -> Result<LogicalPlan> {
         if let Some(marker) = Self::metric_name_column(input.schema())? {
             self.ctx.tag_columns.retain(|name| name != &marker.name);
@@ -1029,7 +1110,7 @@ impl PromPlanner {
                 .time_index_column
                 .as_deref()
                 .filter(|column| input.schema().has_column_with_unqualified_name(column));
-            if Self::unions_series_sets(&input)
+            if !Self::column_is_constant(&input, &marker.name)
                 && let Some(time_index_column) = time_index_column
             {
                 let group_exprs = labels
@@ -1048,31 +1129,99 @@ impl PromPlanner {
         Self::strip_metric_name_column(input)
     }
 
-    /// Whether `plan` holds the union of `or`, whose matching may ignore the identity - `on(__name__)`
-    /// matches two metrics on it alone. Two rows of such a union that share every ordinary label
-    /// can still come from different series, and only their identity tells them apart, so only the
-    /// union needs the label-set check when that identity is dropped.
+    /// Whether every row `plan` emits holds the same value in `column`.
     ///
-    /// Every other operator either matches on the labels themselves (a join keeps only rows whose
-    /// labels agree) or asserts its own uniqueness where it can multiply rows, so a duplicate label
-    /// set cannot reach them without one of those checks having run.
-    fn unions_series_sets(plan: &LogicalPlan) -> bool {
-        let mut unioned = false;
-        // The walk stops at the first union, so the visit never fails.
-        let _ = plan.apply(|node| {
-            unioned = match node {
-                LogicalPlan::Extension(extension) => {
-                    extension.node.as_any().is::<UnionDistinctOn>()
-                }
+    /// The value of a column is decided by the node that computes it: a literal is the same in
+    /// every row, and a reference to another column keeps whatever that column holds, so the walk
+    /// follows references down to the node that produces the value. A node that combines the rows
+    /// of several inputs can decide a column per row out of data no single input holds - a union
+    /// of two metrics takes the name from the operand the row came from - so those nodes answer
+    /// `false`, as does anything the walk cannot follow to a literal.
+    fn column_is_constant(plan: &LogicalPlan, column: &str) -> bool {
+        Self::column_reference_is_constant(plan, &Column::from_name(column))
+    }
+
+    /// Whether every row `plan` emits holds the same value in the column `source` names.
+    ///
+    /// A qualified reference is resolved where the inputs of a plan meet, since only the node
+    /// that keeps the rows of both of them can tell which one holds the value; everywhere else
+    /// the walk follows the column by name.
+    fn column_reference_is_constant(plan: &LogicalPlan, source: &Column) -> bool {
+        if let LogicalPlan::Projection(projection) = plan {
+            let Some(expr) = projection
+                .expr
+                .iter()
+                .find(|expr| Self::projection_outputs_column(expr, source))
+            else {
+                // The projection does not carry the column at all.
+                return false;
+            };
+            return Self::expression_is_constant(&projection.input, expr);
+        }
+        if let LogicalPlan::Join(join) = plan {
+            // A join pairs the rows of its inputs, so a column it takes from one of them holds
+            // that input's value in every row of the pair. An outer join fills the missing side
+            // with NULLs, which no longer follows, and neither does a name both inputs hold.
+            if join.join_type != JoinType::Inner {
+                return false;
+            }
+            return match (
+                Self::schema_has_column(join.left.schema(), source),
+                Self::schema_has_column(join.right.schema(), source),
+            ) {
+                (true, false) => Self::column_reference_is_constant(&join.left, source),
+                (false, true) => Self::column_reference_is_constant(&join.right, source),
                 _ => false,
             };
-            Ok(if unioned {
-                TreeNodeRecursion::Stop
-            } else {
-                TreeNodeRecursion::Continue
-            })
-        });
-        unioned
+        }
+        match plan.inputs().as_slice() {
+            // A node that combines several inputs decides a column per row out of all of them.
+            [_, _, ..] => false,
+            [input] => Self::column_reference_is_constant(input, source),
+            // A leaf holds no marked column.
+            [] => false,
+        }
+    }
+
+    /// Whether a projection's output column `source` is the one `expr` produces.
+    ///
+    /// The name a projection gives its output is unqualified - the qualifier is the relation the
+    /// plan is reading from - so a reference into a plan of several relations is matched by the
+    /// name of the output, not by the qualified name the expression reads.
+    fn projection_outputs_column(expr: &DfExpr, source: &Column) -> bool {
+        let (name, relation) = match expr {
+            DfExpr::Alias(alias) => (alias.name.as_str(), alias.relation.as_ref()),
+            DfExpr::Column(column) => (column.name.as_str(), column.relation.as_ref()),
+            _ => return false,
+        };
+        name == source.name
+            && match (source.relation.as_ref(), relation) {
+                // A reference that names a relation reaches the output of that relation.
+                (Some(source), Some(relation)) => source == relation,
+                _ => true,
+            }
+    }
+
+    /// Whether `schema` holds `column` itself: the name and, for a reference that names a
+    /// relation, the relation have to match.
+    fn schema_has_column(schema: &DFSchema, column: &Column) -> bool {
+        schema.iter().any(|(qualifier, field)| {
+            field.name() == &column.name
+                && column
+                    .relation
+                    .as_ref()
+                    .is_none_or(|relation| qualifier == Some(relation))
+        })
+    }
+
+    /// Whether `expr` holds the same value in every row `input` emits.
+    fn expression_is_constant(input: &LogicalPlan, expr: &DfExpr) -> bool {
+        match expr {
+            DfExpr::Literal(..) => true,
+            DfExpr::Alias(alias) => Self::expression_is_constant(input, alias.expr.as_ref()),
+            DfExpr::Column(source) => Self::column_reference_is_constant(input, source),
+            _ => false,
+        }
     }
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
@@ -2750,7 +2899,14 @@ impl PromPlanner {
         let range_fold_offset = self.ctx.range_fold_offset.take();
         // A label function writes its destination as a label of the result; the label takes the
         // physical name it is written with, so the marked identity moves out of that name first.
-        let input = self.move_metric_name_out_of_label_destination(func, &args.literals, input)?;
+        let input = match args.literals.first() {
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(dst_label)), _))
+                if matches!(func.name, "label_join" | "label_replace") =>
+            {
+                self.move_metric_name_out_of_label_destination(dst_label, input)?
+            }
+            _ => input,
+        };
         let input_tag_columns = self.ctx.tag_columns.clone();
         let (mut func_exprs, new_tags) = self.create_function_expr(
             func,
@@ -4877,35 +5033,29 @@ impl PromPlanner {
         ))
     }
 
-    /// Move the marked identity out of the physical name an ordinary label destination writes.
+    /// Move the marked identity out of the physical name an ordinary destination `dst_label`
+    /// writes.
     ///
-    /// A label function writes its destination as a label of its result, and the label is a
-    /// column the result carries. When the destination is spelled like the physical column of the
-    /// input's marked identity - the identity is attached under the first free name, so nothing
-    /// else can be spelled like it and this reaches only the identity - the label would take that
-    /// column over and the identity would be lost. The identity is metadata, not a label, so it
-    /// moves to a free name first and the destination keeps the name it was written with. The
-    /// semantic `__name__` has no such collision: [`Self::write_destination_label`] writes it into
-    /// the identity itself.
+    /// A label function or a `count_values` destination writes a label of its result, and the
+    /// label is a column the result carries. When the destination is spelled like the physical
+    /// column of the input's marked identity - the identity is attached under the first free
+    /// name, so nothing else can be spelled like it and this reaches only the identity - the label
+    /// would take that column over and the identity would be lost. The identity is metadata, not a
+    /// label, so it moves to a free name first and the destination keeps the name it was written
+    /// with. The semantic `__name__` has no such collision: [`Self::write_destination_label`] and
+    /// the `count_values` projection write it into the identity itself.
     fn move_metric_name_out_of_label_destination(
         &mut self,
-        func: &Function,
-        literals: &[DfExpr],
+        dst_label: &str,
         input: LogicalPlan,
     ) -> Result<LogicalPlan> {
-        if !matches!(func.name, "label_join" | "label_replace") {
-            return Ok(input);
-        }
-        let Some(DfExpr::Literal(ScalarValue::Utf8(Some(dst_label)), _)) = literals.first() else {
-            return Ok(input);
-        };
-        if dst_label.as_str() == METRIC_NAME {
+        if dst_label == METRIC_NAME {
             return Ok(input);
         }
         let Some(marker) = Self::metric_name_column(input.schema())? else {
             return Ok(input);
         };
-        if marker.name.as_str() != dst_label.as_str() {
+        if marker.name.as_str() != dst_label {
             return Ok(input);
         }
         let target = Self::free_metric_name_column_name(
