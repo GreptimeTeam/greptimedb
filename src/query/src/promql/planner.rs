@@ -1228,7 +1228,12 @@ impl PromPlanner {
                     } else {
                         self.ctx.table_name = Some("rhs".to_string());
                     }
-                } else if right_is_empty_metric && !left_is_empty_metric {
+                } else if (right_is_empty_metric || rhs.value_type() == ValueType::Scalar)
+                    && !left_is_empty_metric
+                    && lhs.value_type() != ValueType::Scalar
+                {
+                    // A computed scalar on the right (`time()`, `scalar(...)`) has no labels;
+                    // the result keeps the labels of the vector on the left.
                     self.ctx = left_context.clone();
                 }
                 // Computed scalars reach this join path instead of the literal projection paths.
