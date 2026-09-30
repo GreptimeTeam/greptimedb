@@ -19,6 +19,7 @@ use catalog::RegisterTableRequest;
 use catalog::memory::{MemoryCatalogManager, new_memory_catalog_manager};
 use common_base::Plugins;
 use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME};
+use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::native_histogram::{
     CUSTOM_BUCKETS_SCHEMA, CounterResetHint, NativeHistogram, build_histogram_array,
 };
@@ -32,6 +33,7 @@ use datafusion::arrow::array::{
 use datafusion::arrow::datatypes::{Field, Schema as ArrowSchema};
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::catalog::{CatalogProvider, MemoryCatalogProvider, MemorySchemaProvider};
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::datasource::memory::MemorySourceConfig;
 use datafusion::datasource::source::DataSourceExec;
 use datafusion::datasource::{MemTable, provider_as_source};
@@ -7863,8 +7865,12 @@ async fn test_mixed_or_routes_float_histogram_and_label_functions() {
     };
     let args = planner.create_function_args(&call.args.args).unwrap();
     let state = build_query_engine_state();
+    let literals = planner
+        .build_scalar_params(&call.func.name, &args.literals, &state)
+        .await
+        .unwrap();
     let (mut exprs, _) = planner
-        .create_function_expr(&call.func, args.literals, input.schema(), &state, None)
+        .create_function_expr(&call.func, literals, input.schema(), &state, None)
         .unwrap();
     exprs.insert(0, planner.create_time_index_column_expr().unwrap());
     exprs.extend(planner.create_tag_column_exprs().unwrap());
@@ -8269,4 +8275,298 @@ async fn test_count_values_groups_by_formatted_value_for_bigint_input() {
         count_values_rows(&batches, "v"),
         vec![("9007199254740992", 2.0)]
     );
+}
+
+/// Query engine state whose scalar functions include the ones registered by
+/// [`FUNCTION_REGISTRY`], like a server has.
+///
+/// [`build_query_engine_state`] builds a bare [`QueryEngineState`], which only
+/// knows the DataFusion built-ins. `clamp_min` and `clamp_max` come from
+/// GreptimeDB's own registry, so the functions that take a dynamic scalar
+/// parameter need them registered to be planned.
+fn build_function_registry_query_engine_state() -> QueryEngineState {
+    let state = build_query_engine_state();
+    for name in ["clamp_min", "clamp_max"] {
+        state.register_scalar_function(
+            FUNCTION_REGISTRY
+                .get_function(name)
+                .unwrap_or_else(|| panic!("{name} is not registered")),
+        );
+    }
+
+    state
+}
+
+/// Table provider with one metric `dyn_scalar_metric`: series `k="a"` holds the
+/// samples `1.0` at `ts=0` and `3.0` at `ts=1000`.
+///
+/// An instant query evaluating at `ts=1000` (see [`operator_eval_stmt`]) selects
+/// the sample `3.0`, and the range selector `[2s]` covers both samples, so a
+/// dynamic scalar parameter can be told apart from the sample values in the
+/// assertions below.
+async fn build_dynamic_scalar_table_provider() -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let columns = vec![
+        ColumnSchema::new("k".to_string(), ConcreteDataType::string_datatype(), false),
+        ColumnSchema::new(
+            "timestamp".to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            greptime_value().to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ];
+    let schema = Arc::new(Schema::new(columns));
+    let table_meta = TableMetaBuilder::empty()
+        .schema(schema.clone())
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = Arc::new(
+        TableInfoBuilder::default()
+            .table_id(3_100)
+            .name("dyn_scalar_metric")
+            .meta(table_meta)
+            .build()
+            .unwrap(),
+    );
+    let batch = RecordBatch::try_new(
+        schema.arrow_schema().clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["a", "a"])),
+            Arc::new(TimestampMillisecondArray::from(vec![0, 1_000])),
+            Arc::new(Float64Array::from(vec![1.0, 3.0])),
+        ],
+    )
+    .unwrap();
+    let backing = GreptimeMemTable::new_with_catalog(
+        "dyn_scalar_metric",
+        GreptimeRecordBatch::from_df_record_batch(schema, batch),
+        3_100,
+        DEFAULT_CATALOG_NAME.to_string(),
+        DEFAULT_SCHEMA_NAME.to_string(),
+    );
+    let table = Arc::new(Table::new(
+        table_info,
+        FilterPushDownType::Unsupported,
+        backing.data_source(),
+    ));
+
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: "dyn_scalar_metric".to_string(),
+                table_id: 3_100,
+                table,
+            })
+            .is_ok()
+    );
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// Plans of the scalar subquery expressions of `plan`, in visit order.
+fn scalar_subquery_plans(plan: &LogicalPlan) -> Vec<Arc<LogicalPlan>> {
+    let mut plans = Vec::new();
+    let _ = plan.apply(|node| {
+        for expr in node.expressions() {
+            let _ = expr.apply(|expr| {
+                if let DfExpr::ScalarSubquery(subquery) = expr {
+                    plans.push(Arc::clone(&subquery.subquery));
+                }
+                Ok(TreeNodeRecursion::Continue)
+            });
+        }
+        Ok(TreeNodeRecursion::Continue)
+    });
+
+    plans
+}
+
+/// Values of the `Float64` column of the given batches, in row order.
+///
+/// The assertions below read single-column PromQL results, so the first float
+/// column is the sample value.
+fn float_column_values(batches: &[RecordBatch]) -> Vec<f64> {
+    batches
+        .iter()
+        .flat_map(|batch| {
+            let index = batch
+                .schema()
+                .fields()
+                .iter()
+                .position(|field| field.data_type() == &ArrowDataType::Float64)
+                .expect("no float column");
+            batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("column is not a float column")
+                .iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_clamp_functions_in_instant_query() {
+    let state = build_function_registry_query_engine_state();
+    // The instant query evaluates at `ts=1000`, where the series holds `3.0`.
+    // Each expectation differs from that sample, so it only holds when the
+    // runtime parameter reaches the function.
+    for (query, expected) in [
+        ("clamp_min(dyn_scalar_metric, scalar(vector(4)))", 4.0),
+        ("clamp_max(dyn_scalar_metric, scalar(vector(2)))", 2.0),
+        // The parameter may also be computed from the metric itself.
+        (
+            "clamp_min(dyn_scalar_metric, scalar(dyn_scalar_metric + 1))",
+            4.0,
+        ),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+        // The runtime parameter is planned as a `scalar(...)` subquery.
+        let subqueries = scalar_subquery_plans(&plan);
+        assert_eq!(subqueries.len(), 1, "{query}\n{plan}");
+        assert!(
+            subqueries[0]
+                .display_indent()
+                .to_string()
+                .contains("ScalarCalculate"),
+            "{query}\n{plan}"
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(float_column_values(&batches), vec![expected], "{query}");
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_clamp_functions_over_a_generated_vector() {
+    let state = build_function_registry_query_engine_state();
+    // `vector(...)` is a single sample too, so the runtime parameter is what
+    // `clamp_min`/`clamp_max` can be told apart from.
+    for (query, expected) in [
+        ("clamp_min(vector(2), scalar(vector(3)))", 3.0),
+        ("clamp_max(vector(5), scalar(vector(3)))", 3.0),
+    ] {
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(float_column_values(&batches), vec![expected], "{query}");
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_quantile_over_time_in_instant_query() {
+    let state = build_query_engine_state();
+    // The `[2s]` window of the instant query covers `1.0` and `3.0`, so each
+    // expectation differs from the samples and proves the runtime quantile is
+    // the one the aggregation used.
+    for (quantile, expected) in [(0.0, 1.0), (0.5, 2.0), (1.0, 3.0)] {
+        let query =
+            format!("quantile_over_time(scalar(vector({quantile})), dyn_scalar_metric[2s])");
+        let plan = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider().await,
+            &operator_eval_stmt(&query),
+            &state,
+        )
+        .await
+        .unwrap();
+        let subqueries = scalar_subquery_plans(&plan);
+        assert_eq!(subqueries.len(), 1, "{query}\n{plan}");
+        assert!(
+            subqueries[0]
+                .display_indent()
+                .to_string()
+                .contains("ScalarCalculate"),
+            "{query}\n{plan}"
+        );
+
+        let (_, batches) = execute(plan, &state).await;
+        assert_eq!(float_column_values(&batches), vec![expected], "{query}");
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_is_rejected_for_functions_that_read_it_while_planning() {
+    let state = build_query_engine_state();
+    for query in [
+        // `histogram_quantile` keeps its quantile in the compile-time
+        // `HistogramFold` node.
+        "histogram_quantile(scalar(vector(0.5)), some_metric)",
+        // `topk`/`bottomk` build a window and a rank filter from the parameter.
+        "topk(scalar(vector(2)), some_metric)",
+        "bottomk(scalar(vector(2)), some_metric)",
+    ] {
+        let err = PromPlanner::stmt_to_plan(
+            build_test_table_provider_with_fields(
+                &[(DEFAULT_SCHEMA_NAME.to_string(), "some_metric".to_string())],
+                &[],
+            )
+            .await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("dynamic scalar parameter not supported for this function"),
+            "{query}: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dynamic_scalar_param_is_rejected_in_range_query() {
+    let state = build_function_registry_query_engine_state();
+    // `build_eval_stmt` evaluates a range of timestamps, so the value of the
+    // runtime parameter differs per evaluation step and cannot be broadcast.
+    for query in [
+        "clamp_min(dyn_scalar_metric, scalar(vector(4)))",
+        "clamp_max(dyn_scalar_metric, scalar(vector(4)))",
+        "quantile_over_time(scalar(vector(0.5)), dyn_scalar_metric[2s])",
+    ] {
+        let err = PromPlanner::stmt_to_plan(
+            build_dynamic_scalar_table_provider().await,
+            &build_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("dynamic scalar parameter not supported in range query"),
+            "{query}: {err}"
+        );
+    }
 }
