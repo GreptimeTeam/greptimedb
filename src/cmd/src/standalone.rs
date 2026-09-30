@@ -48,8 +48,8 @@ use common_meta::wal_provider::{WalProvider, WalProviderRef, build_wal_provider}
 use common_options::plugin_options::StandaloneFlag;
 use common_procedure::ProcedureManagerRef;
 use common_query::prelude::set_default_prefix;
-use common_telemetry::info;
 use common_telemetry::logging::{DEFAULT_LOGGING_DIR, TracingOptions};
+use common_telemetry::{info, warn};
 use common_time::timezone::set_default_timezone;
 use common_version::{short_version, verbose_version};
 use common_wal::config::DatanodeWalConfig;
@@ -274,32 +274,53 @@ impl App for Instance {
         Ok(())
     }
 
+    /// Stops every component in order. A failed step does not skip the later
+    /// ones; the first error is returned and the rest are logged.
     async fn stop(&mut self) -> Result<()> {
-        self.frontend
-            .shutdown()
-            .await
-            .context(error::ShutdownFrontendSnafu)?;
+        let mut first_error = None;
+        let mut record = |result: Result<()>| {
+            if let Err(err) = result {
+                if first_error.is_none() {
+                    first_error = Some(err);
+                } else {
+                    warn!(err; "Ignored a later shutdown error");
+                }
+            }
+        };
 
-        self.leader_services_controller
-            .stop(
-                self.procedure_manager.clone(),
-                self.datanode.region_server(),
-            )
-            .await?;
+        record(
+            self.frontend
+                .shutdown()
+                .await
+                .context(error::ShutdownFrontendSnafu),
+        );
 
-        self.datanode
-            .shutdown()
-            .await
-            .context(error::ShutdownDatanodeSnafu)?;
+        record(
+            self.leader_services_controller
+                .stop(
+                    self.procedure_manager.clone(),
+                    self.datanode.region_server(),
+                )
+                .await,
+        );
 
-        self.flownode
-            .shutdown()
-            .await
-            .context(error::ShutdownFlownodeSnafu)?;
+        record(
+            self.datanode
+                .shutdown()
+                .await
+                .context(error::ShutdownDatanodeSnafu),
+        );
+
+        record(
+            self.flownode
+                .shutdown()
+                .await
+                .context(error::ShutdownFlownodeSnafu),
+        );
 
         info!("Datanode instance stopped.");
 
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 
