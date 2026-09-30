@@ -91,7 +91,7 @@ pub struct GrpcOptions {
     #[serde(with = "humantime_serde")]
     pub http2_keep_alive_timeout: Duration,
     /// Whether to enable CORS, required by gRPC-Web clients in browsers.
-    /// Always off on the frontend's internal gRPC server.
+    /// Only the frontend's public gRPC server honors it.
     pub enable_cors: bool,
     /// Origins allowed by CORS. Empty allows any origin.
     pub cors_allowed_origins: Vec<String>,
@@ -130,8 +130,6 @@ impl GrpcOptions {
             max_send_message_size: self.max_send_message_size.as_bytes() as usize,
             tls: self.tls.clone(),
             max_connection_age: self.max_connection_age,
-            enable_cors: self.enable_cors,
-            cors_allowed_origins: self.cors_allowed_origins.clone(),
         }
     }
 }
@@ -251,6 +249,8 @@ pub struct GrpcServer {
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
     config: GrpcServerConfig,
+    /// `None` disables CORS.
+    cors_allowed_origins: Option<Vec<String>>,
 }
 
 /// Grpc Server configuration
@@ -265,9 +265,6 @@ pub struct GrpcServerConfig {
     /// Useful when the server wants to control the reconnection of its clients.
     /// Default to `None`, means infinite.
     pub max_connection_age: Option<Duration>,
-    pub enable_cors: bool,
-    /// Empty allows any origin.
-    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Default for GrpcServerConfig {
@@ -277,20 +274,18 @@ impl Default for GrpcServerConfig {
             max_send_message_size: DEFAULT_MAX_GRPC_SEND_MESSAGE_SIZE.as_bytes() as usize,
             tls: TlsOption::default(),
             max_connection_age: None,
-            enable_cors: false,
-            cors_allowed_origins: Vec::new(),
         }
     }
 }
 
 impl GrpcServer {
     fn cors_layer(&self) -> Result<Option<CorsLayer>> {
-        if !self.config.enable_cors {
+        let Some(allowed_origins) = &self.cors_allowed_origins else {
             return Ok(None);
-        }
+        };
         let layer = CorsLayer::new()
             .allow_methods([Method::POST])
-            .allow_origin(cors_allow_origin(&self.config.cors_allowed_origins)?)
+            .allow_origin(cors_allow_origin(allowed_origins)?)
             .allow_headers(AllowHeaders::any())
             // Trailers-only responses (most errors) carry `grpc-status` in HTTP
             // headers, which browsers hide unless exposed.
@@ -512,9 +507,15 @@ mod tests {
     }
 
     /// The returned server owns the shutdown sender and must outlive the requests.
-    async fn start_test_grpc_server(config: GrpcServerConfig) -> (GrpcServer, SocketAddr) {
+    async fn start_test_grpc_server(
+        cors_allowed_origins: Option<Vec<String>>,
+    ) -> (GrpcServer, SocketAddr) {
         let runtime = Runtime::builder().build().unwrap();
-        let mut server = GrpcServerBuilder::new(config, runtime).build();
+        let mut builder = GrpcServerBuilder::new(GrpcServerConfig::default(), runtime);
+        if let Some(origins) = cors_allowed_origins {
+            builder = builder.with_cors(origins);
+        }
+        let mut server = builder.build();
         server
             .start(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
             .await
@@ -556,11 +557,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_preflight() {
-        let config = GrpcServerConfig {
-            enable_cors: true,
-            ..Default::default()
-        };
-        let (_server, addr) = start_test_grpc_server(config).await;
+        let (_server, addr) = start_test_grpc_server(Some(Vec::new())).await;
 
         let response = send_preflight(addr, "https://example.com").await;
 
@@ -576,11 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_expose_headers() {
-        let config = GrpcServerConfig {
-            enable_cors: true,
-            ..Default::default()
-        };
-        let (_server, addr) = start_test_grpc_server(config).await;
+        let (_server, addr) = start_test_grpc_server(Some(Vec::new())).await;
 
         let response = send_grpc_web_call(addr, "https://example.com").await;
 
@@ -599,12 +592,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_custom_origins() {
-        let config = GrpcServerConfig {
-            enable_cors: true,
-            cors_allowed_origins: vec!["https://example.com".to_string()],
-            ..Default::default()
-        };
-        let (_server, addr) = start_test_grpc_server(config).await;
+        let (_server, addr) =
+            start_test_grpc_server(Some(vec!["https://example.com".to_string()])).await;
 
         let response = send_preflight(addr, "https://example.com").await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -622,7 +611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_grpc_web_cors_disabled() {
-        let (_server, addr) = start_test_grpc_server(GrpcServerConfig::default()).await;
+        let (_server, addr) = start_test_grpc_server(None).await;
 
         let response = send_preflight(addr, "https://example.com").await;
 

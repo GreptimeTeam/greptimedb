@@ -215,23 +215,15 @@ where
         external: bool,
         request_memory_limiter: ServerMemoryLimiter,
     ) -> Result<GrpcServer> {
-        // Browsers never talk to the internal server, so CORS stays off there
-        // regardless of configuration.
-        let grpc = if external {
-            grpc.clone()
-        } else {
-            GrpcOptions {
-                enable_cors: false,
-                ..grpc.clone()
-            }
-        };
-        let grpc = &grpc;
-
-        let builder = if let Some(builder) = self.grpc_server_builder.take() {
+        let mut builder = if let Some(builder) = self.grpc_server_builder.take() {
             builder
         } else {
             self.grpc_server_builder(grpc, request_memory_limiter)?
         };
+        // Browsers never talk to the internal server.
+        if external && grpc.enable_cors {
+            builder = builder.with_cors(grpc.cors_allowed_origins.clone());
+        }
 
         let user_provider = if external {
             self.plugins.get::<UserProviderRef>()
