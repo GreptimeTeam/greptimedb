@@ -5682,14 +5682,6 @@ async fn subquery_rejects_invalid_range_and_zero_step() {
         matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
         "{err}"
     );
-    // An omitted child step inherits the zero parent step.
-    let err = plan_subquery_offset_probe("sum_over_time(subquery_offset_offgrid[5s:])", 60, 60, 0)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(&err, crate::promql::error::Error::ZeroRangeSelector { .. }),
-        "{err}"
-    );
 }
 
 /// Rejects nonempty child windows whose derived millisecond bounds are unrepresentable.
