@@ -95,11 +95,7 @@ pub struct GrpcOptions {
     /// Whether to enable CORS on the gRPC server. Required by gRPC-Web clients
     /// running in a browser, which send an `OPTIONS` preflight request first.
     ///
-    /// It is off by default, unlike the HTTP server. `GrpcOptions` is shared by
-    /// every node type, and `serde` cannot tell the public `[grpc]` section
-    /// apart from `[internal_grpc]`, so a default of `true` would also turn CORS
-    /// on for the cluster-internal gRPC listeners (the internal gRPC server,
-    /// datanode and flownode), which do not authenticate their callers.
+    /// It is off by default.
     ///
     /// The frontend never serves CORS on its internal gRPC server: it forces
     /// this option off there, whatever the configuration says.
