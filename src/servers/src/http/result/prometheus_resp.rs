@@ -431,25 +431,12 @@ impl ColumnLayout {
             .fail();
         }
 
-        // Only the marked identity supplies `__name__`; retain an ordinary physical
-        // column under an unoccupied label so distinct series are never merged.
+        // Only the marked identity supplies `__name__`. A table whose own schema holds a column
+        // of that spelling is refused before PromQL evaluation, so an unmarked column of the
+        // reserved name cannot reach this layout.
         let tag_names = tag_column_indices
             .iter()
-            .map(|index| {
-                let name = schema.column_name_by_index(*index);
-                if name != METRIC_NAME {
-                    return name.to_string();
-                }
-                let mut exported = "exported_name".to_string();
-                while schema
-                    .column_schemas()
-                    .iter()
-                    .any(|column| column.name == exported)
-                {
-                    exported.push('_');
-                }
-                exported
-            })
+            .map(|index| schema.column_name_by_index(*index).to_string())
             .collect::<Vec<_>>();
 
         Ok(Self {
@@ -843,154 +830,24 @@ mod tests {
     }
 
     #[test]
-    fn marked_metric_name_overrides_ordinary_name_tag() {
-        // The marked column is the renamed physical identity; the ordinary `__name__`
-        // label column must not override it.
-        let schema = Arc::new(Schema::new(vec![
+    fn column_layout_keeps_tag_names_verbatim() {
+        // The layout reads the name of every tag column as it is. A column
+        // spelled like the reserved name is not worked around either: a table
+        // that brings one is refused where it enters PromQL, so no unmarked
+        // column of that spelling can reach this layout.
+        let schema = Schema::new(vec![
             ColumnSchema::new(
                 "timestamp",
                 ConcreteDataType::timestamp_millisecond_datatype(),
                 false,
             ),
             ColumnSchema::new("host", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("__name__", ConcreteDataType::string_datatype(), true),
-            marked_metric_name_column("renamed_identity"),
+            ColumnSchema::new(METRIC_NAME, ConcreteDataType::string_datatype(), true),
             ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
-        ]));
-        let batch = RecordBatch::new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondVector::from_values([1_000])) as _,
-                Arc::new(StringVector::from(vec![Some("host-a")])) as _,
-                Arc::new(StringVector::from(vec![Some("ordinary_name")])) as _,
-                Arc::new(StringVector::from(vec![Some("physical_name")])) as _,
-                Arc::new(Float64Vector::from_values([1.0])) as _,
-            ],
-        )
-        .unwrap();
-        let response = PrometheusJsonResponse::record_batches_to_data(
-            RecordBatches::try_new(schema, vec![batch]).unwrap(),
-            ValueType::Vector,
-        )
-        .unwrap();
-        let PrometheusResponse::PromData(PromData {
-            result: PromQueryResult::Vector(series),
-            ..
-        }) = response
-        else {
-            panic!("expected vector response");
-        };
-        assert_eq!(series.len(), 1);
-        assert_eq!(
-            series[0].metric.get(METRIC_NAME).map(String::as_str),
-            Some("physical_name")
-        );
-        assert_eq!(
-            series[0].metric.get("host").map(String::as_str),
-            Some("host-a")
-        );
-        assert_eq!(
-            series[0].metric.get("exported_name").map(String::as_str),
-            Some("ordinary_name")
-        );
-    }
-
-    #[tokio::test]
-    async fn unmarked_ordinary_name_never_restores_metric_identity() {
-        let schema = Arc::new(Schema::new(vec![
-            ColumnSchema::new(
-                "timestamp",
-                ConcreteDataType::timestamp_millisecond_datatype(),
-                false,
-            ),
-            ColumnSchema::new("__name__", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("exported_name", ConcreteDataType::string_datatype(), true),
-            ColumnSchema::new("value", ConcreteDataType::float64_datatype(), false),
-        ]));
-        let batch = RecordBatch::new(
-            schema.clone(),
-            vec![
-                Arc::new(TimestampMillisecondVector::from_values([1_000, 1_000])) as _,
-                Arc::new(StringVector::from(vec![
-                    Some("physical_a"),
-                    Some("physical_b"),
-                ])) as _,
-                Arc::new(StringVector::from(vec![Some("other"), Some("other")])) as _,
-                Arc::new(Float64Vector::from_values([1.0, 2.0])) as _,
-            ],
-        )
-        .unwrap();
-        for result_type in [ValueType::Vector, ValueType::Matrix] {
-            let buffered = PrometheusJsonResponse::record_batches_to_data(
-                RecordBatches::try_new(schema.clone(), vec![batch.clone()]).unwrap(),
-                result_type,
-            )
-            .unwrap();
-            let streamed = PrometheusJsonResponse::consume_stream_to_data(
-                RecordBatches::try_new(
-                    schema.clone(),
-                    vec![batch.slice(0, 1).unwrap(), batch.slice(1, 1).unwrap()],
-                )
-                .unwrap()
-                .as_stream(),
-                result_type,
-            )
-            .await
-            .unwrap();
-            assert_eq!(
-                serde_json::to_value(&buffered).unwrap(),
-                serde_json::to_value(&streamed).unwrap()
-            );
-            let PrometheusResponse::PromData(PromData { result, .. }) = buffered else {
-                panic!("expected Prometheus data");
-            };
-            let (metrics, values) = match &result {
-                PromQueryResult::Vector(series) => (
-                    series
-                        .iter()
-                        .map(|series| &series.metric)
-                        .collect::<Vec<_>>(),
-                    series
-                        .iter()
-                        .map(|series| series.value.as_ref().unwrap().1.clone())
-                        .collect::<Vec<_>>(),
-                ),
-                PromQueryResult::Matrix(series) => (
-                    series
-                        .iter()
-                        .map(|series| &series.metric)
-                        .collect::<Vec<_>>(),
-                    series
-                        .iter()
-                        .map(|series| {
-                            serde_json::to_value(&series.values[0].1)
-                                .unwrap()
-                                .as_str()
-                                .unwrap()
-                                .to_string()
-                        })
-                        .collect::<Vec<_>>(),
-                ),
-                _ => panic!("expected vector or matrix"),
-            };
-            assert_eq!(metrics.len(), 2);
-            for metric in &metrics {
-                assert!(!metric.contains_key(METRIC_NAME));
-                assert_eq!(
-                    metric.get("exported_name").map(String::as_str),
-                    Some("other")
-                );
-            }
-            assert_eq!(
-                metrics[0].get("exported_name_").map(String::as_str),
-                Some("physical_a")
-            );
-            assert_eq!(
-                metrics[1].get("exported_name_").map(String::as_str),
-                Some("physical_b")
-            );
-            assert_eq!(values, vec!["1.0", "2.0"]);
-        }
+        ]);
+        let layout = ColumnLayout::infer(&schema).unwrap();
+        assert!(layout.metric_name_column_index.is_none());
+        assert_eq!(layout.tag_names, vec!["host", METRIC_NAME]);
     }
 
     #[tokio::test]

@@ -10151,71 +10151,140 @@ async fn test_histogram_quantile_folds_with_identity_then_drops_it() {
     );
 }
 
+/// A table whose *value* column, rather than one of its tags, carries a caller provided spelling.
+/// The reserved-name rejection reads the schema of the table, so the role a column plays in it
+/// does not change the verdict.
+async fn build_value_column_table_provider(table_name: &str, value: &str) -> DfTableSourceProvider {
+    let catalog_list = MemoryCatalogManager::with_default_setup();
+    let columns = vec![
+        ColumnSchema::new(
+            "job".to_string(),
+            ConcreteDataType::string_datatype(),
+            false,
+        ),
+        ColumnSchema::new(
+            greptime_timestamp().to_string(),
+            ConcreteDataType::timestamp_millisecond_datatype(),
+            false,
+        )
+        .with_time_index(true),
+        ColumnSchema::new(
+            value.to_string(),
+            ConcreteDataType::float64_datatype(),
+            true,
+        ),
+    ];
+    let table_meta = TableMetaBuilder::empty()
+        .schema(Arc::new(Schema::new(columns)))
+        .primary_key_indices(vec![0])
+        .value_indices(vec![2])
+        .next_column_id(1024)
+        .build()
+        .unwrap();
+    let table_info = TableInfoBuilder::default()
+        .name(table_name.to_string())
+        .meta(table_meta)
+        .build()
+        .unwrap();
+
+    assert!(
+        catalog_list
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: table_name.to_string(),
+                table_id: 1024,
+                table: EmptyTable::from_table_info(&table_info),
+            })
+            .is_ok()
+    );
+
+    DfTableSourceProvider::new(
+        catalog_list,
+        false,
+        QueryContext::arc(),
+        DummyDecoder::arc(),
+        false,
+    )
+}
+
+/// A table that brings its own `__name__` column cannot be evaluated: `__name__` is the metric
+/// name of a series and nothing else, so the column would have to be that name and an ordinary
+/// column of the row at once. Every selector reads its table through the same entry point, so the
+/// plain selector, the one inside a call or a label function, the one a range selector wraps and
+/// the one a subquery wraps are all refused with the table.
 #[tokio::test]
-async fn test_sort_by_label_semantic_name_without_marker_sorts_as_absent() {
+async fn test_reserved_metric_name_column_rejects_every_selector() {
     let state = build_query_engine_state();
     let provider = || async {
-        build_test_table_provider_with_distinct_tags(&[("collision_metric", &["__name__", "job"])])
-            .await
+        build_test_table_provider_with_distinct_tags(&[
+            ("reserved_name_metric", &["__name__", "job"]),
+            ("plain_metric", &["job"]),
+        ])
+        .await
     };
-    let plan = PromPlanner::stmt_to_plan(
-        provider().await,
-        &operator_eval_stmt("abs(collision_metric)"),
+    let expected = concat!(
+        "Table reserved_name_metric cannot be queried with PromQL: ",
+        "column '__name__' conflicts with the reserved metric name"
+    );
+    for query in [
+        // The plain vector selector.
+        "reserved_name_metric",
+        // The selector a matcher that names the metric instead of the table reads.
+        r#"{__name__="reserved_name_metric"}"#,
+        // The selector inside a call and inside a label function.
+        "abs(reserved_name_metric)",
+        r#"sort_by_label(reserved_name_metric, "job")"#,
+        r#"label_join(reserved_name_metric, "name_copy", "/", "job")"#,
+        // The selector a range selector wraps, next to the one a subquery wraps.
+        "rate(reserved_name_metric[5m])",
+        "count_over_time(reserved_name_metric[5m:1m])",
+    ] {
+        let err = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(query), &state)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_string(), expected, "{query}");
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{query}");
+    }
+
+    // The same shapes read a table without a column of the reserved spelling, and a table that
+    // does not exist is still an empty metric rather than a rejection.
+    for query in [
+        "plain_metric",
+        "abs(plain_metric)",
+        "rate(plain_metric[5m])",
+        "count_over_time(plain_metric[5m:1m])",
+        "nonexistent_metric",
+    ] {
+        PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(query), &state)
+            .await
+            .unwrap_or_else(|err| panic!("{query}: {err}"));
+    }
+
+    // The spelling is what is reserved, not the role the column plays: a value column of that
+    // name is refused like a tag column, while a value column under another name is read as the
+    // sample of its series.
+    let err = PromPlanner::stmt_to_plan(
+        build_value_column_table_provider("reserved_field_metric", METRIC_NAME).await,
+        &operator_eval_stmt("reserved_field_metric"),
+        &state,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        concat!(
+            "Table reserved_field_metric cannot be queried with PromQL: ",
+            "column '__name__' conflicts with the reserved metric name"
+        )
+    );
+    PromPlanner::stmt_to_plan(
+        build_value_column_table_provider("ordinary_field_metric", "value").await,
+        &operator_eval_stmt("ordinary_field_metric"),
         &state,
     )
     .await
     .unwrap();
-    assert!(
-        plan.schema()
-            .field_with_unqualified_name("__name__")
-            .is_ok()
-    );
-    assert!(
-        PromPlanner::metric_name_column(plan.schema())
-            .unwrap()
-            .is_none()
-    );
-    for function in ["sort_by_label", "sort_by_label_desc"] {
-        // The name is gone, so the label the sort reads is absent: it sorts as the empty value
-        // among the labels the series carry instead of failing the query, and the physical
-        // `__name__` column of the input is never read as the semantic name.
-        let query = format!(r#"{function}(abs(collision_metric), "__name__")"#);
-        let plan = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
-            .await
-            .unwrap_or_else(|err| panic!("{query}: {err}"));
-        let plan_text = plan.display_indent().to_string();
-        assert!(
-            plan_text.contains(&format!(
-                "Sort: Utf8(\"\") {} NULLS",
-                if function.ends_with("desc") {
-                    "DESC"
-                } else {
-                    "ASC"
-                }
-            )),
-            "{query}: {plan_text}"
-        );
-        // The physical `__name__` label of the input is not what the semantic name resolves to.
-        assert!(
-            plan.schema()
-                .field_with_unqualified_name("__name__")
-                .is_ok(),
-            "{query}: the physical `__name__` label must survive: {plan_text}"
-        );
-
-        let query = format!(r#"{function}(collision_metric, "__name__")"#);
-        let plan = PromPlanner::stmt_to_plan(provider().await, &operator_eval_stmt(&query), &state)
-            .await
-            .unwrap();
-        let marker = PromPlanner::metric_name_column(plan.schema())
-            .unwrap()
-            .unwrap();
-        assert!(
-            plan.display_indent()
-                .to_string()
-                .contains(&format!("Sort: coalesce({}, Utf8(\"\"))", marker.name))
-        );
-    }
 }
 
 /// Aggregations follow the metric-name lifecycle: the semantic `__name__` resolves through the
@@ -10557,121 +10626,87 @@ async fn test_dropping_an_absent_metric_name_adds_no_check() {
     }
 }
 
-/// A physical column spelled like the semantic `__name__`, or like the internal column the marker
-/// is attached under, is an ordinary label of its input and never the identity: the planner writes
-/// the name only through the marked column and reads it only through that mark, so no physical
-/// column is promoted to the role.
+/// A physical column spelled like the internal column the marker is attached under is an ordinary
+/// label of its input and never the identity: the planner writes the name only through the marked
+/// column and reads it only through that mark, so no physical column is promoted to the role.
 ///
 /// A destination written as `__name__` next to `without(...)` writes no name at all, and the name
 /// it was written as is not a grouping label of the result either: the label of that spelling is
 /// taken over by the destination and dropped with it, while a column of any other spelling stays
-/// an ordinary label of the result.
+/// an ordinary label of the result. A column spelled like the *reserved* name never reaches the
+/// call: its table is refused where the selector enters PromQL.
 #[tokio::test]
-async fn test_count_values_semantic_name_next_to_physical_columns() {
+async fn test_count_values_semantic_name_next_to_the_internal_metric_name_column() {
     let state = build_query_engine_state();
-    // (physical label column, query)
-    for (tag, query) in [
-        (
-            METRIC_NAME,
-            r#"count_values without(job) ("__name__", abs(cv_metric))"#,
-        ),
-        // A physical column occupying the internal name of the marker is not the identity and not
-        // the destination: it stays an ordinary label, is part of the grouping of `without` and
-        // keeps its own values, so the three series stay three groups.
-        (
-            PROMQL_METRIC_NAME_COLUMN,
-            r#"count_values without(job) ("__name__", abs(cv_metric))"#,
-        ),
-    ] {
-        let plan = PromPlanner::stmt_to_plan(
-            build_count_values_collision_table_provider(tag).await,
-            &operator_eval_stmt(query),
-            &state,
-        )
-        .await
-        .unwrap_or_else(|err| panic!("{tag}: {query}: {err}"));
-
-        assert!(
-            plan.schema()
-                .fields()
-                .iter()
-                .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none()),
-            "{tag}: no field may carry the identity role: {}",
-            plan.display_indent()
-        );
-
-        let has_name_column = plan
-            .schema()
-            .fields()
-            .iter()
-            .any(|field| field.name() == METRIC_NAME);
-        let plan_display = plan.display_indent().to_string();
-        let count_column = plan
-            .schema()
-            .fields()
-            .iter()
-            .find(|field| {
-                matches!(
-                    field.data_type(),
-                    ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
-                )
-            })
-            .expect("no aggregated count column")
-            .name()
-            .clone();
-        let (_, batches) = execute(plan, &state).await;
-        let mut actual_counts = numeric_values(&batches, &count_column);
-        actual_counts.sort_by(f64::total_cmp);
-        if tag == METRIC_NAME {
-            // The destination was written as the only label of the input, and with `without` the
-            // name is not a label of the result: the three samples of one value form one group.
-            assert!(
-                !has_name_column,
-                "{query}: the destination is not a label of the result: {plan_display}"
-            );
-            assert_eq!(actual_counts, vec![3.0], "{tag}: {query}");
-        } else {
-            assert_eq!(actual_counts, vec![1.0, 1.0, 1.0], "{tag}: {query}");
-            let mut tag_values = string_values(&batches, tag)
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>();
-            tag_values.sort();
-            assert_eq!(tag_values, vec!["k0", "k1", "k2"], "{tag}: {query}");
-        }
-    }
-
-    // A marked input next to a physical label spelled like the semantic name: the marked column is
-    // the name of the result and the physical label of that spelling is not part of it, so the
-    // three samples - all of value 1 - form one group named `1` instead of three named after their
-    // label.
-    let query = r#"count_values("__name__", cv_metric)"#;
+    let query = r#"count_values without(job) ("__name__", abs(cv_metric))"#;
+    // The physical column is not the identity and not the destination: it stays an ordinary label,
+    // is part of the grouping of `without` and keeps its own values, so the three series stay
+    // three groups.
     let plan = PromPlanner::stmt_to_plan(
-        build_count_values_collision_table_provider(METRIC_NAME).await,
+        build_count_values_collision_table_provider(PROMQL_METRIC_NAME_COLUMN).await,
         &operator_eval_stmt(query),
         &state,
     )
     .await
     .unwrap_or_else(|err| panic!("{query}: {err}"));
-    let marker = PromPlanner::metric_name_column(plan.schema())
-        .unwrap()
-        .unwrap_or_else(|| panic!("{query}: the generated column must be the name"));
+
     assert!(
-        !plan
-            .schema()
+        plan.schema()
             .fields()
             .iter()
-            .any(|field| field.name() == METRIC_NAME),
-        "{query}: the physical label cannot stay next to the name: {}",
+            .all(|field| field.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none()),
+        "no field may carry the identity role: {}",
         plan.display_indent()
     );
+    let count_column = plan
+        .schema()
+        .fields()
+        .iter()
+        .find(|field| {
+            matches!(
+                field.data_type(),
+                ArrowDataType::Float64 | ArrowDataType::Int64 | ArrowDataType::UInt64
+            )
+        })
+        .expect("no aggregated count column")
+        .name()
+        .clone();
     let (_, batches) = execute(plan, &state).await;
-    assert_metric_name_in_batches(&batches, &marker.name);
-    assert_eq!(
-        count_values_rows(&batches, &marker.name),
-        vec![("1", 3.0)],
-        "{query}"
-    );
+    let mut actual_counts = numeric_values(&batches, &count_column);
+    actual_counts.sort_by(f64::total_cmp);
+    assert_eq!(actual_counts, vec![1.0, 1.0, 1.0], "{query}");
+    let mut tag_values = string_values(&batches, PROMQL_METRIC_NAME_COLUMN)
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    tag_values.sort();
+    assert_eq!(tag_values, vec!["k0", "k1", "k2"], "{query}");
+}
+
+/// A table that brings its own `__name__` column has no way into PromQL evaluation, so a
+/// `count_values` never sees one: the selector inside the call is refused with its table, before a
+/// destination could take the reserved name over or leave it behind.
+#[tokio::test]
+async fn test_count_values_rejects_a_table_with_a_reserved_name_column() {
+    let state = build_query_engine_state();
+    for query in [
+        r#"count_values("__name__", cv_metric)"#,
+        r#"count_values without(job) ("__name__", abs(cv_metric))"#,
+    ] {
+        let err = PromPlanner::stmt_to_plan(
+            build_count_values_collision_table_provider(METRIC_NAME).await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("column '__name__' conflicts with the reserved metric name"),
+            "{query}: {err}"
+        );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{query}");
+    }
 }
 
 /// A `count_values` destination is a label of the result and the label takes the physical name it
@@ -12074,114 +12109,47 @@ async fn test_internal_metric_name_column_is_not_an_ordinary_label() {
     }
 }
 
-/// A physical label named `__name__` is an ordinary label, not the semantic metric name: the
-/// semantic source resolves through the marked identity instead, and the semantic destination
-/// overwrites the identity, while the physical label keeps its values and its unmarked metadata.
+/// A table that brings its own `__name__` column cannot be labelled: a label function reading the
+/// semantic name would read it out of that column, and one writing it would have the column and
+/// the name of the series at once. The table is refused where the selector enters PromQL, so the
+/// label functions never see it - the same three queries read the ordinary `cv_metric` table
+/// through its marked identity (`test_label_functions_semantic_name_source_into_ordinary_label`,
+/// `test_label_functions_semantic_name_destination_overwrites_identity`).
 #[tokio::test]
-async fn test_label_functions_semantic_name_keeps_physical_name_label() {
+async fn test_label_functions_reject_a_table_with_a_reserved_name_column() {
     let state = build_query_engine_state();
-    // (query, ordinary destination to check with its expected values, expected identity values)
-    for (query, ordinary, expected_identity) in [
-        (
-            // The semantic source is the identity, never the physical `__name__` label.
-            r#"label_replace(cv_metric, "name_copy", "$1", "__name__", "(.*)")"#,
-            Some(("name_copy", vec!["cv_metric", "cv_metric", "cv_metric"])),
-            vec!["cv_metric", "cv_metric", "cv_metric"],
-        ),
-        (
-            // ... and the semantic destination replaces the identity (matching regex) ...
-            r#"label_replace(cv_metric, "__name__", "renamed", "__name__", "(.*)")"#,
-            None,
-            vec!["renamed", "renamed", "renamed"],
-        ),
-        (
-            // ... or keeps it (non-matching regex), including for `label_join`.
-            r#"label_join(cv_metric, "__name__", "/", "__name__", "missing_label")"#,
-            None,
-            vec!["cv_metric/", "cv_metric/", "cv_metric/"],
-        ),
+    for query in [
+        // A semantic source ...
+        r#"label_replace(cv_metric, "name_copy", "$1", "__name__", "(.*)")"#,
+        // ... a semantic destination ...
+        r#"label_replace(cv_metric, "__name__", "renamed", "__name__", "(.*)")"#,
+        // ... and a semantic source of `label_join`.
+        r#"label_join(cv_metric, "__name__", "/", "__name__", "missing_label")"#,
     ] {
-        let plan = PromPlanner::stmt_to_plan(
+        let err = PromPlanner::stmt_to_plan(
             // The metric carries a physical label named `__name__`.
             build_count_values_collision_table_provider(METRIC_NAME).await,
             &operator_eval_stmt(query),
             &state,
         )
         .await
-        .unwrap_or_else(|err| panic!("{query}: {err}"));
-
-        let marker = PromPlanner::metric_name_column(plan.schema())
-            .unwrap()
-            .unwrap_or_else(|| panic!("{query}: the identity must be attached"));
-        assert_eq!(marker.name, PROMQL_METRIC_NAME_COLUMN, "{query}");
-        let physical = plan
-            .schema()
-            .field_with_unqualified_name(METRIC_NAME)
-            .unwrap_or_else(|_| panic!("{query}: the physical `__name__` label must survive"));
+        .unwrap_err();
         assert!(
-            physical.metadata().get(PROMQL_FIELD_ROLE_KEY).is_none(),
-            "{query}: the physical `__name__` label must stay unmarked",
+            err.to_string()
+                .contains("column '__name__' conflicts with the reserved metric name"),
+            "{query}: {err}"
         );
+        assert_eq!(err.status_code(), StatusCode::InvalidArguments, "{query}");
 
-        let (_, batches) = execute(plan, &state).await;
-        assert_metric_name_in_batches(&batches, &marker.name);
-        // Every row keeps the physical label and the sample value of its series.
-        let mut rows = batches
-            .iter()
-            .flat_map(|batch| {
-                let physical = batch
-                    .column_by_name(METRIC_NAME)
-                    .expect("the physical `__name__` label must be projected")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("the physical `__name__` label must be a string column");
-                let identity = batch
-                    .column_by_name(&marker.name)
-                    .expect("the identity must be projected")
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .expect("the identity must be a string column");
-                let value = batch
-                    .column_by_name(greptime_value())
-                    .expect("the sample value must be projected")
-                    .as_any()
-                    .downcast_ref::<Float64Array>()
-                    .expect("the sample value must be a float column");
-                (0..batch.num_rows())
-                    .map(|row| {
-                        (
-                            physical.value(row).to_string(),
-                            identity.value(row).to_string(),
-                            value.value(row),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| left.0.cmp(&right.0));
-        assert_eq!(
-            rows,
-            ["k0", "k1", "k2"]
-                .iter()
-                .enumerate()
-                .map(|(index, label)| (
-                    label.to_string(),
-                    expected_identity[index].to_string(),
-                    1.0
-                ))
-                .collect::<Vec<_>>(),
-            "{query}"
-        );
-        if let Some((column, expected)) = ordinary {
-            assert_eq!(
-                string_values(&batches, column),
-                expected
-                    .iter()
-                    .map(|value| Some(value.to_string()))
-                    .collect::<Vec<_>>(),
-                "{query}"
-            );
-        }
+        // The same query reads the ordinary table: what is refused is the table's column, not the
+        // `__name__` the query asks about.
+        PromPlanner::stmt_to_plan(
+            build_count_values_table_provider().await,
+            &operator_eval_stmt(query),
+            &state,
+        )
+        .await
+        .unwrap_or_else(|err| panic!("{query}: {err}"));
     }
 }
 
