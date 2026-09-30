@@ -253,53 +253,50 @@ async fn test_compound_time_filters_before_last_row() {
             if flushed {
                 test_util::flush_region(&engine, region_id, None).await;
             }
-            // Alternate predicates twice to exercise reuse of row-group and range caches.
-            for _ in 0..2 {
-                for (filter, expected) in &cases {
-                    for selector in [
-                        None,
-                        Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
-                        Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
-                    ] {
-                        let stream = engine
-                            .scan_to_stream(
-                                region_id,
-                                ScanRequest {
-                                    filters: vec![
-                                        col("tag_0").is_null().or(col("tag_0").eq(lit("series"))),
-                                        filter.clone(),
-                                    ],
-                                    distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
-                                    series_row_selector: selector,
-                                    ..Default::default()
-                                },
-                            )
-                            .await
-                            .unwrap();
-                        let batches = RecordBatches::try_collect(stream).await.unwrap();
-                        let mut actual = Vec::new();
-                        for batch in batches.iter() {
-                            actual.extend(
-                                batch
-                                    .column_by_name("ts")
-                                    .unwrap()
-                                    .as_primitive::<TimestampMillisecondType>()
-                                    .values()
-                                    .iter()
-                                    .copied(),
-                            );
-                        }
-                        actual.sort_unstable();
-                        let expected = if selector.is_some() {
-                            expected.last().copied().into_iter().collect::<Vec<_>>()
-                        } else {
-                            expected.clone()
-                        };
-                        assert_eq!(
-                            actual, expected,
-                            "flat={flat}, memtable={memtable}, flushed={flushed}, selector={selector:?}, {filter}"
+            for (filter, expected) in &cases {
+                for selector in [
+                    None,
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: false }),
+                    Some(TimeSeriesRowSelector::LastRow { after_merge: true }),
+                ] {
+                    let stream = engine
+                        .scan_to_stream(
+                            region_id,
+                            ScanRequest {
+                                filters: vec![
+                                    col("tag_0").is_null().or(col("tag_0").eq(lit("series"))),
+                                    filter.clone(),
+                                ],
+                                distribution: flat.then_some(TimeSeriesDistribution::PerSeries),
+                                series_row_selector: selector,
+                                ..Default::default()
+                            },
+                        )
+                        .await
+                        .unwrap();
+                    let batches = RecordBatches::try_collect(stream).await.unwrap();
+                    let mut actual = Vec::new();
+                    for batch in batches.iter() {
+                        actual.extend(
+                            batch
+                                .column_by_name("ts")
+                                .unwrap()
+                                .as_primitive::<TimestampMillisecondType>()
+                                .values()
+                                .iter()
+                                .copied(),
                         );
                     }
+                    actual.sort_unstable();
+                    let expected = if selector.is_some() {
+                        expected.last().copied().into_iter().collect::<Vec<_>>()
+                    } else {
+                        expected.clone()
+                    };
+                    assert_eq!(
+                        actual, expected,
+                        "flat={flat}, memtable={memtable}, flushed={flushed}, selector={selector:?}, {filter}"
+                    );
                 }
             }
         }

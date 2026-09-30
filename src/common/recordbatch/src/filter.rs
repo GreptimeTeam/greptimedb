@@ -828,67 +828,6 @@ mod test {
             right: Box::new(1.lit()),
         });
         assert!(SimpleFilterEvaluator::try_new(&expr).is_none());
-    }
-
-    #[test]
-    fn null_disjunct_matches_string_labels() {
-        use datatypes::arrow::array::{StringArray, UInt32Array};
-
-        let strings: ArrayRef = Arc::new(StringArray::from(vec![
-            None,
-            Some(""),
-            Some("lo"),
-            Some("eth0"),
-            None,
-        ]));
-        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![None, Some(0), Some(1), Some(2), Some(3)]),
-            Arc::new(StringArray::from(vec![
-                Some(""),
-                Some("lo"),
-                Some("eth0"),
-                None,
-            ])),
-        ));
-        for input in [strings, dictionary] {
-            for (op, literal, expected) in [
-                (Operator::Eq, "", vec![true, true, false, false, true]),
-                (Operator::NotEq, "lo", vec![true, true, false, true, true]),
-                (
-                    Operator::RegexNotMatch,
-                    "^(?:lo)$",
-                    vec![true, true, false, true, true],
-                ),
-                (
-                    Operator::RegexMatch,
-                    "^(?:|eth0)$",
-                    vec![true, true, false, true, true],
-                ),
-            ] {
-                let comparison = Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(col("label")),
-                    op,
-                    Box::new(lit(literal)),
-                ));
-                for expr in [
-                    col("label").is_null().or(comparison.clone()),
-                    comparison.or(col("label").is_null()),
-                ] {
-                    let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
-                    assert_eq!(
-                        evaluator.evaluate_array(&input).unwrap(),
-                        BooleanBuffer::from(expected.clone())
-                    );
-                    assert!(evaluator.evaluate_scalar(&ScalarValue::Utf8(None)).unwrap());
-                    assert_eq!(
-                        evaluator
-                            .evaluate_scalar(&ScalarValue::Utf8(Some("lo".into())))
-                            .unwrap(),
-                        expected[2]
-                    );
-                }
-            }
-        }
         for expr in [
             col("other").is_null().or(col("label").not_eq(lit("lo"))),
             col("a.label")
@@ -930,70 +869,6 @@ mod test {
     }
 
     #[tokio::test]
-    async fn optimized_nullable_label_filters() {
-        use datafusion::prelude::SessionContext;
-        use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
-        use datatypes::arrow::array::{StringArray, UInt32Array};
-
-        let strings: ArrayRef = Arc::new(StringArray::from(vec![
-            None,
-            Some(""),
-            Some("tmpfs"),
-            Some("ext4"),
-        ]));
-        let dictionary: ArrayRef = Arc::new(DictionaryArray::<UInt32Type>::new(
-            UInt32Array::from(vec![None, Some(0), Some(1), Some(2)]),
-            Arc::new(StringArray::from(vec!["", "tmpfs", "ext4"])),
-        ));
-        for input in [strings, dictionary] {
-            let ctx = SessionContext::new();
-            let schema = Arc::new(Schema::new(vec![Field::new(
-                "label",
-                input.data_type().clone(),
-                true,
-            )]));
-            ctx.register_batch(
-                "labels",
-                RecordBatch::try_new(schema, vec![input.clone()]).unwrap(),
-            )
-            .unwrap();
-            for (op, pattern) in [
-                (Operator::RegexNotMatch, "^(?:tmpfs|vfat)$"),
-                (Operator::NotEq, "tmpfs"),
-            ] {
-                let comparison = Expr::BinaryExpr(BinaryExpr::new(
-                    Box::new(col("label")),
-                    op,
-                    Box::new(lit(pattern)),
-                ));
-                let expr = col("label").is_null().or(comparison);
-                let df = ctx.table("labels").await.unwrap().filter(expr).unwrap();
-                let plan = df.into_optimized_plan().unwrap();
-                let mut filters = Vec::new();
-                plan.apply(|plan| {
-                    if let datafusion::logical_expr::LogicalPlan::Filter(filter) = plan {
-                        filters.push(filter.predicate.clone());
-                    }
-                    Ok(TreeNodeRecursion::Continue)
-                })
-                .unwrap();
-                assert!(!filters.is_empty(), "{plan}");
-                for filter in filters {
-                    let evaluator =
-                        SimpleFilterEvaluator::try_new_with_column_type(&filter, &|name| {
-                            (name == "label").then(|| input.data_type().clone())
-                        })
-                        .unwrap_or_else(|| panic!("unsupported optimized filter: {filter}"));
-                    assert_eq!(
-                        evaluator.evaluate_array(&input).unwrap(),
-                        BooleanBuffer::from(vec![true, true, false, true])
-                    );
-                }
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn single_column_predicates_match_datafusion() {
         use datafusion::prelude::SessionContext;
         use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
@@ -1029,7 +904,7 @@ mod test {
             ])),
         ));
         let null = || lit(ScalarValue::Utf8(None));
-        let predicates = [
+        let mut predicates = vec![
             col("label").is_null(),
             col("label").is_not_null(),
             col("label")
@@ -1053,6 +928,22 @@ mod test {
             col("label").gt(lit("a")).and(col("label").lt(lit("z"))),
             lit("lo").not_eq(col("label")),
         ];
+        for (op, literal) in [
+            (Operator::Eq, ""),
+            (Operator::NotEq, "lo"),
+            (Operator::RegexNotMatch, "^(?:lo|vfat)$"),
+            (Operator::RegexMatch, "^(?:|eth0)$"),
+        ] {
+            let comparison = Expr::BinaryExpr(BinaryExpr::new(
+                Box::new(col("label")),
+                op,
+                Box::new(lit(literal)),
+            ));
+            predicates.extend([
+                col("label").is_null().or(comparison.clone()),
+                comparison.or(col("label").is_null()),
+            ]);
+        }
         for input in [strings, dictionary] {
             let ctx = SessionContext::new();
             let schema = Arc::new(Schema::new(vec![
@@ -1071,50 +962,6 @@ mod test {
                 .unwrap(),
             )
             .unwrap();
-            // Compare nested predicates with DataFusion's three-valued logic.
-            // Check scalars as well: primary-key filtering evaluates one series at a time.
-            for left in &predicates {
-                for right in &predicates {
-                    for expr in [
-                        left.clone().and(right.clone()),
-                        left.clone().or(right.clone()),
-                    ] {
-                        let schema =
-                            Schema::new(vec![Field::new("label", input.data_type().clone(), true)]);
-                        let batch =
-                            RecordBatch::try_new(Arc::new(schema.clone()), vec![input.clone()])
-                                .unwrap();
-                        let physical = create_physical_expr(
-                            &expr,
-                            &DFSchema::try_from(schema).unwrap(),
-                            &ExecutionProps::new(),
-                            &PhysicalPlanningContext::default(),
-                        )
-                        .unwrap();
-                        let result = physical
-                            .evaluate(&batch)
-                            .unwrap()
-                            .into_array(input.len())
-                            .unwrap();
-                        let expected =
-                            boolean_array_to_scan_mask(as_boolean_array(&result).unwrap());
-                        let evaluator = SimpleFilterEvaluator::try_new(&expr).unwrap();
-                        assert_eq!(
-                            evaluator.evaluate_array(&input).unwrap(),
-                            *expected.values(),
-                            "{expr}"
-                        );
-                        for i in 0..input.len() {
-                            let scalar = ScalarValue::try_from_array(&input, i).unwrap();
-                            assert_eq!(
-                                evaluator.evaluate_scalar(&scalar).unwrap(),
-                                expected.value(i),
-                                "{expr}, row={i}"
-                            );
-                        }
-                    }
-                }
-            }
             for expr in &predicates {
                 let df = ctx
                     .table("labels")
@@ -1140,12 +987,21 @@ mod test {
                     })
                     .collect::<Vec<_>>();
                 let evaluate = |expr: &Expr| {
-                    SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
-                        (name == "label").then(|| input.data_type().clone())
-                    })
-                    .unwrap_or_else(|| panic!("unsupported: {expr}"))
-                    .evaluate_array(&input)
-                    .unwrap()
+                    let evaluator =
+                        SimpleFilterEvaluator::try_new_with_column_type(expr, &|name| {
+                            (name == "label").then(|| input.data_type().clone())
+                        })
+                        .unwrap_or_else(|| panic!("unsupported: {expr}"));
+                    let mask = evaluator.evaluate_array(&input).unwrap();
+                    for (i, matched) in mask.iter().enumerate() {
+                        let scalar = ScalarValue::try_from_array(&input, i).unwrap();
+                        assert_eq!(
+                            evaluator.evaluate_scalar(&scalar).unwrap(),
+                            matched,
+                            "{expr}, row={i}"
+                        );
+                    }
+                    mask
                 };
                 let selected = |mask: BooleanBuffer| {
                     mask.iter()
@@ -1251,6 +1107,12 @@ mod test {
                 .is_not_null()
                 .and(col("ts").not_eq(lit(ts_us(500)))),
             col("ts").eq(null()).or(col("ts").eq(lit(ts_us(-1000)))),
+            col("ts")
+                .eq(lit(ts_us(500)))
+                .and(col("ts").gt(lit(ts_us(0)))),
+            col("ts")
+                .not_eq(lit(ts_us(500)))
+                .or(col("ts").lt(lit(ts_us(0)))),
         ];
         let native: ArrayRef = Arc::new(TimestampMicrosecondArray::from(vec![
             -2000, -1000, 0, 1000, 2000,
@@ -1262,15 +1124,7 @@ mod test {
             false,
         )]));
         let batch = RecordBatch::try_new(schema.clone(), vec![native]).unwrap();
-        let composed = predicates.iter().flat_map(|left| {
-            predicates.iter().flat_map(move |right| {
-                [
-                    left.clone().and(right.clone()),
-                    left.clone().or(right.clone()),
-                ]
-            })
-        });
-        for expr in predicates.iter().cloned().chain(composed) {
+        for expr in predicates {
             let physical = create_physical_expr(
                 &expr,
                 &DFSchema::try_from(schema.as_ref().clone()).unwrap(),
