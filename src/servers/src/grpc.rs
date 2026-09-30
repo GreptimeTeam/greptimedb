@@ -50,6 +50,7 @@ use tonic::{Request, Response, Status};
 use tonic_reflection::server::v1::{ServerReflection, ServerReflectionServer};
 
 use crate::error::{AlreadyStartedSnafu, InternalSnafu, Result, StartGrpcSnafu, TcpBindSnafu};
+use crate::grpc::memory_limit::MemoryLimiterExtensionService;
 use crate::install_default_crypto_provider;
 use crate::metrics::MetricsMiddlewareLayer;
 use crate::otel_arrow::{HeaderInterceptor, OtelArrowServiceHandler};
@@ -213,6 +214,14 @@ impl FlightCompression {
     }
 }
 
+/// The wrapped OTLP Arrow service type used by [`GrpcServer`].
+type OtelArrowService = MemoryLimiterExtensionService<
+    InterceptedService<
+        ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
+        HeaderInterceptor,
+    >,
+>;
+
 pub struct GrpcServer {
     // states
     shutdown_tx: Mutex<Option<Sender<()>>>,
@@ -224,14 +233,7 @@ pub struct GrpcServer {
     // tls config
     tls_config: Option<ServerTlsConfig>,
     // Otel arrow service
-    otel_arrow_service: Mutex<
-        Option<
-            InterceptedService<
-                ArrowMetricsServiceServer<OtelArrowServiceHandler<OpenTelemetryProtocolHandlerRef>>,
-                HeaderInterceptor,
-            >,
-        >,
-    >,
+    otel_arrow_service: Mutex<Option<OtelArrowService>>,
     bind_addr: Option<SocketAddr>,
     name: Option<String>,
     config: GrpcServerConfig,

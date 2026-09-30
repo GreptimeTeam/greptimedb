@@ -99,6 +99,15 @@ impl DatabaseClient {
 
     /// Requires the explicit packed-import protocol before any restore mutation.
     pub async fn require_packed_import(&self) -> Result<()> {
+        self.require_packed_capability("metric_packed_import").await
+    }
+
+    /// Requires packed export support before creating snapshot artifacts.
+    pub async fn require_packed_export(&self) -> Result<()> {
+        self.require_packed_capability("metric_packed_export").await
+    }
+
+    async fn require_packed_capability(&self, capability: &str) -> Result<()> {
         let url = format!("http://{}/v1/capabilities", self.addr);
         let mut builder = reqwest::Client::builder().timeout(self.timeout);
         if let Some(proxy) = self.proxy.clone() {
@@ -113,18 +122,18 @@ impl DatabaseClient {
             request = request.header("Authorization", auth);
         }
         let response = request.send().await.with_context(|_| HttpQuerySqlSnafu {
-            reason: "packed import capability request failed",
+            reason: "packed snapshot capability request failed",
         })?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return crate::error::InvalidArgumentsSnafu {
-                msg: "target does not support packed import",
+                msg: format!("server does not support {capability}"),
             }
             .fail();
         }
         let response = response
             .error_for_status()
             .with_context(|_| HttpQuerySqlSnafu {
-                reason: "packed import capability request rejected",
+                reason: "packed snapshot capability request rejected",
             })?;
         let body = response.text().await.with_context(|_| HttpQuerySqlSnafu {
             reason: "cannot read capability response",
@@ -136,9 +145,9 @@ impl DatabaseClient {
             }
             .fail();
         }
-        if value.get("metric_packed_import").and_then(Value::as_u64) != Some(1) {
+        if value.get(capability).and_then(Value::as_u64) != Some(1) {
             return crate::error::InvalidArgumentsSnafu {
-                msg: "target does not support packed import version 1",
+                msg: format!("server does not support {capability} version 1"),
             }
             .fail();
         }
@@ -221,41 +230,54 @@ mod tests {
     #[tokio::test]
     async fn packed_capability_probe_checks_auth_and_protocol_version() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        for (status, body, supported) in [
-            (200, r#"{"metric_packed_import":1,"future":2}"#, true),
-            (200, "{}", false),
-            (200, r#"{"metric_packed_import":2}"#, false),
-            (404, "{}", false),
-            (401, "{}", false),
-            (403, "{}", false),
-            (200, "[]", false),
-            (200, "invalid-json", false),
-        ] {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let server = tokio::spawn(async move {
-                let (mut socket, _) = listener.accept().await.unwrap();
-                let mut request = vec![0; 4096];
-                let n = socket.read(&mut request).await.unwrap();
-                let request = String::from_utf8_lossy(&request[..n]).to_lowercase();
-                assert!(request.starts_with("get /v1/capabilities "));
-                assert!(request.contains("authorization: basic dxnlcjpwyxnzd29yza=="));
-                socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            });
-            let client = super::DatabaseClient::new(
-                address.to_string(),
-                "greptime".into(),
-                Some("user:password".into()),
-                std::time::Duration::from_secs(5),
-                None,
-                true,
-            );
-            assert_eq!(
-                client.require_packed_import().await.is_ok(),
-                supported,
-                "{status}: {body}"
-            );
-            server.await.unwrap();
+        for export in [false, true] {
+            for (status, body, supported) in [
+                (200, r#"{"metric_packed_import":1,"future":2}"#, true),
+                (200, "{}", false),
+                (200, r#"{"metric_packed_import":2}"#, false),
+                (404, "{}", false),
+                (401, "{}", false),
+                (403, "{}", false),
+                (200, "[]", false),
+                (200, "invalid-json", false),
+            ] {
+                let body = if export {
+                    body.replace("metric_packed_import", "metric_packed_export")
+                } else {
+                    body.to_string()
+                };
+                let response_body = body.clone();
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let body = response_body;
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = vec![0; 4096];
+                    let n = socket.read(&mut request).await.unwrap();
+                    let request = String::from_utf8_lossy(&request[..n]).to_lowercase();
+                    assert!(request.starts_with("get /v1/capabilities "));
+                    assert!(request.contains("authorization: basic dxnlcjpwyxnzd29yza=="));
+                    socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                });
+                let client = super::DatabaseClient::new(
+                    address.to_string(),
+                    "greptime".into(),
+                    Some("user:password".into()),
+                    std::time::Duration::from_secs(5),
+                    None,
+                    true,
+                );
+                assert_eq!(
+                    if export {
+                        client.require_packed_export().await.is_ok()
+                    } else {
+                        client.require_packed_import().await.is_ok()
+                    },
+                    supported,
+                    "{status}: {body}"
+                );
+                server.await.unwrap();
+            }
         }
     }
 

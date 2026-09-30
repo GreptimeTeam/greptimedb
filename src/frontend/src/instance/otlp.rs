@@ -124,7 +124,7 @@ impl OpenTelemetryProtocolHandler for Instance {
         metric_ctx.resource_info = self.otlp_resource_info;
 
         let otlp::metrics::MetricsConversion {
-            mut requests,
+            requests,
             rows,
             semantic_index,
             resource_info,
@@ -170,33 +170,21 @@ impl OpenTelemetryProtocolHandler for Instance {
             .extension(PHYSICAL_TABLE_PARAM)
             .unwrap_or(GREPTIME_PHYSICAL_TABLE)
             .to_string();
+        // The bulk path converts each request's time index unit to the
+        // destination table's unit during batch alignment, so no pre-gate
+        // alignment is needed here.
         let batcher = self.logical_batcher().filter(|_| {
             ctx.logical_batching_enabled() && !metric_ctx.is_legacy && metric_ctx.with_metric_engine
         });
-        let batcher = if batcher.is_some() {
-            // Align the requests' time index unit with the physical table's
-            // before the bulk eligibility check: the OTLP encoder keeps
-            // nanosecond precision on the metric engine path, while the bulk
-            // path assumes the physical table's unit (today millisecond).
-            // Without this, nanosecond requests would silently skip the
-            // batcher, and a non-millisecond physical table must not enter
-            // the bulk path either (the eligibility check rejects its unit).
-            self.inserter
-                .align_metric_row_inserts_time_unit(&ctx, &physical_table, &mut requests)
-                .await
-                .map_err(BoxedError::new)
-                .context(error::ExecuteGrpcQuerySnafu)?;
-            if self
+        let batcher = if batcher.is_some()
+            && self
                 .inserter
                 .can_batch_metric_rows(&requests, &ctx, &physical_table)
                 .await
                 .map_err(BoxedError::new)
                 .context(error::ExecuteGrpcQuerySnafu)?
-            {
-                batcher
-            } else {
-                None
-            }
+        {
+            batcher
         } else {
             None
         };

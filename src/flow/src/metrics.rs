@@ -20,14 +20,6 @@ use prometheus::*;
 lazy_static! {
     pub static ref METRIC_FLOW_TASK_COUNT: IntGauge =
         register_int_gauge!("greptime_flow_task_count", "flow task count").unwrap();
-    pub static ref METRIC_FLOW_INPUT_BUF_SIZE: IntGauge =
-        register_int_gauge!("greptime_flow_input_buf_size", "flow input buf size").unwrap();
-    pub static ref METRIC_FLOW_INSERT_ELAPSED: HistogramVec = register_histogram_vec!(
-        "greptime_flow_insert_elapsed",
-        "flow insert elapsed",
-        &["table_id"]
-    )
-    .unwrap();
     pub static ref METRIC_FLOW_BATCHING_ENGINE_QUERY_TIME: HistogramVec = register_histogram_vec!(
         "greptime_flow_batching_engine_query_time_secs",
         "flow batching engine query time(seconds)",
@@ -101,8 +93,6 @@ lazy_static! {
             &["flow_id", "mode"],
         )
         .unwrap();
-    pub static ref METRIC_FLOW_RUN_INTERVAL_MS: IntGauge =
-        register_int_gauge!("greptime_flow_run_interval_ms", "flow run interval in ms").unwrap();
     pub static ref METRIC_FLOW_ROWS: IntCounterVec = register_int_counter_vec!(
         "greptime_flow_processed_rows",
         "Count of rows flowing through the system.",
@@ -113,12 +103,6 @@ lazy_static! {
         "greptime_flow_processing_time",
         "Time spent processing requests",
         &["type"]
-    )
-    .unwrap();
-    pub static ref METRIC_FLOW_ERRORS: IntCounterVec = register_int_counter_vec!(
-        "greptime_flow_errors",
-        "Count of errors in flow processing",
-        &["code"]
     )
     .unwrap();
 }

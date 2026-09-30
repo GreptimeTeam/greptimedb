@@ -79,7 +79,7 @@ use crate::error::Result;
 use crate::flush::{WriteBufferManager, WriteBufferManagerRef};
 use crate::manifest::manager::{RegionManifestManager, RegionManifestOptions};
 use crate::manifest::storage::{is_checkpoint_file, is_delta_file};
-use crate::read::{Batch, BatchBuilder, BatchReader};
+use crate::read::{Batch, BatchBuilder};
 use crate::region::opener::{PartitionExprFetcher, PartitionExprFetcherRef};
 use crate::sst::FormatType;
 use crate::sst::file_purger::{FilePurgerRef, NoopFilePurger};
@@ -1106,34 +1106,6 @@ pub(crate) fn ts_ms_value(data: i64) -> v1::Value {
     }
 }
 
-/// A reader for test that pop [Batch] from a vector.
-pub struct VecBatchReader {
-    batches: Vec<Batch>,
-}
-
-impl VecBatchReader {
-    pub fn new(batches: &[Batch]) -> VecBatchReader {
-        let batches = batches.iter().rev().cloned().collect();
-
-        VecBatchReader { batches }
-    }
-}
-
-#[async_trait::async_trait]
-impl BatchReader for VecBatchReader {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        Ok(self.batches.pop())
-    }
-}
-
-impl Iterator for VecBatchReader {
-    type Item = Result<Batch>;
-
-    fn next(&mut self) -> Option<Result<Batch>> {
-        self.batches.pop().map(Ok)
-    }
-}
-
 pub fn new_batch_builder(
     primary_key: &[u8],
     timestamps: &[i64],
@@ -1175,19 +1147,6 @@ pub fn new_batch(
     new_batch_builder(primary_key, timestamps, sequences, op_types, 1, field)
         .build()
         .unwrap()
-}
-
-/// Ensure the reader returns batch as `expect`.
-pub async fn check_reader_result<R: BatchReader>(reader: &mut R, expect: &[Batch]) {
-    let mut result = Vec::new();
-    while let Some(mut batch) = reader.next_batch().await.unwrap() {
-        batch.remove_pk_values();
-        result.push(batch);
-    }
-
-    assert_eq!(expect, result);
-    // Next call to `next_batch()` still returns None.
-    assert!(reader.next_batch().await.unwrap().is_none());
 }
 
 /// A mock [WriteBufferManager] that supports controlling whether to flush/stall.

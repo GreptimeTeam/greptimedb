@@ -766,6 +766,7 @@ impl PromPlanner {
         let join_keys = left_tag_col_set
             .into_iter()
             .chain([left_time_index])
+            .map(Column::from_name)
             .collect::<Vec<_>>();
 
         ensure!(

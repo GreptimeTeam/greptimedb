@@ -33,7 +33,7 @@ use datafusion::physical_plan::{
     InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::array::TimestampMillisecondArray;
 use datatypes::arrow::datatypes::{SchemaRef, TimestampMillisecondType};
 use datatypes::arrow::record_batch::RecordBatch;
@@ -93,8 +93,8 @@ impl UserDefinedLogicalNodeCore for SeriesNormalize {
 
         self.tag_columns
             .iter()
-            .map(col)
-            .chain(std::iter::once(col(&self.time_index_column_name)))
+            .map(ident)
+            .chain(std::iter::once(ident(&self.time_index_column_name)))
             .collect()
     }
 

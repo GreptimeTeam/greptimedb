@@ -21,7 +21,7 @@ mod tables;
 #[cfg(test)]
 mod test_util;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::{Future, ready};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -42,6 +42,7 @@ use meter_macros::write_meter;
 use partition::manager::PartitionRuleManagerRef;
 use session::context::QueryContextRef;
 use snafu::ResultExt;
+use store_api::metric_engine_consts::{LOGICAL_TABLE_METADATA_KEY, METRIC_ENGINE_NAME};
 use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 
 use crate::batcher::flow_notifier::{FlowNotifier, start_flow_notification_worker};
@@ -173,79 +174,17 @@ impl LogicalTablePendingRowsBatcher {
             .map(|(rows, ())| rows)
     }
 
-    /// Returns whether the bulk path can accept `batches`:
-    /// - the physical metric table selected by each context must have a
-    ///   millisecond time index (or not exist yet — it is auto-created with
-    ///   the millisecond unit): new tables are created on it and the bulk
-    ///   encode produces millisecond batches;
-    /// - every existing destination table must itself have a millisecond time
-    ///   index: it may be bound to another physical table with another unit,
-    ///   and the bulk encoder would build millisecond arrays against its
-    ///   schema.
-    ///
-    /// Incompatible requests must stay on the ordinary insert path, which
-    /// converts the requests to each destination table's unit. Write targets
-    /// and destination tables are resolved once per distinct name.
-    pub(crate) async fn accepts_bulk_time_indexes(
-        &self,
-        batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
-    ) -> bool {
-        let mut checked_targets = HashSet::new();
-        let mut checked_tables = HashSet::new();
-        for (ctx, requests) in batches {
-            let key = batch_key_from_ctx(ctx);
-            if checked_targets.insert((key.catalog, key.schema, key.physical_table))
-                && !self.accepts_physical_table_time_index(ctx).await
-            {
-                return false;
-            }
-            for request in &requests.inserts {
-                if !checked_tables.insert((ctx.current_schema(), request.table_name.clone())) {
-                    continue;
-                }
-                let Ok(Some(table)) = self
-                    .catalog_manager
-                    .table(
-                        ctx.current_catalog(),
-                        &ctx.current_schema(),
-                        &request.table_name,
-                        None,
-                    )
-                    .await
-                else {
-                    // New table: governed by the selected physical table's
-                    // unit, checked above.
-                    continue;
-                };
-                if table
-                    .table_info()
-                    .meta
-                    .schema
-                    .timestamp_column()
-                    .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
-                    .is_none_or(|unit| unit != TimeUnit::Millisecond)
-                {
-                    return false;
-                }
-            }
-        }
-        true
-    }
-
-    /// Returns whether the physical metric table resolved from `ctx` can use
-    /// the bulk path. The bulk encode produces millisecond timestamp batches
-    /// only, so a physical table with another time index unit (e.g. created
-    /// as `TIMESTAMP(6)`) must stay on the ordinary insert path, which
-    /// converts the requests to the physical table's unit. A missing physical
-    /// table is accepted: it is auto-created with the millisecond unit.
-    async fn accepts_physical_table_time_index(&self, ctx: &QueryContextRef) -> bool {
+    /// Returns the physical metric table's time index unit resolved from
+    /// `ctx`, defaulting to millisecond when the table does not exist yet
+    /// (the schema alterer auto-creates it as millisecond).
+    async fn physical_time_index_unit_or_default(&self, ctx: &QueryContextRef) -> TimeUnit {
         let key = batch_key_from_ctx(ctx);
         let Ok(Some(table)) = self
             .catalog_manager
             .table(&key.catalog, &key.schema, &key.physical_table, None)
             .await
         else {
-            return true;
+            return TimeUnit::Millisecond;
         };
         table
             .table_info()
@@ -253,8 +192,77 @@ impl LogicalTablePendingRowsBatcher {
             .schema
             .timestamp_column()
             .and_then(|col| col.data_type.as_timestamp().map(|ts| ts.unit()))
-            .map(|unit| unit == TimeUnit::Millisecond)
-            .unwrap_or(true)
+            .unwrap_or(TimeUnit::Millisecond)
+    }
+
+    /// Returns whether the bulk path can accept `batches`: every existing
+    /// destination table must be a metric logical table bound to the
+    /// physical table selected by its context. A destination bound to
+    /// another physical table would be flushed through the selected
+    /// physical's regions, silently misplacing its rows, so such requests
+    /// must stay on the ordinary insert path (which routes per destination).
+    /// New tables are always fine: they are created on the selected physical
+    /// table. Time index units need no check here — the bulk encode converts
+    /// each request to its destination's unit. Destinations are resolved
+    /// once per distinct (schema, table).
+    pub(crate) async fn accepts_bulk_destinations(
+        &self,
+        batches: impl Iterator<Item = &(QueryContextRef, RowInsertRequests)>,
+    ) -> bool {
+        // One request can select different physical tables per batch (e.g.
+        // per-series physical-table labels), so the dedupe key includes the
+        // selected physical table: every distinct (schema, table, physical)
+        // triple is validated against the table's actual binding.
+        let mut checked = HashSet::new();
+        // For missing tables, one request must not select two different
+        // physical tables: the batcher would create the table through one
+        // selection and flush its rows through the other's regions.
+        let mut missing_selections: HashMap<(String, String), String> = HashMap::new();
+        for (ctx, requests) in batches {
+            let physical_table = batch_key_from_ctx(ctx).physical_table;
+            let schema = ctx.current_schema();
+            for request in &requests.inserts {
+                if !checked.insert((
+                    schema.clone(),
+                    request.table_name.clone(),
+                    physical_table.clone(),
+                )) {
+                    continue;
+                }
+                let Ok(Some(table)) = self
+                    .catalog_manager
+                    .table(ctx.current_catalog(), &schema, &request.table_name, None)
+                    .await
+                else {
+                    // New table: created on the selected physical table, but
+                    // a conflicting selection within the same request cannot
+                    // be batched.
+                    if missing_selections
+                        .insert(
+                            (schema.clone(), request.table_name.clone()),
+                            physical_table.clone(),
+                        )
+                        .is_some_and(|previous| previous != physical_table)
+                    {
+                        return false;
+                    }
+                    continue;
+                };
+                let info = table.table_info();
+                if info.meta.engine != METRIC_ENGINE_NAME
+                    || info
+                        .meta
+                        .options
+                        .extra_options
+                        .get(LOGICAL_TABLE_METADATA_KEY)
+                        .map(String::as_str)
+                        != Some(physical_table.as_str())
+                {
+                    return false;
+                }
+            }
+        }
+        true
     }
 
     /// Submits with request-level accounting after schema preparation and before
