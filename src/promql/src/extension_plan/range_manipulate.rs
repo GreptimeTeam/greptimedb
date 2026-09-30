@@ -702,33 +702,46 @@ impl RangeManipulateStream {
             new_columns[*index] = new_column;
         }
 
-        // The timestamp range payload is always millisecond ABI. Shift in wide
-        // native precision before truncating toward zero, preserving null validity.
-        let scale = nanoseconds_per_native_tick(self.time_unit);
-        let (timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
-            .ok_or_else(|| {
-                DataFusionError::Execution("Time index column is not a timestamp".into())
-            })?;
-        let timestamp_values = timestamps
-            .values()
-            .iter()
-            .enumerate()
-            .map(|(index, timestamp)| {
-                if !input.column(self.time_index).is_valid(index) {
-                    return Ok(None);
-                }
-                let shifted_ns = (*timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
-                i64::try_from(shifted_ns / 1_000_000)
-                    .map(Some)
-                    .map_err(|_| {
-                        ArrowError::ComputeError(
-                            "RangeManipulate timestamp payload overflow".into(),
-                        )
+        // The timestamp range payload is always millisecond ABI. Pick the cheapest
+        // conversion that preserves native-precision semantics:
+        // - millisecond + zero offset reuses the input array with zero copy;
+        // - other units / offsets shift in wide i128 precision (below), which is
+        //   required so ns/us data near the native type limits stays correct under
+        //   large offsets (see normalize.rs).
+        let ts_column = input.column(self.time_index);
+        let timestamp_values: ArrayRef =
+            if self.time_unit == TimeUnit::Millisecond && self.offset == 0 {
+                ts_column.clone()
+            } else {
+                // Shift in wide native precision before truncating toward zero,
+                // preserving null validity.
+                let scale = nanoseconds_per_native_tick(self.time_unit);
+                let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
+                    DataFusionError::Execution("Time index column is not a timestamp".into())
+                })?;
+                let shifted = timestamps
+                    .values()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, timestamp)| {
+                        if !ts_column.is_valid(index) {
+                            return Ok(None);
+                        }
+                        let shifted_ns =
+                            (*timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+                        i64::try_from(shifted_ns / 1_000_000)
+                            .map(Some)
+                            .map_err(|_| {
+                                ArrowError::ComputeError(
+                                    "RangeManipulate timestamp payload overflow".into(),
+                                )
+                            })
                     })
-            })
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let timestamp_values = TimestampMillisecondArray::from(timestamp_values);
-        let ts_range_column = RangeArray::from_ranges(Arc::new(timestamp_values), ranges.clone())
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                Arc::new(TimestampMillisecondArray::from(shifted))
+            };
+
+        let ts_range_column = RangeArray::from_ranges(timestamp_values, ranges.clone())
             .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
             .into_dict();
         new_columns.push(Arc::new(ts_range_column));
@@ -1400,6 +1413,101 @@ mod test {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("timestamp payload overflow"));
+    }
+
+    /// Zero-offset millisecond input reuses the input array for the timestamp
+    /// range payload (zero-copy fast path); a non-zero offset still materializes
+    /// a shifted millisecond array.
+    #[tokio::test]
+    async fn zero_offset_millisecond_payload_reuses_input_array() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let timestamps = Arc::new(TimestampMillisecondArray::from(vec![0, 1_000, 2_000]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                timestamps.clone() as ArrayRef,
+                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+        let input_schema = schema.clone().to_dfschema_ref().unwrap();
+
+        let run = |offset: Millisecond| {
+            let input = Arc::new(DataSourceExec::new(Arc::new(
+                MemorySourceConfig::try_new(&[vec![batch.clone()]], schema.clone(), None).unwrap(),
+            )));
+            let plan = RangeManipulate::new(
+                0,
+                2_000,
+                1_000,
+                offset,
+                1_000,
+                TIME_INDEX_COLUMN.to_string(),
+                vec!["value".to_string()],
+                LogicalPlan::EmptyRelation(EmptyRelation {
+                    produce_one_row: false,
+                    schema: input_schema.clone(),
+                }),
+            )
+            .unwrap();
+            async move {
+                datafusion::physical_plan::collect(
+                    plan.to_execution_plan(input),
+                    SessionContext::default().task_ctx(),
+                )
+                .await
+                .unwrap()
+            }
+        };
+
+        // Zero offset: the payload values share the input buffer (no copy).
+        let output = run(0).await;
+        let payload = RangeArray::try_new(
+            output[0]
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let payload_values = payload
+            .values()
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .unwrap();
+        assert_eq!(
+            payload_values.values().as_ptr(),
+            timestamps.values().as_ptr()
+        );
+
+        // Non-zero offset: start is advanced to the first aligned point with a
+        // non-empty window; each range holds the single sample shifted by offset.
+        let output = run(500).await;
+        let payload = RangeArray::try_new(
+            output[0]
+                .column(2)
+                .as_any()
+                .downcast_ref::<DictionaryArray<Int64Type>>()
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
+        let shifted = |index: usize| {
+            payload
+                .get(index)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(shifted(0).values().as_ref(), &[500]);
+        assert_eq!(shifted(1).values().as_ref(), &[1_500]);
+        assert_eq!(payload.len(), 2);
     }
 
     #[tokio::test]
