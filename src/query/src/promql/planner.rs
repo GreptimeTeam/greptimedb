@@ -40,7 +40,7 @@ use datafusion::datasource::DefaultTableSource;
 use datafusion::functions_aggregate::average::avg_udaf;
 use datafusion::functions_aggregate::count::count_udaf;
 use datafusion::functions_aggregate::expr_fn::first_value;
-use datafusion::functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion::functions_aggregate::min_max::max_udaf;
 use datafusion::functions_aggregate::stddev::stddev_pop_udaf;
 use datafusion::functions_aggregate::sum::sum_udaf;
 use datafusion::functions_aggregate::variance::var_pop_udaf;
@@ -70,8 +70,8 @@ use promql::extension_plan::{
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
-    IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime, MixedRange,
-    NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
+    Extremum, IDelta, Increase, LastOverTime, MatchGroupViolation, MaxOverTime, MinOverTime,
+    MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
     NativeHistogramAggSum, NativeHistogramAvg, NativeHistogramAvgOverTime, NativeHistogramChanges,
     NativeHistogramCount, NativeHistogramCountOverTime, NativeHistogramDelta,
     NativeHistogramDivScalar, NativeHistogramDrop, NativeHistogramEq, NativeHistogramIDelta,
@@ -3796,6 +3796,14 @@ impl PromPlanner {
                     if alternative_samples && value_is_histogram {
                         continue;
                     }
+                    // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
+                    let col_expr = if func.name() == "sqrt" {
+                        when(col_expr.clone().lt(lit(0.0_f64)), lit(f64::NAN))
+                            .otherwise(col_expr)
+                            .context(DataFusionPlanningSnafu)?
+                    } else {
+                        col_expr
+                    };
                     let args = itertools::chain!(
                         other_input_exprs.iter().take(field_column_pos).cloned(),
                         std::iter::once(col_expr),
@@ -4455,8 +4463,8 @@ impl PromPlanner {
             }
             token::T_AVG => avg_udaf().call(vec![input]),
             token::T_COUNT_VALUES | token::T_COUNT => count_udaf().call(vec![input]),
-            token::T_MIN => min_udaf().call(vec![input]),
-            token::T_MAX => max_udaf().call(vec![input]),
+            token::T_MIN => Extremum::min_udaf().call(vec![input]),
+            token::T_MAX => Extremum::max_udaf().call(vec![input]),
             // PromQL's `group()` aggregator produces 1 for each group.
             // Use `max(1.0)` (per-group) to match semantics and output type (Float64).
             token::T_GROUP => max_udaf().call(vec![lit(1_f64)]),
@@ -4800,7 +4808,15 @@ impl PromPlanner {
             .field_columns
             .iter()
             .map(|col| {
-                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 1);
+                let mut sort_exprs = Vec::with_capacity(self.ctx.tag_columns.len() + 2);
+                // PromQL ranks NaN last for both `topk` and `bottomk`, while DataFusion
+                // orders NaN above every number.
+                sort_exprs.push(
+                    datafusion_functions::math::expr_fn::isnan(DfExpr::Column(Column::from_name(
+                        col,
+                    )))
+                    .sort(true, true),
+                );
                 // Order by value in the specific order
                 sort_exprs.push(DfExpr::Column(Column::from_name(col)).sort(asc, true));
                 // Then tags if the values are equal,
@@ -4991,12 +5007,24 @@ impl PromPlanner {
             token::T_MOD => Ok(Box::new(move |lhs: DfExpr, rhs| {
                 Ok(cast_float(lhs) % cast_float(rhs))
             })),
-            token::T_EQLC => Ok(Box::new(|lhs, rhs| Ok(lhs.eq(rhs)))),
-            token::T_NEQ => Ok(Box::new(|lhs, rhs| Ok(lhs.not_eq(rhs)))),
-            token::T_GTR => Ok(Box::new(|lhs, rhs| Ok(lhs.gt(rhs)))),
-            token::T_LSS => Ok(Box::new(|lhs, rhs| Ok(lhs.lt(rhs)))),
-            token::T_GTE => Ok(Box::new(|lhs, rhs| Ok(lhs.gt_eq(rhs)))),
-            token::T_LTE => Ok(Box::new(|lhs, rhs| Ok(lhs.lt_eq(rhs)))),
+            token::T_EQLC => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Eq, rhs))
+            })),
+            token::T_NEQ => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::NotEq, rhs))
+            })),
+            token::T_GTR => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Gt, rhs))
+            })),
+            token::T_LSS => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::Lt, rhs))
+            })),
+            token::T_GTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::GtEq, rhs))
+            })),
+            token::T_LTE => Ok(Box::new(|lhs, rhs| {
+                Ok(Self::ieee_comparison(lhs, Operator::LtEq, rhs))
+            })),
             token::T_POW => Ok(Box::new(move |lhs, rhs| {
                 Ok(DfExpr::ScalarFunction(ScalarFunction {
                     func: datafusion_functions::math::power(),
@@ -5010,6 +5038,21 @@ impl PromPlanner {
                 }))
             })),
             _ => UnexpectedTokenSnafu { token }.fail(),
+        }
+    }
+
+    /// Compares two float expressions with IEEE 754 semantics, as PromQL does.
+    ///
+    /// Arrow compares floats by total order, where NaN equals NaN and is greater than `+Inf`.
+    /// Under IEEE 754 every comparison involving NaN is false, except `!=`, which is true.
+    fn ieee_comparison(lhs: DfExpr, op: Operator, rhs: DfExpr) -> DfExpr {
+        let any_nan = datafusion_functions::math::expr_fn::isnan(lhs.clone())
+            .or(datafusion_functions::math::expr_fn::isnan(rhs.clone()));
+        let comparison = DfExpr::BinaryExpr(BinaryExpr::new(Box::new(lhs), op, Box::new(rhs)));
+        if op == Operator::NotEq {
+            comparison.or(any_nan)
+        } else {
+            comparison.and(!any_nan)
         }
     }
 

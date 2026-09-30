@@ -18,6 +18,7 @@ mod deriv;
 mod double_exponential_smoothing;
 mod edge_count;
 mod extrapolate_rate;
+mod extremum;
 mod idelta;
 mod native_histogram;
 mod predict_linear;
@@ -44,6 +45,7 @@ use datatypes::arrow::datatypes::{DataType, Int64Type};
 pub use deriv::Deriv;
 pub use double_exponential_smoothing::DoubleExponentialSmoothing;
 pub use extrapolate_rate::{Delta, Increase, Rate};
+pub use extremum::Extremum;
 pub use idelta::IDelta;
 pub use native_histogram::{
     MixedRange, NativeHistogramAbsentOverTime, NativeHistogramAdd, NativeHistogramAggAvg,
