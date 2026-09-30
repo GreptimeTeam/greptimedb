@@ -217,12 +217,6 @@ pub enum Error {
         location: Location,
     },
 
-    #[snafu(display("vector cannot contain metrics with the same labelset"))]
-    SameLabelSet {
-        #[snafu(implicit)]
-        location: Location,
-    },
-
     #[snafu(display("Invalid regular expression in label_replace(): {}", regex))]
     InvalidRegularExpression {
         regex: String,
@@ -256,7 +250,6 @@ impl ErrorExt for Error {
             | CombineTableColumnMismatch { .. }
             | UnexpectedPlanExpr { .. }
             | UnsupportedMatcherOp { .. }
-            | SameLabelSet { .. }
             | TimestampOutOfRange { .. }
             | SystemTimeOutOfRange { .. }
             | AtModifierTimestampOutOfRange { .. }
