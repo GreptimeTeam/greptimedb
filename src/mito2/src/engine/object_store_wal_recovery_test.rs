@@ -217,7 +217,6 @@ async fn region_recovery_state(engine: &MitoEngine, region_id: RegionId) -> Regi
     }
 }
 
-/// The recovery state of a region that holds nothing.
 const EMPTY_RECOVERY_STATE: RegionRecoveryState = RegionRecoveryState {
     flushed_entry_id: 0,
     last_entry_id: 0,
