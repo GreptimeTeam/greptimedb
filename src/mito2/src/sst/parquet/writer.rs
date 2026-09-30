@@ -62,7 +62,8 @@ use crate::sst::parquet::flat_format::{
 };
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::{
-    PARQUET_METADATA_KEY, SstInfo, WriteOptions, apply_float_field_encoding,
+    COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
+    apply_float_field_encoding,
 };
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
@@ -544,7 +545,7 @@ where
                 .set_compression(Compression::ZSTD(ZstdLevel::default()))
                 .set_encoding(Encoding::PLAIN)
                 .set_max_row_group_row_count(Some(opts.row_group_size))
-                .set_column_index_truncate_length(None)
+                .set_column_index_truncate_length(COLUMN_INDEX_TRUNCATE_LENGTH)
                 .set_statistics_truncate_length(None);
             let ts_col = ColumnPath::new(vec![
                 self.metadata.time_index_column().column_schema.name.clone(),
