@@ -37,7 +37,7 @@ use datafusion::physical_plan::{
     PhysicalExpr, PlanProperties, RecordBatchStream, SendableRecordBatchStream, Statistics,
     StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::arrow::compute;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
@@ -140,8 +140,8 @@ impl UserDefinedLogicalNodeCore for InstantManipulate {
             return vec![];
         }
 
-        let mut exprs = vec![col(&self.time_index_column)];
-        exprs.extend(self.staleness_field_columns().map(col));
+        let mut exprs = vec![ident(&self.time_index_column)];
+        exprs.extend(self.staleness_field_columns().map(ident));
         exprs
     }
 
@@ -735,33 +735,97 @@ impl InstantManipulateStream {
         let estimated_points = estimated_points as usize;
         let aligned_start = aligned_start as i64;
         let aligned_end = aligned_end as i64;
+        // The cursor scan only compares shifted sample timestamps against evaluation
+        // instants, so hoist the `offset * 1e6` baseline out of the loop and run those
+        // comparisons in i64: `timestamp * scale + offset * 1e6` stays well inside i64
+        // for every realistic query — an offset a century away from now still uses less
+        // than half of the i64 range. Inputs whose shifted timeline only fits in the
+        // wide representation (within ~150ms of the native i64 limits, see
+        // `native_nanosecond_offset_uses_wide_shifted_timeline`) keep using the wide
+        // i128 scan, which is left unchanged.
+        let narrow_shift = || -> Option<(i64, i64, i64)> {
+            let scale = i64::try_from(scale).ok()?;
+            let offset_ns = self.offset.checked_mul(1_000_000)?;
+            let lookback_ns = self.lookback_delta.checked_mul(1_000_000)?;
+            // Samples are sorted by timestamp and `scale` is positive, so representable
+            // endpoint shifts keep every interior shift inside i64 as well, along with
+            // its intermediate product.
+            let shift = |timestamp: i64| -> Option<i64> {
+                timestamp.checked_mul(scale)?.checked_add(offset_ns)
+            };
+            let first_shift = shift(timestamps[0])?;
+            let last_shift = shift(timestamps[len - 1])?;
+            debug_assert_eq!(i64::try_from(first_ns), Ok(first_shift));
+            debug_assert_eq!(i64::try_from(last_ns), Ok(last_shift));
+            // Evaluation instants stay inside the aligned range, whose representable
+            // endpoints bound every `expected` and every exclusive lower boundary
+            // `expected - lookback`.
+            let start_ns = aligned_start.checked_mul(1_000_000)?;
+            let end_ns = aligned_end.checked_mul(1_000_000)?;
+            start_ns.checked_sub(lookback_ns)?;
+            end_ns.checked_sub(lookback_ns)?;
+            Some((scale, offset_ns, lookback_ns))
+        };
         let mut take_indices = Vec::with_capacity(estimated_points);
         let mut aligned_ts = Vec::with_capacity(estimated_points);
         let mut cursor = 0;
-        for expected_ms in (aligned_start..=aligned_end).step_by(self.interval as usize) {
-            let expected = (expected_ms as i128) * 1_000_000;
-            let mut exact_candidate = None;
-            while cursor < len && to_nanoseconds(timestamps[cursor]) <= expected {
-                if to_nanoseconds(timestamps[cursor]) == expected && exact_candidate.is_none() {
-                    exact_candidate = Some(cursor);
+        // Keep the first row among exact timestamp ties; otherwise use the latest
+        // preceding row. Zero lookback admits only exact samples. Test staleness after
+        // choosing: a selected stale marker suppresses this evaluation rather than
+        // falling back to an older finite value.
+        match narrow_shift() {
+            Some((scale, offset_ns, lookback_ns)) => {
+                // The bounds above are checked, so the narrow arithmetic cannot overflow
+                // and the scan needs no per-sample proof.
+                let shifted = |timestamp: i64| timestamp * scale + offset_ns;
+                for expected_ms in (aligned_start..=aligned_end).step_by(self.interval as usize) {
+                    let expected = expected_ms * 1_000_000;
+                    let mut exact_candidate = None;
+                    while cursor < len && shifted(timestamps[cursor]) <= expected {
+                        if shifted(timestamps[cursor]) == expected && exact_candidate.is_none() {
+                            exact_candidate = Some(cursor);
+                        }
+                        cursor += 1;
+                    }
+                    let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
+                        continue;
+                    };
+                    let candidate_ts = shifted(timestamps[candidate]);
+                    let lower = expected - lookback_ns;
+                    if (candidate_ts == expected || candidate_ts > lower)
+                        && candidate_ts <= expected
+                        && !is_stale(candidate)
+                    {
+                        take_indices.push(candidate as u64);
+                        aligned_ts.push(expected_ms);
+                    }
                 }
-                cursor += 1;
             }
-            // Keep the first row among exact timestamp ties; otherwise use the
-            // latest preceding row. Zero lookback admits only exact samples.
-            // Test staleness after choosing: a selected stale marker suppresses
-            // this evaluation rather than falling back to an older finite value.
-            let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
-                continue;
-            };
-            let candidate_ts = to_nanoseconds(timestamps[candidate]);
-            let lower = expected - (self.lookback_delta as i128) * 1_000_000;
-            if (candidate_ts == expected || candidate_ts > lower)
-                && candidate_ts <= expected
-                && !is_stale(candidate)
-            {
-                take_indices.push(candidate as u64);
-                aligned_ts.push(expected_ms);
+            None => {
+                for expected_ms in (aligned_start..=aligned_end).step_by(self.interval as usize) {
+                    let expected = (expected_ms as i128) * 1_000_000;
+                    let mut exact_candidate = None;
+                    while cursor < len && to_nanoseconds(timestamps[cursor]) <= expected {
+                        if to_nanoseconds(timestamps[cursor]) == expected
+                            && exact_candidate.is_none()
+                        {
+                            exact_candidate = Some(cursor);
+                        }
+                        cursor += 1;
+                    }
+                    let Some(candidate) = exact_candidate.or_else(|| cursor.checked_sub(1)) else {
+                        continue;
+                    };
+                    let candidate_ts = to_nanoseconds(timestamps[candidate]);
+                    let lower = expected - (self.lookback_delta as i128) * 1_000_000;
+                    if (candidate_ts == expected || candidate_ts > lower)
+                        && candidate_ts <= expected
+                        && !is_stale(candidate)
+                    {
+                        take_indices.push(candidate as u64);
+                        aligned_ts.push(expected_ms);
+                    }
+                }
             }
         }
         self.take_record_batch_optional(input, take_indices, aligned_ts)

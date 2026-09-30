@@ -20,7 +20,7 @@ use std::task::{Context, Poll};
 use common_telemetry::{debug, warn};
 use datafusion::arrow::array::{Array, ArrayRef, Int64Array, TimestampMillisecondArray};
 use datafusion::arrow::compute;
-use datafusion::arrow::datatypes::{DataType, Field, Int64Type, SchemaRef, TimeUnit};
+use datafusion::arrow::datatypes::{DataType, Field, SchemaRef, TimeUnit};
 use datafusion::arrow::error::ArrowError;
 use datafusion::arrow::record_batch::RecordBatch;
 use datafusion::common::stats::Precision;
@@ -38,7 +38,7 @@ use datafusion::physical_plan::{
     InputDistributionRequirements, PhysicalExpr, PlanProperties, RecordBatchStream,
     SendableRecordBatchStream, Statistics, StatisticsArgs,
 };
-use datafusion_expr::col;
+use datafusion_expr::ident;
 use datatypes::timestamp::timestamp_array_to_primitive;
 use futures::{Stream, StreamExt, ready};
 use greptime_proto::substrait_extension as pb;
@@ -318,8 +318,8 @@ impl UserDefinedLogicalNodeCore for RangeManipulate {
         }
 
         let mut exprs = Vec::with_capacity(1 + self.field_columns.len());
-        exprs.push(col(&self.time_index));
-        exprs.extend(self.field_columns.iter().map(col));
+        exprs.push(ident(&self.time_index));
+        exprs.extend(self.field_columns.iter().map(ident));
         exprs
     }
 
@@ -702,45 +702,33 @@ impl RangeManipulateStream {
             new_columns[*index] = new_column;
         }
 
-        // The timestamp range payload is always millisecond ABI. Pick the cheapest
-        // conversion that preserves native-precision semantics:
-        // - millisecond + zero offset reuses the input array with zero copy;
-        // - other units / offsets shift in wide i128 precision (below), which is
-        //   required so ns/us data near the native type limits stays correct under
-        //   large offsets (see normalize.rs).
-        let ts_column = input.column(self.time_index);
-        let timestamp_values: ArrayRef =
-            if self.time_unit == TimeUnit::Millisecond && self.offset == 0 {
-                ts_column.clone()
-            } else {
-                let scale = nanoseconds_per_native_tick(self.time_unit) as i64;
-                let (timestamps, _) = timestamp_array_to_primitive(ts_column).ok_or_else(|| {
-                    DataFusionError::Execution("Time index column is not a timestamp".into())
-                })?;
-                // Single vectorized pass over the dense i64 buffer (no i128, no
-                // per-sample Option). checked_* lowers to a per-lane overflow flag
-                // so the pass still vectorizes; any overflow short-circuits to an
-                // error instead of silently wrapping. Nulls are preserved.
-                let offset_ns = self.offset.checked_mul(1_000_000).ok_or_else(|| {
-                    ArrowError::ComputeError("RangeManipulate timestamp payload overflow".into())
-                })?;
-                let shifted = compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
-                    v.checked_mul(scale)
-                        .and_then(|v| v.checked_add(offset_ns))
-                        .map(|v| v / 1_000_000)
-                        .ok_or_else(|| {
-                            ArrowError::ComputeError(
-                                "RangeManipulate timestamp payload overflow".into(),
-                            )
-                        })
-                })?;
-                Arc::new(TimestampMillisecondArray::new(
-                    shifted.values().clone(),
-                    shifted.nulls().cloned(),
-                ))
-            };
-
-        let ts_range_column = RangeArray::from_ranges(timestamp_values, ranges.clone())
+        // The timestamp range payload is always millisecond ABI. Shift in wide
+        // native precision before truncating toward zero, preserving null validity.
+        let scale = nanoseconds_per_native_tick(self.time_unit);
+        let (timestamps, _) = timestamp_array_to_primitive(input.column(self.time_index))
+            .ok_or_else(|| {
+                DataFusionError::Execution("Time index column is not a timestamp".into())
+            })?;
+        let timestamp_values = timestamps
+            .values()
+            .iter()
+            .enumerate()
+            .map(|(index, timestamp)| {
+                if !input.column(self.time_index).is_valid(index) {
+                    return Ok(None);
+                }
+                let shifted_ns = (*timestamp as i128) * scale + (self.offset as i128) * 1_000_000;
+                i64::try_from(shifted_ns / 1_000_000)
+                    .map(Some)
+                    .map_err(|_| {
+                        ArrowError::ComputeError(
+                            "RangeManipulate timestamp payload overflow".into(),
+                        )
+                    })
+            })
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let timestamp_values = TimestampMillisecondArray::from(timestamp_values);
+        let ts_range_column = RangeArray::from_ranges(Arc::new(timestamp_values), ranges.clone())
             .map_err(|e| ArrowError::InvalidArgumentError(e.to_string()))?
             .into_dict();
         new_columns.push(Arc::new(ts_range_column));
@@ -783,6 +771,9 @@ impl RangeManipulateStream {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
         let timestamps = timestamps.values();
+        // Wide arithmetic below only places the query bounds (a constant number
+        // of samples); the per-sample cursor scan itself runs on `i64`, see
+        // `scan_ranges_i64`.
         let timestamp =
             |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
         let len = timestamps.len();
@@ -811,14 +802,81 @@ impl RangeManipulateStream {
         // The intersection is within the declared i64 query bounds.
         let start = start as i64;
         let end = end as i64;
-        let mut ranges = Vec::new();
 
         // Range membership is decided on shifted native ticks, before the
         // timestamp-range payload is converted to its millisecond ABI. This
         // keeps sub-millisecond samples distinct in a range; equal millisecond
         // payload values are not a reason to deduplicate input samples.
         //
-        // Calculate for every aligned timestamp (`curr_ts`), assuming ordered timestamps.
+        // Calculate for every aligned timestamp (`curr_ts`), assuming ordered
+        // timestamps. Samples are compared in `i64` nanoseconds whenever the
+        // shifted timestamps fit into `i64` (all supported precisions at
+        // realistic values); timestamps near the native type limits fall back to
+        // the wide scan.
+        let ranges = self
+            .scan_ranges_i64(timestamps, start, end)
+            .unwrap_or_else(|| self.scan_ranges_i128(timestamps, start, end));
+
+        Ok((ranges, (start, end)))
+    }
+
+    /// Cursor scan over the aligned evaluation points in `i64` nanoseconds.
+    ///
+    /// The nanoseconds per native tick and the offset are precomputed once per
+    /// batch with checked arithmetic, so the per-sample comparisons stay in
+    /// `i64` instead of shifting every sample on `i128`. Returns `None` as soon
+    /// as the offset, the range, an evaluation point or a shifted timestamp
+    /// would overflow `i64` (only timestamps within ~292 years of the native type
+    /// limits); the caller then retries with [`Self::scan_ranges_i128`], which is
+    /// exact for every input.
+    fn scan_ranges_i64(&self, timestamps: &[i64], start: i64, end: i64) -> Option<Vec<(u32, u32)>> {
+        let scale = i64::try_from(nanoseconds_per_native_tick(self.time_unit)).ok()?;
+        let offset_ns = self.offset.checked_mul(1_000_000)?;
+        let range_ns = self.range.checked_mul(1_000_000)?;
+        let len = timestamps.len();
+        let mut ranges = Vec::new();
+        let mut left = 0usize;
+        let mut right = 0usize;
+        for curr_ts in (start..=end).step_by(self.interval as _) {
+            let curr_ts = curr_ts.checked_mul(1_000_000)?;
+            let start_ts = curr_ts.checked_sub(range_ns)?;
+
+            while left < len {
+                let sample = timestamps[left]
+                    .checked_mul(scale)?
+                    .checked_add(offset_ns)?;
+                if sample > start_ts {
+                    break;
+                }
+                left += 1;
+            }
+            right = right.max(left);
+            while right < len {
+                let sample = timestamps[right]
+                    .checked_mul(scale)?
+                    .checked_add(offset_ns)?;
+                if sample > curr_ts {
+                    break;
+                }
+                right += 1;
+            }
+
+            if left == right {
+                ranges.push((0, 0));
+            } else {
+                ranges.push((left as _, (right - left) as _));
+            }
+        }
+        Some(ranges)
+    }
+
+    /// Exact cursor scan on `i128` nanoseconds, used when `i64` would overflow.
+    fn scan_ranges_i128(&self, timestamps: &[i64], start: i64, end: i64) -> Vec<(u32, u32)> {
+        let scale = nanoseconds_per_native_tick(self.time_unit);
+        let timestamp =
+            |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
+        let len = timestamps.len();
+        let mut ranges = Vec::new();
         let mut left = 0usize;
         let mut right = 0usize;
         for curr_ts in (start..=end).step_by(self.interval as _) {
@@ -838,8 +896,7 @@ impl RangeManipulateStream {
                 ranges.push((left as _, (right - left) as _));
             }
         }
-
-        Ok((ranges, (start, end)))
+        ranges
     }
 }
 
@@ -1155,6 +1212,15 @@ mod test {
                 1_000,
             ),
             (
+                "negative native lower limit with positive window",
+                TimeUnit::Nanosecond,
+                -9_223_112_837_000_000_000,
+                -259_200_000,
+                -9_223_372_037_000,
+                300_000,
+                -9_223_372_037_000,
+            ),
+            (
                 "second timestamp with negative fractional offset",
                 TimeUnit::Second,
                 1,
@@ -1307,7 +1373,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn range_payload_preserves_null_timestamp() {
+    async fn range_payload_preserves_null_timestamp_and_rejects_offset_overflow() {
         let schema = Arc::new(Schema::new(vec![
             Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
             Field::new("value", DataType::Float64, true),
@@ -1361,101 +1427,48 @@ mod test {
             .unwrap();
         assert_eq!(payload.len(), 1);
         assert!(!payload.is_valid(0));
-    }
 
-    /// Zero-offset millisecond input reuses the input array for the timestamp
-    /// range payload (zero-copy fast path); a non-zero offset still materializes
-    /// a shifted millisecond array.
-    #[tokio::test]
-    async fn zero_offset_millisecond_payload_reuses_input_array() {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new(TIME_INDEX_COLUMN, TimestampMillisecondType::DATA_TYPE, true),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let timestamps = Arc::new(TimestampMillisecondArray::from(vec![0, 1_000, 2_000]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                timestamps.clone() as ArrayRef,
-                Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])),
+                Arc::new(TimestampMillisecondArray::from(vec![0, i64::MAX])),
+                Arc::new(Float64Array::from(vec![7.0, 8.0])),
             ],
         )
         .unwrap();
-        let input_schema = schema.clone().to_dfschema_ref().unwrap();
-
-        let run = |offset: Millisecond| {
-            let input = Arc::new(DataSourceExec::new(Arc::new(
-                MemorySourceConfig::try_new(&[vec![batch.clone()]], schema.clone(), None).unwrap(),
-            )));
-            let plan = RangeManipulate::new(
-                0,
-                2_000,
-                1_000,
-                offset,
-                1_000,
-                TIME_INDEX_COLUMN.to_string(),
-                vec!["value".to_string()],
-                LogicalPlan::EmptyRelation(EmptyRelation {
-                    produce_one_row: false,
-                    schema: input_schema.clone(),
-                }),
-            )
-            .unwrap();
-            async move {
-                datafusion::physical_plan::collect(
-                    plan.to_execution_plan(input),
-                    SessionContext::default().task_ctx(),
-                )
-                .await
-                .unwrap()
-            }
-        };
-
-        // Zero offset: the payload values share the input buffer (no copy).
-        let output = run(0).await;
-        let payload = RangeArray::try_new(
-            output[0]
-                .column(2)
-                .as_any()
-                .downcast_ref::<DictionaryArray<Int64Type>>()
-                .unwrap()
-                .clone(),
-        )
-        .unwrap();
-        let payload_values = payload
-            .values()
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .unwrap();
-        assert_eq!(
-            payload_values.values().as_ptr(),
-            timestamps.values().as_ptr()
+        let input = Arc::new(DataSourceExec::new(Arc::new(
+            MemorySourceConfig::try_new(&[vec![batch]], schema.clone(), None).unwrap(),
+        )));
+        let normalized = crate::extension_plan::SeriesNormalize::new(
+            1,
+            TIME_INDEX_COLUMN,
+            false,
+            Vec::new(),
+            LogicalPlan::EmptyRelation(EmptyRelation {
+                produce_one_row: false,
+                schema: schema.to_dfschema_ref().unwrap(),
+            }),
         );
-
-        // Non-zero offset: start is advanced to the first aligned point with a
-        // non-empty window; each range holds the single sample shifted by offset.
-        let output = run(500).await;
-        let payload = RangeArray::try_new(
-            output[0]
-                .column(2)
-                .as_any()
-                .downcast_ref::<DictionaryArray<Int64Type>>()
-                .unwrap()
-                .clone(),
+        let plan = RangeManipulate::new(
+            1,
+            1,
+            1,
+            1,
+            1,
+            TIME_INDEX_COLUMN.to_string(),
+            vec!["value".to_string()],
+            LogicalPlan::Extension(Extension {
+                node: Arc::new(normalized),
+            }),
         )
         .unwrap();
-        let shifted = |index: usize| {
-            payload
-                .get(index)
-                .unwrap()
-                .as_any()
-                .downcast_ref::<TimestampMillisecondArray>()
-                .unwrap()
-                .clone()
-        };
-        assert_eq!(shifted(0).values().as_ref(), &[500]);
-        assert_eq!(shifted(1).values().as_ref(), &[1_500]);
-        assert_eq!(payload.len(), 2);
+        let error = datafusion::physical_plan::collect(
+            plan.to_execution_plan(input),
+            SessionContext::default().task_ctx(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timestamp payload overflow"));
     }
 
     #[tokio::test]
