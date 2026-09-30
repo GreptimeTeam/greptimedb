@@ -718,13 +718,22 @@ impl RangeManipulateStream {
                     DataFusionError::Execution("Time index column is not a timestamp".into())
                 })?;
                 // Single vectorized pass over the dense i64 buffer (no i128, no
-                // per-sample Option, no overflow branch). Shift toward zero to
-                // milliseconds; preserves nulls. Realistic timestamps and offsets
-                // stay far inside i64, so overflow is not a practical concern.
-                let offset_ns = self.offset.wrapping_mul(1_000_000);
-                let shifted = compute::unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
-                    v.wrapping_mul(scale).wrapping_add(offset_ns) / 1_000_000
-                });
+                // per-sample Option). checked_* lowers to a per-lane overflow flag
+                // so the pass still vectorizes; any overflow short-circuits to an
+                // error instead of silently wrapping. Nulls are preserved.
+                let offset_ns = self.offset.checked_mul(1_000_000).ok_or_else(|| {
+                    ArrowError::ComputeError("RangeManipulate timestamp payload overflow".into())
+                })?;
+                let shifted = compute::try_unary::<Int64Type, _, Int64Type>(&timestamps, |v| {
+                    v.checked_mul(scale)
+                        .and_then(|v| v.checked_add(offset_ns))
+                        .map(|v| v / 1_000_000)
+                        .ok_or_else(|| {
+                            ArrowError::ComputeError(
+                                "RangeManipulate timestamp payload overflow".into(),
+                            )
+                        })
+                })?;
                 Arc::new(TimestampMillisecondArray::new(
                     shifted.values().clone(),
                     shifted.nulls().cloned(),
