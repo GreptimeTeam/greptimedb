@@ -97,6 +97,7 @@ pub struct GrpcServerBuilder {
         >,
     >,
     memory_limiter: ServerMemoryLimiter,
+    cors_allowed_origins: Option<Vec<String>>,
 }
 
 impl GrpcServerBuilder {
@@ -112,7 +113,14 @@ impl GrpcServerBuilder {
             tls_config: None,
             otel_arrow_service: None,
             memory_limiter,
+            cors_allowed_origins: None,
         }
+    }
+
+    /// Enables CORS for gRPC-Web clients in browsers. An empty list allows any origin.
+    pub fn with_cors(mut self, allowed_origins: Vec<String>) -> Self {
+        self.cors_allowed_origins = Some(allowed_origins);
+        self
     }
 
     /// Set a global memory limiter for all server protocols.
@@ -257,6 +265,7 @@ impl GrpcServerBuilder {
             bind_addr: None,
             name: self.name,
             config: self.config,
+            cors_allowed_origins: self.cors_allowed_origins,
         }
     }
 }

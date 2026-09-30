@@ -1061,20 +1061,7 @@ impl HttpServer {
                         Method::DELETE,
                         Method::HEAD,
                     ])
-                    .allow_origin(if self.options.cors_allowed_origins.is_empty() {
-                        AllowOrigin::from(Any)
-                    } else {
-                        AllowOrigin::from(
-                            self.options
-                                .cors_allowed_origins
-                                .iter()
-                                .map(|s| {
-                                    HeaderValue::from_str(s.as_str())
-                                        .context(InvalidHeaderValueSnafu)
-                                })
-                                .collect::<Result<Vec<HeaderValue>>>()?,
-                        )
-                    })
+                    .allow_origin(cors_allow_origin(&self.options.cors_allowed_origins)?)
                     .allow_headers(Any),
             )
         } else {
@@ -1611,6 +1598,18 @@ impl HttpServer {
 
 pub const HTTP_SERVER: &str = "HTTP_SERVER";
 pub const HTTP_API_SERVER: &str = "HTTP_API_SERVER";
+
+/// An empty list allows any origin.
+pub(crate) fn cors_allow_origin(origins: &[String]) -> Result<AllowOrigin> {
+    if origins.is_empty() {
+        return Ok(AllowOrigin::any());
+    }
+    let origins = origins
+        .iter()
+        .map(|origin| HeaderValue::from_str(origin).context(InvalidHeaderValueSnafu))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(AllowOrigin::list(origins))
+}
 
 #[async_trait]
 impl Server for HttpServer {
