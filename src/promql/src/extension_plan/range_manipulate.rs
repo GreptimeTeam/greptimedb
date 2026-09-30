@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::HashSet;
+use std::ops::{Add, Mul, Sub};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -771,9 +772,6 @@ impl RangeManipulateStream {
             DataFusionError::Execution("Time index column is not a timestamp".into())
         })?;
         let timestamps = timestamps.values();
-        // Wide arithmetic below only places the query bounds (a constant number
-        // of samples); the per-sample cursor scan itself runs on `i64`, see
-        // `scan_ranges_i64`.
         let timestamp =
             |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
         let len = timestamps.len();
@@ -809,84 +807,48 @@ impl RangeManipulateStream {
         // payload values are not a reason to deduplicate input samples.
         //
         // Calculate for every aligned timestamp (`curr_ts`), assuming ordered
-        // timestamps. Samples are compared in `i64` nanoseconds whenever the
-        // shifted timestamps fit into `i64` (all supported precisions at
-        // realistic values); timestamps near the native type limits fall back to
-        // the wide scan.
-        let ranges = self
-            .scan_ranges_i64(timestamps, start, end)
-            .unwrap_or_else(|| self.scan_ranges_i128(timestamps, start, end));
+        // timestamps: the scan compares shifted samples in `i64` nanoseconds
+        // whenever they fit the batch, and in exact `i128` nanoseconds otherwise.
+        let narrow = narrow_scan(
+            self.time_unit,
+            self.offset,
+            self.range,
+            timestamps,
+            start,
+            end,
+        );
+        let ranges = match narrow {
+            Some(scan) => self.scan_ranges::<i64>(timestamps, start, end, &scan),
+            None => {
+                let scan = ScanNanoseconds::<i128>::wide(self.time_unit, self.offset, self.range);
+                self.scan_ranges::<i128>(timestamps, start, end, &scan)
+            }
+        };
 
         Ok((ranges, (start, end)))
     }
 
-    /// Cursor scan over the aligned evaluation points in `i64` nanoseconds.
-    ///
-    /// The nanoseconds per native tick and the offset are precomputed once per
-    /// batch with checked arithmetic, so the per-sample comparisons stay in
-    /// `i64` instead of shifting every sample on `i128`. Returns `None` as soon
-    /// as the offset, the range, an evaluation point or a shifted timestamp
-    /// would overflow `i64` (only timestamps within ~292 years of the native type
-    /// limits); the caller then retries with [`Self::scan_ranges_i128`], which is
-    /// exact for every input.
-    fn scan_ranges_i64(&self, timestamps: &[i64], start: i64, end: i64) -> Option<Vec<(u32, u32)>> {
-        let scale = i64::try_from(nanoseconds_per_native_tick(self.time_unit)).ok()?;
-        let offset_ns = self.offset.checked_mul(1_000_000)?;
-        let range_ns = self.range.checked_mul(1_000_000)?;
+    /// Cursor scan over the aligned evaluation points, in `Ns` nanoseconds.
+    fn scan_ranges<Ns: Nanoseconds>(
+        &self,
+        timestamps: &[i64],
+        start: Millisecond,
+        end: Millisecond,
+        scan: &ScanNanoseconds<Ns>,
+    ) -> Vec<(u32, u32)> {
         let len = timestamps.len();
         let mut ranges = Vec::new();
         let mut left = 0usize;
         let mut right = 0usize;
         for curr_ts in (start..=end).step_by(self.interval as _) {
-            let curr_ts = curr_ts.checked_mul(1_000_000)?;
-            let start_ts = curr_ts.checked_sub(range_ns)?;
+            let curr_ts_ns = scan.instant(curr_ts);
+            let start_ts = scan.window_start(curr_ts_ns);
 
-            while left < len {
-                let sample = timestamps[left]
-                    .checked_mul(scale)?
-                    .checked_add(offset_ns)?;
-                if sample > start_ts {
-                    break;
-                }
+            while left < len && scan.shift(timestamps[left]) <= start_ts {
                 left += 1;
             }
             right = right.max(left);
-            while right < len {
-                let sample = timestamps[right]
-                    .checked_mul(scale)?
-                    .checked_add(offset_ns)?;
-                if sample > curr_ts {
-                    break;
-                }
-                right += 1;
-            }
-
-            if left == right {
-                ranges.push((0, 0));
-            } else {
-                ranges.push((left as _, (right - left) as _));
-            }
-        }
-        Some(ranges)
-    }
-
-    /// Exact cursor scan on `i128` nanoseconds, used when `i64` would overflow.
-    fn scan_ranges_i128(&self, timestamps: &[i64], start: i64, end: i64) -> Vec<(u32, u32)> {
-        let scale = nanoseconds_per_native_tick(self.time_unit);
-        let timestamp =
-            |index| (timestamps[index] as i128) * scale + (self.offset as i128) * 1_000_000;
-        let len = timestamps.len();
-        let mut ranges = Vec::new();
-        let mut left = 0usize;
-        let mut right = 0usize;
-        for curr_ts in (start..=end).step_by(self.interval as _) {
-            let start_ts = (curr_ts as i128) * 1_000_000 - (self.range as i128) * 1_000_000;
-
-            while left < len && timestamp(left) <= start_ts {
-                left += 1;
-            }
-            right = right.max(left);
-            while right < len && timestamp(right) <= (curr_ts as i128) * 1_000_000 {
+            while right < len && scan.shift(timestamps[right]) <= curr_ts_ns {
                 right += 1;
             }
 
@@ -898,6 +860,86 @@ impl RangeManipulateStream {
         }
         ranges
     }
+}
+
+/// Cursor scan baselines in nanoseconds, shared with `InstantManipulate`.
+///
+/// The narrow `i64` baselines come from [`narrow_scan`], the exact ones from
+/// [`ScanNanoseconds::wide`].
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ScanNanoseconds<Ns> {
+    /// Nanoseconds per timestamp tick.
+    scale: Ns,
+    /// The offset shift in nanoseconds.
+    offset_ns: Ns,
+    /// The range or lookback window in nanoseconds.
+    window_ns: Ns,
+}
+
+/// Nanoseconds carrier of the cursor scans: `i64` where [`narrow_scan`] proved that
+/// the batch fits, `i128` for the exact fallback.
+pub(super) trait Nanoseconds:
+    Copy + PartialOrd + From<i64> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self>
+{
+}
+
+impl<T> Nanoseconds for T where
+    T: Copy + PartialOrd + From<i64> + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self>
+{
+}
+
+impl ScanNanoseconds<i128> {
+    /// The `i128` baselines, exact for every input.
+    pub(super) fn wide(time_unit: TimeUnit, offset: Millisecond, window: Millisecond) -> Self {
+        Self {
+            scale: nanoseconds_per_native_tick(time_unit),
+            offset_ns: i128::from(offset) * 1_000_000,
+            window_ns: i128::from(window) * 1_000_000,
+        }
+    }
+}
+
+impl<Ns: Nanoseconds> ScanNanoseconds<Ns> {
+    /// Shifted nanoseconds of an input timestamp.
+    pub(super) fn shift(&self, timestamp: i64) -> Ns {
+        Ns::from(timestamp) * self.scale + self.offset_ns
+    }
+
+    /// Nanoseconds of an evaluation instant given in milliseconds.
+    pub(super) fn instant(&self, millis: Millisecond) -> Ns {
+        Ns::from(millis) * Ns::from(1_000_000)
+    }
+
+    /// The exclusive lower boundary of the window ending at `instant`.
+    pub(super) fn window_start(&self, instant: Ns) -> Ns {
+        instant - self.window_ns
+    }
+}
+
+/// The narrow `i64` baselines of a sorted batch, or `None` when they would overflow.
+pub(super) fn narrow_scan(
+    time_unit: TimeUnit,
+    offset: Millisecond,
+    window: Millisecond,
+    timestamps: &[i64],
+    start: Millisecond,
+    end: Millisecond,
+) -> Option<ScanNanoseconds<i64>> {
+    let scale = i64::try_from(nanoseconds_per_native_tick(time_unit)).ok()?;
+    let offset_ns = offset.checked_mul(1_000_000)?;
+    let window_ns = window.checked_mul(1_000_000)?;
+    // Sorted samples, so the checked endpoints bound every interior shift and product.
+    let shift = |timestamp: i64| timestamp.checked_mul(scale)?.checked_add(offset_ns);
+    shift(*timestamps.first()?)?;
+    shift(*timestamps.last()?)?;
+    // The checked `[start, end]` bounds every instant and every `instant - window`.
+    start.checked_mul(1_000_000)?.checked_sub(window_ns)?;
+    end.checked_mul(1_000_000)?.checked_sub(window_ns)?;
+    Some(ScanNanoseconds {
+        scale,
+        offset_ns,
+        window_ns,
+    })
 }
 
 #[cfg(test)]
