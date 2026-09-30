@@ -1,0 +1,75 @@
+-- NaN and rounding follow Prometheus (IEEE 754) rather than SQL ordering.
+-- Expected results are from Prometheus 3.
+create table float_semantics (
+    ts timestamp time index,
+    val double,
+    host string primary key
+);
+
+Affected Rows: 0
+
+insert into float_semantics values
+    (0, 1.0, 'a'),
+    (0, 2.0, 'b'),
+    (0, 'NaN'::double, 'c'),
+    (0, -2.5, 'd');
+
+Affected Rows: 4
+
+tql eval (0, 0, '1s') max(float_semantics);
+
+Error: 1002(Unexpected), Failed to decode DataFusion plan: This feature is not implemented: Aggregate function prom_max is not supported: function anchor = 3
+
+tql eval (0, 0, '1s') min(float_semantics);
+
+Error: 1002(Unexpected), Failed to decode DataFusion plan: This feature is not implemented: Aggregate function prom_min is not supported: function anchor = 3
+
+tql eval (0, 0, '1s') topk(1, float_semantics);
+
++-----+------+---------------------+
+| val | host | ts                  |
++-----+------+---------------------+
+| 2.0 | b    | 1970-01-01T00:00:00 |
++-----+------+---------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 0, '1s') float_semantics <= NaN;
+
++----+-----+------+
+| ts | val | host |
++----+-----+------+
++----+-----+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 0, '1s') float_semantics != bool NaN;
+
++------+---------------------+----------------------------------------------------------+
+| host | ts                  | val != Float64(NaN) OR isnan(val) OR isnan(Float64(NaN)) |
++------+---------------------+----------------------------------------------------------+
+| a    | 1970-01-01T00:00:00 | 1.0                                                      |
+| b    | 1970-01-01T00:00:00 | 1.0                                                      |
+| c    | 1970-01-01T00:00:00 | 1.0                                                      |
+| d    | 1970-01-01T00:00:00 | 1.0                                                      |
++------+---------------------+----------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 0, '1s') round(float_semantics);
+
++---------------------+----------------------------+------+
+| ts                  | prom_round(val,Float64(1)) | host |
++---------------------+----------------------------+------+
+| 1970-01-01T00:00:00 | -2.0                       | d    |
+| 1970-01-01T00:00:00 | 1.0                        | a    |
+| 1970-01-01T00:00:00 | 2.0                        | b    |
+| 1970-01-01T00:00:00 | NaN                        | c    |
++---------------------+----------------------------+------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (0, 0, '1s') sqrt(float_semantics);
+
+Error: 3001(EngineExecuteQuery), Compute error: Execution error: cannot take square root of a negative number
+
+drop table float_semantics;
+
+Affected Rows: 0
+

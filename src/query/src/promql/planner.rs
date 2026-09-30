@@ -3777,6 +3777,14 @@ impl PromPlanner {
 
         for value in &self.ctx.field_columns {
             let col_expr = DfExpr::Column(Column::from_name(value));
+            // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
+            let col_expr = if func.name == "sqrt" {
+                when(col_expr.clone().lt(lit(0.0_f64)), lit(f64::NAN))
+                    .otherwise(col_expr)
+                    .context(DataFusionPlanningSnafu)?
+            } else {
+                col_expr
+            };
             let value_is_histogram = Self::field_column_is_native_histogram(input_schema, value);
 
             match scalar_func.clone() {
@@ -3796,14 +3804,6 @@ impl PromPlanner {
                     if alternative_samples && value_is_histogram {
                         continue;
                     }
-                    // DataFusion's `sqrt` rejects negative input; PromQL returns NaN for it.
-                    let col_expr = if func.name() == "sqrt" {
-                        when(col_expr.clone().lt(lit(0.0_f64)), lit(f64::NAN))
-                            .otherwise(col_expr)
-                            .context(DataFusionPlanningSnafu)?
-                    } else {
-                        col_expr
-                    };
                     let args = itertools::chain!(
                         other_input_exprs.iter().take(field_column_pos).cloned(),
                         std::iter::once(col_expr),
