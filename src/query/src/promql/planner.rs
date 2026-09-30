@@ -55,6 +55,7 @@ use datafusion::logical_expr::{
 use datafusion::prelude as df_prelude;
 use datafusion::prelude::{Column, Expr as DfExpr, JoinType};
 use datafusion::scalar::ScalarValue;
+use datafusion_common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion_common::{DFSchema, NullEquality, TableReference};
 use datafusion_expr::expr::WindowFunctionParams;
 use datafusion_expr::expr_fn::when;
@@ -67,7 +68,7 @@ use itertools::Itertools;
 use once_cell::sync::Lazy;
 use promql::extension_plan::{
     EmptyMetric, InstantManipulate, Millisecond, RangeManipulate, SeriesDivide, SeriesNormalize,
-    build_special_time_expr,
+    UnionDistinctOn, build_special_time_expr,
 };
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
@@ -995,14 +996,79 @@ impl PromPlanner {
         )
     }
 
-    fn drop_metric_name(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
+    /// Drops the metric-name identity of `input`, the result of every function, binary or unary
+    /// operator that does not keep it.
+    ///
+    /// The label set is what names a series in PromQL, so dropping the identity of a plan that
+    /// unions several series sets can leave rows of one evaluation step with the same label set -
+    /// `abs(a or on(__name__) b)` for two metrics that share every ordinary label. A vector cannot
+    /// hold those rows: every reader - the HTTP layer above all - would have to pick one of them,
+    /// so the plan refuses them instead, the same way a label rewrite that collapses series does.
+    fn drop_metric_name(&mut self, mut input: LogicalPlan) -> Result<LogicalPlan> {
         if let Some(marker) = Self::metric_name_column(input.schema())? {
             self.ctx.tag_columns.retain(|name| name != &marker.name);
             self.ctx
                 .aggregation_field_labels
                 .retain(|name| name != &marker.name);
+
+            // The plan below is completed, so its labels are the columns of its schema next to
+            // the identity; a column of the context that it does not project is not a label of it.
+            let labels = self
+                .ctx
+                .tag_columns
+                .iter()
+                .filter(|label| input.schema().has_column_with_unqualified_name(label))
+                .cloned()
+                .collect::<Vec<_>>();
+            let time_index_column = self
+                .ctx
+                .time_index_column
+                .as_deref()
+                .filter(|column| input.schema().has_column_with_unqualified_name(column));
+            if Self::unions_series_sets(&input)
+                && let Some(time_index_column) = time_index_column
+            {
+                let group_exprs = labels
+                    .iter()
+                    .map(|label| DfExpr::Column(Column::from_name(label)))
+                    .collect();
+                input = Self::assert_unique_match_group(
+                    input,
+                    group_exprs,
+                    labels,
+                    DfExpr::Column(Column::from_name(time_index_column)),
+                    MatchGroupViolation::DuplicateLabelSet,
+                )?;
+            }
         }
         Self::strip_metric_name_column(input)
+    }
+
+    /// Whether `plan` holds the union of `or`, whose matching may ignore the identity - `on(__name__)`
+    /// matches two metrics on it alone. Two rows of such a union that share every ordinary label
+    /// can still come from different series, and only their identity tells them apart, so only the
+    /// union needs the label-set check when that identity is dropped.
+    ///
+    /// Every other operator either matches on the labels themselves (a join keeps only rows whose
+    /// labels agree) or asserts its own uniqueness where it can multiply rows, so a duplicate label
+    /// set cannot reach them without one of those checks having run.
+    fn unions_series_sets(plan: &LogicalPlan) -> bool {
+        let mut unioned = false;
+        // The walk stops at the first union, so the visit never fails.
+        let _ = plan.apply(|node| {
+            unioned = match node {
+                LogicalPlan::Extension(extension) => {
+                    extension.node.as_any().is::<UnionDistinctOn>()
+                }
+                _ => false,
+            };
+            Ok(if unioned {
+                TreeNodeRecursion::Stop
+            } else {
+                TreeNodeRecursion::Continue
+            })
+        });
+        unioned
     }
 
     fn negate_field_columns(&mut self, input: LogicalPlan) -> Result<LogicalPlan> {
@@ -1893,6 +1959,26 @@ impl PromPlanner {
             }
         }
         Ok(found)
+    }
+
+    /// Resolve the PromQL label `label` to the column of `input_schema` that carries its value.
+    ///
+    /// `__name__` is the semantic metric name: it resolves through the marked identity column of
+    /// the input and never through a physical column of that name. Any other label names a column
+    /// the input projects, read exactly like the label functions have always read their sources -
+    /// a label the input does not carry is absent, and `None` leaves it to the caller to read that
+    /// absence as the empty string, a NULL or a dropped label. The marked identity and the metric
+    /// engine's internal columns are physical details, not labels: only their physical names reach
+    /// them, and a column that merely looks like one stays an ordinary label.
+    fn resolve_label_col(input_schema: &DFSchemaRef, label: &str) -> Result<Option<Column>> {
+        let metric_name_column = Self::metric_name_column(input_schema)?;
+        if label == METRIC_NAME {
+            return Ok(metric_name_column);
+        }
+        if metric_name_column.is_some_and(|column| column.name == label) {
+            return Ok(None);
+        }
+        Ok(Self::find_case_sensitive_column(input_schema, label).map(Column::from_name))
     }
 
     /// Strips the metric-name identity from `plan`'s output, if it carries one.
@@ -3007,9 +3093,6 @@ impl PromPlanner {
                 Ok(vec![self.create_time_index_column_expr()?])
             }
             Some(LabelModifier::Include(labels)) => {
-                // `__name__` is not a physical column: it resolves through the marked identity
-                // column of the input, never through a physical column of that name.
-                let metric_name_column = Self::metric_name_column(input_schema)?;
                 if update_ctx {
                     // A `by(...)` label can name a value field of the input instead of a tag. The
                     // aggregate still reports it among its tag columns below, but unlike a tag it
@@ -3034,29 +3117,17 @@ impl PromPlanner {
                 }
                 let mut exprs = Vec::with_capacity(labels.labels.len());
                 for label in &labels.labels {
-                    if is_metric_engine_internal_column(label) {
+                    // A missing label - the identity of an input that dropped it included - is
+                    // ignored, exactly like any other label the input does not carry: the marked
+                    // identity and the metric engine's internal columns are not labels, and only
+                    // `__name__` names the identity.
+                    let Some(column) = Self::resolve_label_col(input_schema, label)? else {
                         continue;
-                    }
-                    // Ignore a missing identity, exactly like any other missing label.
-                    if label.as_str() == METRIC_NAME {
-                        if let Some(column) = &metric_name_column {
-                            exprs.push(DfExpr::Column(column.clone()));
-                            if update_ctx {
-                                // record the resolved physical name, not the semantic label
-                                self.ctx.tag_columns.push(column.name.clone());
-                            }
-                        }
-                        continue;
-                    }
-                    // nonexistence label will be ignored
-                    if let Some(column_name) = Self::find_case_sensitive_column(input_schema, label)
-                    {
-                        exprs.push(DfExpr::Column(Column::from_name(column_name.clone())));
-
-                        if update_ctx {
-                            // update the tag columns in context
-                            self.ctx.tag_columns.push(column_name);
-                        }
+                    };
+                    exprs.push(DfExpr::Column(column.clone()));
+                    if update_ctx {
+                        // record the resolved physical name, not the semantic label
+                        self.ctx.tag_columns.push(column.name);
                     }
                 }
                 // add timestamp column
@@ -4242,12 +4313,8 @@ impl PromPlanner {
             }
             "label_replace" => {
                 self.ctx.use_tsid = false;
-                if let Some((replace_expr, dst_label, overwrite)) = self
-                    .build_regexp_replace_label_expr(
-                        &mut other_input_exprs,
-                        query_engine_state,
-                        input_schema,
-                    )?
+                if let Some((replace_expr, dst_label)) =
+                    self.build_regexp_replace_label_expr(&mut other_input_exprs, input_schema)?
                 {
                     // Reserve the current field columns except the `dst_label`.
                     for value in &self.ctx.field_columns {
@@ -4257,21 +4324,11 @@ impl PromPlanner {
                         }
                     }
 
-                    if overwrite {
-                        // The replacement overwrites a label the input already projects in
-                        // place, so it must not be projected a second time under the same name.
-                        self.ctx.tag_columns.retain(|tag| *tag != dst_label);
-                    } else {
-                        // Rewriting a label the input series already have can map several of
-                        // them onto the same label set, which PromQL rejects. A new label
-                        // keeps the series distinct.
-                        ensure!(
-                            !self.ctx.tag_columns.contains(&dst_label),
-                            InvalidDestinationLabelNameSnafu {
-                                label_name: dst_label
-                            }
-                        );
-                    }
+                    // The replacement overwrites a label the input already projects in place, so
+                    // it must not be projected a second time under the same name. Rewriting a
+                    // label the series already carry can map several of them onto one label set,
+                    // which is refused while the plan runs; a new label keeps them distinct.
+                    self.ctx.tag_columns.retain(|tag| *tag != dst_label);
                     new_tags.push(dst_label);
                     // Add the new label expr to evaluate
                     exprs.push(replace_expr);
@@ -4578,16 +4635,21 @@ impl PromPlanner {
 
     /// Build expr for `label_replace` function
     ///
-    /// Returns the replacement expression, the physical name of the destination column and
-    /// whether that destination overwrites a column the input already projects: the marked
-    /// identity of the input, which is replaced in place instead of being refused when it
-    /// already exists, or an existing ordinary label the semantic name is replaced into.
+    /// Returns the expression of the destination and the physical name of the column it writes -
+    /// the marked identity for the semantic `__name__`, the label itself otherwise - or `None`
+    /// when the replacement leaves every series of the input untouched and the destination is not
+    /// projected at all.
+    ///
+    /// Like Prometheus, the anchored regex is matched against every series, reading the source
+    /// label the way [`Self::resolve_label_col`] resolves it, and a series whose source does not
+    /// match keeps the destination it already had. A missing source label reads as the empty
+    /// string for every series, so its whole result is decided here instead of per row.
+    /// doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
     fn build_regexp_replace_label_expr(
         &self,
         other_input_exprs: &mut VecDeque<DfExpr>,
-        query_engine_state: &QueryEngineState,
         input_schema: &DFSchemaRef,
-    ) -> Result<Option<(DfExpr, String, bool)>> {
+    ) -> Result<Option<(DfExpr, String)>> {
         // label_replace(vector, dst_label, replacement, src_label, regex)
         let dst_label = match other_input_exprs.pop_front() {
             Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
@@ -4627,270 +4689,99 @@ impl PromPlanner {
             .fail()?,
         };
 
-        // Like Prometheus, match the whole source value. A series whose source value matches gets
-        // `dst_label` set to the expanded replacement; any other series is left unchanged.
-        // doc: https://prometheus.io/docs/prometheus/latest/querying/functions/#label_replace
+        // Like Prometheus, match the whole source value.
         let anchored = format!("^(?s:{regex})$");
-        regex::Regex::new(&anchored).map_err(|_| {
-            InvalidRegularExpressionSnafu {
-                regex: regex.clone(),
-            }
-            .build()
-        })?;
-        let dst_exists = self.ctx.tag_columns.contains(&dst_label);
+        let compiled = regex::Regex::new(&anchored)
+            .map_err(|_| InvalidRegularExpressionSnafu { regex }.build())?;
 
-        // `__name__` is not a physical column: the semantic source resolves through the marked
-        // identity column of the input, never through a physical column of that name.
-        let metric_name_column = Self::metric_name_column(input_schema)?;
-        let metric_name_src = src_label.as_str() == METRIC_NAME;
-        let src_column = if metric_name_src {
-            metric_name_column.clone()
-        } else if self.ctx.tag_columns.contains(&src_label) {
-            Some(Column::from_name(src_label.clone()))
+        // The destination the input already carries, read back on the rows the regex leaves
+        // unchanged. The semantic one is the marked identity of the input; an ordinary one is a
+        // label the input projects, and a destination it does not carry stays NULL, like any
+        // label a series never had.
+        let existing_dst = if metric_name_dst {
+            Self::metric_name_column(input_schema)?.map(DfExpr::Column)
+        } else if self.ctx.tag_columns.contains(&dst_label) {
+            Some(
+                DfExpr::Column(Column::from_name(&dst_label))
+                    .cast_to(&ArrowDataType::Utf8, input_schema)
+                    .context(DataFusionPlanningSnafu)?,
+            )
         } else {
             None
         };
 
-        let session_state = query_engine_state.session_state();
-
-        if !metric_name_src && !metric_name_dst {
-            // An ordinary source and an ordinary destination keep the existing handling.
-            //
-            // If the src_label exists and regex is empty, keep everything unchanged.
-            if src_column.is_some() && regex.is_empty() {
-                return Ok(None);
+        let value = match Self::resolve_label_col(input_schema, &src_label)? {
+            Some(src_column) => {
+                let src = Self::label_value_expr(&src_column.name, input_schema)?;
+                let matched = DfExpr::ScalarFunction(ScalarFunction {
+                    func: datafusion_functions::regex::regexp_like(),
+                    args: vec![src.clone(), lit(anchored.clone())],
+                });
+                let replaced = Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
+                    func: datafusion_functions::regex::regexp_replace(),
+                    args: vec![src, lit(anchored), lit(replacement)],
+                }));
+                let unchanged = existing_dst
+                    .clone()
+                    .unwrap_or_else(|| lit(ScalarValue::Utf8(None)));
+                when(matched, replaced)
+                    .otherwise(unchanged)
+                    .context(DataFusionPlanningSnafu)?
             }
-
-            // If the src_label doesn't exists, and
-            let Some(src_column) = &src_column else {
-                if replacement.is_empty() {
-                    // the replacement is empty, keep everything unchanged.
-                    return Ok(None);
-                } else {
-                    // the replacement is not empty, always adds dst_label with replacement value.
-                    return Ok(Some((
-                        // alias literal `replacement` as dst_label
-                        lit(replacement).alias(&dst_label),
-                        dst_label,
-                        false,
-                    )));
+            None => {
+                // A missing source label is the empty string every series matches against, so the
+                // destination is the same for all of them and only the two outcomes of the regex
+                // remain.
+                match compiled.captures("").map(|captures| {
+                    let mut value = String::new();
+                    captures.expand(&replacement, &mut value);
+                    value
+                }) {
+                    // The regex does not match the empty source: no series is touched. A
+                    // destination the input does not carry stays unprojected.
+                    None => match existing_dst {
+                        Some(existing) => existing,
+                        None if metric_name_dst => lit(ScalarValue::Utf8(None)),
+                        None => return Ok(None),
+                    },
+                    // An empty expansion is an absent label: it removes a destination the input
+                    // carries, while one it does not carry is never projected for it.
+                    Some(value) if value.is_empty() => match existing_dst {
+                        Some(_) => lit(ScalarValue::Utf8(None)),
+                        None if metric_name_dst => lit(ScalarValue::Utf8(None)),
+                        None => return Ok(None),
+                    },
+                    Some(value) => lit(value),
                 }
-            };
-
-            // Preprocess the regex:
-            // https://github.com/prometheus/prometheus/blob/d902abc50d6652ba8fe9a81ff8e5cce936114eba/promql/functions.go#L1575C32-L1575C37
-            let regex = format!("^(?s:{regex})$");
-            let func = session_state
-                .scalar_functions()
-                .get("regexp_replace")
-                .context(UnsupportedExprSnafu {
-                    name: "regexp_replace",
-                })?;
-
-            // regexp_replace(src_label, regex, replacement)
-            let args = vec![
-                DfExpr::Column(src_column.clone()),
-                DfExpr::Literal(ScalarValue::Utf8(Some(regex)), None),
-                DfExpr::Literal(ScalarValue::Utf8(Some(replacement)), None),
-            ];
-            return Ok(Some((
-                DfExpr::ScalarFunction(ScalarFunction {
-                    func: func.clone(),
-                    args,
-                })
-                .alias(&dst_label),
-                dst_label,
-                false,
-            )));
-        }
-
-        let src = match &src_column {
-            Some(column) => DfExpr::ScalarFunction(ScalarFunction {
-                func: coalesce(),
-                args: vec![
-                    DfExpr::Column(column.clone())
-                        .cast_to(&ArrowDataType::Utf8, input_schema)
-                        .context(DataFusionPlanningSnafu)?,
-                    lit(""),
-                ],
-            }),
-            None => lit(""),
-        };
-        let matched = DfExpr::ScalarFunction(ScalarFunction {
-            func: datafusion_functions::regex::regexp_like(),
-            args: vec![src.clone(), lit(anchored.clone())],
-        });
-        let replaced = Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
-            func: datafusion_functions::regex::regexp_replace(),
-            args: vec![src, lit(anchored), lit(replacement)],
-        }));
-        let unchanged = if metric_name_dst {
-            match &metric_name_column {
-                Some(column) => DfExpr::Column(column.clone()),
-                None => lit(ScalarValue::Utf8(None)),
             }
-        } else if dst_exists {
-            DfExpr::Column(Column::from_name(&dst_label))
-                .cast_to(&ArrowDataType::Utf8, input_schema)
-                .context(DataFusionPlanningSnafu)?
-        } else {
-            lit(ScalarValue::Utf8(None))
         };
-        let replace_expr = when(matched, replaced)
-            .otherwise(unchanged)
-            .context(DataFusionPlanningSnafu)?;
 
-        let overwrite = metric_name_dst || dst_exists;
-        if !metric_name_dst {
-            return Ok(Some((replace_expr.alias(&dst_label), dst_label, overwrite)));
+        let (replace_expr, dst_name) =
+            Self::write_destination_label(&self.ctx, input_schema, &dst_label, value)?;
+        Ok(Some((replace_expr, dst_name)))
+    }
+
+    /// Wrap the rewritten label value `value` into the destination `dst_label` of the result.
+    ///
+    /// An ordinary destination is projected under its own name, while the semantic `__name__`
+    /// overwrites the marked identity of the input in place, or attaches one when the input
+    /// carries none - named the way a selector that attaches an identity names it, so that a
+    /// physical column is never mistaken for it.
+    ///
+    /// Returns the expression and the physical name of the destination column.
+    fn write_destination_label(
+        ctx: &PromPlannerContext,
+        input_schema: &DFSchemaRef,
+        dst_label: &str,
+        value: DfExpr,
+    ) -> Result<(DfExpr, String)> {
+        if dst_label != METRIC_NAME {
+            return Ok((value.alias(dst_label), dst_label.to_string()));
         }
 
         // An input without an identity gets a free internal name, chosen the way a selector that
         // attaches an identity chooses it, so a physical column is never mistaken for it.
-        let (dst_name, dst_qualifier) = match &metric_name_column {
-            Some(column) => (column.name.clone(), column.relation.clone()),
-            None => {
-                let occupied = input_schema
-                    .fields()
-                    .iter()
-                    .map(|field| field.name().as_str())
-                    .collect::<HashSet<_>>();
-                let mut name = PROMQL_METRIC_NAME_COLUMN.to_string();
-                while occupied.contains(name.as_str()) {
-                    name.push('_');
-                }
-                // Project the identity like the tag columns it is projected next to.
-                let qualifier = self
-                    .ctx
-                    .time_index_column
-                    .as_deref()
-                    .and_then(|time_index| {
-                        input_schema
-                            .qualified_field_with_unqualified_name(time_index)
-                            .ok()
-                    })
-                    .and_then(|(qualifier, _)| qualifier.cloned());
-                (name, qualifier)
-            }
-        };
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert(
-            PROMQL_FIELD_ROLE_KEY.to_string(),
-            PROMQL_METRIC_NAME_ROLE.to_string(),
-        );
-
-        Ok(Some((
-            DfExpr::Alias(Alias {
-                expr: Box::new(replace_expr),
-                relation: dst_qualifier,
-                name: dst_name.clone(),
-                metadata: Some(metadata.into()),
-            }),
-            dst_name,
-            overwrite,
-        )))
-    }
-
-    /// Build expr for `label_join` function
-    ///
-    /// Returns the concatenation expression and the physical name of the destination column,
-    /// which is the marked identity itself when the destination is the semantic `__name__`.
-    fn build_concat_labels_expr(
-        other_input_exprs: &mut VecDeque<DfExpr>,
-        ctx: &PromPlannerContext,
-        query_engine_state: &QueryEngineState,
-        input_schema: &DFSchemaRef,
-    ) -> Result<(DfExpr, String)> {
-        // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
-
-        let dst_label = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
-            other => UnexpectedPlanExprSnafu {
-                desc: format!("expected dst_label string literal, but found {:?}", other),
-            }
-            .fail()?,
-        };
-        let separator = match other_input_exprs.pop_front() {
-            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
-            other => UnexpectedPlanExprSnafu {
-                desc: format!("expected separator string literal, but found {:?}", other),
-            }
-            .fail()?,
-        };
-
-        // Create a set of available columns (tag columns + field columns + time index column)
-        let available_columns: HashSet<&str> = ctx
-            .tag_columns
-            .iter()
-            .chain(ctx.field_columns.iter())
-            .chain(ctx.time_index_column.as_ref())
-            .map(|s| s.as_str())
-            .collect();
-
-        // `__name__` is not a physical column: the semantic source resolves through the marked
-        // identity column of the input, never through a physical column of that name.
-        let metric_name_column = Self::metric_name_column(input_schema)?;
-        let src_labels = other_input_exprs
-            .iter()
-            .map(|expr| {
-                // `concat_ws` skips NULL arguments together with their separator, while an
-                // absent label joins as the empty string. `__name__` resolves through the marked
-                // identity column, never through a physical column of that name.
-                match expr {
-                    DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
-                        if label.is_empty() {
-                            FunctionInvalidArgumentSnafu {
-                                fn_name: "label_join",
-                            }
-                            .fail()
-                        } else if label.as_str() == METRIC_NAME {
-                            match &metric_name_column {
-                                Some(column) => Self::label_value_expr(&column.name, input_schema),
-                                None => Ok(lit("")),
-                            }
-                        } else if available_columns.contains(label.as_str()) {
-                            Self::label_value_expr(label, input_schema)
-                        } else {
-                            Ok(lit(""))
-                        }
-                    }
-                    other => UnexpectedPlanExprSnafu {
-                        desc: format!(
-                            "expected source label string literal, but found {:?}",
-                            other
-                        ),
-                    }
-                    .fail(),
-                }
-            })
-            .collect::<Result<Vec<_>>>()?;
-        // Joining no labels yields the empty string, i.e. removes `dst_label`.
-        if src_labels.is_empty() {
-            return Ok((lit(ScalarValue::Utf8(None)).alias(&dst_label), dst_label));
-        }
-
-        let session_state = query_engine_state.session_state();
-        let func = session_state
-            .scalar_functions()
-            .get("concat_ws")
-            .context(UnsupportedExprSnafu { name: "concat_ws" })?;
-
-        // concat_ws(separator, src_label_1, src_label_2, ...) as dst_label
-        let mut args = Vec::with_capacity(1 + src_labels.len());
-        args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator)), None));
-        args.extend(src_labels);
-
-        let concat_expr = DfExpr::ScalarFunction(ScalarFunction {
-            func: func.clone(),
-            args,
-        });
-        if dst_label.as_str() != METRIC_NAME {
-            return Ok((concat_expr.alias(&dst_label), dst_label));
-        }
-
-        // The semantic destination overwrites the marked identity of the input in place, or
-        // attaches a new one when the input carries none.
-        let (dst_name, dst_qualifier) = match metric_name_column {
+        let (dst_name, dst_qualifier) = match Self::metric_name_column(input_schema)? {
             Some(column) => (column.name, column.relation),
             None => {
                 let occupied = input_schema
@@ -4923,13 +4814,93 @@ impl PromPlanner {
 
         Ok((
             DfExpr::Alias(Alias {
-                expr: Box::new(Self::empty_label_to_null(concat_expr)),
+                expr: Box::new(value),
                 relation: dst_qualifier,
                 name: dst_name.clone(),
                 metadata: Some(metadata.into()),
             }),
             dst_name,
         ))
+    }
+
+    /// Build expr for `label_join` function
+    ///
+    /// Returns the joined expression and the physical name of the destination column, which is
+    /// the marked identity itself when the destination is the semantic `__name__`.
+    fn build_concat_labels_expr(
+        other_input_exprs: &mut VecDeque<DfExpr>,
+        ctx: &PromPlannerContext,
+        query_engine_state: &QueryEngineState,
+        input_schema: &DFSchemaRef,
+    ) -> Result<(DfExpr, String)> {
+        // label_join(vector, dst_label, separator, src_label_1, src_label_2, ...)
+
+        let dst_label = match other_input_exprs.pop_front() {
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
+            other => UnexpectedPlanExprSnafu {
+                desc: format!("expected dst_label string literal, but found {:?}", other),
+            }
+            .fail()?,
+        };
+        let separator = match other_input_exprs.pop_front() {
+            Some(DfExpr::Literal(ScalarValue::Utf8(Some(d)), _)) => d,
+            other => UnexpectedPlanExprSnafu {
+                desc: format!("expected separator string literal, but found {:?}", other),
+            }
+            .fail()?,
+        };
+
+        let src_labels = other_input_exprs
+            .iter()
+            .map(|expr| match expr {
+                // `concat_ws` skips NULL arguments together with their separator, while an absent
+                // label joins as the empty string; a source resolves like every other label read,
+                // `__name__` through the marked identity of the input included.
+                DfExpr::Literal(ScalarValue::Utf8(Some(label)), None) => {
+                    if label.is_empty() {
+                        return FunctionInvalidArgumentSnafu {
+                            fn_name: "label_join",
+                        }
+                        .fail();
+                    }
+                    match Self::resolve_label_col(input_schema, label)? {
+                        Some(column) => Self::label_value_expr(&column.name, input_schema),
+                        None => Ok(lit("")),
+                    }
+                }
+                other => UnexpectedPlanExprSnafu {
+                    desc: format!(
+                        "expected source label string literal, but found {:?}",
+                        other
+                    ),
+                }
+                .fail(),
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        // Joining no labels yields the empty string, i.e. the destination label is absent.
+        let value = if src_labels.is_empty() {
+            lit(ScalarValue::Utf8(None))
+        } else {
+            let session_state = query_engine_state.session_state();
+            let func = session_state
+                .scalar_functions()
+                .get("concat_ws")
+                .context(UnsupportedExprSnafu { name: "concat_ws" })?;
+
+            // concat_ws(separator, src_label_1, src_label_2, ...) as dst_label
+            let mut args = Vec::with_capacity(1 + src_labels.len());
+            args.push(DfExpr::Literal(ScalarValue::Utf8(Some(separator)), None));
+            args.extend(src_labels);
+
+            // An empty joined label is an absent label, like the sources that never had one.
+            Self::empty_label_to_null(DfExpr::ScalarFunction(ScalarFunction {
+                func: func.clone(),
+                args,
+            }))
+        };
+
+        Self::write_destination_label(ctx, input_schema, &dst_label, value)
     }
 
     /// The value of `label` as a string, where NULL (the series has no such label) reads as the
@@ -5071,26 +5042,17 @@ impl PromPlanner {
             FunctionInvalidArgumentSnafu { fn_name: func }
         );
 
-        let metric_name_column = Self::metric_name_column(input_schema)?;
         tags.iter()
             .map(|col| match col {
                 DfExpr::Literal(ScalarValue::Utf8(Some(label)), _) => {
-                    // `__name__` is not a physical column: the metric identity lives in the
-                    // marked column of the input. Without one, the label keeps its ordinary
-                    // missing-label behavior.
-                    let column = match (label.as_str(), &metric_name_column) {
-                        (METRIC_NAME, Some(metric_name_column)) => metric_name_column.clone(),
-                        (METRIC_NAME, None) => {
-                            return Err(datafusion::common::field_not_found(
-                                None::<datafusion::common::TableReference>,
-                                label,
-                                input_schema.as_ref(),
-                            ))
-                            .context(DataFusionPlanningSnafu);
-                        }
-                        _ => Column::from_name(label),
+                    // PromQL sorts by the value of the label of a series, where a label the series
+                    // does not carry - the semantic `__name__` of an input that dropped its
+                    // identity included - is the empty value, i.e. NULL among NULLs.
+                    let expr = match Self::resolve_label_col(input_schema, label)? {
+                        Some(column) => DfExpr::Column(column),
+                        None => lit(ScalarValue::Utf8(None)),
                     };
-                    Ok(DfExpr::Column(column).sort(asc, false))
+                    Ok(expr.sort(asc, false))
                 }
                 other => UnexpectedPlanExprSnafu {
                     desc: format!("expected label string literal, but found {:?}", other),
