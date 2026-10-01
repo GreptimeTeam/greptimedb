@@ -732,6 +732,31 @@ fn test_example_configs_document_actual_defaults() {
 }
 
 #[test]
+fn test_load_trace_aux_cache_capacity() {
+    for capacity in [0, 37] {
+        let config = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            config.path(),
+            format!("[otlp]\ntrace_aux_cache_capacity = {capacity}\n"),
+        )
+        .unwrap();
+
+        let frontend =
+            GreptimeOptions::<FrontendOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        let standalone =
+            GreptimeOptions::<StandaloneOptions>::load_layered_options(config.path().to_str(), "")
+                .unwrap();
+        for options in [frontend.component, standalone.component.frontend_options()] {
+            assert_eq!(options.otlp.trace_aux_cache_capacity, capacity);
+            let serialized = toml::to_string(&options).unwrap();
+            let restored: FrontendOptions = toml::from_str(&serialized).unwrap();
+            assert_eq!(restored.otlp.trace_aux_cache_capacity, capacity);
+        }
+    }
+}
+
+#[test]
 fn test_load_removed_histogram_options() {
     for enabled in [false, true] {
         let config = tempfile::NamedTempFile::new().unwrap();

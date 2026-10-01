@@ -310,6 +310,9 @@ enable = true
 enable = true
 ## Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
 trace_ingest_chunk_size = 512
+## Maximum cached trace service/operation entries per frontend, shared across
+## all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+trace_aux_cache_capacity = 100000
 ## Whether to synthesize the `greptime_otel_resource_info` table from OTLP metric
 ## resource attributes, so metrics-only services reach the semantic graph.
 experimental_enable_resource_info = false

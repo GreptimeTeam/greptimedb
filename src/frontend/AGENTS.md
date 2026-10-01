@@ -58,6 +58,14 @@ remote datanodes via `operator`/`client`.
   the lazy schema handshake; checks permissions and reconciles missing columns
   through `Inserter` once per stream, then reuses the refreshed table.
 
+- **OTLP trace lookup tables** (`instance/otlp/trace_ingest.rs`): `Instance` owns
+  a shared cache of confirmed service/operation writes, which bypass batching.
+  `otlp.trace_aux_cache_capacity` sets its entry limit at startup; zero disables it.
+  Async main writes retain completion results; a frontend task writes auxiliary
+  rows only for confirmed chunks before populating the cache.
+  These tables are ingestion-managed; manual mutation requires restarting
+  serving frontends.
+
 - **Logical-table batching** (`instance/logical_batcher.rs`): `Services` initializes
   one shared batcher for opted-in HTTP Prom and nonlegacy OTLP metric-engine
   writes. Downstream routers can initialize it when enabling replacement endpoints.
