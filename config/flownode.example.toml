@@ -4,9 +4,6 @@ node_id = 14
 
 ## flow engine options.
 [flow]
-## The number of flow worker in flownode.
-## Not setting(or set to 0) this value will use the number of CPU cores divided by 2.
-#+num_workers=0
 [flow.batching_mode]
 ## The default batching engine query timeout is 10 minutes.
 #+query_timeout="600s"

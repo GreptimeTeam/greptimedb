@@ -11,6 +11,9 @@ protoc-rust.workspace = true
 [lints]
 workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true

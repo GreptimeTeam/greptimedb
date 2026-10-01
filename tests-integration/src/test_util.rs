@@ -977,8 +977,14 @@ pub async fn setup_authenticated_grpc_database(
             .unwrap();
     let grpc_server = setup_grpc_server_for_frontend_instance(instance, Some(user_provider)).await;
     let grpc_addr = grpc_server.bind_addr().unwrap().to_string();
-    let mut database =
-        Database::new_with_dbname("greptime-public", Client::with_urls(vec![grpc_addr]));
+    let mut database = Database::new_with_dbname(
+        "greptime-public",
+        Client::with_query_and_control_managers(
+            Default::default(),
+            Default::default(),
+            vec![grpc_addr],
+        ),
+    );
     database.set_auth(api::v1::auth_header::AuthScheme::Basic(Basic {
         username: username.to_string(),
         password: password.to_string(),

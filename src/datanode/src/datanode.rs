@@ -780,6 +780,22 @@ fn validate_object_store_wal_config(config: &ObjectStoreWalConfig) -> Result<()>
             reason: "must be greater than 0",
         }
     );
+    ensure!(
+        config.max_unpersisted_bytes.as_bytes() > 0,
+        InvalidObjectStoreWalConfigSnafu {
+            field: "max_unpersisted_bytes",
+            value: config.max_unpersisted_bytes.to_string(),
+            reason: "must be greater than 0",
+        }
+    );
+    ensure!(
+        config.max_unpersisted_age > Duration::ZERO,
+        InvalidObjectStoreWalConfigSnafu {
+            field: "max_unpersisted_age",
+            value: format!("{:?}", config.max_unpersisted_age),
+            reason: "must be greater than 0",
+        }
+    );
     Ok(())
 }
 
@@ -1163,12 +1179,28 @@ mod tests {
                 },
                 "max_batch_bytes",
             ),
+            (
+                ObjectStoreWalConfig {
+                    max_unpersisted_bytes: ReadableSize(0),
+                    ..Default::default()
+                },
+                "max_unpersisted_bytes",
+            ),
+            (
+                ObjectStoreWalConfig {
+                    max_unpersisted_age: Duration::ZERO,
+                    ..Default::default()
+                },
+                "max_unpersisted_age",
+            ),
         ];
 
         for (config, expected_field) in cases {
             let expected_value = match expected_field {
                 "prefix" => config.prefix.clone(),
                 "flush_interval" => format!("{:?}", config.flush_interval),
+                "max_unpersisted_bytes" => config.max_unpersisted_bytes.to_string(),
+                "max_unpersisted_age" => format!("{:?}", config.max_unpersisted_age),
                 _ => config.max_batch_bytes.to_string(),
             };
             let data_home = create_temp_dir("object-store-wal-invalid-config");

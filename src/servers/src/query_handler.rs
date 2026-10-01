@@ -82,8 +82,6 @@ pub struct MetricsIngestOutcome {
 
 #[async_trait]
 pub trait InfluxdbLineProtocolHandler {
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
     async fn exec(&self, request: InfluxdbRequest, ctx: QueryContextRef) -> Result<Output>;
 }
 
@@ -92,12 +90,10 @@ pub trait OpentsdbProtocolHandler {
     /// Checks all points in one external request before per-point debug execution.
     async fn preflight(&self, data_points: &[DataPoint], ctx: QueryContextRef) -> Result<()>;
 
-    /// A successful request will not return a response.
-    /// Only on error will the socket return a line of data.
     async fn exec(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize>;
 
-    /// Executes an ordinary HTTP put with optional batching. Debug and socket
-    /// callers retain [`Self::exec`]; the frontend clears HTTP batching selection
+    /// Executes an ordinary HTTP put with optional batching. Debug callers
+    /// retain [`Self::exec`]; the frontend clears HTTP batching selection
     /// there so diagnostic requests preserve direct, per-point error attribution.
     async fn exec_batch(&self, data_points: Vec<DataPoint>, ctx: QueryContextRef) -> Result<usize> {
         self.exec(data_points, ctx).await

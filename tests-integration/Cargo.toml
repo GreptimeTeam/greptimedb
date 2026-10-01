@@ -11,7 +11,6 @@ path = "tests/main.rs"
 
 [features]
 dashboard = ["servers/dashboard"]
-vector_index = []
 enterprise = ["frontend/enterprise", "meta-srv/enterprise", "common-meta/enterprise"]
 
 [lints]
@@ -118,7 +117,6 @@ rstest.workspace = true
 rstest_reuse.workspace = true
 sea-query.workspace = true
 servers = { workspace = true, features = ["testing"] }
-session = { workspace = true, features = ["testing"] }
 similar-asserts.workspace = true
 sqlx = { workspace = true, features = [
     "mysql",

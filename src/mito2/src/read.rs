@@ -45,7 +45,6 @@ use std::time::Duration;
 
 use api::v1::OpType;
 use arrow_schema::SchemaRef;
-use async_trait::async_trait;
 use common_time::Timestamp;
 use datafusion_common::arrow::array::UInt8Array;
 use datatypes::arrow;
@@ -73,7 +72,7 @@ use crate::error::{
     ComputeArrowSnafu, ComputeVectorSnafu, ConvertVectorSnafu, DecodeSnafu, InvalidBatchSnafu,
     Result,
 };
-use crate::memtable::{BoxedBatchIterator, BoxedRecordBatchIterator};
+use crate::memtable::BoxedRecordBatchIterator;
 
 pub(crate) fn timestamp_array_to_i64_slice(arr: &ArrayRef) -> &[i64] {
     use datatypes::arrow::array::{
@@ -706,86 +705,6 @@ impl Batch {
         self.sequences.get_data(index).unwrap()
     }
 
-    /// Checks the batch is monotonic by timestamps.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn check_monotonic(&self) -> Result<(), String> {
-        use std::cmp::Ordering;
-        if self.timestamps_native().is_none() {
-            return Ok(());
-        }
-
-        let timestamps = self.timestamps_native().unwrap();
-        let sequences = self.sequences.as_arrow().values();
-        for (i, window) in timestamps.windows(2).enumerate() {
-            let current = window[0];
-            let next = window[1];
-            let current_sequence = sequences[i];
-            let next_sequence = sequences[i + 1];
-            match current.cmp(&next) {
-                Ordering::Less => {
-                    // The current timestamp is less than the next timestamp.
-                    continue;
-                }
-                Ordering::Equal => {
-                    // The current timestamp is equal to the next timestamp.
-                    if current_sequence < next_sequence {
-                        return Err(format!(
-                            "sequence are not monotonic: ts {} == {} but current sequence {} < {}, index: {}",
-                            current, next, current_sequence, next_sequence, i
-                        ));
-                    }
-                }
-                Ordering::Greater => {
-                    // The current timestamp is greater than the next timestamp.
-                    return Err(format!(
-                        "timestamps are not monotonic: {} > {}, index: {}",
-                        current, next, i
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Returns Ok if the given batch is behind the current batch.
-    #[cfg(debug_assertions)]
-    #[allow(dead_code)]
-    pub(crate) fn check_next_batch(&self, other: &Batch) -> Result<(), String> {
-        // Checks the primary key
-        if self.primary_key() < other.primary_key() {
-            return Ok(());
-        }
-        if self.primary_key() > other.primary_key() {
-            return Err(format!(
-                "primary key is not monotonic: {:?} > {:?}",
-                self.primary_key(),
-                other.primary_key()
-            ));
-        }
-        // Checks the timestamp.
-        if self.last_timestamp() < other.first_timestamp() {
-            return Ok(());
-        }
-        if self.last_timestamp() > other.first_timestamp() {
-            return Err(format!(
-                "timestamps are not monotonic: {:?} > {:?}",
-                self.last_timestamp(),
-                other.first_timestamp()
-            ));
-        }
-        // Checks the sequence.
-        if self.last_sequence() >= other.first_sequence() {
-            return Ok(());
-        }
-        Err(format!(
-            "sequences are not monotonic: {:?} < {:?}",
-            self.last_sequence(),
-            other.first_sequence()
-        ))
-    }
-
     /// Prepares a shared full-key cache when all Dense PK columns are needed.
     /// Explicitly supplied decoded/defaulted values take precedence.
     pub(crate) fn ensure_dense_pk_decoded(&mut self, codec: &DensePrimaryKeyCodec) -> Result<()> {
@@ -860,112 +779,6 @@ impl Batch {
             .unwrap()
             .get(&column_id)
             .map(|&idx| &self.fields[idx])
-    }
-}
-
-/// A struct to check the batch is monotonic.
-#[cfg(debug_assertions)]
-#[derive(Default)]
-#[allow(dead_code)]
-pub(crate) struct BatchChecker {
-    last_batch: Option<Batch>,
-    start: Option<Timestamp>,
-    end: Option<Timestamp>,
-}
-
-#[cfg(debug_assertions)]
-#[allow(dead_code)]
-impl BatchChecker {
-    /// Attaches the given start timestamp to the checker.
-    pub(crate) fn with_start(mut self, start: Option<Timestamp>) -> Self {
-        self.start = start;
-        self
-    }
-
-    /// Attaches the given end timestamp to the checker.
-    pub(crate) fn with_end(mut self, end: Option<Timestamp>) -> Self {
-        self.end = end;
-        self
-    }
-
-    /// Returns true if the given batch is monotonic and behind
-    /// the last batch.
-    pub(crate) fn check_monotonic(&mut self, batch: &Batch) -> Result<(), String> {
-        batch.check_monotonic()?;
-
-        if let (Some(start), Some(first)) = (self.start, batch.first_timestamp())
-            && start > first
-        {
-            return Err(format!(
-                "batch's first timestamp is before the start timestamp: {:?} > {:?}",
-                start, first
-            ));
-        }
-        if let (Some(end), Some(last)) = (self.end, batch.last_timestamp())
-            && end <= last
-        {
-            return Err(format!(
-                "batch's last timestamp is after the end timestamp: {:?} <= {:?}",
-                end, last
-            ));
-        }
-
-        // Checks the batch is behind the last batch.
-        // Then Updates the last batch.
-        let res = self
-            .last_batch
-            .as_ref()
-            .map(|last| last.check_next_batch(batch))
-            .unwrap_or(Ok(()));
-        self.last_batch = Some(batch.clone());
-        res
-    }
-
-    /// Formats current batch and last batch for debug.
-    pub(crate) fn format_batch(&self, batch: &Batch) -> String {
-        use std::fmt::Write;
-
-        let mut message = String::new();
-        if let Some(last) = &self.last_batch {
-            write!(
-                message,
-                "last_pk: {:?}, last_ts: {:?}, last_seq: {:?}, ",
-                last.primary_key(),
-                last.last_timestamp(),
-                last.last_sequence()
-            )
-            .unwrap();
-        }
-        write!(
-            message,
-            "batch_pk: {:?}, batch_ts: {:?}, batch_seq: {:?}",
-            batch.primary_key(),
-            batch.timestamps(),
-            batch.sequences()
-        )
-        .unwrap();
-
-        message
-    }
-
-    /// Checks batches from the part range are monotonic. Otherwise, panics.
-    pub(crate) fn ensure_part_range_batch(
-        &mut self,
-        scanner: &str,
-        region_id: store_api::storage::RegionId,
-        partition: usize,
-        part_range: store_api::region_engine::PartitionRange,
-        batch: &Batch,
-    ) {
-        if let Err(e) = self.check_monotonic(batch) {
-            let err_msg = format!(
-                "{}: batch is not sorted, {}, region_id: {}, partition: {}, part_range: {:?}",
-                scanner, e, region_id, partition, part_range,
-            );
-            common_telemetry::error!("{err_msg}, {}", self.format_batch(batch));
-            // Only print the number of row in the panic message.
-            panic!("{err_msg}, batch rows: {}", batch.num_rows());
-        }
     }
 }
 
@@ -1169,29 +982,6 @@ impl From<Batch> for BatchBuilder {
     }
 }
 
-/// Async [Batch] reader and iterator wrapper.
-///
-/// This is the data source for SST writers or internal readers.
-pub enum Source {
-    /// Source from a [BoxedBatchReader].
-    Reader(BoxedBatchReader),
-    /// Source from a [BoxedBatchIterator].
-    Iter(BoxedBatchIterator),
-    /// Source from a [BoxedBatchStream].
-    Stream(BoxedBatchStream),
-}
-
-impl Source {
-    /// Returns next [Batch] from this data source.
-    pub async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        match self {
-            Source::Reader(reader) => reader.next_batch().await,
-            Source::Iter(iter) => iter.next().transpose(),
-            Source::Stream(stream) => stream.try_next().await,
-        }
-    }
-}
-
 /// Async [RecordBatch] reader and iterator wrapper for flat format.
 pub struct FlatSource {
     schema: SchemaRef,
@@ -1249,36 +1039,8 @@ impl FlatSourceInner {
     }
 }
 
-/// Async batch reader.
-///
-/// The reader must guarantee [Batch]es returned by it have the same schema.
-#[async_trait]
-pub trait BatchReader: Send {
-    /// Fetch next [Batch].
-    ///
-    /// Returns `Ok(None)` when the reader has reached its end and calling `next_batch()`
-    /// again won't return batch again.
-    ///
-    /// If `Err` is returned, caller should not call this method again, the implementor
-    /// may or may not panic in such case.
-    async fn next_batch(&mut self) -> Result<Option<Batch>>;
-}
-
-/// Pointer to [BatchReader].
-pub type BoxedBatchReader = Box<dyn BatchReader>;
-
-/// Pointer to a stream that yields [Batch].
-pub type BoxedBatchStream = BoxStream<'static, Result<Batch>>;
-
 /// Pointer to a stream that yields [RecordBatch].
 pub type BoxedRecordBatchStream = BoxStream<'static, Result<RecordBatch>>;
-
-#[async_trait::async_trait]
-impl<T: BatchReader + ?Sized> BatchReader for Box<T> {
-    async fn next_batch(&mut self) -> Result<Option<Batch>> {
-        (**self).next_batch().await
-    }
-}
 
 /// Local metrics for scanners.
 #[derive(Debug, Default)]

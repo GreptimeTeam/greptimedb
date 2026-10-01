@@ -138,7 +138,7 @@ mod tests {
 
     use super::*;
     use crate::TopicSelectorType;
-    use crate::config::object_store::CorruptedSegmentAction;
+    use crate::config::object_store::{AckMode, CorruptedSegmentAction};
     use crate::config::{DatanodeKafkaConfig, MetasrvKafkaConfig};
 
     #[test]
@@ -234,7 +234,7 @@ mod tests {
                 create_topic_timeout: Duration::from_secs(30),
             },
             auto_create_topics: true,
-            auto_prune_interval: Duration::from_mins(30),
+            auto_prune_interval: Duration::from_secs(30 * 60),
             auto_prune_logical_delete: false,
             auto_prune_parallelism: 10,
             flush_trigger_size: ReadableSize::mb(512),
@@ -294,6 +294,9 @@ mod tests {
         assert_eq!(config.prefix, "wal");
         assert_eq!(config.flush_interval, Duration::from_millis(100));
         assert_eq!(config.max_batch_bytes, ReadableSize::mb(8));
+        assert_eq!(config.ack_mode, AckMode::Durable);
+        assert_eq!(config.max_unpersisted_bytes, ReadableSize::mb(64));
+        assert_eq!(config.max_unpersisted_age, Duration::from_secs(8));
         assert_eq!(config.on_corrupted_segment, CorruptedSegmentAction::Skip);
         assert!(matches!(
             MetasrvWalConfig::try_from(datanode_wal_config).unwrap_err(),
@@ -306,6 +309,9 @@ mod tests {
             prefix = "cluster-a/wal"
             flush_interval = "500ms"
             max_batch_bytes = "4MB"
+            ack_mode = "enqueued"
+            max_unpersisted_bytes = "32MB"
+            max_unpersisted_age = "4s"
             on_corrupted_segment = "fail"
         "#;
         let datanode_wal_config: DatanodeWalConfig = toml::from_str(toml_str).unwrap();
@@ -314,11 +320,23 @@ mod tests {
             prefix: "cluster-a/wal".to_string(),
             flush_interval: Duration::from_millis(500),
             max_batch_bytes: ReadableSize::mb(4),
+            ack_mode: AckMode::Enqueued,
+            max_unpersisted_bytes: ReadableSize::mb(32),
+            max_unpersisted_age: Duration::from_secs(4),
             on_corrupted_segment: CorruptedSegmentAction::Fail,
         };
         assert_eq!(
             datanode_wal_config,
             DatanodeWalConfig::ObjectStore(expected)
+        );
+        let serialized = toml::to_string(&datanode_wal_config).unwrap();
+        let table: toml::Table = toml::from_str(&serialized).unwrap();
+        assert_eq!(table["ack_mode"].as_str(), Some("enqueued"));
+        assert_eq!(table["max_unpersisted_bytes"].as_str(), Some("32MiB"));
+        assert_eq!(table["max_unpersisted_age"].as_str(), Some("4s"));
+        assert_eq!(
+            datanode_wal_config,
+            toml::from_str::<DatanodeWalConfig>(&serialized).unwrap()
         );
 
         // The persisted tag is not accepted as a config provider.

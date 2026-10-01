@@ -2970,7 +2970,7 @@ mod test {
     use datafusion::functions_aggregate::expr_fn::count;
     use datafusion::logical_expr::builder::LogicalTableSource;
     use datafusion::logical_expr::{LogicalPlanBuilder, col};
-    use session::context::{QueryContext, QueryContextBuilder};
+    use session::context::QueryContext;
     use sql::dialect::GreptimeDbDialect;
     use sql::parser::{ParseOptions, ParserContext};
     use sql::statements::statement::Statement;
@@ -3966,55 +3966,5 @@ WITH ('repartition.column.hint' = 'host')",
             err.to_string()
                 .contains("cannot set repartition.column.hint on a table with partition metadata")
         );
-    }
-
-    #[tokio::test]
-    #[ignore = "TODO(ruihang): WIP new partition rule"]
-    async fn test_parse_partitions() {
-        common_telemetry::init_default_ut_logging();
-        let cases = [
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION ON COLUMNS (b) (
-  b < 'hz',
-  b >= 'hz' AND b < 'sh',
-  b >= 'sh'
-)
-ENGINE=mito",
-                r#"[{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"hz\"}}"]},{"column_list":["b"],"value_list":["{\"Value\":{\"String\":\"sh\"}}"]},{"column_list":["b"],"value_list":["\"MaxValue\""]}]"#,
-            ),
-            (
-                r"
-CREATE TABLE rcx ( a INT, b STRING, c TIMESTAMP, TIME INDEX (c) )
-PARTITION BY RANGE COLUMNS (b, a) (
-  PARTITION r0 VALUES LESS THAN ('hz', 10),
-  b < 'hz' AND a < 10,
-  b >= 'hz' AND b < 'sh' AND a >= 10 AND a < 20,
-  b >= 'sh' AND a >= 20
-)
-ENGINE=mito",
-                r#"[{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"hz\"}}","{\"Value\":{\"Int32\":10}}"]},{"column_list":["b","a"],"value_list":["{\"Value\":{\"String\":\"sh\"}}","{\"Value\":{\"Int32\":20}}"]},{"column_list":["b","a"],"value_list":["\"MaxValue\"","\"MaxValue\""]}]"#,
-            ),
-        ];
-        let ctx = QueryContextBuilder::default().build().into();
-        for (sql, expected) in cases {
-            let result = ParserContext::create_with_dialect(
-                sql,
-                &GreptimeDbDialect {},
-                ParseOptions::default(),
-            )
-            .unwrap();
-            match &result[0] {
-                Statement::CreateTable(c) => {
-                    let expr = expr_helper::create_to_expr(c, &QueryContext::arc()).unwrap();
-                    let (partitions, _) =
-                        parse_partitions(&expr, c.partitions.clone(), &ctx).unwrap();
-                    let json = serde_json::to_string(&partitions).unwrap();
-                    assert_eq!(json, expected);
-                }
-                _ => unreachable!(),
-            }
-        }
     }
 }

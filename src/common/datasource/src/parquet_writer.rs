@@ -28,6 +28,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::DEFAULT_WRITE_BUFFER_SIZE;
 use crate::error::{self, Result};
+use crate::packed_writer::PackedTableWriter;
+
+/// Destination creation policy; conditional failures never authorize path deletion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParquetCreationPolicy {
+    Overwrite,
+    IfNotExists,
+}
 
 /// Limits for one Parquet file. Flush thresholds are not hard memory caps.
 #[derive(Clone, Copy, Debug)]
@@ -45,10 +53,18 @@ pub struct ParquetWriterLimits {
 /// operation can leave a filesystem worker running after cleanup.
 pub struct ParquetFileWriter {
     encoder: Option<ArrowWriter<Vec<u8>>>,
-    sink: Writer,
+    sink: ParquetSink,
+    rows: u64,
     store: ObjectStore,
     path: String,
     limits: Option<ParquetWriterLimits>,
+    creation: ParquetCreationPolicy,
+    close_started: bool,
+}
+
+enum ParquetSink {
+    Object(Writer),
+    Packed(Box<PackedTableWriter>),
 }
 
 impl ParquetFileWriter {
@@ -61,43 +77,63 @@ impl ParquetFileWriter {
         concurrency: usize,
         limits: Option<ParquetWriterLimits>,
     ) -> Result<Self> {
-        let mut props = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(ZstdLevel::default()))
-            .set_statistics_truncate_length(None)
-            .set_column_index_truncate_length(None);
-        if let Some(limits) = limits {
-            ensure!(
-                limits.row_group_rows > 0
-                    && limits.flush_threshold_bytes > 0
-                    && limits.max_row_groups > 0,
-                error::InvalidParquetWriterLimitsSnafu
-            );
-            props = props
-                .set_max_row_group_row_count(Some(limits.row_group_rows))
-                .set_max_row_group_bytes(None);
-        }
-        for field in schema.fields() {
-            if matches!(field.data_type(), DataType::Timestamp(_, _)) {
-                let column = ColumnPath::new(vec![field.name().clone()]);
-                props = props
-                    .set_column_dictionary_enabled(column.clone(), false)
-                    .set_column_encoding(column, Encoding::DELTA_BINARY_PACKED);
-            }
-        }
-        let encoder = ArrowWriter::try_new(Vec::new(), schema, Some(props.build()))
-            .context(error::WriteParquetSnafu { path })?;
+        Self::open_with_creation(
+            schema,
+            store,
+            path,
+            concurrency,
+            limits,
+            ParquetCreationPolicy::Overwrite,
+        )
+        .await
+    }
+
+    /// Open with a conditional policy only when the caller verified backend support.
+    pub async fn open_with_creation(
+        schema: SchemaRef,
+        store: ObjectStore,
+        path: &str,
+        concurrency: usize,
+        limits: Option<ParquetWriterLimits>,
+        creation: ParquetCreationPolicy,
+    ) -> Result<Self> {
+        let encoder = build_encoder(schema, limits, path)?;
         let sink = store
             .writer_with(path)
             .concurrent(concurrency)
             .chunk(DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize)
+            .if_not_exists(creation == ParquetCreationPolicy::IfNotExists)
             .await
             .context(error::WriteObjectSnafu { path })?;
         Ok(Self {
             encoder: Some(encoder),
-            sink,
+            sink: ParquetSink::Object(sink),
+            rows: 0,
             store,
             path: path.to_owned(),
             limits,
+            creation,
+            close_started: false,
+        })
+    }
+
+    /// Encode into a request-owned pack or standalone destination.
+    pub fn open_packed(
+        schema: SchemaRef,
+        store: ObjectStore,
+        path: &str,
+        limits: Option<ParquetWriterLimits>,
+        packed: PackedTableWriter,
+    ) -> Result<Self> {
+        Ok(Self {
+            encoder: Some(build_encoder(schema, limits, path)?),
+            sink: ParquetSink::Packed(Box::new(packed)),
+            rows: 0,
+            store,
+            path: path.into(),
+            limits,
+            creation: ParquetCreationPolicy::IfNotExists,
+            close_started: false,
         })
     }
 
@@ -150,15 +186,22 @@ impl ParquetFileWriter {
             check_cancelled(cancellation)?;
             self.write_bytes(bytes).await?;
             check_cancelled(cancellation)?;
+            self.rows += len as u64;
             offset += len;
         }
         Ok(())
     }
 
     async fn write_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
-        if !bytes.is_empty() {
-            self.sink
-                .write(bytes)
+        let bytes = Bytes::from(bytes);
+        let sink = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.write(bytes).await,
+            ParquetSink::Object(sink) => sink,
+        };
+        let chunk = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        // Slices retain the complete encoded allocation until its last submission.
+        for offset in (0..bytes.len()).step_by(chunk) {
+            sink.write(bytes.slice(offset..(offset + chunk).min(bytes.len())))
                 .await
                 .context(error::WriteObjectSnafu { path: &self.path })?;
         }
@@ -183,21 +226,31 @@ impl ParquetFileWriter {
         .context(error::JoinHandleSnafu)??;
         self.write_bytes(bytes).await?;
         check_cancelled(cancellation)?;
-        self.sink
-            .close()
+        let sink = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.finish(self.rows, cancellation).await,
+            ParquetSink::Object(sink) => sink,
+        };
+        self.close_started = true;
+        sink.close()
             .await
             .context(error::WriteObjectSnafu { path: &self.path })?;
         check_cancelled(cancellation)?;
         Ok(())
     }
 
-    /// Abort an exclusively owned file after all in-flight operations have completed.
-    /// If the backend cannot abort, deletion assumes this attempt owns the path.
+    /// Abort after all in-flight operations complete. Preserve ambiguous commits;
+    /// conditional callers delegate cleanup exclusively to the backend.
     pub async fn abort(mut self) -> Result<()> {
-        let result = self.sink.abort().await;
-        if result
-            .as_ref()
-            .is_err_and(|e| e.kind() == object_store::ErrorKind::Unsupported)
+        let result = match &mut self.sink {
+            ParquetSink::Packed(packed) => return packed.abort().await,
+            ParquetSink::Object(sink) => sink.abort().await,
+        };
+        if self.creation == ParquetCreationPolicy::Overwrite
+            && result.as_ref().is_err_and(|error| {
+                error.kind() == object_store::ErrorKind::Unsupported
+                    && (!self.close_started
+                        || object_store::secure_fs::is_unsynced_overwrite_abort(error))
+            })
         {
             let store = self.store.clone();
             let path = self.path.clone();
@@ -212,6 +265,39 @@ impl ParquetFileWriter {
         }
         Ok(())
     }
+}
+
+fn build_encoder(
+    schema: SchemaRef,
+    limits: Option<ParquetWriterLimits>,
+    path: &str,
+) -> Result<ArrowWriter<Vec<u8>>> {
+    let mut props = WriterProperties::builder()
+        .set_compression(Compression::ZSTD(ZstdLevel::default()))
+        .set_statistics_truncate_length(None)
+        .set_column_index_truncate_length(None);
+    if let Some(limits) = limits {
+        ensure!(
+            limits.row_group_rows > 0
+                && limits.flush_threshold_bytes > 0
+                && limits.max_row_groups > 0,
+            error::InvalidParquetWriterLimitsSnafu
+        );
+        props = props
+            .set_max_row_group_row_count(Some(limits.row_group_rows))
+            .set_max_row_group_bytes(None);
+    }
+    for field in schema.fields() {
+        if matches!(field.data_type(), DataType::Timestamp(_, _)) {
+            let column = ColumnPath::new(vec![field.name().clone()]);
+            props = props
+                .set_column_dictionary_enabled(column.clone(), false)
+                .set_column_encoding(column, Encoding::DELTA_BINARY_PACKED);
+        }
+    }
+    let encoder = ArrowWriter::try_new(Vec::new(), schema, Some(props.build()))
+        .context(error::WriteParquetSnafu { path })?;
+    Ok(encoder)
 }
 
 fn check_cancelled(cancellation: Option<&CancellationToken>) -> Result<()> {
@@ -286,6 +372,196 @@ mod tests {
     async fn read(store: &ObjectStore, path: &str) -> ParquetRecordBatchReaderBuilder<Bytes> {
         ParquetRecordBatchReaderBuilder::try_new(store.read(path).await.unwrap().to_bytes())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn abort_preserves_collisions_and_ambiguous_commits() {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory, oio};
+
+        struct AmbiguousCommit(oio::Writer);
+        impl oio::Write for AmbiguousCommit {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.0.write(bytes).await
+            }
+            async fn close(
+                &mut self,
+            ) -> object_store::Result<object_store::layers::mock::Metadata> {
+                self.0.close().await?;
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unexpected,
+                    "lost close reply",
+                ))
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unsupported,
+                    "cannot abort",
+                ))
+            }
+        }
+
+        for (creation, existing) in [
+            (ParquetCreationPolicy::Overwrite, false),
+            (ParquetCreationPolicy::IfNotExists, false),
+            (ParquetCreationPolicy::IfNotExists, true),
+        ] {
+            let directory = common_test_util::temp_dir::create_temp_dir("conditional_parquet");
+            let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+                .unwrap()
+                .build_operator();
+            let path = "conditional.parquet";
+            if existing {
+                store.write(path, "original").await.unwrap();
+            }
+            let factory: MockWriterFactory =
+                Arc::new(|_, _, writer| Box::new(AmbiguousCommit(writer)));
+            let store = store.layer(
+                MockLayerBuilder::default()
+                    .writer_factory(factory)
+                    .build()
+                    .unwrap(),
+            );
+            let mut writer = ParquetFileWriter::open_with_creation(
+                batch().schema(),
+                store.clone(),
+                path,
+                1,
+                None,
+                creation,
+            )
+            .await
+            .unwrap();
+            writer.write(batch(), None).await.unwrap();
+            assert!(writer.finish(None).await.is_err());
+            assert!(writer.abort().await.is_err());
+            if existing {
+                assert_eq!(
+                    store.read(path).await.unwrap().to_bytes(),
+                    Bytes::from_static(b"original")
+                );
+            } else {
+                assert_eq!(
+                    read(&store, path)
+                        .await
+                        .metadata()
+                        .file_metadata()
+                        .num_rows(),
+                    4
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn overwrite_abort_deletes_after_unsynced_close() {
+        use object_store::layers::mock::{MockLayerBuilder, MockWriterFactory, oio};
+
+        struct FailedClose(oio::Writer);
+        impl oio::Write for FailedClose {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.0.write(bytes).await
+            }
+            async fn close(
+                &mut self,
+            ) -> object_store::Result<object_store::layers::mock::Metadata> {
+                Err(object_store::Error::new(
+                    object_store::ErrorKind::Unexpected,
+                    "close failed before sync",
+                ))
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                self.0.abort().await
+            }
+        }
+
+        let directory = common_test_util::temp_dir::create_temp_dir("unsynced_parquet");
+        let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+            .unwrap()
+            .build_operator();
+        let path = "partial.parquet";
+        let factory: MockWriterFactory = Arc::new(|_, _, writer| Box::new(FailedClose(writer)));
+        let store = store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+        let mut writer = ParquetFileWriter::open(batch().schema(), store.clone(), path, 1, None)
+            .await
+            .unwrap();
+        writer.write(batch(), None).await.unwrap();
+        assert!(writer.finish(None).await.is_err());
+        assert!(store.exists(path).await.unwrap());
+        writer.abort().await.unwrap();
+        assert!(!store.exists(path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn large_footer_flush_uses_bounded_submissions_in_one_parquet_stream() {
+        use std::sync::Mutex;
+
+        use object_store::layers::mock::{Metadata, MockLayerBuilder, MockWriterFactory, oio};
+        struct ObservedWriter(oio::Writer, Arc<Mutex<Vec<usize>>>);
+        impl oio::Write for ObservedWriter {
+            async fn write(&mut self, bytes: object_store::Buffer) -> object_store::Result<()> {
+                self.1.lock().unwrap().push(bytes.len());
+                self.0.write(bytes).await
+            }
+            async fn close(&mut self) -> object_store::Result<Metadata> {
+                self.0.close().await
+            }
+            async fn abort(&mut self) -> object_store::Result<()> {
+                self.0.abort().await
+            }
+        }
+        let directory = common_test_util::temp_dir::create_temp_dir("bounded_parquet");
+        let store = object_store::secure_fs::SecureFsRoot::open(directory.path())
+            .unwrap()
+            .build_operator();
+        let sizes = Arc::new(Mutex::new(Vec::new()));
+        let factory: MockWriterFactory = Arc::new({
+            let sizes = sizes.clone();
+            move |_, _, writer| Box::new(ObservedWriter(writer, sizes.clone()))
+        });
+        let store = store.layer(
+            MockLayerBuilder::default()
+                .writer_factory(factory)
+                .build()
+                .unwrap(),
+        );
+        let mut state = 17u64;
+        let values = (0..600_000)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as i64
+            })
+            .collect::<Vec<_>>();
+        let array = Arc::new(Int64Array::from(values)) as arrow::array::ArrayRef;
+        let batch = RecordBatch::try_from_iter([("a", array.clone()), ("b", array)]).unwrap();
+        let mut writer =
+            ParquetFileWriter::open(batch.schema(), store.clone(), "large.parquet", 1, None)
+                .await
+                .unwrap();
+        // No storage-layer chunking: observe the application's actual submissions.
+        writer.sink = ParquetSink::Object(store.writer("large.parquet").await.unwrap());
+        writer.write(batch.clone(), None).await.unwrap();
+        writer.finish(None).await.unwrap();
+        let sizes = sizes.lock().unwrap().clone();
+        let limit = DEFAULT_WRITE_BUFFER_SIZE.as_bytes() as usize;
+        assert!(sizes.iter().sum::<usize>() > limit);
+        assert!(sizes.iter().all(|size| *size <= limit), "{sizes:?}");
+        let actual = read(&store, "large.parquet")
+            .await
+            .build()
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            arrow::compute::concat_batches(&batch.schema(), &actual).unwrap(),
+            batch
+        );
     }
 
     #[tokio::test]
@@ -472,7 +748,8 @@ mod tests {
                 .await
                 .unwrap();
         // Force footer bytes through the sink before its close operation.
-        writer.sink = store.writer_with("cancel.parquet").chunk(1).await.unwrap();
+        writer.sink =
+            ParquetSink::Object(store.writer_with("cancel.parquet").chunk(1).await.unwrap());
         let cancellation = CancellationToken::new();
         let result = {
             let finish = writer.finish(Some(&cancellation));

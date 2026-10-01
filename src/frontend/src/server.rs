@@ -521,6 +521,7 @@ mod tests {
     use async_trait::async_trait;
     use auth::{UserProviderRef, static_user_provider_from_option};
     use client::{Client, Database};
+    use common_grpc::channel_manager::ChannelManager;
     use meta_client::client::MetaClientBuilder;
     use servers::grpc::GRPC_SERVER;
     use servers::grpc::flight::{FlightCraft, FlightCraftRef, TonicStream};
@@ -939,12 +940,20 @@ mod tests {
         let public_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([public_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [public_addr.to_string()],
+            ),
         );
         let internal_database = Database::new(
             "greptime",
             "public",
-            Client::with_urls([internal_addr.to_string()]),
+            Client::with_query_and_control_managers(
+                ChannelManager::new(),
+                ChannelManager::new(),
+                [internal_addr.to_string()],
+            ),
         );
 
         let internal_result = internal_database.sql("SELECT 1").await;

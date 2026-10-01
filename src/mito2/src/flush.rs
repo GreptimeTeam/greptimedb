@@ -836,7 +836,6 @@ impl RegionFlushTask {
             metadata: version.metadata.clone(),
             source,
             cache_manager: self.cache_manager.clone(),
-            storage: version.options.storage.clone(),
             max_sequence: Some(max_sequence),
             sst_write_format: if flat_format {
                 FormatType::Flat
@@ -849,8 +848,6 @@ impl RegionFlushTask {
             inverted_index_config: self.engine_config.inverted_index.clone(),
             fulltext_index_config: self.engine_config.fulltext_index.clone(),
             bloom_filter_index_config: self.engine_config.bloom_filter_index.clone(),
-            #[cfg(feature = "vector_index")]
-            vector_index_config: self.engine_config.vector_index.clone(),
         }
     }
 

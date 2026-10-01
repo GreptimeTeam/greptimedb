@@ -11,7 +11,6 @@ workspace = true
 default = ["ai_functions"]
 ai_functions = ["common-function/ai_functions"]
 enterprise = ["sql/enterprise"]
-vector_index = []
 
 [dependencies]
 ahash.workspace = true
@@ -92,7 +91,6 @@ nalgebra.workspace = true
 paste.workspace = true
 pretty_assertions.workspace = true
 rand.workspace = true
-session = { workspace = true, features = ["testing"] }
 store-api.workspace = true
 table = { workspace = true, features = ["testing"] }
 toml.workspace = true
