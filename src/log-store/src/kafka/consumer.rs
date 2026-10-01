@@ -158,13 +158,10 @@ impl RecordsBuffer {
 impl RecordsBuffer {
     fn pop_front(&mut self) -> Option<RecordAndOffset> {
         while let Some(index) = self.index.peek() {
-            if let Some(record_and_offset) = self.buffer.pop_front() {
-                if index == record_and_offset.offset as u64 {
-                    self.index.next();
-                    return Some(record_and_offset);
-                }
-            } else {
-                return None;
+            let record_and_offset = self.buffer.pop_front()?;
+            if index == record_and_offset.offset as u64 {
+                self.index.next();
+                return Some(record_and_offset);
             }
         }
 

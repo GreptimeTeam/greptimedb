@@ -911,7 +911,7 @@ fn identity_pipeline_inner(
     }
 
     let column_count = schema_info.schema.len();
-    for (_, row) in opt_map.iter_mut() {
+    for row in opt_map.values_mut() {
         for row in row.iter_mut() {
             assert!(
                 column_count >= row.values.len(),
