@@ -5176,7 +5176,7 @@ async fn test_hash_join() {
         .unwrap();
     let expected = "Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.kubernetes_namespace, http_server_requests_seconds_sum.kubernetes_pod_name, http_server_requests_seconds_sum.greptime_timestamp, http_server_requests_seconds_sum.greptime_value, http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_sum.uri)\
+            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(2), Utf8(\"uri\"), http_server_requests_seconds_sum.uri)\
             \n      WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n        Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n          SubqueryAlias: http_server_requests_seconds_sum\
@@ -5187,7 +5187,7 @@ async fn test_hash_join() {
             \n                    TableScan: http_server_requests_seconds_sum\
             \n          SubqueryAlias: http_server_requests_seconds_count\
             \n            Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_count.uri)\
+            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(1), Utf8(\"uri\"), http_server_requests_seconds_count.uri)\
             \n                WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_count.uri, http_server_requests_seconds_count.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n                  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
             \n                    PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
