@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use pgwire::error::PgWireResult;
 
+use super::bad_copy_data;
 use super::codec::{CopyInCodec, Field, Record, RecordParser};
 use super::options::CopyOptionSet;
-use super::{bad_copy_data, unsupported};
 
 /// The validated `text` format configuration.
 #[derive(Debug)]
@@ -33,14 +33,14 @@ pub(super) struct TextCodec {
 }
 
 /// Builds the text codec from the parsed options.
-pub(super) fn build_text_codec(options: CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
-    if options.quote.is_some() || options.escape.is_some() {
-        return Err(unsupported("QUOTE/ESCAPE are only allowed in CSV format"));
-    }
-    Ok(Arc::new(TextCodec {
-        delimiter: options.delimiter.unwrap_or(b'\t'),
-        null: options.null.unwrap_or_else(|| b"\\N".to_vec()),
-    }))
+pub(super) fn build_text_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
+    let delimiter = options.take_single_byte("DELIMITER")?.unwrap_or(b'\t');
+    let null = options
+        .take_string("NULL")?
+        .unwrap_or_else(|| "\\N".to_string())
+        .into_bytes();
+    options.reject_leftovers("text")?;
+    Ok(Arc::new(TextCodec { delimiter, null }))
 }
 
 impl CopyInCodec for TextCodec {
@@ -170,6 +170,7 @@ fn unescape_text(raw: &[u8]) -> PgWireResult<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::postgres::copy_in::options::CopyOptionValue;
 
     fn default_options() -> CopyOptionSet {
         CopyOptionSet::default()
@@ -184,12 +185,12 @@ mod tests {
 
     #[test]
     fn test_build_custom_options() {
-        let options = CopyOptionSet {
-            null: Some(b"nil".to_vec()),
-            delimiter: Some(b'|'),
-            ..Default::default()
-        };
-        let codec = build_text_codec(options).unwrap();
+        let mut set = CopyOptionSet::default();
+        set.insert("null".into(), CopyOptionValue::String("nil".into()))
+            .unwrap();
+        set.insert("delimiter".into(), CopyOptionValue::String("|".into()))
+            .unwrap();
+        let codec = build_text_codec(set).unwrap();
         let mut parser = codec.create_parser();
         // Custom options flow into the parser: `nil` is NULL and `|` the
         // delimiter.
@@ -200,12 +201,11 @@ mod tests {
 
     #[test]
     fn test_build_rejects_csv_only_options() {
-        let options = CopyOptionSet {
-            quote: Some(b'"'),
-            ..Default::default()
-        };
-        let err = build_text_codec(options).unwrap_err();
-        assert!(err.to_string().contains("only allowed in CSV"));
+        let mut set = CopyOptionSet::default();
+        set.insert("quote".into(), CopyOptionValue::String("\"".into()))
+            .unwrap();
+        let err = build_text_codec(set).unwrap_err();
+        assert!(err.to_string().contains("not supported by format text"));
     }
 
     fn text_parser() -> TextRecordParser {

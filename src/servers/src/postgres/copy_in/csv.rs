@@ -36,20 +36,27 @@ pub(super) struct CsvCodec {
 }
 
 /// Builds the CSV codec from the parsed options.
-pub(super) fn build_csv_codec(options: CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
-    let delimiter = options.delimiter.unwrap_or(b',');
-    let quote = options.quote.unwrap_or(b'"');
+pub(super) fn build_csv_codec(mut options: CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
+    let delimiter = options.take_single_byte("DELIMITER")?.unwrap_or(b',');
+    let quote = options.take_single_byte("QUOTE")?.unwrap_or(b'"');
+    // In PostgreSQL the default escape character for CSV is the quote
+    // character itself (doubled quotes inside quoted fields).
+    let escape = options.take_single_byte("ESCAPE")?.unwrap_or(quote);
+    let null = options
+        .take_string("NULL")?
+        .unwrap_or_default()
+        .into_bytes();
+    let header = options.take_flag("HEADER")?.unwrap_or(false);
+    options.reject_leftovers("csv")?;
     if delimiter == quote {
         return Err(bad_copy_data("DELIMITER must not be equal to QUOTE"));
     }
     Ok(Arc::new(CsvCodec {
         delimiter,
         quote,
-        // In PostgreSQL the default escape character for CSV is the quote
-        // character itself (doubled quotes inside quoted fields).
-        escape: options.escape.unwrap_or(quote),
-        null: options.null.unwrap_or_default(),
-        header: options.header,
+        escape,
+        null,
+        header,
     }))
 }
 
@@ -300,6 +307,7 @@ impl CsvRecordParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::postgres::copy_in::options::CopyOptionValue;
 
     #[test]
     fn test_build_defaults() {
@@ -309,15 +317,28 @@ mod tests {
 
     #[test]
     fn test_build_rejects_delimiter_equal_quote() {
-        let options = CopyOptionSet {
-            delimiter: Some(b'"'),
-            ..Default::default()
-        };
-        let err = build_csv_codec(options).unwrap_err();
+        let mut set = CopyOptionSet::default();
+        set.insert("delimiter".into(), CopyOptionValue::String("\"".into()))
+            .unwrap();
+        let err = build_csv_codec(set).unwrap_err();
         assert!(
             err.to_string()
                 .contains("DELIMITER must not be equal to QUOTE")
         );
+    }
+
+    #[test]
+    fn test_build_rejects_unknown_options() {
+        let mut set = CopyOptionSet::default();
+        set.insert("format".into(), CopyOptionValue::Ident("csv".into()))
+            .unwrap();
+        // `format` is consumed by the registry before the builder runs, so
+        // simulate that.
+        set.take_format().unwrap();
+        set.insert("precision".into(), CopyOptionValue::Ident("ns".into()))
+            .unwrap();
+        let err = build_csv_codec(set).unwrap_err();
+        assert!(err.to_string().contains("not supported by format csv"));
     }
 
     fn csv_parser() -> CsvRecordParser {

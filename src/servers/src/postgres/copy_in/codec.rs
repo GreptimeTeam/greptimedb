@@ -20,6 +20,19 @@
 //! types they can ingest, create a stateful [`RecordParser`] per stream,
 //! and convert parsed fields into typed values.
 //!
+//! # Options
+//!
+//! The `WITH (...)` clause is open: every `KEY value` entry the client
+//! writes is collected into a [`CopyOptionSet`] (see `options`) regardless
+//! of whether any format understands it — the statement is parsed
+//! textually (see `parse`) precisely so options beyond sqlparser's COPY
+//! grammar can reach the codecs. A codec builder takes the options it
+//! understands (`take_string`, `take_single_byte`, `take_flag`, or raw
+//! `take_value` for codec-specific shapes) and rejects the rest with
+//! `reject_leftovers`, so a future format like
+//! `COPY t FROM STDIN WITH (FORMAT influxdb_line, precision 'ns')` only
+//! needs its own codec and registry entry.
+//!
 //! To add a format:
 //!
 //! 1. implement [`CopyInCodec`] for a config struct holding the format's
@@ -28,7 +41,7 @@
 //!    CopyInCodec>>` that applies defaults and rejects options the format
 //!    does not accept,
 //! 3. register the builder under every accepted `FORMAT` name (including
-//!    aliases) in [`super::REGISTERED_FORMATS`].
+//!    aliases) in `REGISTERED_FORMATS` in the parent module.
 
 use api::helper::to_grpc_value;
 use common_time::Timestamp;
