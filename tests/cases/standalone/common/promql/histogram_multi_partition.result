@@ -29,6 +29,7 @@ insert into histogram_gap_bucket values
 Affected Rows: 12
 
 -- Ensure the physical plan keeps the required repartition/order before folding buckets.
+-- Remote plans can name normalized columns by their expression instead of their alias.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
@@ -36,6 +37,7 @@ Affected Rows: 12
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE Hash\(\[ts@1\],.* Hash([ts@1],REDACTED
 -- SQLNESS REPLACE Hash\(\[le@0,\sts@1\],.* Hash([le@0, ts@1],REDACTED
+-- SQLNESS REPLACE CASE\sWHEN\shistogram_gap_bucket\.le\sIS\sNOT\sNULL\sTHEN\shistogram_gap_bucket\.le\sELSE\sUtf8\(""\)\sEND le
 tql analyze (0, 10, '10s') histogram_quantile(0.5, sum by (le) (histogram_gap_bucket));
 
 +-+-+-+
