@@ -621,9 +621,6 @@ TQL EVAL (330, 390, '60s') predict_linear(at_modifier_gauge{host="a"}[5m] offset
 -- on its own and `timestamp()` reports the timestamp of the sample the anchor selected at every
 -- step (300s here). Its plan keeps the anchored selection below the replay of the grid and projects
 -- the timestamp above it.
---
--- Only an `@` without an `offset` is asserted here: the value of `timestamp()` for an anchored
--- selector that also carries an `offset` is a pre-existing question of its own, out of scope here.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 
@@ -642,96 +639,106 @@ TQL EVAL (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 | 1970-01-01T00:04:00 | 300.0 | b    |
 +---------------------+-------+------+
 
+-- With an `offset`, the anchor selects the sample at 240s, and `timestamp()` reports 240s.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 120, '60s') timestamp(at_modifier_gauge @ 300 offset 1m);
+
++---------------------+-------+------+
+| ts                  | value | host |
++---------------------+-------+------+
+| 1970-01-01T00:00:00 | 240.0 | a    |
+| 1970-01-01T00:00:00 | 240.0 | b    |
+| 1970-01-01T00:01:00 | 240.0 | a    |
+| 1970-01-01T00:01:00 | 240.0 | b    |
+| 1970-01-01T00:02:00 | 240.0 | a    |
+| 1970-01-01T00:02:00 | 240.0 | b    |
++---------------------+-------+------+
+
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE (Hash.*) REDACTED
 -- SQLNESS REPLACE (RepartitionExec:.*) RepartitionExec: REDACTED
 TQL EXPLAIN (0, 240, '60s') timestamp(at_modifier_gauge @ 300);
 
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| plan_type     | plan                                                                                                                                                                                                                                                                                   |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
-| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                                                                                                        |
-|               | Projection: at_modifier_gauge.ts, value AS value, at_modifier_gauge.host                                                                                                                                                                                                               |
-|               |   Projection: at_modifier_gauge.ts, value, CASE WHEN CAST(at_modifier_gauge.host AS Utf8) IS NOT NULL THEN CAST(at_modifier_gauge.host AS Utf8) ELSE Utf8("") END AS host                                                                                                              |
-|               |     Projection: at_modifier_gauge.ts, __promql_timestamp_value_ AS value, at_modifier_gauge.host                                                                                                                                                                                       |
-|               |       PromInstantManipulate: range=[0..240000], lookback=[240001], interval=[60000], time index=[ts]                                                                                                                                                                                   |
-|               |         PromInstantManipulate: range=[0..0], lookback=[300000], interval=[60000], time index=[ts]                                                                                                                                                                                      |
-|               |           Projection: at_modifier_gauge.ts, at_modifier_gauge.val, at_modifier_gauge.host, CAST(CAST(CAST(CAST(CAST(at_modifier_gauge.ts AS Int64) AS Decimal128(19, 0)) AS Decimal128(21, 0)) + Decimal128(0,19,0) AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ |
-|               |             PromSeriesNormalize: offset=[-300000], time index=[ts], filter NaN: [false]                                                                                                                                                                                                |
-|               |               PromSeriesDivide: tags=["host"]                                                                                                                                                                                                                                          |
-|               |                 Sort: at_modifier_gauge.host ASC NULLS FIRST, at_modifier_gauge.ts ASC NULLS FIRST                                                                                                                                                                                     |
-|               |                   Filter: at_modifier_gauge.ts >= TimestampMillisecond(1, None) AND at_modifier_gauge.ts <= TimestampMillisecond(300000, None)                                                                                                                                         |
-|               |                     TableScan: at_modifier_gauge, partial_filters=[at_modifier_gauge.ts >= TimestampMillisecond(1, None), at_modifier_gauge.ts <= TimestampMillisecond(300000, None)]                                                                                                  |
-|               | ]]                                                                                                                                                                                                                                                                                     |
-| physical_plan | CooperativeExec                                                                                                                                                                                                                                                                        |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| plan_type     | plan                                                                                                                                                                                           |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| logical_plan  | MergeScan [is_placeholder=false, remote_input=[                                                                                                                                                |
+|               | Projection: at_modifier_gauge.ts, value AS value, at_modifier_gauge.host                                                                                                                       |
+|               |   Projection: at_modifier_gauge.ts, value, CASE WHEN CAST(at_modifier_gauge.host AS Utf8) IS NOT NULL THEN CAST(at_modifier_gauge.host AS Utf8) ELSE Utf8("") END AS host                      |
+|               |     Projection: at_modifier_gauge.ts, __promql_timestamp_value_ AS value, at_modifier_gauge.host                                                                                               |
+|               |       Filter: at_modifier_gauge.val IS NOT NULL                                                                                                                                                |
+|               |         PromInstantManipulate: range=[0..240000], lookback=[240001], interval=[60000], time index=[ts]                                                                                         |
+|               |           PromInstantManipulate: range=[0..0], lookback=[300000], interval=[60000], time index=[ts]                                                                                            |
+|               |             Projection: at_modifier_gauge.ts, at_modifier_gauge.val, at_modifier_gauge.host, CAST(CAST(at_modifier_gauge.ts AS Int64) AS Float64) / Float64(1000) AS __promql_timestamp_value_ |
+|               |               PromSeriesNormalize: offset=[-300000], time index=[ts], filter NaN: [false]                                                                                                      |
+|               |                 PromSeriesDivide: tags=["host"]                                                                                                                                                |
+|               |                   Sort: at_modifier_gauge.host ASC NULLS FIRST, at_modifier_gauge.ts ASC NULLS FIRST                                                                                           |
+|               |                     Filter: at_modifier_gauge.ts >= TimestampMillisecond(1, None) AND at_modifier_gauge.ts <= TimestampMillisecond(300000, None)                                               |
+|               |                       TableScan: at_modifier_gauge, partial_filters=[at_modifier_gauge.ts >= TimestampMillisecond(1, None), at_modifier_gauge.ts <= TimestampMillisecond(300000, None)]        |
+|               | ]]                                                                                                                                                                                             |
+| physical_plan | CooperativeExec                                                                                                                                                                                |
 |               |   MergeScanExec: REDACTED
-|               |                                                                                                                                                                                                                                                                                        |
-+---------------+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+|               |                                                                                                                                                                                                |
++---------------+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
 
 -- 11. `label_join` above an anchored selector. The call rewrites the label the input series are
--- told apart by (`host` becomes the empty string), so it is never promoted: it must stay above the
+-- told apart by (`host` becomes `a-a` and `b-b`), so it is never promoted: it must stay above the
 -- per-series replay of the selector and be evaluated at every step. Both hosts are still reported,
 -- with their own value, at every step. A promoted `label_join` would instead be replayed through
 -- the labels it just rewrote and report the two series as a single timeline, i.e. one mixed row
 -- per step.
---
--- The invariant asserted here is scoped to the replay: it must not drop or mix the input rows.
--- It is not a claim about the final PromQL semantics of this query: joining `host` to one value
--- leaves two samples with the same label set at the same timestamp, which Prometheus rejects,
--- while `label_join` does not validate that yet (`label_replace` errors on such a rewrite
--- instead). That duplicate-labelset validation gap is pre-existing and out of scope here.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "", "");
+TQL EVAL (300, 480, '60s') label_join(at_modifier_gauge @ 300, "host", "-", "host", "host");
 
 +---------------------+------+------+
 | ts                  | val  | host |
 +---------------------+------+------+
-| 1970-01-01T00:05:00 | 12.0 |      |
-| 1970-01-01T00:05:00 | 5.0  |      |
-| 1970-01-01T00:06:00 | 12.0 |      |
-| 1970-01-01T00:06:00 | 5.0  |      |
-| 1970-01-01T00:07:00 | 12.0 |      |
-| 1970-01-01T00:07:00 | 5.0  |      |
-| 1970-01-01T00:08:00 | 12.0 |      |
-| 1970-01-01T00:08:00 | 5.0  |      |
+| 1970-01-01T00:05:00 | 12.0 | b-b  |
+| 1970-01-01T00:05:00 | 5.0  | a-a  |
+| 1970-01-01T00:06:00 | 12.0 | b-b  |
+| 1970-01-01T00:06:00 | 5.0  | a-a  |
+| 1970-01-01T00:07:00 | 12.0 | b-b  |
+| 1970-01-01T00:07:00 | 5.0  | a-a  |
+| 1970-01-01T00:08:00 | 12.0 | b-b  |
+| 1970-01-01T00:08:00 | 5.0  | a-a  |
 +---------------------+------+------+
 
 -- The same join below another call: neither is promoted, and both are evaluated at every step over
 -- the per-series replay of the anchored selector.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "", ""));
+TQL EVAL (300, 480, '60s') abs(label_join(at_modifier_gauge @ 300, "host", "-", "host", "host"));
 
 +---------------------+----------+------+
 | ts                  | abs(val) | host |
 +---------------------+----------+------+
-| 1970-01-01T00:05:00 | 12.0     |      |
-| 1970-01-01T00:05:00 | 5.0      |      |
-| 1970-01-01T00:06:00 | 12.0     |      |
-| 1970-01-01T00:06:00 | 5.0      |      |
-| 1970-01-01T00:07:00 | 12.0     |      |
-| 1970-01-01T00:07:00 | 5.0      |      |
-| 1970-01-01T00:08:00 | 12.0     |      |
-| 1970-01-01T00:08:00 | 5.0      |      |
+| 1970-01-01T00:05:00 | 12.0     | b-b  |
+| 1970-01-01T00:05:00 | 5.0      | a-a  |
+| 1970-01-01T00:06:00 | 12.0     | b-b  |
+| 1970-01-01T00:06:00 | 5.0      | a-a  |
+| 1970-01-01T00:07:00 | 12.0     | b-b  |
+| 1970-01-01T00:07:00 | 5.0      | a-a  |
+| 1970-01-01T00:08:00 | 12.0     | b-b  |
+| 1970-01-01T00:08:00 | 5.0      | a-a  |
 +---------------------+----------+------+
 
 -- A range call below the join is still promoted on its own (it is the direct call over the
 -- anchored range selector): the anchored window is folded once per series, and the join above that
 -- replay reports the rate of both hosts at every step.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "", "");
+TQL EVAL (300, 480, '60s') label_join(rate(at_modifier_counter_total[5m] @ 300), "host", "-", "host", "host");
 
 +---------------------+------------------------------------------+------+
 | ts                  | prom_rate(ts_range,val,ts,Int64(300000)) | host |
 +---------------------+------------------------------------------+------+
-| 1970-01-01T00:05:00 | 0.5                                      |      |
-| 1970-01-01T00:05:00 | 1.0                                      |      |
-| 1970-01-01T00:06:00 | 0.5                                      |      |
-| 1970-01-01T00:06:00 | 1.0                                      |      |
-| 1970-01-01T00:07:00 | 0.5                                      |      |
-| 1970-01-01T00:07:00 | 1.0                                      |      |
-| 1970-01-01T00:08:00 | 0.5                                      |      |
-| 1970-01-01T00:08:00 | 1.0                                      |      |
+| 1970-01-01T00:05:00 | 0.5                                      | b-b  |
+| 1970-01-01T00:05:00 | 1.0                                      | a-a  |
+| 1970-01-01T00:06:00 | 0.5                                      | b-b  |
+| 1970-01-01T00:06:00 | 1.0                                      | a-a  |
+| 1970-01-01T00:07:00 | 0.5                                      | b-b  |
+| 1970-01-01T00:07:00 | 1.0                                      | a-a  |
+| 1970-01-01T00:08:00 | 0.5                                      | b-b  |
+| 1970-01-01T00:08:00 | 1.0                                      | a-a  |
 +---------------------+------------------------------------------+------+
 
 DROP TABLE at_modifier_gauge;

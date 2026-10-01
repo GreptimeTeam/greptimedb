@@ -34,6 +34,8 @@ pub enum MatchGroupViolation {
     ImplicitManyToOne,
     /// A group modifier left several matches with the same result label set.
     AmbiguousGroupLabels,
+    /// A function rewrote labels so that several series share the same label set.
+    DuplicateLabelSet,
 }
 
 impl MatchGroupViolation {
@@ -47,6 +49,7 @@ impl MatchGroupViolation {
             } => 1,
             Self::ImplicitManyToOne => 2,
             Self::AmbiguousGroupLabels => 3,
+            Self::DuplicateLabelSet => 4,
         }
     }
 
@@ -60,6 +63,7 @@ impl MatchGroupViolation {
             }),
             2 => Ok(Self::ImplicitManyToOne),
             3 => Ok(Self::AmbiguousGroupLabels),
+            4 => Ok(Self::DuplicateLabelSet),
             _ => Err(DataFusionError::Execution(format!(
                 "invalid match group violation code: {code}"
             ))),
@@ -83,6 +87,9 @@ impl MatchGroupViolation {
             Self::AmbiguousGroupLabels => format!(
                 "multiple matches for labels {group}: grouping labels must ensure unique matches"
             ),
+            Self::DuplicateLabelSet => {
+                "vector cannot contain metrics with the same labelset".to_string()
+            }
         }
     }
 }
@@ -227,15 +234,17 @@ mod tests {
 
     use super::*;
 
-    fn invoke(counts: Vec<i64>, hosts: Vec<Option<&str>>) -> DfResult<ColumnarValue> {
+    fn invoke_with_violation(
+        counts: Vec<i64>,
+        hosts: Vec<Option<&str>>,
+        violation: MatchGroupViolation,
+    ) -> DfResult<ColumnarValue> {
         let udf = UniqueMatchGroup::scalar_udf();
         let number_rows = counts.len();
         udf.invoke_with_args(ScalarFunctionArgs {
             args: vec![
                 ColumnarValue::Array(Arc::new(Int64Array::from(counts))),
-                ColumnarValue::Scalar(ScalarValue::Int64(Some(
-                    MatchGroupViolation::ImplicitManyToOne.code(),
-                ))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(violation.code()))),
                 ColumnarValue::Scalar(ScalarValue::Utf8(Some("host".to_string()))),
                 ColumnarValue::Array(Arc::new(StringArray::from(hosts))),
             ],
@@ -249,6 +258,10 @@ mod tests {
             return_field: Arc::new(Field::new("assert", DataType::Boolean, false)),
             config_options: Arc::new(Default::default()),
         })
+    }
+
+    fn invoke(counts: Vec<i64>, hosts: Vec<Option<&str>>) -> DfResult<ColumnarValue> {
+        invoke_with_violation(counts, hosts, MatchGroupViolation::ImplicitManyToOne)
     }
 
     #[test]
@@ -274,5 +287,20 @@ mod tests {
     fn null_label_is_omitted_from_the_group() {
         let err = invoke(vec![2], vec![None]).unwrap_err();
         assert!(err.to_string().contains("labels {}"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_label_set_uses_its_error_message() {
+        let err = invoke_with_violation(
+            vec![2],
+            vec![Some("a")],
+            MatchGroupViolation::DuplicateLabelSet,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("vector cannot contain metrics with the same labelset"),
+            "{err}"
+        );
     }
 }
