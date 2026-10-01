@@ -25,10 +25,13 @@ pub mod stream;
 pub mod test_util;
 
 use std::fmt::{Debug, Display, Formatter};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use api::greptime_proto::v1::AddColumnLocation as Location;
 use api::greptime_proto::v1::add_column_location::LocationType;
+use common_error::ext::BoxedError;
 use common_recordbatch::{
     RecordBatches, SendableRecordBatchMapper, SendableRecordBatchStream, map_dictionary_to_values,
     map_dictionary_to_values_schema,
@@ -74,6 +77,30 @@ pub struct OutputMeta {
     /// May exist for query output. One can retrieve execution metrics from this plan.
     pub plan: Option<Arc<dyn ExecutionPlan>>,
     pub cost: OutputCost,
+    /// Process-local storage results attached by asynchronous ordinary-table batching.
+    /// Callers needing confirmed writes must await these. Dropping them does not cancel writes.
+    pub write_completions: Vec<WriteCompletion>,
+}
+
+/// Actual storage completion of an already accepted asynchronous write.
+pub struct WriteCompletion(Pin<Box<dyn Future<Output = Result<(), BoxedError>> + Send>>);
+
+impl WriteCompletion {
+    /// Wraps the storage result without changing how the write is scheduled.
+    pub fn new(completion: impl Future<Output = Result<(), BoxedError>> + Send + 'static) -> Self {
+        Self(Box::pin(completion))
+    }
+
+    /// Waits for storage success or failure, independently of queue admission.
+    pub async fn wait(self) -> Result<(), BoxedError> {
+        self.0.await
+    }
+}
+
+impl Debug for WriteCompletion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WriteCompletion").finish_non_exhaustive()
+    }
 }
 
 impl Output {
@@ -163,18 +190,26 @@ impl Debug for OutputData {
 
 impl OutputMeta {
     pub fn new(plan: Option<Arc<dyn ExecutionPlan>>, cost: usize) -> Self {
-        Self { plan, cost }
+        Self {
+            plan,
+            cost,
+            ..Default::default()
+        }
     }
 
     pub fn new_with_plan(plan: Arc<dyn ExecutionPlan>) -> Self {
         Self {
             plan: Some(plan),
             cost: 0,
+            ..Default::default()
         }
     }
 
     pub fn new_with_cost(cost: usize) -> Self {
-        Self { plan: None, cost }
+        Self {
+            cost,
+            ..Default::default()
+        }
     }
 }
 

@@ -60,6 +60,7 @@ use crate::frontend::FrontendOptions;
 use crate::heartbeat::frontend_peer_addr;
 use crate::instance::Instance;
 use crate::instance::entity_graph::EntityGraphProviderImpl;
+use crate::instance::otlp::TraceAuxCache;
 use crate::instance::region_query::FrontendRegionQueryHandler;
 use crate::service_config::BatcherOptions;
 
@@ -400,10 +401,11 @@ impl FrontendBuilder {
             event_recorder,
             slow_query_recorder,
             process_manager,
-            otlp_metrics_table_legacy_cache: DashMap::new(),
+            otlp_metrics_table_legacy_cache: Arc::new(DashMap::new()),
             slow_query_options: self.options.slow_query.clone(),
             influxdb_default_merge_mode: self.options.influxdb.default_merge_mode,
             trace_ingest_chunk_size: self.options.otlp.trace_ingest_chunk_size,
+            trace_aux_cache: TraceAuxCache::new(self.options.otlp.trace_aux_cache_capacity),
             otlp_resource_info: self.options.otlp.experimental_enable_resource_info,
             suspend: Arc::new(AtomicBool::new(false)),
         })

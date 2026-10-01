@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
+use common_query::Output;
 use session::context::QueryContextRef;
 use table::metadata::TableInfoRef;
 use tokio::sync::OwnedSemaphorePermit;
@@ -32,11 +33,12 @@ pub trait PendingRowsBatcher: Send + Sync {
     /// Submits rows according to the acknowledgement policy, retaining the slot until
     /// writing completes even when the response acknowledges queue admission only.
     /// Cancelling the response wait does not retract an already enqueued submission.
+    /// Early acknowledgements retain actual storage results in the output metadata.
     async fn submit(
         &self,
         table_info: TableInfoRef,
         batch: RecordBatch,
         ctx: QueryContextRef,
         permit: Arc<OwnedSemaphorePermit>,
-    ) -> Result<usize>;
+    ) -> Result<Output>;
 }

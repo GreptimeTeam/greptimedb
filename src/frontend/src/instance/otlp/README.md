@@ -175,6 +175,40 @@ Accounting follows the main-table write:
   accepted or rejected span counts; and
 - failure details are bounded before they are folded into `TraceIngestOutcome`.
 
+A cache shared by each frontend's `Instance` clones skips previously confirmed
+auxiliary writes for v0, v1, and v2. `otlp.trace_aux_cache_capacity` limits the
+combined service/operation entries across all catalogs, schemas, and trace
+tables on each frontend. It defaults to 100,000; `0` disables caching. Changes
+take effect on frontend or standalone restart. There is no time-based expiry.
+Services and operations are cached independently. Only a successful
+auxiliary write populates the cache. Auxiliary writes always bypass batching,
+including when main spans use asynchronous batching. Failures, eviction,
+frontend restarts, and concurrent misses can cause repeat writes. Main-span
+writes and admission are unaffected, while write cost reflects only the writes
+actually performed.
+
+Successful auxiliary writes with `skip_wal` enabled are cached too. If a
+datanode crashes before flushing those rows while the frontend survives, the
+cache can suppress their recreation, even by later WAL-enabled requests, until
+eviction or frontend restart. Missing service/operation discovery rows in this
+case are an accepted limitation; the cache does not guarantee durability beyond
+the write's WAL policy.
+
+With asynchronous main-table batching, the response still acknowledges queue
+admission. A frontend task waits for the storage results and writes auxiliary
+rows only for successful chunks. Failed chunks do not populate the auxiliary
+tables or cache. Deferred auxiliary failures are logged; they cannot change an
+already returned response. Deferred writes retain the original request's row
+admission, and their write cost is not included in the early response.
+
+The auxiliary tables are ingestion-managed. When caching is enabled, manual
+`DROP`, `TRUNCATE`, `DELETE`, or other mutations require clearing the affected
+caches or restarting all serving frontends before relying on ingestion to
+populate the lookup rows again.
+There is no automatic invalidation or public cache-clear command. In v0, fewer
+duplicate rows are appended; distinct service/operation lookup results remain
+the same.
+
 A rejection detail carries the failing cause, not just a status code, so an
 unusable attribute value names its column, source value, and target type. Repeats
 of the same `(site, cause)` collapse into one entry with an occurrence count, and

@@ -141,6 +141,7 @@ pub struct Instance {
     slow_query_options: SlowQueryOptions,
     influxdb_default_merge_mode: InfluxdbMergeMode,
     trace_ingest_chunk_size: usize,
+    trace_aux_cache: otlp::TraceAuxCache,
     otlp_resource_info: bool,
     suspend: Arc<AtomicBool>,
 
@@ -148,7 +149,7 @@ pub struct Instance {
     // first layer key: db-string
     // key: direct input metric name
     // value: if runs in legacy mode
-    otlp_metrics_table_legacy_cache: DashMap<String, DashMap<String, bool>>,
+    otlp_metrics_table_legacy_cache: Arc<DashMap<String, DashMap<String, bool>>>,
 }
 
 impl Instance {
@@ -3766,6 +3767,25 @@ mod tests {
         assert_eq!(StatusCode::PermissionDenied, err.status_code());
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_instance_clone_shares_otlp_legacy_cache() {
+        let instance = test_instance_with_tables(
+            test_table(1024, "source").unwrap(),
+            test_table(1025, "target").unwrap(),
+        )
+        .await
+        .unwrap();
+        let ctx = test_query_ctx(1);
+        instance
+            .cache_otlp_legacy(&["metric1".to_string()], &ctx, true)
+            .unwrap();
+
+        let cloned = instance.clone();
+        let names = ["metric2".to_string()];
+        cloned.cache_otlp_legacy(&names, &ctx, true).unwrap();
+        assert!(instance.check_otlp_legacy(&names, &ctx).await.unwrap());
     }
 
     #[test]

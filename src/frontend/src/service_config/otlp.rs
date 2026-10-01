@@ -15,6 +15,7 @@
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_TRACE_INGEST_CHUNK_SIZE: usize = 512;
+const DEFAULT_TRACE_AUX_CACHE_CAPACITY: u64 = 100_000;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
@@ -22,6 +23,9 @@ pub struct OtlpOptions {
     pub enable: bool,
     /// Maximum spans per trace ingest chunk. Set to 0 to disable splitting.
     pub trace_ingest_chunk_size: usize,
+    /// Maximum cached trace service/operation entries per frontend, shared across
+    /// all catalogs, schemas, and trace tables. Set to 0 to disable caching.
+    pub trace_aux_cache_capacity: u64,
     /// Whether to synthesize the `greptime_otel_resource_info` descriptor
     /// table from the resource attributes of OTLP metrics, so metrics-only
     /// services reach the semantic graph. Off by default: it creates and
@@ -34,6 +38,7 @@ impl Default for OtlpOptions {
         Self {
             enable: true,
             trace_ingest_chunk_size: DEFAULT_TRACE_INGEST_CHUNK_SIZE,
+            trace_aux_cache_capacity: DEFAULT_TRACE_AUX_CACHE_CAPACITY,
             experimental_enable_resource_info: false,
         }
     }
@@ -48,10 +53,12 @@ mod tests {
         let default = OtlpOptions::default();
         assert!(default.enable);
         assert_eq!(default.trace_ingest_chunk_size, 512);
+        assert_eq!(default.trace_aux_cache_capacity, 100_000);
         assert!(!default.experimental_enable_resource_info);
 
         let options: OtlpOptions = toml::from_str("enable = false").unwrap();
         assert!(!options.enable);
+        assert_eq!(options.trace_aux_cache_capacity, 100_000);
         assert_eq!(
             options.trace_ingest_chunk_size,
             DEFAULT_TRACE_INGEST_CHUNK_SIZE

@@ -548,11 +548,14 @@ impl Inserter {
             // Observe every table completion even when another table fails.
             future::join_all(submissions).await
         };
-        let affected_rows = results.into_iter().sum::<Result<usize>>()?;
-        Ok(Output::new(
-            OutputData::AffectedRows(affected_rows),
-            OutputMeta::new_with_cost(write_cost as _),
-        ))
+        let mut affected_rows = 0;
+        let mut meta = OutputMeta::new_with_cost(write_cost as _);
+        for result in results {
+            let output = result?;
+            affected_rows += output.extract_rows_and_cost().0;
+            meta.write_completions.extend(output.meta.write_completions);
+        }
+        Ok(Output::new(OutputData::AffectedRows(affected_rows), meta))
     }
 
     /// Handles row inserts request with metric engine.
@@ -3131,7 +3134,7 @@ mod tests {
             _batch: arrow::record_batch::RecordBatch,
             _ctx: QueryContextRef,
             _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
-        ) -> Result<usize> {
+        ) -> Result<Output> {
             panic!("empty writes must not submit a batch")
         }
     }
