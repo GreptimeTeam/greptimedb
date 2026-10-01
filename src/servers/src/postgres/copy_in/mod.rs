@@ -33,6 +33,7 @@
 mod codec;
 mod csv;
 mod options;
+mod parse;
 mod text;
 
 use std::fmt::Debug;
@@ -47,20 +48,17 @@ use async_trait::async_trait;
 use codec::{CopyInCodec, RecordParser};
 use common_query::OutputData;
 use common_telemetry::info;
-use datafusion::sql::sqlparser::ast::{
-    CopySource, CopyTarget, ObjectName, Statement as SqlParserStatement,
-};
+use datafusion::sql::sqlparser::ast::{CopyTarget, Statement as SqlParserStatement};
 use datatypes::data_type::DataType;
 use datatypes::schema::{ColumnSchema, SchemaRef};
 use futures::{Sink, SinkExt, stream};
 use pgwire::api::copy::CopyHandler;
 use pgwire::api::results::{CopyResponse, Response, Tag};
 use pgwire::api::{ClientInfo, PgWireConnectionState};
-use pgwire::error::{PgWireError, PgWireResult};
+use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
 use pgwire::messages::PgWireBackendMessage;
 use pgwire::messages::copy::{CopyData, CopyDone, CopyFail};
 use session::context::QueryContextRef;
-use sql::ast::ObjectNamePartExt;
 use table::metadata::TableInfo;
 
 use crate::metrics::METRIC_POSTGRES_COPY_IN_ROWS;
@@ -100,8 +98,7 @@ fn build_unimplemented_binary_codec(
 /// Resolves the format codec from the parsed options.
 fn resolve_codec(options: &mut options::CopyOptionSet) -> PgWireResult<Arc<dyn CopyInCodec>> {
     let name = options
-        .format
-        .take()
+        .take_format()?
         .unwrap_or_else(|| DEFAULT_FORMAT.to_string());
     let builder = REGISTERED_FORMATS
         .iter()
@@ -114,7 +111,9 @@ fn resolve_codec(options: &mut options::CopyOptionSet) -> PgWireResult<Arc<dyn C
 /// The parsed `COPY tbl [(columns)] FROM STDIN [(options)]` statement.
 #[derive(Debug, Clone)]
 pub(crate) struct CopyFromStdin {
-    table: ObjectName,
+    /// Table name parts as written (`t`, `schema.t`, `catalog.schema.t`);
+    /// quoted names keep their case.
+    table: Vec<String>,
     /// Requested column list; empty means all columns in table order.
     columns: Vec<String>,
     /// The resolved format codec, validated and ready to run.
@@ -137,98 +136,71 @@ fn invalid_text_repr(message: impl Into<String>) -> PgWireError {
     copy_in_error(PgErrorCode::Ec22P02, message)
 }
 
-/// Detects and parses a `COPY ... FROM STDIN` statement.
+pub(crate) fn copy_in_must_run_alone_error() -> PgWireError {
+    PgWireError::UserError(Box::new(ErrorInfo::new(
+        "ERROR".to_string(),
+        PgErrorCode::Ec0A000.code(),
+        "COPY FROM STDIN must be executed alone".to_string(),
+    )))
+}
+
+/// Parses a leading `COPY ... FROM STDIN` statement from SQL text.
 ///
-/// Returns `Ok(None)` when the statement is not a copy-in (for example a
-/// `COPY ... TO STDOUT`), `Ok(Some(..))` on success and an error when the
-/// statement is a copy-in with unsupported or invalid options.
-pub(crate) fn parse_copy_from_stdin(
-    statement: &SqlParserStatement,
-) -> PgWireResult<Option<CopyFromStdin>> {
-    let SqlParserStatement::Copy {
-        source,
-        to,
-        target,
-        options,
-        ..
-    } = statement
-    else {
-        return Ok(None);
+/// The statement is parsed textually — not through sqlparser — because the
+/// `WITH (...)` option list is open: formats may accept options beyond
+/// sqlparser's COPY grammar, and unknown options must reach the format
+/// codec instead of failing statement parsing. Returns `Ok(None)` when
+/// the string does not lead with a copy-in statement.
+pub(crate) fn copy_from_stdin_from_sql(sql: &str) -> PgWireResult<Option<CopyFromStdin>> {
+    let raw = match parse::scan_copy_from_stdin(sql)? {
+        parse::CopyInScan::NotCopyIn => return Ok(None),
+        parse::CopyInScan::CopyIn(raw) => raw,
     };
-
-    if *to || !matches!(target, CopyTarget::Stdin) {
-        return Ok(None);
-    }
-
-    let (table, columns) = match source {
-        CopySource::Table {
-            table_name,
-            columns,
-        } => (table_name.clone(), columns.clone()),
-        CopySource::Query(_) => {
-            return Err(unsupported("COPY FROM STDIN requires a table as target"));
-        }
-    };
-
-    let mut option_set = options::parse_copy_options(options)?;
+    let mut option_set = raw.options;
     let codec = resolve_codec(&mut option_set)?;
-
     Ok(Some(CopyFromStdin {
-        table,
-        columns: columns.iter().map(|c| c.value.clone()).collect(),
+        table: raw.table,
+        columns: raw.columns,
         codec,
     }))
 }
 
-/// Resolves an [`ObjectName`] against the query context defaults.
-fn resolve_table_name(
-    query_ctx: &QueryContextRef,
-    table: &ObjectName,
-) -> PgWireResult<(String, String, String)> {
-    let parts = &table.0;
-    match parts.len() {
-        1 => Ok((
-            query_ctx.current_catalog().to_string(),
-            query_ctx.current_schema(),
-            parts[0].to_string_unquoted(),
-        )),
-        2 => Ok((
-            query_ctx.current_catalog().to_string(),
-            parts[0].to_string_unquoted(),
-            parts[1].to_string_unquoted(),
-        )),
-        3 => Ok((
-            parts[0].to_string_unquoted(),
-            parts[1].to_string_unquoted(),
-            parts[2].to_string_unquoted(),
-        )),
-        _ => Err(unsupported(format!(
-            "invalid table name for COPY: {}",
-            table
-        ))),
-    }
+/// Whether an already-parsed statement is a `COPY ... FROM STDIN`; used to
+/// reject copy-in statements trailing other statements, where the textual
+/// scanner (which only sees statement-leading COPYs) does not see them.
+pub(crate) fn is_copy_from_stdin(statement: &SqlParserStatement) -> bool {
+    matches!(
+        statement,
+        SqlParserStatement::Copy {
+            to: false,
+            target: CopyTarget::Stdin,
+            ..
+        }
+    )
 }
 
-/// Returns true when the SQL string contains more than one statement, that
-/// is, any token other than statement separators appears after the first
-/// `;`. sqlparser's COPY grammar swallows statements trailing a COPY, so a
-/// plain statement count cannot detect this.
-pub(crate) fn has_multiple_statements(sql: &str) -> bool {
-    use datafusion::sql::sqlparser::dialect::GenericDialect;
-    use datafusion::sql::sqlparser::tokenizer::{Token, Tokenizer};
-
-    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, sql).tokenize() else {
-        return false;
-    };
-    let mut seen_semicolon = false;
-    for token in tokens {
-        match token {
-            Token::SemiColon => seen_semicolon = true,
-            _ if seen_semicolon => return true,
-            _ => {}
-        }
+/// Resolves table name parts against the query context defaults.
+fn resolve_table_name(
+    query_ctx: &QueryContextRef,
+    parts: &[String],
+) -> PgWireResult<(String, String, String)> {
+    match parts {
+        [table] => Ok((
+            query_ctx.current_catalog().to_string(),
+            query_ctx.current_schema(),
+            table.clone(),
+        )),
+        [schema, table] => Ok((
+            query_ctx.current_catalog().to_string(),
+            schema.clone(),
+            table.clone(),
+        )),
+        [catalog, schema, table] => Ok((catalog.clone(), schema.clone(), table.clone())),
+        _ => Err(unsupported(format!(
+            "invalid table name for COPY: {}",
+            parts.join(".")
+        ))),
     }
-    false
 }
 
 /// Per-connection state of an in-progress COPY FROM STDIN.
@@ -461,7 +433,7 @@ impl PostgresServerHandlerInner {
         else {
             return Err(copy_in_error(
                 PgErrorCode::Ec42P01,
-                format!("relation \"{}\" does not exist", stmt.table),
+                format!("relation \"{}\" does not exist", stmt.table.join(".")),
             ));
         };
 
@@ -600,21 +572,14 @@ impl CopyHandler for PostgresServerHandlerInner {
 
 #[cfg(test)]
 mod tests {
-    use datafusion_pg_catalog::sql::PostgresCompatibilityParser;
-
     use super::*;
-
-    fn parse(sql: &str) -> SqlParserStatement {
-        let parser = PostgresCompatibilityParser::new();
-        let statements = parser.parse(sql).unwrap();
-        statements.into_iter().next().unwrap()
-    }
 
     #[test]
     fn test_parse_copy_from_stdin_default() {
-        let stmt = parse("COPY t FROM STDIN");
-        let copy = parse_copy_from_stdin(&stmt).unwrap().unwrap();
-        assert_eq!(copy.table.to_string(), "t");
+        let copy = copy_from_stdin_from_sql("COPY t FROM STDIN")
+            .unwrap()
+            .unwrap();
+        assert_eq!(copy.table, vec!["t"]);
         assert!(copy.columns.is_empty());
         assert_eq!(copy.codec.name(), "text");
         assert_eq!(copy.codec.format_code(), 0);
@@ -622,62 +587,100 @@ mod tests {
 
     #[test]
     fn test_parse_copy_from_stdin_csv() {
-        let stmt = parse("COPY t (a, b) FROM STDIN WITH (FORMAT csv, HEADER, DELIMITER ';')");
-        let copy = parse_copy_from_stdin(&stmt).unwrap().unwrap();
+        let copy = copy_from_stdin_from_sql(
+            "COPY t (a, b) FROM STDIN WITH (FORMAT csv, HEADER, DELIMITER ';')",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(copy.columns, vec!["a", "b"]);
         assert_eq!(copy.codec.name(), "csv");
     }
 
     #[test]
     fn test_parse_copy_from_stdin_txt_alias() {
-        let stmt = parse("COPY t FROM STDIN WITH (FORMAT txt)");
-        let copy = parse_copy_from_stdin(&stmt).unwrap().unwrap();
+        let copy = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT txt)")
+            .unwrap()
+            .unwrap();
         assert_eq!(copy.codec.name(), "text");
     }
 
     #[test]
     fn test_parse_copy_from_stdin_binary_unsupported() {
-        let stmt = parse("COPY t FROM STDIN WITH (FORMAT binary)");
-        let err = parse_copy_from_stdin(&stmt).unwrap_err();
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT binary)").unwrap_err();
         assert!(err.to_string().contains("not supported"));
     }
 
     #[test]
     fn test_parse_copy_from_stdin_unknown_format() {
-        let stmt = parse("COPY t FROM STDIN WITH (FORMAT parquet)");
-        let err = parse_copy_from_stdin(&stmt).unwrap_err();
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT parquet)").unwrap_err();
         assert!(err.to_string().contains("unknown COPY format"));
     }
 
     #[test]
     fn test_parse_copy_from_stdin_not_copy_in() {
-        let stmt = parse("COPY (SELECT 1) TO STDOUT");
-        assert!(parse_copy_from_stdin(&stmt).unwrap().is_none());
-
-        let stmt = parse("COPY t TO '/tmp/x.csv'");
-        assert!(parse_copy_from_stdin(&stmt).unwrap().is_none());
+        assert!(
+            copy_from_stdin_from_sql("COPY (SELECT 1) TO STDOUT")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            copy_from_stdin_from_sql("COPY t TO '/tmp/x.csv'")
+                .unwrap()
+                .is_none()
+        );
+        // GreptimeDB's own file-based COPY FROM.
+        assert!(
+            copy_from_stdin_from_sql("COPY t FROM '/tmp/x.csv' WITH (FORMAT csv)")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn test_redundant_options() {
-        let stmt = parse("COPY t FROM STDIN WITH (FORMAT csv, FORMAT text)");
-        let err = parse_copy_from_stdin(&stmt).unwrap_err();
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (FORMAT csv, FORMAT text)")
+            .unwrap_err();
         assert!(err.to_string().contains("redundant FORMAT"));
 
-        let stmt = parse("COPY t FROM STDIN WITH (DELIMITER ',', DELIMITER ';')");
-        let err = parse_copy_from_stdin(&stmt).unwrap_err();
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (DELIMITER ',', DELIMITER ';')")
+            .unwrap_err();
         assert!(err.to_string().contains("redundant DELIMITER"));
     }
 
     #[test]
-    fn test_has_multiple_statements() {
-        assert!(!has_multiple_statements("COPY t FROM STDIN"));
-        assert!(!has_multiple_statements("COPY t FROM STDIN;"));
-        assert!(has_multiple_statements("COPY t FROM STDIN; SELECT 1"));
-        assert!(has_multiple_statements("SELECT 1; COPY t FROM STDIN"));
-        // Semicolons inside string literals are not separators.
-        assert!(!has_multiple_statements(
-            "COPY t FROM STDIN WITH (NULL ';')"
-        ));
+    fn test_format_specific_options_rejected_by_other_formats() {
+        // The open WITH section parses anything, but each format rejects
+        // the options it does not understand.
+        let err = copy_from_stdin_from_sql(
+            "COPY t FROM STDIN WITH (FORMAT text, QUOTE '\"', PRECISION 'ns')",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("not supported by format text"),
+            "{err}"
+        );
+
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN WITH (HEADER)").unwrap_err();
+        assert!(
+            err.to_string().contains("HEADER"),
+            "HEADER must be rejected by the text format: {err}"
+        );
+    }
+
+    #[test]
+    fn test_multi_statement_rejected() {
+        let err = copy_from_stdin_from_sql("COPY t FROM STDIN; SELECT 1").unwrap_err();
+        assert!(err.to_string().contains("alone"));
+        // Trailing separators and quoted semicolons are fine.
+        assert!(
+            copy_from_stdin_from_sql("COPY t FROM STDIN;")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            copy_from_stdin_from_sql("COPY t FROM STDIN WITH (NULL ';')")
+                .unwrap()
+                .is_some()
+        );
     }
 }

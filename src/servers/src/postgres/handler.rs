@@ -90,25 +90,23 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
+        // A leading COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol; it is parsed textually so the WITH clause may carry
+        // options beyond sqlparser's COPY grammar. It must run alone.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(query)? {
+            let response = self.begin_copy_in(copy_from_stdin).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(vec![response]);
+        }
+
         let parsed_query = self.query_parser.compatibility_parser.parse(query);
 
-        // A COPY FROM STDIN takes over the connection for the copy
-        // sub-protocol and must run alone.
-        if let Ok(statements) = &parsed_query {
-            for statement in statements {
-                if let Some(copy_from_stdin) = copy_in::parse_copy_from_stdin(statement)? {
-                    if copy_in::has_multiple_statements(query) {
-                        return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                            "ERROR".to_string(),
-                            PgErrorCode::Ec0A000.code(),
-                            "COPY FROM STDIN must be executed alone".to_string(),
-                        ))));
-                    }
-                    let response = self.begin_copy_in(copy_from_stdin).await?;
-                    send_warning_opt(client, query_ctx).await?;
-                    return Ok(vec![response]);
-                }
-            }
+        // A COPY FROM STDIN trailing other statements must be rejected;
+        // the textual scanner above only sees statement-leading COPYs.
+        if let Ok(statements) = &parsed_query
+            && statements.iter().any(copy_in::is_copy_from_stdin)
+        {
+            return Err(copy_in::copy_in_must_run_alone_error());
         }
 
         let query = if let Ok(statements) = &parsed_query {
@@ -369,39 +367,31 @@ impl QueryParser for DefaultQueryParser {
             }));
         }
 
-        let parsed_statements = self.compatibility_parser.parse(sql);
-        let (sql, copy_to_stdout_format, copy_from_stdin) =
-            if let Ok(mut statements) = parsed_statements {
-                if statements.is_empty() {
-                    return Ok(None);
-                }
-                let first_stmt = statements.remove(0);
-                let format = check_copy_to_stdout(&first_stmt);
-                // A COPY FROM STDIN cannot be planned by the internal SQL
-                // layer; keep the statement as a shortcut and let the
-                // extended query handler start the copy sub-protocol.
-                let copy_from_stdin = copy_in::parse_copy_from_stdin(&first_stmt)?;
-                if copy_from_stdin.is_some() && copy_in::has_multiple_statements(sql) {
-                    return Err(PgWireError::UserError(Box::new(ErrorInfo::new(
-                        "ERROR".to_string(),
-                        PgErrorCode::Ec0A000.code(),
-                        "COPY FROM STDIN must be executed alone".to_string(),
-                    ))));
-                }
-                (first_stmt.to_string(), format, copy_from_stdin)
-            } else {
-                // bypass the error: it can run into error because of different
-                // versions of sqlparser
-                (sql.to_string(), None, None)
-            };
-
-        if let Some(copy_from_stdin) = copy_from_stdin {
+        // A COPY FROM STDIN is parsed textually — not through sqlparser —
+        // so the WITH clause may carry options beyond sqlparser's COPY
+        // grammar; the extended query handler starts the copy sub-protocol
+        // when the statement is executed.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(sql)? {
             return Ok(Some(PgSqlPlan {
-                plan: SqlPlan::Shortcut(sql),
+                plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
                 copy_from_stdin: Some(copy_from_stdin),
             }));
         }
+
+        let parsed_statements = self.compatibility_parser.parse(sql);
+        let (sql, copy_to_stdout_format) = if let Ok(mut statements) = parsed_statements {
+            if statements.is_empty() {
+                return Ok(None);
+            }
+            let first_stmt = statements.remove(0);
+            let format = check_copy_to_stdout(&first_stmt);
+            (first_stmt.to_string(), format)
+        } else {
+            // bypass the error: it can run into error because of different
+            // versions of sqlparser
+            (sql.to_string(), None)
+        };
 
         let mut stmts = ParserContext::create_with_dialect(
             &sql,
