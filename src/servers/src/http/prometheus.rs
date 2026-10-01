@@ -492,11 +492,10 @@ async fn do_instant_query(
     prom_query: ParsedPromQuery,
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
-    let (metric_name, result_type) = retrieve_metric_name_and_result_type(prom_query.expr());
+    let (_, result_type) = retrieve_metric_name_and_result_type(prom_query.expr());
     let query_id = query_ctx.remote_query_id().map(str::to_string);
     let result = handler.do_query_parsed(prom_query, query_ctx).await;
-    PrometheusJsonResponse::from_query_result(result, metric_name, result_type, query_id.as_deref())
-        .await
+    PrometheusJsonResponse::from_query_result(result, result_type, query_id.as_deref()).await
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -622,20 +621,13 @@ async fn do_range_query(
     prom_query: ParsedPromQuery,
     query_ctx: QueryContextRef,
 ) -> PrometheusJsonResponse {
-    let (metric_name, _) = retrieve_metric_name_and_result_type(prom_query.expr());
     let query_id = query_ctx.remote_query_id().map(str::to_string);
     // Matrix serialization sorts samples and series, so execution order never
     // reaches the response.
     let result = handler
         .do_query_parsed(prom_query.with_unordered_output(), query_ctx)
         .await;
-    PrometheusJsonResponse::from_query_result(
-        result,
-        metric_name,
-        ValueType::Matrix,
-        query_id.as_deref(),
-    )
-    .await
+    PrometheusJsonResponse::from_query_result(result, ValueType::Matrix, query_id.as_deref()).await
 }
 
 #[derive(Debug, Default, Serialize)]
