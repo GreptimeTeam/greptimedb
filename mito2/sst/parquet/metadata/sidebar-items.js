@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["DEFAULT_PREFETCH_SIZE"],"fn":["extract_primary_key_range","unbox_external_error"],"struct":["MetadataLoader","ObjectStoreFetch"]};

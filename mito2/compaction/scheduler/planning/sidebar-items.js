@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompactionPlanningResult"],"fn":["estimate_compaction_bytes","refresh_picker_output"],"struct":["CompactionPickFinished","CompactionRequest","PreparedCompaction"]};

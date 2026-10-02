@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["bigint_column","string_column","string_columns","timestamp_micro_column"]};

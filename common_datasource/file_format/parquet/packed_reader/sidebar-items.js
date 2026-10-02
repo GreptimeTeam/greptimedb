@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WINDOW_BUDGET","WINDOW_SIZE"],"struct":["PackReadWindows","PackedParquetReader","Window"]};

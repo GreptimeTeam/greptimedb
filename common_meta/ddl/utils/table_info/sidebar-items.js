@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["all_logical_table_routes_have_same_physical_id","batch_update_table_info_values","get_all_table_info_values_by_table_ids"]};

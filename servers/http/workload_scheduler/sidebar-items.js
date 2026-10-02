@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["get_status_handler","set_enabled_handler","set_weights_handler"],"struct":["ClassStatusDto","SchedulerStatusDto","SchedulerWeightsDto"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["PHYSICAL_REGION_ESSENTIAL_COLUMN_COUNT"],"fn":["columns_taxonomy","concat_modified_batches","strip_partition_columns_from_batch","transform_logical_batches_to_physical"],"struct":["RecordBatchWithTsIdx","TableBatch"]};

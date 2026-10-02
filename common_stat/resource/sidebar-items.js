@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["cpu_cores","get_total_cpu_cores","get_total_cpu_millicores","get_total_memory_bytes","get_total_memory_readable"],"struct":["ResourceStatImpl"],"trait":["ResourceStat"],"type":["ResourceStatRef"]};

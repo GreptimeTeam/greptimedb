@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["analyze_region_migration_task","has_leader_changed","has_migrated","has_peer_conflict","leader_peer","update_result_with_region_route"],"struct":["RegionMigrationAnalysis","RegionMigrationTaskBatch"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"mod":["avg","product","sum"],"struct":["VectorFunction"]};

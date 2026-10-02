@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TableRouteValue"],"fn":["extract_address_keys","extract_address_keys_from_region_routes","set_addresses","set_addresses_for_region_routes"],"struct":["LogicalTableRouteValue","PhysicalTableRouteValue","TableRouteKey","TableRouteManager","TableRouteStorage"],"type":["TableRouteManagerRef","TableRouteValueDecodeResult"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["search_predicate","typed_column","validate_index_schema","validate_sorted_series"],"struct":["RangeMergeState","SstRangeIndexSearcher"]};

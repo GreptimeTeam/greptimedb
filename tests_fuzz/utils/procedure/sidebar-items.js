@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["procedure_state","wait_for_procedure_finish"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["ENCODED_LEN","MAGIC","STDDEV_POP_MERGE_NAME","STDDEV_POP_STATE_NAME"],"fn":["checked_weighted_square","decode_f64","decode_u64","invalid_state","non_finite_arithmetic","non_finite_input"],"struct":["WelfordAccumulator","WelfordState"]};

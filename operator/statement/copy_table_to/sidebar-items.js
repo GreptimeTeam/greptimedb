@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WRITE_BUFFER_THRESHOLD","WRITE_CONCURRENCY"],"fn":["compact_view_buffers","stream_to_managed_parquet_with_packed"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["check_cancelled","estimate_value_size","expand_bounded_slice","expand_export_array","expand_export_batch","export_stream_managed","map_writer_error","rows_within_budget","write_tables"],"mod":["writers"],"struct":["ActiveWriter","LogicalTableExport","LogicalTableExportLimits","LogicalTableExportSummary","LogicalTableProjection"]};

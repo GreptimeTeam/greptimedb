@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["single_part_column_ident","sql_exprs_to_values"],"macro":["parse_fail"],"struct":["Insert"]};

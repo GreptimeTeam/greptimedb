@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FlightRecordBatchSource","FlightRecordBatchStreamInput"],"struct":["BatchAccumulator","CoalescingBatcher","FlightRecordBatchStream","StreamMetrics"]};

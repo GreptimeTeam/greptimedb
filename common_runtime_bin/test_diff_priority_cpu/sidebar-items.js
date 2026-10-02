@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["WORKLOADS"],"enum":["WorkloadType"],"fn":["compute_pi_str","test_diff_workload_priority","test_spec_priority_and_workload","workload_compute_heavily","workload_compute_heavily2","workload_spawn_blocking_write_file","workload_write_file"],"macro":["def_workload_enum"]};
