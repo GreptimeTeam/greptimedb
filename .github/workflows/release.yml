@@ -4,15 +4,20 @@ name: Release
 # 1. The tag('v*.*.*') push release: the release workflow will be triggered by the tag push event.
 # 2. The scheduled release(the version will be '<base-version>-nightly-YYYYMMDD', any pre-release
 #    extension in the next release version like '-alpha.1' is stripped, so 'nightly' is the extension):
-#    the release workflow will be triggered by the schedule event.
+#    the release workflow will be triggered by the schedule event. The schedule runs every weekday,
+#    but the release only proceeds when the latest published nightly release is older than
+#    NIGHTLY_RELEASE_MAX_AGE_DAYS days, so a failed nightly run is retried by the next weekday
+#    schedule instead of leaving a whole week without nightly builds.
 # A failed tag push release can be manually dispatched on the same tag to recover it without changing the formal release version.
 on:
   push:
     tags:
       - "v*.*.*"
   schedule:
-    # At 00:00 on Monday.
-    - cron: '0 0 * * 1'
+    # At 00:00 on every weekday (Monday to Friday). The scheduled nightly release only
+    # proceeds when the latest published nightly release is older than
+    # NIGHTLY_RELEASE_MAX_AGE_DAYS days, see the 'Check nightly release necessity' step.
+    - cron: '0 0 * * 1-5'
   workflow_dispatch: # Allows you to run this workflow manually.
     # Notes: The GitHub Actions ONLY support 10 inputs; this final input is the tenth.
     inputs:
@@ -100,6 +105,10 @@ env:
   # the pre-release extension of the next release version is stripped, e.g. v0.2.0-alpha.1 -> v0.2.0-nightly-20230313.
   NIGHTLY_RELEASE_PREFIX: nightly
 
+  # The maximum age (in days) of the latest published nightly release before a scheduled
+  # nightly release may run again; see the 'Check nightly release necessity' step.
+  NIGHTLY_RELEASE_MAX_AGE_DAYS: 5
+
 jobs:
   allocate-runners:
     name: Allocate runners
@@ -123,6 +132,10 @@ jobs:
       # The 'is-current-version-latest' determines whether to update 'latest' Docker tags and downstream repositories.
       is-current-version-latest: ${{ steps.check-version.outputs.is-current-version-latest }}
       is-current-version-stable: ${{ steps.check-version.outputs.is-current-version-stable }}
+
+      # Whether a scheduled nightly release should run: it only runs when the latest published
+      # nightly release is older than NIGHTLY_RELEASE_MAX_AGE_DAYS days. Always 'true' for other events.
+      nightly-required: ${{ steps.check-nightly.outputs.nightly-required }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -134,6 +147,19 @@ jobs:
         shell: bash
         run: |
           ./scripts/check-builder-rust-version.sh
+
+      # A scheduled run only proceeds when the latest published nightly release is older than
+      # NIGHTLY_RELEASE_MAX_AGE_DAYS days, so a failed nightly run is retried by the next weekday
+      # schedule. The check runs before the runners are allocated to avoid wasting EC2 resources.
+      - name: Check nightly release necessity
+        id: check-nightly
+        run: |
+          echo "nightly-required=$(./.github/scripts/check-nightly-release.sh)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          NIGHTLY_RELEASE_MAX_AGE_DAYS: ${{ env.NIGHTLY_RELEASE_MAX_AGE_DAYS }}
 
       # The create-version will create a global variable named 'version' in the global workflows.
       # - If it's a tag push release or manual dispatch on a tag with REUSE_EXISTING_RELEASE_TAG=true, the version is the tag name(${{ github.ref_name }});
@@ -156,7 +182,7 @@ jobs:
           ./.github/scripts/check-version.sh "${{ steps.create-version.outputs.version }}"
 
       - name: Allocate linux-amd64 runner
-        if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+        if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && steps.check-nightly.outputs.nightly-required == 'true' }}
         uses: ./.github/actions/start-runner
         id: start-linux-amd64-runner
         with:
@@ -170,7 +196,7 @@ jobs:
           subnet-id: ${{ vars.EC2_RUNNER_SUBNET_ID }}
 
       - name: Allocate linux-arm64 runner
-        if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+        if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && steps.check-nightly.outputs.nightly-required == 'true' }}
         uses: ./.github/actions/start-runner
         id: start-linux-arm64-runner
         with:
@@ -185,7 +211,7 @@ jobs:
 
   build-linux-amd64-artifacts:
     name: Build linux-amd64 artifacts
-    if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -211,7 +237,7 @@ jobs:
 
   build-linux-arm64-artifacts:
     name: Build linux-arm64 artifacts
-    if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -238,7 +264,7 @@ jobs:
 
   build-linux-riscv64-artifacts:
     name: Build linux-riscv64 artifacts
-    if: ${{ inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.build_linux_artifacts || inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -302,7 +328,7 @@ jobs:
     needs: [
       allocate-runners,
     ]
-    if: ${{ inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.build_macos_artifacts || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -340,7 +366,7 @@ jobs:
     needs: [
       allocate-runners,
     ]
-    if: ${{ inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.build_windows_artifacts || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     steps:
       - run: git config --global core.autocrlf false
 
@@ -365,7 +391,7 @@ jobs:
 
   prepare-release-validation:
     name: Prepare release validation
-    if: ${{ inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    if: ${{ (inputs.publish_github_release || inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
     needs: [
       allocate-runners,
     ]
@@ -534,6 +560,7 @@ jobs:
     if: |
       always() &&
       (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
+      (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') &&
       needs.allocate-runners.result == 'success' &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
@@ -582,6 +609,7 @@ jobs:
     if: |
       always() &&
       (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
+      (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') &&
       needs.allocate-runners.result == 'success' &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
@@ -637,6 +665,7 @@ jobs:
     if: |
       always() &&
       (inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule') &&
+      (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') &&
       needs.allocate-runners.result == 'success' &&
       needs.prepare-release-validation.result == 'success' &&
       (needs.compat-release.result == 'success' ||
@@ -752,7 +781,7 @@ jobs:
       needs.allocate-runners.result == 'success' &&
       needs.publish-github-release.result == 'success' &&
       (
-        github.event_name == 'schedule' ||
+        (github.event_name == 'schedule' && needs.allocate-runners.outputs.nightly-required == 'true') ||
         (
           (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
           github.ref_type == 'tag' &&
@@ -827,9 +856,10 @@ jobs:
           ./.github/scripts/update-homebrew-greptme-version.sh
 
   notification:
-    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || github.event_name == 'schedule') && always() }}
+    if: ${{ github.repository == 'GreptimeTeam/greptimedb' && (github.event_name == 'push' || (github.event_name == 'schedule' && needs.allocate-runners.outputs.nightly-required == 'true')) && always() }}
     name: Send notification to Greptime team
     needs: [
+      allocate-runners,
       release-images-to-dockerhub,
       build-macos-artifacts,
       build-windows-artifacts,
