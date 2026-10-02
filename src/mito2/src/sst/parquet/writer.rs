@@ -63,7 +63,7 @@ use crate::sst::parquet::flat_format::{
 use crate::sst::parquet::format::{PrimaryKeyArray, PrimaryKeyWriteFormat};
 use crate::sst::parquet::{
     COLUMN_INDEX_TRUNCATE_LENGTH, PARQUET_METADATA_KEY, SstInfo, WriteOptions,
-    apply_float_field_encoding,
+    apply_column_compression, apply_float_field_encoding,
 };
 use crate::sst::{
     DEFAULT_WRITE_CONCURRENCY, FlatSchemaOptions, SeriesEstimator, maybe_wrap_schema,
@@ -563,6 +563,7 @@ where
                 &self.metadata,
                 opts.float_field_encoding,
             );
+            let props_builder = apply_column_compression(props_builder, &self.metadata)?;
             let writer_props = props_builder.build();
 
             let sst_file_path = self.path_provider.build_sst_file_path(RegionFileId::new(

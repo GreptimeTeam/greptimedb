@@ -18,7 +18,7 @@ use std::fmt::{Display, Formatter};
 use common_catalog::consts::FILE_ENGINE;
 use datatypes::json::{JSON2_DEFAULT_MAX_AUTO_EXPANDED_PATHS, JsonSettings};
 use datatypes::prelude::ConcreteDataType;
-use datatypes::schema::{FulltextOptions, SkippingIndexOptions};
+use datatypes::schema::{CompressionOptions, FulltextOptions, SkippingIndexOptions};
 use itertools::Itertools;
 use serde::Serialize;
 use snafu::ResultExt;
@@ -27,8 +27,8 @@ use sqlparser_derive::{Visit, VisitMut};
 
 use crate::ast::{ColumnDef, Ident, ObjectName};
 use crate::error::{
-    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetFulltextOptionSnafu,
-    SetSkippingIndexOptionSnafu,
+    InvalidFlowQuerySnafu, InvalidSqlSnafu, Result, SetCompressionOptionSnafu,
+    SetFulltextOptionSnafu, SetSkippingIndexOptionSnafu,
 };
 use crate::statements::query::Query as GtQuery;
 use crate::statements::statement::Statement;
@@ -128,6 +128,8 @@ pub struct ColumnExtensions {
     ///
     /// Inverted index doesn't have options at present. There won't be any options in that map.
     pub inverted_index_options: Option<OptionMap>,
+    /// SST compression options.
+    pub compression_options: Option<OptionMap>,
     /// JSON2-specific column options.
     pub json2_options: Option<Json2Options>,
 }
@@ -245,6 +247,11 @@ impl Display for Column {
             }
         }
 
+        if let Some(compression_options) = &self.extensions.compression_options {
+            let options = compression_options.kv_pairs();
+            write!(f, " COMPRESSION WITH({})", format_list_comma!(options))?;
+        }
+
         Ok(())
     }
 }
@@ -268,6 +275,15 @@ impl ColumnExtensions {
         Ok(Some(
             options.try_into().context(SetSkippingIndexOptionSnafu)?,
         ))
+    }
+
+    pub fn build_compression_options(&self) -> Result<Option<CompressionOptions>> {
+        let Some(options) = self.compression_options.as_ref() else {
+            return Ok(None);
+        };
+
+        let options: HashMap<String, String> = options.clone().into_map();
+        Ok(Some(options.try_into().context(SetCompressionOptionSnafu)?))
     }
 
     pub fn build_json_settings(&self) -> Result<Option<JsonSettings>> {

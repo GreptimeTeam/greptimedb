@@ -47,8 +47,8 @@ use crate::error::{
 use crate::parser::{FLOW, ParserContext};
 use crate::parsers::tql_parser;
 use crate::parsers::utils::{
-    self, parse_with_options, validate_column_fulltext_create_option,
-    validate_column_skipping_index_create_option,
+    self, parse_with_options, validate_column_compression_create_option,
+    validate_column_fulltext_create_option, validate_column_skipping_index_create_option,
 };
 use crate::statements::create::{
     Column, ColumnExtensions, CreateDatabase, CreateExternalTable, CreateFlow, CreateTable,
@@ -897,6 +897,7 @@ impl<'a> ParserContext<'a> {
     /// This function will handle:
     /// - Vector type
     /// - Indexes
+    /// - SST compression options
     fn parse_column_extensions(
         parser: &mut Parser<'_>,
         column_name: &Ident,
@@ -929,7 +930,7 @@ impl<'a> ParserContext<'a> {
         }
 
         // parse index options in column definition
-        let mut is_index_declared = false;
+        let mut is_extension_declared = false;
 
         // skipping index
         if let Token::Word(word) = parser.peek_token().token
@@ -971,7 +972,7 @@ impl<'a> ParserContext<'a> {
 
             let options = OptionMap::new(options);
             column_extensions.skipping_index_options = Some(options);
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
         // fulltext index
@@ -1022,7 +1023,7 @@ impl<'a> ParserContext<'a> {
 
             let options = OptionMap::new(options);
             column_extensions.fulltext_index_options = Some(options);
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
         // inverted index
@@ -1064,10 +1065,47 @@ impl<'a> ParserContext<'a> {
             );
 
             column_extensions.inverted_index_options = Some(OptionMap::default());
-            is_index_declared |= true;
+            is_extension_declared |= true;
         }
 
-        Ok(is_index_declared)
+        // SST compression
+        if parser.parse_keyword(Keyword::COMPRESSION) {
+            ensure!(
+                column_extensions.compression_options.is_none(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "duplicated COMPRESSION option",
+                }
+            );
+
+            let options = parser
+                .parse_options(Keyword::WITH)
+                .context(error::SyntaxSnafu)?
+                .into_iter()
+                .map(parse_option_string)
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(
+                !options.is_empty(),
+                InvalidColumnOptionSnafu {
+                    name: column_name.to_string(),
+                    msg: "expect WITH (...) after COMPRESSION keyword",
+                }
+            );
+            for (key, _) in options.iter() {
+                ensure!(
+                    validate_column_compression_create_option(key),
+                    InvalidColumnOptionSnafu {
+                        name: column_name.to_string(),
+                        msg: format!("invalid COMPRESSION option: {key}"),
+                    }
+                );
+            }
+
+            column_extensions.compression_options = Some(OptionMap::new(options));
+            is_extension_declared |= true;
+        }
+
+        Ok(is_extension_declared)
     }
 
     fn parse_optional_table_constraint(&mut self) -> Result<Option<TableConstraint>> {
@@ -3192,6 +3230,69 @@ CREATE TABLE log (
             });
         } else {
             panic!("should be create_table statement");
+        }
+    }
+
+    #[test]
+    fn test_parse_create_table_compression_options() {
+        let parse = |sql: &str| {
+            ParserContext::create_with_dialect(sql, &GreptimeDbDialect {}, ParseOptions::default())
+        };
+
+        let sql = r"
+CREATE TABLE spans (
+    ts TIMESTAMP TIME INDEX,
+    prompt STRING COMPRESSION WITH (type='zstd', level='3', page_size='8MiB') SKIPPING INDEX,
+    reply STRING NULL COMPRESSION WITH (level='9'),
+)";
+        let result = parse(sql).unwrap();
+        let Statement::CreateTable(c) = &result[0] else {
+            panic!("should be create_table statement");
+        };
+        let prompt = &c.columns[1];
+        assert_eq!(
+            vec!["level=3", "page_size=8MiB", "type=zstd"],
+            prompt
+                .extensions
+                .compression_options
+                .as_ref()
+                .unwrap()
+                .kv_pairs()
+                .into_iter()
+                .map(|kv| kv.replace(['\'', ' '], ""))
+                .sorted()
+                .collect::<Vec<_>>()
+        );
+        assert!(prompt.extensions.skipping_index_options.is_some());
+        // Display must produce SQL that parses back to the same column.
+        let reparsed = parse(&format!(
+            "CREATE TABLE t (ts TIMESTAMP TIME INDEX, {prompt})"
+        ))
+        .unwrap();
+        let Statement::CreateTable(r) = &reparsed[0] else {
+            panic!("should be create_table statement");
+        };
+        assert_eq!(prompt.extensions, r.columns[1].extensions);
+
+        for (sql, err) in [
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION)",
+                "expect WITH (...) after COMPRESSION keyword",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (codec='zstd'))",
+                "invalid COMPRESSION option: codec",
+            ),
+            (
+                "CREATE TABLE t (ts TIMESTAMP TIME INDEX, s STRING COMPRESSION WITH (level='3') COMPRESSION WITH (level='5'))",
+                "duplicated COMPRESSION option",
+            ),
+        ] {
+            let result = parse(sql);
+            assert!(
+                result.as_ref().is_err_and(|e| e.to_string().contains(err)),
+                "{sql}: {result:?}"
+            );
         }
     }
 

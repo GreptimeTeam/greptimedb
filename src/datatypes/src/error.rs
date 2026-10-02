@@ -285,6 +285,13 @@ pub enum Error {
         location: Location,
     },
 
+    #[snafu(display("Invalid compression option: {}", msg))]
+    InvalidCompressionOption {
+        msg: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
     #[snafu(display("Inconsistent struct field count {field_len} and item count {item_len}"))]
     InconsistentStructFieldsAndItems {
         field_len: usize,
@@ -360,7 +367,8 @@ impl ErrorExt for Error {
             | InvalidJsonb { .. }
             | InvalidVector { .. }
             | InvalidFulltextOption { .. }
-            | InvalidSkippingIndexOption { .. } => StatusCode::InvalidArguments,
+            | InvalidSkippingIndexOption { .. }
+            | InvalidCompressionOption { .. } => StatusCode::InvalidArguments,
 
             ValueExceedsPrecision { .. }
             | CastType { .. }

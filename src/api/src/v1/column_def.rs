@@ -16,9 +16,9 @@ use std::collections::HashMap;
 
 use arrow_schema::extension::{EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_NAME_KEY};
 use datatypes::schema::{
-    COMMENT_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY, FulltextAnalyzer,
-    FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata, SKIPPING_INDEX_KEY,
-    SkippingIndexOptions, SkippingIndexType,
+    COMMENT_KEY, COMPRESSION_KEY, ColumnDefaultConstraint, ColumnSchema, FULLTEXT_KEY,
+    FulltextAnalyzer, FulltextBackend, FulltextOptions, INVERTED_INDEX_KEY, Metadata,
+    SKIPPING_INDEX_KEY, SkippingIndexOptions, SkippingIndexType,
 };
 use greptime_proto::v1::{
     Analyzer, FulltextBackend as PbFulltextBackend, SkippingIndexType as PbSkippingIndexType,
@@ -35,11 +35,14 @@ const FULLTEXT_GRPC_KEY: &str = "fulltext";
 const INVERTED_INDEX_GRPC_KEY: &str = "inverted_index";
 /// Key used to store skip index options in gRPC column options.
 const SKIPPING_INDEX_GRPC_KEY: &str = "skipping_index";
+/// Key used to store SST compression options in gRPC column options.
+const COMPRESSION_GRPC_KEY: &str = "compression";
 
-const COLUMN_OPTION_MAPPINGS: [(&str, &str); 5] = [
+const COLUMN_OPTION_MAPPINGS: [(&str, &str); 6] = [
     (FULLTEXT_GRPC_KEY, FULLTEXT_KEY),
     (INVERTED_INDEX_GRPC_KEY, INVERTED_INDEX_KEY),
     (SKIPPING_INDEX_GRPC_KEY, SKIPPING_INDEX_KEY),
+    (COMPRESSION_GRPC_KEY, COMPRESSION_KEY),
     (EXTENSION_TYPE_NAME_KEY, EXTENSION_TYPE_NAME_KEY),
     (EXTENSION_TYPE_METADATA_KEY, EXTENSION_TYPE_METADATA_KEY),
 ];
@@ -76,6 +79,9 @@ pub fn try_as_column_schema(column_def: &ColumnDef) -> Result<ColumnSchema> {
         }
         if let Some(skipping_index) = options.options.get(SKIPPING_INDEX_GRPC_KEY) {
             metadata.insert(SKIPPING_INDEX_KEY.to_string(), skipping_index.to_owned());
+        }
+        if let Some(compression) = options.options.get(COMPRESSION_GRPC_KEY) {
+            metadata.insert(COMPRESSION_KEY.to_string(), compression.to_owned());
         }
         if let Some(extension_name) = options.options.get(EXTENSION_TYPE_NAME_KEY) {
             metadata.insert(EXTENSION_TYPE_NAME_KEY.to_string(), extension_name.clone());
@@ -172,6 +178,11 @@ pub fn options_from_column_schema(column_schema: &ColumnSchema) -> Option<Column
             .options
             .insert(SKIPPING_INDEX_GRPC_KEY.to_string(), skipping_index.clone());
     }
+    if let Some(compression) = column_schema.metadata().get(COMPRESSION_KEY) {
+        options
+            .options
+            .insert(COMPRESSION_GRPC_KEY.to_string(), compression.clone());
+    }
     if let Some(extension_name) = column_schema.metadata().get(EXTENSION_TYPE_NAME_KEY) {
         options
             .options
@@ -258,8 +269,9 @@ pub fn as_skipping_index_type(skipping_index_type: PbSkippingIndexType) -> Skipp
 #[cfg(test)]
 mod tests {
 
+    use common_base::readable_size::ReadableSize;
     use datatypes::data_type::ConcreteDataType;
-    use datatypes::schema::{FulltextAnalyzer, FulltextBackend};
+    use datatypes::schema::{CompressionOptions, FulltextAnalyzer, FulltextBackend};
 
     use super::*;
     use crate::v1::ColumnDataType;
@@ -305,6 +317,25 @@ mod tests {
             }
         );
         assert!(schema.is_inverted_indexed());
+    }
+
+    #[test]
+    fn test_compression_options_round_trip() {
+        let options = CompressionOptions {
+            level: Some(3),
+            page_size: Some(ReadableSize::mb(8)),
+            ..Default::default()
+        };
+        let schema = ColumnSchema::new("test", ConcreteDataType::string_datatype(), true)
+            .with_compression_options(options)
+            .unwrap();
+
+        let column_def = try_as_column_def(&schema, false).unwrap();
+        let schema = try_as_column_schema(&column_def).unwrap();
+        assert_eq!(Some(options), schema.compression_options().unwrap());
+
+        let metadata = collect_column_options(column_def.options.as_ref());
+        assert!(metadata.contains_key(COMPRESSION_KEY));
     }
 
     #[test]
