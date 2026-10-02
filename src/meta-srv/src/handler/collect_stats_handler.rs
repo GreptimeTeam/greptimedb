@@ -40,7 +40,7 @@ struct EpochStats {
 impl EpochStats {
     #[inline]
     fn drain_all(&mut self) -> Vec<Stat> {
-        self.stats.drain(..).collect()
+        std::mem::take(&mut self.stats)
     }
 
     #[inline]

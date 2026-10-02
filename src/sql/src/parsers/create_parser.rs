@@ -768,7 +768,7 @@ impl<'a> ParserContext<'a> {
         {
             return Err(ParserError::ParserError(format!(
                 "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                &name.value
+                name.value
             )));
         }
 
@@ -786,7 +786,7 @@ impl<'a> ParserContext<'a> {
             InvalidSqlSnafu {
                 msg: format!(
                     "Cannot use keyword '{}' as column name. Hint: add quotes to the name.",
-                    &name.value
+                    name.value
                 ),
             }
         );
