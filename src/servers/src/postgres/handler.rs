@@ -56,11 +56,14 @@ use crate::SqlPlan;
 use crate::error::{DataFusionSnafu, InferParameterTypesSnafu, Result};
 use crate::postgres::types::*;
 use crate::postgres::utils::convert_err;
-use crate::postgres::{PostgresServerHandlerInner, fixtures};
+use crate::postgres::{PostgresServerHandlerInner, copy_in, fixtures};
 use crate::query_handler::sql::ServerSqlQueryHandlerRef;
 
 impl PostgresServerHandlerInner {
-    fn new_query_context(&self) -> QueryContextRef {
+    /// Creates a query context carrying this connection's batching
+    /// selection, so write paths can route through the pending-rows
+    /// batcher when it is enabled.
+    pub(super) fn new_query_context(&self) -> QueryContextRef {
         let mut ctx = self.session.new_query_context();
         Arc::make_mut(&mut ctx).set_batching_enabled(self.batching_enabled);
         ctx
@@ -87,7 +90,24 @@ impl SimpleQueryHandler for PostgresServerHandlerInner {
             return Ok(vec![Response::EmptyQuery]);
         }
 
+        // A leading COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol; it is parsed textually so the WITH clause may carry
+        // options beyond sqlparser's COPY grammar. It must run alone.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(query)? {
+            let response = self.begin_copy_in(copy_from_stdin).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(vec![response]);
+        }
+
         let parsed_query = self.query_parser.compatibility_parser.parse(query);
+
+        // A COPY FROM STDIN trailing other statements must be rejected;
+        // the textual scanner above only sees statement-leading COPYs.
+        if let Ok(statements) = &parsed_query
+            && statements.iter().any(copy_in::is_copy_from_stdin)
+        {
+            return Err(copy_in::copy_in_must_run_alone_error());
+        }
 
         let query = if let Ok(statements) = &parsed_query {
             // Comments, whitespace and empty statements also require EmptyQueryResponse.
@@ -318,6 +338,7 @@ impl DefaultQueryParser {
 pub struct PgSqlPlan {
     pub(crate) plan: SqlPlan,
     pub(crate) copy_to_stdout_format: Option<String>,
+    pub(crate) copy_from_stdin: Option<copy_in::CopyFromStdin>,
 }
 
 #[async_trait]
@@ -342,6 +363,19 @@ impl QueryParser for DefaultQueryParser {
             return Ok(Some(PgSqlPlan {
                 plan: SqlPlan::Shortcut(sql.to_string()),
                 copy_to_stdout_format: None,
+                copy_from_stdin: None,
+            }));
+        }
+
+        // A COPY FROM STDIN is parsed textually — not through sqlparser —
+        // so the WITH clause may carry options beyond sqlparser's COPY
+        // grammar; the extended query handler starts the copy sub-protocol
+        // when the statement is executed.
+        if let Some(copy_from_stdin) = copy_in::copy_from_stdin_from_sql(sql)? {
+            return Ok(Some(PgSqlPlan {
+                plan: SqlPlan::Shortcut(sql.to_string()),
+                copy_to_stdout_format: None,
+                copy_from_stdin: Some(copy_from_stdin),
             }));
         }
 
@@ -382,11 +416,13 @@ impl QueryParser for DefaultQueryParser {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Plan(logical_plan, stmt),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             } else {
                 Ok(Some(PgSqlPlan {
                     plan: SqlPlan::Statement(stmt, sql),
                     copy_to_stdout_format,
+                    copy_from_stdin: None,
                 }))
             }
         }
@@ -441,6 +477,14 @@ impl ExtendedQueryHandler for PostgresServerHandlerInner {
 
         let pg_sql_plan = &portal.statement.statement;
         let sql_plan = &pg_sql_plan.plan;
+
+        // A COPY FROM STDIN takes over the connection for the copy
+        // sub-protocol.
+        if let Some(copy_from_stdin) = &pg_sql_plan.copy_from_stdin {
+            let response = self.begin_copy_in(copy_from_stdin.clone()).await?;
+            send_warning_opt(client, query_ctx).await?;
+            return Ok(response);
+        }
 
         let output = match sql_plan {
             SqlPlan::Empty => {
