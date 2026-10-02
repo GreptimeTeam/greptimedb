@@ -792,6 +792,13 @@ fn assert_normal_metric_schema(plan: &LogicalPlan) {
 async fn build_test_table_provider_with_distinct_tags(
     table_tags: &[(&str, &[&str])],
 ) -> DfTableSourceProvider {
+    build_test_table_provider_with_nullable_distinct_tags(table_tags, false).await
+}
+
+async fn build_test_table_provider_with_nullable_distinct_tags(
+    table_tags: &[(&str, &[&str])],
+    nullable_tags: bool,
+) -> DfTableSourceProvider {
     let catalog_list = MemoryCatalogManager::with_default_setup();
     for (table_name, tags) in table_tags {
         let mut columns = tags
@@ -800,7 +807,7 @@ async fn build_test_table_provider_with_distinct_tags(
                 ColumnSchema::new(
                     (*tag).to_string(),
                     ConcreteDataType::string_datatype(),
-                    false,
+                    nullable_tags,
                 )
             })
             .collect::<Vec<_>>();
@@ -2498,8 +2505,7 @@ async fn at_modifier_rejects_unrepresentable_timestamp() {
     {
         let err = parser::parse("some_metric @ 1e16").unwrap_err();
         assert!(
-            err.to_string()
-                .contains("timestamp out of bounds for @ modifier"),
+            err.contains("timestamp out of bounds for @ modifier"),
             "{err}"
         );
     }
@@ -4517,9 +4523,9 @@ async fn mixed_histogram_helper_preserves_native_le_and_scans_once() {
     assert_eq!(
         actual,
         vec![
-            (1_000, None, 1.0),
+            (1_000, Some(String::new()), 1.0),
             (1_000, Some("native".to_string()), 0.0),
-            (2_000, None, 1.0),
+            (2_000, Some(String::new()), 1.0),
             (2_000, Some("native".to_string()), 0.0),
         ]
     );
@@ -5170,7 +5176,7 @@ async fn test_hash_join() {
         .unwrap();
     let expected = "Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_count.greptime_timestamp, CAST(http_server_requests_seconds_sum.greptime_value AS Float64) / CAST(http_server_requests_seconds_count.greptime_value AS Float64) AS http_server_requests_seconds_sum.greptime_value / http_server_requests_seconds_count.greptime_value\
             \n  Projection: http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.kubernetes_namespace, http_server_requests_seconds_sum.kubernetes_pod_name, http_server_requests_seconds_sum.greptime_timestamp, http_server_requests_seconds_sum.greptime_value, http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_sum.uri)\
+            \n    Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(2), Utf8(\"uri\"), http_server_requests_seconds_sum.uri)\
             \n      WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_sum.uri, http_server_requests_seconds_sum.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n        Inner Join: http_server_requests_seconds_sum.greptime_timestamp = http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_sum.uri = http_server_requests_seconds_count.uri\
             \n          SubqueryAlias: http_server_requests_seconds_sum\
@@ -5181,7 +5187,7 @@ async fn test_hash_join() {
             \n                    TableScan: http_server_requests_seconds_sum\
             \n          SubqueryAlias: http_server_requests_seconds_count\
             \n            Projection: http_server_requests_seconds_count.uri, http_server_requests_seconds_count.kubernetes_namespace, http_server_requests_seconds_count.kubernetes_pod_name, http_server_requests_seconds_count.greptime_timestamp, http_server_requests_seconds_count.greptime_value\
-            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, http_server_requests_seconds_count.uri)\
+            \n              Filter: prom_assert_unique_match_group(__promql_match_group_count, Int64(1), Utf8(\"uri\"), http_server_requests_seconds_count.uri)\
             \n                WindowAggr: windowExpr=[[count(Int64(1)) PARTITION BY [http_server_requests_seconds_count.uri, http_server_requests_seconds_count.greptime_timestamp] ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING AS __promql_match_group_count]]\
             \n                  PromInstantManipulate: range=[0..100000000], lookback=[1000], interval=[5000], time index=[greptime_timestamp]\
             \n                    PromSeriesDivide: tags=[\"uri\", \"kubernetes_namespace\", \"kubernetes_pod_name\"]\
@@ -6824,6 +6830,64 @@ async fn binary_matching_label_filter_reaches_both_operands() {
             "{query}\n{plan}"
         );
     }
+}
+
+#[tokio::test]
+async fn nullable_tags_are_normalized_for_promql_grouping() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host", "zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("max by(host)(metric_a)"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    let normalization = display.find("coalesce(").expect(&display);
+    let selection = display.find("PromInstantManipulate").expect(&display);
+    assert!(normalization < selection, "{display}");
+    assert!(display.contains("PromSeriesDivide"), "{display}");
+}
+
+#[tokio::test]
+async fn nullable_match_groups_are_checked_even_with_all_tags_in_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["host"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains(MATCH_GROUP_COUNT_COLUMN), "{display}");
+}
+
+#[tokio::test]
+async fn missing_on_label_uses_empty_private_join_key() {
+    let provider = build_test_table_provider_with_nullable_distinct_tags(
+        &[("metric_a", &["host"]), ("metric_b", &["zone"])],
+        true,
+    )
+    .await;
+    let plan = PromPlanner::stmt_to_plan(
+        provider,
+        &build_eval_stmt("metric_a / on(host) group_left metric_b"),
+        &build_query_engine_state(),
+    )
+    .await
+    .unwrap();
+    let display = plan.display_indent().to_string();
+    assert!(display.contains("__promql_missing_match_"), "{display}");
+    assert!(!display.contains("Filter: false"), "{display}");
 }
 
 #[tokio::test]

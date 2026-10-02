@@ -30,6 +30,46 @@ INSERT INTO matching_groups_right VALUES
 
 Affected Rows: 5
 
+-- SQL still distinguishes the stored NULL from an empty string.
+SELECT COUNT(*) FROM matching_groups_right WHERE host IS NULL;
+
++----------+
+| count(*) |
++----------+
+| 1        |
++----------+
+
+SELECT COUNT(*) FROM matching_groups_right WHERE host = '';
+
++----------+
+| count(*) |
++----------+
+| 1        |
++----------+
+
+-- PromQL groups both representations under the same empty label.
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_right);
+
++------+---------------------+-------------------------------------------+
+| host | ts                  | max(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------+
+|      | 1970-01-01T00:00:00 | 10.0                                      |
+| x    | 1970-01-01T00:00:00 | 4.0                                       |
+| y    | 1970-01-01T00:00:00 | 100.0                                     |
++------+---------------------+-------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') sum without(zone)(matching_groups_right);
+
++------+---------------------+-------------------------------------------+
+| host | ts                  | sum(matching_groups_right.greptime_value) |
++------+---------------------+-------------------------------------------+
+|      | 1970-01-01T00:00:00 | 18.0                                      |
+| x    | 1970-01-01T00:00:00 | 6.0                                       |
+| y    | 1970-01-01T00:00:00 | 100.0                                     |
++------+---------------------+-------------------------------------------+
+
 -- Filtering whole ranking partitions preserves the aggregate and scalar arithmetic.
 -- SQLNESS SORT_RESULT 3 1
 TQL EVAL (0, 0, '1s') (8 * matching_groups_left{host="x"}) / on(host) group_left topk by(host)(1, max by(host)(matching_groups_right));
@@ -57,7 +97,7 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host!="y"} / on(host) group_left max 
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
 | host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
-|      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | a    | 1970-01-01T00:00:00 | 4.8                                                                                                   |
 |      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
 | x    | a    | 1970-01-01T00:00:00 | 3.0                                                                                                   |
 | x    | b    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
@@ -80,7 +120,7 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host=""} / on(host) group_left max by
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
 | host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
-|      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | a    | 1970-01-01T00:00:00 | 4.8                                                                                                   |
 |      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
 
@@ -90,9 +130,59 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host!~"x|y"} / on(host) group_left ma
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
 | host | zone | ts                  | matching_groups_left.greptime_value / matching_groups_right.max(matching_groups_right.greptime_value) |
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
-|      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
+|      | a    | 1970-01-01T00:00:00 | 4.8                                                                                                   |
 |      | a    | 1970-01-01T00:00:00 | 6.0                                                                                                   |
 +------+------+---------------------+-------------------------------------------------------------------------------------------------------+
+
+-- The right operand has two series in the same normalized empty-host match group.
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_left{host=""}) / on(host) group_left matching_groups_right{host=""};
+
+Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
+
+-- An absent host on one side matches the empty host on the other.
+CREATE TABLE matching_groups_no_host (
+  "zone" STRING NULL,
+  ts TIMESTAMP(3) TIME INDEX,
+  greptime_value DOUBLE,
+  PRIMARY KEY("zone")
+);
+
+Affected Rows: 0
+
+INSERT INTO matching_groups_no_host VALUES ('a', 0, 2);
+
+Affected Rows: 1
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_left{host=""}) / on(host) group_left matching_groups_no_host;
+
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.max(matching_groups_left.greptime_value) / matching_groups_no_host.greptime_value |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 30.0                                                                                                   |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') max by(host)(matching_groups_left{host=""}) / ignoring(zone) group_left matching_groups_no_host;
+
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_left.max(matching_groups_left.greptime_value) / matching_groups_no_host.greptime_value |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 30.0                                                                                                   |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+
+-- SQLNESS SORT_RESULT 3 1
+TQL EVAL (0, 0, '1s') matching_groups_no_host / on(host) group_right max by(host)(matching_groups_left{host=""});
+
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+| host | ts                  | matching_groups_no_host.greptime_value / matching_groups_left.max(matching_groups_left.greptime_value) |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+|      | 1970-01-01T00:00:00 | 0.03333333333333333                                                                                    |
++------+---------------------+--------------------------------------------------------------------------------------------------------+
+
+DROP TABLE matching_groups_no_host;
+
+Affected Rows: 0
 
 -- bottomk partitions by host when zone is excluded from grouping.
 -- SQLNESS SORT_RESULT 3 1
@@ -140,9 +230,9 @@ TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left topk 
 +------+------+----+-------------------------------------------------------------------------------------------------------+
 +------+------+----+-------------------------------------------------------------------------------------------------------+
 
--- Both one-sides carry two series per `host`, which the matching cannot resolve.
+-- Both operands have two x series; group_left requires the right side to be unique.
 -- SQLNESS SORT_RESULT 3 1
-TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left matching_groups_right;
+TQL EVAL (0, 0, '1s') matching_groups_left{host="x"} / on(host) group_left matching_groups_right{host="x"};
 
 Error: 3001(EngineExecuteQuery), Execution error: found duplicate series for the match group {host="x"} on the right hand-side of the operation; many-to-many matching not allowed: matching labels must be unique on one side
 

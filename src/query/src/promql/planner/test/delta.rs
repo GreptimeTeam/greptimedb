@@ -21,6 +21,17 @@ use datafusion::catalog::SchemaProvider;
 use super::*;
 use crate::query_engine::DefaultPlanDecoder;
 
+/// Gives low-level join tests the normalized input that selectors produce in real queries.
+fn normalized_join_input(
+    planner: &mut PromPlanner,
+    plan: LogicalPlan,
+    context: PromPlannerContext,
+) -> (LogicalPlan, PromPlannerContext) {
+    planner.ctx = context;
+    let plan = planner.normalize_nullable_tag_labels(plan).unwrap();
+    (plan, planner.ctx.clone())
+}
+
 fn delta_temporality_table_provider() -> (DfTableSourceProvider, QueryEngineState, Arc<MemTable>) {
     let catalog = MemoryCatalogManager::with_default_setup();
     let schema = Arc::new(Schema::new(vec![
@@ -336,7 +347,12 @@ async fn empty_metric_broadcasts_over_temporality_marker() {
             results.get("single"),
             "{query}"
         );
-        assert_eq!(Some(&(None, 60.0)), results.get("cumulative"), "{query}");
+        // A missing nullable tag is exposed as the empty PromQL label.
+        assert_eq!(
+            Some(&(Some(String::new()), 60.0)),
+            results.get("cumulative"),
+            "{query}"
+        );
     }
 }
 
@@ -677,7 +693,11 @@ async fn matchers_read_absent_labels_as_empty() {
 #[tokio::test]
 async fn binary_joins_align_only_the_temporality_marker() {
     let marker = OTLP_AGGREGATION_TEMPORALITY_LABEL;
-    for (left_marker, expected_rows) in [(Some(GREPTIME_TEMPORALITY_DELTA), 0), (None, 1)] {
+    for (left_marker, expected_rows) in [
+        (Some(GREPTIME_TEMPORALITY_DELTA), 0),
+        (None, 1),
+        (Some(""), 1),
+    ] {
         let left = source(
             "lhs",
             false,
@@ -694,7 +714,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
         );
         let left_context = direct_or_context("lhs", &["job", marker], "v");
         let right_context = direct_or_context("rhs", &["job"], "v");
-        let planner = PromPlanner {
+        let mut planner = PromPlanner {
             table_provider: build_test_table_provider_with_fields(
                 &[(DEFAULT_SCHEMA_NAME.to_string(), "dummy".to_string())],
                 &[],
@@ -703,10 +723,13 @@ async fn binary_joins_align_only_the_temporality_marker() {
             ctx: PromPlannerContext::default(),
             promql_annotations: None,
         };
+        let (left, left_context) = normalized_join_input(&mut planner, scan(&left), left_context);
+        let (right, right_context) =
+            normalized_join_input(&mut planner, scan(&right), right_context);
         let joined = planner
             .join_on_non_field_columns(
-                scan(&left),
-                scan(&right),
+                left.clone(),
+                right.clone(),
                 TableReference::bare("lhs"),
                 TableReference::bare("rhs"),
                 Some("ts".to_string()),
@@ -721,8 +744,15 @@ async fn binary_joins_align_only_the_temporality_marker() {
             !joined
                 .display_indent_schema()
                 .to_string()
-                .contains("__promql_match_"),
+                .contains("__promql_missing_match_"),
             "{joined:?}"
+        );
+        assert!(
+            joined
+                .schema()
+                .fields()
+                .iter()
+                .all(|field| !field.name().starts_with("__promql_match_"))
         );
         let (_, batches) = execute(joined, &build_query_engine_state()).await;
         assert_eq!(
@@ -744,8 +774,8 @@ async fn binary_joins_align_only_the_temporality_marker() {
         };
         let set = planner
             .set_op_on_non_field_columns(
-                scan(&left),
-                scan(&right),
+                left,
+                right,
                 left_context,
                 right_context,
                 and_expr.op,
@@ -761,7 +791,7 @@ async fn binary_joins_align_only_the_temporality_marker() {
         assert!(
             !set.display_indent_schema()
                 .to_string()
-                .contains("__promql_match_"),
+                .contains("__promql_missing_match_"),
             "{set:?}"
         );
         let (_, batches) = execute(set, &build_query_engine_state()).await;
@@ -797,12 +827,22 @@ async fn binary_joins_align_only_the_temporality_marker() {
         ctx: PromPlannerContext::default(),
         promql_annotations: None,
     };
+    let (left, left_context) = normalized_join_input(
+        &mut planner,
+        scan(&left),
+        direct_or_context("lhs", &["job"], "v"),
+    );
+    let (right, right_context) = normalized_join_input(
+        &mut planner,
+        scan(&right),
+        direct_or_context("rhs", &["job", marker], "v"),
+    );
     let set = planner
         .set_op_on_non_field_columns(
-            scan(&left),
-            scan(&right),
-            direct_or_context("lhs", &["job"], "v"),
-            direct_or_context("rhs", &["job", marker], "v"),
+            left,
+            right,
+            left_context,
+            right_context,
             and_expr.op,
             &and_expr.modifier,
         )
@@ -915,10 +955,14 @@ async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() 
                 .build()
                 .unwrap()
         };
+        let (left, left_context) =
+            normalized_join_input(&mut planner, scan("lhs", left), left_context);
+        let (right, right_context) =
+            normalized_join_input(&mut planner, scan("rhs", right), right_context);
         let joined = planner
             .join_on_non_field_columns(
-                scan("lhs", left.clone()),
-                scan("rhs", right.clone()),
+                left.clone(),
+                right.clone(),
                 TableReference::bare("lhs"),
                 TableReference::bare("rhs"),
                 Some("ts".to_string()),
@@ -1014,7 +1058,7 @@ async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() 
                 } else {
                     &[10.0][..]
                 },
-                marker_on_left.then_some(None),
+                marker_on_left.then_some(Some("")),
             ),
             (
                 "lhs unless rhs",
@@ -1027,8 +1071,8 @@ async fn binary_joins_align_dictionary_temporality_marker_with_tagless_vector() 
             };
             let set = planner
                 .set_op_on_non_field_columns(
-                    scan("lhs", left.clone()),
-                    scan("rhs", right.clone()),
+                    left.clone(),
+                    right.clone(),
                     left_context.clone(),
                     right_context.clone(),
                     binary.op,

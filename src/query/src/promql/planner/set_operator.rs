@@ -627,7 +627,9 @@ impl PromPlanner {
         } else {
             vec![output_field_col]
         };
-        output_context.use_tsid = left_has_tsid && right_has_tsid;
+        output_context.normalized_nullable_tags |= right_context.normalized_nullable_tags;
+        output_context.use_tsid =
+            left_has_tsid && right_has_tsid && !output_context.normalized_nullable_tags;
         self.ctx = output_context;
 
         Ok(result)

@@ -29,6 +29,7 @@ TQL EVAL (180, 180, '1m') rate(delta_temporality[3m]);
 -- SQLNESS REPLACE (\s\s+) _
 -- SQLNESS REPLACE (?m)^\|\s1_\|\s0_\|_(?:Projection|Filter)Exec:.*\n
 -- SQLNESS REPLACE (?m)^\|_\|_\|_FilterExec:.*\n
+-- SQLNESS REPLACE CASE\sWHEN\sdelta_temporality\.([a-z_]+)\sIS\sNOT\sNULL\sTHEN\sdelta_temporality\.[a-z_]+\sELSE\sUtf8\(""\)\sEND $1
 -- SQLNESS REPLACE END\sas\s.*,\sseries@2\sas\sseries END as RATE_RESULT, series@2 as series
 -- SQLNESS REPLACE (peers.*) REDACTED
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
@@ -74,7 +75,7 @@ CREATE TABLE delta_tagless (
 
 INSERT INTO delta_tagless VALUES (180000, 10);
 
--- A missing temporality marker matches the NULL cumulative state; "delta" does not.
+-- A missing temporality marker matches the normalized empty cumulative state; "delta" does not.
 TQL EVAL (180, 180, '1m') delta_marker_only + delta_tagless;
 TQL EVAL (180, 180, '1m') delta_marker_only AND delta_tagless;
 

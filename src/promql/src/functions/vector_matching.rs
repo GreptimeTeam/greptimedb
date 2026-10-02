@@ -39,6 +39,37 @@ pub enum MatchGroupViolation {
 }
 
 impl MatchGroupViolation {
+    pub const fn code(self) -> i64 {
+        match self {
+            Self::DuplicateOnOneSide {
+                one_side_is_left: true,
+            } => 0,
+            Self::DuplicateOnOneSide {
+                one_side_is_left: false,
+            } => 1,
+            Self::ImplicitManyToOne => 2,
+            Self::AmbiguousGroupLabels => 3,
+            Self::DuplicateLabelSet => 4,
+        }
+    }
+
+    fn from_code(code: i64) -> DfResult<Self> {
+        match code {
+            0 => Ok(Self::DuplicateOnOneSide {
+                one_side_is_left: true,
+            }),
+            1 => Ok(Self::DuplicateOnOneSide {
+                one_side_is_left: false,
+            }),
+            2 => Ok(Self::ImplicitManyToOne),
+            3 => Ok(Self::AmbiguousGroupLabels),
+            4 => Ok(Self::DuplicateLabelSet),
+            _ => Err(DataFusionError::Execution(format!(
+                "invalid match group violation code: {code}"
+            ))),
+        }
+    }
+
     fn message(&self, group: &str) -> String {
         match self {
             Self::DuplicateOnOneSide { one_side_is_left } => {
@@ -65,9 +96,8 @@ impl MatchGroupViolation {
 
 /// Rejects a vector matching whose match groups are not unique.
 ///
-/// Takes the per-group row count as first argument and the label columns that form the group
-/// as the remaining ones. Returns `true` when every group holds a single row, and fails the
-/// query otherwise; PromQL has no way to express the duplicate series it would produce.
+/// Takes the per-group row count, violation code, then alternating label names and values.
+/// Keeping the configuration in the arguments lets serialized plans reconstruct the function.
 pub struct UniqueMatchGroup;
 
 impl UniqueMatchGroup {
@@ -75,11 +105,9 @@ impl UniqueMatchGroup {
         "prom_assert_unique_match_group"
     }
 
-    pub fn scalar_udf(labels: Vec<String>, violation: MatchGroupViolation) -> ScalarUDF {
+    pub fn scalar_udf() -> ScalarUDF {
         ScalarUDF::new_from_impl(AssertUniqueMatchGroup {
             signature: Signature::variadic_any(Volatility::Volatile),
-            labels,
-            violation,
         })
     }
 }
@@ -87,15 +115,35 @@ impl UniqueMatchGroup {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct AssertUniqueMatchGroup {
     signature: Signature,
-    /// Label names of the group, in the same order as the label arguments.
-    labels: Vec<String>,
-    violation: MatchGroupViolation,
 }
 
 impl AssertUniqueMatchGroup {
-    fn render_group(&self, args: &[ColumnarValue], row: usize) -> DfResult<String> {
-        let mut rendered = Vec::with_capacity(self.labels.len());
-        for (label, arg) in self.labels.iter().zip(args) {
+    fn scalar_value(arg: &ColumnarValue) -> DfResult<ScalarValue> {
+        match arg {
+            ColumnarValue::Scalar(value) => Ok(value.clone()),
+            ColumnarValue::Array(array) if !array.is_empty() => {
+                ScalarValue::try_from_array(array, 0)
+            }
+            _ => Err(DataFusionError::Execution(format!(
+                "{} expects a scalar configuration argument",
+                UniqueMatchGroup::name()
+            ))),
+        }
+    }
+
+    fn render_group(args: &[ColumnarValue], row: usize) -> DfResult<String> {
+        let mut rendered = Vec::with_capacity(args.len() / 2);
+        for pair in args.chunks_exact(2) {
+            let label = match Self::scalar_value(&pair[0])? {
+                ScalarValue::Utf8(Some(label)) => label,
+                value => {
+                    return Err(DataFusionError::Execution(format!(
+                        "{} expects a string label name, found {value}",
+                        UniqueMatchGroup::name()
+                    )));
+                }
+            };
+            let arg = &pair[1];
             let array = extract_array(arg)?;
             // A scalar argument was expanded to a single row above.
             let row = if array.len() == 1 { 0 } else { row };
@@ -127,11 +175,32 @@ impl ScalarUDFImpl for AssertUniqueMatchGroup {
     }
 
     fn invoke_with_args(&self, args: ScalarFunctionArgs) -> DfResult<ColumnarValue> {
-        let Some((counts, labels)) = args.args.split_first() else {
+        let Some((counts, remaining)) = args.args.split_first() else {
             return Err(DataFusionError::Execution(format!(
                 "{} expects the match group row count as first argument",
                 UniqueMatchGroup::name()
             )));
+        };
+        let Some((violation, labels)) = remaining.split_first() else {
+            return Err(DataFusionError::Execution(format!(
+                "{} expects a match group violation code",
+                UniqueMatchGroup::name()
+            )));
+        };
+        if labels.len() % 2 != 0 {
+            return Err(DataFusionError::Execution(format!(
+                "{} expects alternating label names and values",
+                UniqueMatchGroup::name()
+            )));
+        }
+        let violation = match Self::scalar_value(violation)? {
+            ScalarValue::Int64(Some(code)) => MatchGroupViolation::from_code(code)?,
+            value => {
+                return Err(DataFusionError::Execution(format!(
+                    "{} expects an Int64 violation code, found {value}",
+                    UniqueMatchGroup::name()
+                )));
+            }
         };
         let counts = extract_array(counts)?;
         let counts = counts
@@ -148,8 +217,8 @@ impl ScalarUDFImpl for AssertUniqueMatchGroup {
         if let Some(row) =
             (0..counts.len()).find(|row| !counts.is_null(*row) && counts.value(*row) > 1)
         {
-            let group = self.render_group(labels, row)?;
-            return Err(DataFusionError::Execution(self.violation.message(&group)));
+            let group = Self::render_group(labels, row)?;
+            return Err(DataFusionError::Execution(violation.message(&group)));
         }
 
         Ok(ColumnarValue::Scalar(ScalarValue::Boolean(Some(true))))
@@ -165,25 +234,34 @@ mod tests {
 
     use super::*;
 
-    fn invoke(counts: Vec<i64>, hosts: Vec<Option<&str>>) -> DfResult<ColumnarValue> {
-        let udf = UniqueMatchGroup::scalar_udf(
-            vec!["host".to_string()],
-            MatchGroupViolation::ImplicitManyToOne,
-        );
+    fn invoke_with_violation(
+        counts: Vec<i64>,
+        hosts: Vec<Option<&str>>,
+        violation: MatchGroupViolation,
+    ) -> DfResult<ColumnarValue> {
+        let udf = UniqueMatchGroup::scalar_udf();
         let number_rows = counts.len();
         udf.invoke_with_args(ScalarFunctionArgs {
             args: vec![
                 ColumnarValue::Array(Arc::new(Int64Array::from(counts))),
+                ColumnarValue::Scalar(ScalarValue::Int64(Some(violation.code()))),
+                ColumnarValue::Scalar(ScalarValue::Utf8(Some("host".to_string()))),
                 ColumnarValue::Array(Arc::new(StringArray::from(hosts))),
             ],
             arg_fields: vec![
                 Arc::new(Field::new("count", DataType::Int64, true)),
+                Arc::new(Field::new("violation", DataType::Int64, false)),
+                Arc::new(Field::new("label_name", DataType::Utf8, false)),
                 Arc::new(Field::new("host", DataType::Utf8, true)),
             ],
             number_rows,
             return_field: Arc::new(Field::new("assert", DataType::Boolean, false)),
             config_options: Arc::new(Default::default()),
         })
+    }
+
+    fn invoke(counts: Vec<i64>, hosts: Vec<Option<&str>>) -> DfResult<ColumnarValue> {
+        invoke_with_violation(counts, hosts, MatchGroupViolation::ImplicitManyToOne)
     }
 
     #[test]
@@ -209,5 +287,20 @@ mod tests {
     fn null_label_is_omitted_from_the_group() {
         let err = invoke(vec![2], vec![None]).unwrap_err();
         assert!(err.to_string().contains("labels {}"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_label_set_uses_its_error_message() {
+        let err = invoke_with_violation(
+            vec![2],
+            vec![Some("a")],
+            MatchGroupViolation::DuplicateLabelSet,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("vector cannot contain metrics with the same labelset"),
+            "{err}"
+        );
     }
 }

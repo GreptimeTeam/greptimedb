@@ -1042,7 +1042,14 @@ impl HistogramFoldStream {
         for (idx, value) in self.normal_indices.iter().zip(tag_values) {
             self.output_buffer[*idx].push_value_ref(&value.as_value_ref());
         }
-        self.output_buffer[self.le_column_index].push_value_ref(&le.as_value_ref());
+        // PromQL exposes a missing `le` label as empty, even when the input projection has
+        // made the column non-nullable.
+        let le = if le.is_null() {
+            ValueRef::String("")
+        } else {
+            le.as_value_ref()
+        };
+        self.output_buffer[self.le_column_index].push_value_ref(&le);
         self.output_buffer[self.field_column_index]
             .push_value_ref(&result.map_or(ValueRef::Null, ValueRef::from));
         self.output_buffer[histogram_column_index].push_value_ref(&histogram.as_value_ref());
@@ -1169,9 +1176,15 @@ impl HistogramFoldStream {
             if let Some(histogram_column_index) = self.histogram_column_index {
                 let histogram = vectors[histogram_column_index].get(row);
                 if !histogram.is_null() {
-                    group
-                        .native_samples
-                        .push((vectors[self.le_column_index].get(row), histogram));
+                    // NULL and empty are the same PromQL label. Both mark a native sample
+                    // without an explicit bucket boundary.
+                    let le = if string_array_value_at_index(le_array, row).is_none_or(str::is_empty)
+                    {
+                        Value::Null
+                    } else {
+                        vectors[self.le_column_index].get(row)
+                    };
+                    group.native_samples.push((le, histogram));
                 }
             }
         }

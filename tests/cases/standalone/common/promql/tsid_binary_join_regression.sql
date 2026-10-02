@@ -1,6 +1,6 @@
--- Regression test for TSID-backed PromQL binary joins on metric-engine tables.
--- Default arithmetic and comparison joins should use `__tsid` when matching is the
--- default one-to-one case. Label modifiers still have to stay label-based.
+-- Regression test for PromQL binary joins on metric-engine tables.
+-- Nullable labels need label-based matching even for default one-to-one joins,
+-- since normalization can make distinct TSIDs share the same label set.
 
 CREATE TABLE tsid_binary_join_physical (
   ts TIMESTAMP(3) TIME INDEX,
@@ -82,7 +82,7 @@ INSERT INTO tsid_binary_join_third (host, job, ts, greptime_value) VALUES
   ('host1', 'job1', 5000, 4),
   ('host2', 'job2', 5000, 6);
 
--- Default vector-vector arithmetic should join on `__tsid` and time index.
+-- Default vector-vector arithmetic matches normalized labels and time index.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -148,8 +148,8 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / ignoring(host) tsid_binary_join
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_by_job;
 
--- Comparison filters can join on `__tsid`, but the filtered result must still behave like
--- a regular derived vector downstream.
+-- Comparison filters match normalized labels, and the filtered result must still behave
+-- like a regular derived vector downstream.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -162,7 +162,7 @@ TQL ANALYZE (0, 5, '5s') tsid_binary_join_left / on(job) tsid_binary_join_right_
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
 TQL ANALYZE (0, 5, '5s') tsid_binary_join_left > tsid_binary_join_right;
 
--- `bool` comparison should follow the same TSID-backed matching path.
+-- `bool` comparison should follow the same label-based matching path.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -202,6 +202,7 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 
 -- Set operators are a barrier because they have distinct matching and output-domain
 -- semantics.
+-- Canonicalize transported alias names and projection order without removing expressions.
 -- SQLNESS REPLACE (metrics.*) REDACTED
 -- SQLNESS REPLACE (RoundRobinBatch.*) REDACTED
 -- SQLNESS REPLACE (-+) -
@@ -211,6 +212,9 @@ TQL ANALYZE (0, 5, '5s') ((tsid_binary_join_left > bool tsid_binary_join_right) 
 -- SQLNESS REPLACE input_partitions=\d+ input_partitions=REDACTED
 -- SQLNESS REPLACE "partition_count":\{(.*?)\} "partition_count":REDACTED
 -- SQLNESS REPLACE region=\d+\(\d+,\s+\d+\) region=REDACTED
+-- SQLNESS REPLACE CASE\sWHEN\stsid_binary_join_physical\.([a-z_]+)\sIS\sNOT\sNULL\sTHEN\stsid_binary_join_physical\.[a-z_]+\sELSE\sUtf8\(""\)\sEND $1
+-- SQLNESS REPLACE ProjectionExec:\sexpr=\[ts@4\sas\sts,\s__tsid@3\sas\s__tsid,\sgreptime_value@0\sas\sgreptime_value,\shost@1\sas\shost,\sjob@2\sas\sjob,\shost@1\sas\s__promql_or_match_0,\sjob@2\sas\s__promql_or_match_1\] ProjectionExec: expr=[ts@0 as ts, __tsid@1 as __tsid, greptime_value@2 as greptime_value, host@3 as host, job@4 as job, host@3 as __promql_or_match_0, job@4 as __promql_or_match_1]
+-- SQLNESS REPLACE ProjectionExec:\sexpr=\[(greptime_value@2\sas\sgreptime_value),\s(CASE\sWHEN\s__common_expr_1@0\sIS\sNOT\sNULL\sTHEN\s__common_expr_1@0\sELSE_END\sas\shost),\s(CASE\sWHEN\s__common_expr_2@1\sIS\sNOT\sNULL\sTHEN\s__common_expr_2@1\sELSE_END\sas\sjob),\s(__tsid@3\sas\s__tsid),\s(ts@4\sas\sts)\] ProjectionExec: expr=[$5, $4, $1, $2, $3]
 TQL ANALYZE (0, 5, '5s') (tsid_binary_join_left or tsid_binary_join_right) / tsid_binary_join_left;
 
 -- Group modifiers are many-to-one/one-to-many matching barriers and must stay on the

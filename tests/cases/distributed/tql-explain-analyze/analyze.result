@@ -23,7 +23,9 @@ TQL ANALYZE (0, 10, '5s') test;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[i@1 as i, j@2 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
@@ -48,7 +50,9 @@ TQL ANALYZE (0, 10, '1s', '2s') test;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[2000], interval=[1000], time index=[j] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[i@1 as i, j@2 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[2000], interval=[1000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
@@ -72,7 +76,9 @@ TQL ANALYZE ('1970-01-01T00:00:00'::timestamp, '1970-01-01T00:00:00'::timestamp 
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[i@1 as i, j@2 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
@@ -99,7 +105,9 @@ TQL ANALYZE VERBOSE (0, 10, '5s') test;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[i@1 as i, j@2 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, {"partition_count":{"count":1, "mem_ranges":1, "files":0, "file_ranges":0}, "distribution":"PerSeries", "projection": ["i", "j", "k"], "filters": ["j >= TimestampMillisecond(-299999, None)", "j <= TimestampMillisecond(10000, None)"], "REDACTED
@@ -131,12 +139,16 @@ TQL ANALYZE (0, 10, '5s') test;
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[i@2 as i, j@3 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as l] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, CAST(l@3 AS Utf8) as __common_expr_2, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
-| 1_| 1_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
+| 1_| 1_|_ProjectionExec: expr=[i@2 as i, j@3 as j, CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as k, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as l] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, CAST(l@3 AS Utf8) as __common_expr_2, i@0 as i, j@1 as j] REDACTED
+|_|_|_PromInstantManipulateExec: range=[0..10000], lookback=[300000], interval=[5000], time index=[j] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
@@ -159,18 +171,20 @@ TQL ANALYZE (0, 10, '5s') rate(test[10s]);
 | 0_| 0_|_CooperativeExec REDACTED
 |_|_|_MergeScanExec: REDACTED
 |_|_|_|
-| 1_| 0_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+| 1_| 0_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), CASE WHEN test.k IS NOT NULL THEN test.k ELSE Utf8("") END@2 as k, CASE WHEN test.l IS NOT NULL THEN test.l ELSE Utf8("") END@3 as l] REDACTED
 |_|_|_FilterExec: prom_rate(j_range,i,test.j,Int64(10000))@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+|_|_|_ProjectionExec: expr=[j@3 as j, prom_rate(j_range@4, i@2, j@3, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as CASE WHEN test.k IS NOT NULL THEN test.k ELSE Utf8("") END, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as CASE WHEN test.l IS NOT NULL THEN test.l ELSE Utf8("") END] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, CAST(l@3 AS Utf8) as __common_expr_2, i@0 as i, j@1 as j, j_range@4 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
 |_|_|_CooperativeExec REDACTED
 |_|_|_SeriesScan: region=REDACTED, "partition_count":{"count":0, "mem_ranges":0, "files":0, "file_ranges":0}, "distribution":"PerSeries", "mode":"legacy" REDACTED
 |_|_|_|
-| 1_| 1_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+| 1_| 1_|_ProjectionExec: expr=[j@0 as j, prom_rate(j_range,i,test.j,Int64(10000))@1 as prom_rate(j_range,i,j,Int64(10000)), CASE WHEN test.k IS NOT NULL THEN test.k ELSE Utf8("") END@2 as k, CASE WHEN test.l IS NOT NULL THEN test.l ELSE Utf8("") END@3 as l] REDACTED
 |_|_|_FilterExec: prom_rate(j_range,i,test.j,Int64(10000))@1 IS NOT NULL REDACTED
-|_|_|_ProjectionExec: expr=[j@1 as j, prom_rate(j_range@4, i@0, j@1, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), k@2 as k, l@3 as l] REDACTED
+|_|_|_ProjectionExec: expr=[j@3 as j, prom_rate(j_range@4, i@2, j@3, 10000) as prom_rate(j_range,i,test.j,Int64(10000)), CASE WHEN __common_expr_1@0 IS NOT NULL THEN __common_expr_1@0 ELSE_END as CASE WHEN test.k IS NOT NULL THEN test.k ELSE Utf8("") END, CASE WHEN __common_expr_2@1 IS NOT NULL THEN __common_expr_2@1 ELSE_END as CASE WHEN test.l IS NOT NULL THEN test.l ELSE Utf8("") END] REDACTED
+|_|_|_ProjectionExec: expr=[CAST(k@2 AS Utf8) as __common_expr_1, CAST(l@3 AS Utf8) as __common_expr_2, i@0 as i, j@1 as j, j_range@4 as j_range] REDACTED
 |_|_|_PromRangeManipulateExec: req range=[0..10000], interval=[5000], eval range=[10000], time index=[j] REDACTED
 |_|_|_PromSeriesNormalizeExec: offset=[0], time index=[j], filter NaN: [true] REDACTED
 |_|_|_PromSeriesDivideExec: tags=["k", "l"] REDACTED
