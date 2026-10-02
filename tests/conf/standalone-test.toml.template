@@ -7,6 +7,8 @@ parallelism = 4
 
 [[region_engine]]
 [region_engine.mito]
+# Keep sqlness coverage of the opt-in two-phase series scan.
+experimental_series_scan_v2 = true
 {{ if enable_flat_format }}
 default_flat_format = true
 {{ endif }}
