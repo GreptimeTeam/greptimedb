@@ -19,7 +19,7 @@ use std::time::Duration;
 use api::v1::meta::heartbeat_client::HeartbeatClient;
 use api::v1::meta::{HeartbeatRequest, HeartbeatResponse, RequestHeader, Role};
 use common_grpc::channel_manager::ChannelManager;
-use common_meta::distributed_time_constants::BASE_HEARTBEAT_INTERVAL;
+use common_meta::distributed_time_constants::{BASE_HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT};
 use common_meta::util;
 use common_telemetry::tracing_context::TracingContext;
 use common_telemetry::{info, warn};
@@ -247,17 +247,26 @@ impl Inner {
         })?;
         let receiver = ReceiverStream::new(receiver);
 
-        let mut stream = leader
-            .heartbeat(receiver)
-            .await
-            .map_err(error::Error::from)?
-            .into_inner();
+        let handshake = async {
+            let mut stream = leader
+                .heartbeat(receiver)
+                .await
+                .map_err(error::Error::from)?
+                .into_inner();
 
-        let res = stream
-            .message()
+            let res = stream
+                .message()
+                .await
+                .map_err(error::Error::from)?
+                .context(error::CreateHeartbeatStreamSnafu)?;
+            Ok::<_, error::Error>((stream, res))
+        };
+
+        let (stream, res) = tokio::time::timeout(HEARTBEAT_TIMEOUT, handshake)
             .await
-            .map_err(error::Error::from)?
-            .context(error::CreateHeartbeatStreamSnafu)?;
+            .with_context(|_| error::HeartbeatHandshakeTimeoutSnafu {
+                timeout: HEARTBEAT_TIMEOUT,
+            })??;
 
         // Extract heartbeat configuration from handshake response
         let config = HeartbeatConfig::from_response(&res);
