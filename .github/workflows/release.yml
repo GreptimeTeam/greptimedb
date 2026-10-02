@@ -84,7 +84,7 @@ on:
         default: false
       release_validation:
         type: choice
-        description: Manual policy for accepted perf regressions or runner failures; automatic releases always run all validation
+        description: Manual policy for accepted perf regressions or runner failures; automatic releases always run all validation (scheduled nightlies run query regression non-blocking)
         required: true
         default: all
         options:
@@ -468,6 +468,9 @@ jobs:
             if [[ "${validation_policy}" != "all" ]]; then
               echo "- ⚠️ Validation bypassed: compatibility=${run_compat}, query-regression=${run_query_regression}"
             fi
+            if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+              echo "- ℹ️ Query-regression failure or cancellation is non-blocking for scheduled nightly releases"
+            fi
           } >> "${GITHUB_STEP_SUMMARY}"
 
   compat-release:
@@ -551,6 +554,9 @@ jobs:
 
   release-images-to-dockerhub:
     name: Build and push images to DockerHub
+    # Scheduled nightly releases do not gate on query regression: the test
+    # still runs and reports, but a failure or cancellation does not block
+    # the nightly release.
     if: |
       always() &&
       (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
@@ -562,7 +568,8 @@ jobs:
       (needs.compat-release.result == 'success' ||
        (needs.prepare-release-validation.outputs.run-compat == 'false' && needs.compat-release.result == 'skipped')) &&
       (needs.query-regression-release.result == 'success' ||
-       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped'))
+       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped') ||
+       github.event_name == 'schedule')
     needs: [
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -598,7 +605,18 @@ jobs:
 
   release-cn-artifacts:
     name: Release artifacts to CN region
-    if: ${{ (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') && (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') }}
+    # A non-blocking query regression failure must not skip downstream releases.
+    if: |
+      always() &&
+      (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
+      (github.event_name != 'schedule' || needs.allocate-runners.outputs.nightly-required == 'true') &&
+      needs.allocate-runners.result == 'success' &&
+      needs.build-linux-amd64-artifacts.result == 'success' &&
+      needs.build-linux-arm64-artifacts.result == 'success' &&
+      needs.build-linux-riscv64-artifacts.result == 'success' &&
+      needs.build-macos-artifacts.result == 'success' &&
+      needs.build-windows-artifacts.result == 'success' &&
+      needs.release-images-to-dockerhub.result == 'success'
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -642,6 +660,8 @@ jobs:
     name: Create GitHub release and upload artifacts
     # Use always() to run even when optional jobs (macos, windows) are skipped.
     # Then check that required jobs succeeded and optional jobs didn't fail.
+    # Scheduled nightly releases do not gate on query regression either
+    # (see release-images-to-dockerhub); the test still runs and reports.
     if: |
       always() &&
       (inputs.publish_github_release || github.event_name == 'push' || github.event_name == 'schedule') &&
@@ -651,7 +671,8 @@ jobs:
       (needs.compat-release.result == 'success' ||
        (needs.prepare-release-validation.outputs.run-compat == 'false' && needs.compat-release.result == 'skipped')) &&
       (needs.query-regression-release.result == 'success' ||
-       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped')) &&
+       (needs.prepare-release-validation.outputs.run-query-regression == 'false' && needs.query-regression-release.result == 'skipped') ||
+       github.event_name == 'schedule') &&
       needs.build-linux-amd64-artifacts.result == 'success' &&
       needs.build-linux-arm64-artifacts.result == 'success' &&
       needs.build-linux-riscv64-artifacts.result == 'success' &&
@@ -754,7 +775,21 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ (github.event_name == 'schedule' && needs.allocate-runners.outputs.nightly-required == 'true') || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
+    # A non-blocking query regression failure must not skip downstream updates.
+    if: |
+      always() &&
+      needs.allocate-runners.result == 'success' &&
+      needs.publish-github-release.result == 'success' &&
+      (
+        (github.event_name == 'schedule' && needs.allocate-runners.outputs.nightly-required == 'true') ||
+        (
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref_type == 'tag' &&
+          !contains(github.ref_name, 'nightly') &&
+          needs.allocate-runners.outputs.is-current-version-stable == 'true' &&
+          needs.allocate-runners.outputs.is-current-version-latest == 'true'
+        )
+      )
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
