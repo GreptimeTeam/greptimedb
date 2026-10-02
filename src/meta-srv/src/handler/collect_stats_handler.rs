@@ -27,7 +27,7 @@ use snafu::ResultExt;
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
-use crate::handler::node_address::{self, NodeAddressUpdater};
+use crate::handler::utils::{self, NodeAddressUpdater};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
@@ -190,7 +190,7 @@ async fn update_datanode_address(updater: &NodeAddressUpdater, ctx: &Context, st
         .update_if_needed((Role::Datanode, stat.id), stat.node_epoch, || async {
             let peer = Peer { id: stat.id, addr: stat.addr.clone() };
             let key = NodeAddressKey::with_datanode(stat.id).to_bytes();
-            node_address::save_node_address(ctx, key, peer).await
+            utils::save_node_address(ctx, key, peer).await
         })
         .await
         .inspect_err(|e| {
@@ -202,7 +202,7 @@ async fn update_datanode_address(updater: &NodeAddressUpdater, ctx: &Context, st
             .into_iter()
             .map(CacheIdent::TableId)
             .collect::<Vec<_>>();
-        node_address::invalidate_address_caches(ctx, stat.id, &cache_idents).await;
+        utils::invalidate_address_caches(ctx, stat.id, &cache_idents).await;
     }
 }
 

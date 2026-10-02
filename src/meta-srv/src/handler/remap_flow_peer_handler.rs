@@ -19,7 +19,7 @@ use common_meta::key::node_address::NodeAddressKey;
 use common_telemetry::error;
 
 use crate::Result;
-use crate::handler::node_address::{self, NodeAddressUpdater};
+use crate::handler::utils::{self, NodeAddressUpdater};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
@@ -47,7 +47,7 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
             .address_updater
             .update_if_needed((Role::Flownode, peer.id), req.node_epoch, || {
                 let key = NodeAddressKey::with_flownode(peer.id).to_bytes();
-                node_address::save_node_address(ctx, key, peer.clone())
+                utils::save_node_address(ctx, key, peer.clone())
             })
             .await
             .inspect_err(|e| {
@@ -56,7 +56,7 @@ impl HeartbeatHandler for RemapFlowPeerHandler {
             });
         if let Ok(true) = updated {
             let cache_idents = [CacheIdent::FlowNodeAddressChange(peer.id)];
-            node_address::invalidate_address_caches(ctx, peer.id, &cache_idents).await;
+            utils::invalidate_address_caches(ctx, peer.id, &cache_idents).await;
         }
         Ok(HandleControl::Continue)
     }

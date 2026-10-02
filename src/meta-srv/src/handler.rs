@@ -75,13 +75,13 @@ pub mod filter_inactive_region_stats;
 pub mod flow_state_handler;
 pub mod keep_lease_handler;
 pub mod mailbox_handler;
-mod node_address;
 pub mod on_leader_start_handler;
 pub mod persist_stats_handler;
 pub mod publish_heartbeat_handler;
 pub mod region_lease_handler;
 pub mod remap_flow_peer_handler;
 pub mod response_header_handler;
+mod utils;
 
 #[cfg(test)]
 pub mod test_utils;

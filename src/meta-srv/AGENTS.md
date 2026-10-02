@@ -40,9 +40,9 @@ abstraction, election, key encoding, and the DDL manager live in `common-meta`;
   runs the handler chain in `handler/`; responses carry mailbox messages (DDL
   results, cache invalidation). Node information is refreshed in memory on each
   heartbeat. Datanode statistics collection and flownode remapping share
-  `handler/node_address.rs` for per-node address persistence. Datanode address
-  updates retain the statistics handler's per-node ordering. Address epochs are confirmed only after
-  a successful save; cache invalidation remains best effort.
+  `handler/utils.rs` for per-node address persistence. Datanode address
+  updates retain the statistics handler's per-node ordering. Address epochs are
+  confirmed only after a successful save; cache invalidation remains best effort.
 - **DDL**: `service/procedure.rs` (`ddl`) is leader-only and hands off to
   `common-meta`'s `DdlManager`, executed via `common-procedure`.
 - **Region migration**: `procedure/region_migration/manager.rs` plus per-step
