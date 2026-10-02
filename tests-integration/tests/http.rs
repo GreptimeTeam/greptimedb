@@ -227,6 +227,7 @@ macro_rules! http_tests {
                 test_splunk_raw,
                 test_log_query,
                 test_jaeger_query_api,
+                test_jaeger_v3_query_api,
                 test_jaeger_query_api_for_trace_v1,
                 test_jaeger_query_api_for_trace_v2,
 
@@ -11015,6 +11016,306 @@ pub async fn test_log_query(store_type: StorageType) {
     assert_eq!(get_output_row_count(&res.text().await), 17);
 
     guard.remove_all().await;
+}
+
+pub async fn test_jaeger_v3_query_api(
+    store_type: StorageType,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (app, mut guard) =
+        setup_test_http_app_with_frontend(store_type, "test_jaeger_v3_query_api").await;
+    let client = TestClient::new(app).await;
+    for (path, expected_status, expected) in [
+        ("services", StatusCode::OK, json!({"services":[]})),
+        (
+            "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z",
+            StatusCode::OK,
+            json!({"summaries":[]}),
+        ),
+        (
+            "operations?service=checkout",
+            StatusCode::OK,
+            json!({"operations":[]}),
+        ),
+        (
+            "traces/00000000000000000000000000000001",
+            StatusCode::NOT_FOUND,
+            json!({"error":{"httpCode":404,"message":"No traces found"}}),
+        ),
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), expected_status, "{path}");
+        assert_eq!(
+            serde_json::from_str::<Value>(&response.text().await)?,
+            expected
+        );
+    }
+    for path in [
+        "operations",
+        "traces",
+        "traces/not-hex",
+        "traces/0000000000000001?startTime=invalid",
+        "traces/0000000000000001?rawTraces=invalid",
+        "traces?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+        "trace-summaries?query.startTimeMin=2026-01-01T00:00:00Z&query.startTimeMax=2026-01-02T00:00:00Z&query.searchDepth=10001",
+    ] {
+        let response = client
+            .get(&format!("/v1/jaeger/api/v3/{path}"))
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["error"]["httpCode"], 400);
+    }
+
+    // The parent starts before the search window. A matching child must return the whole trace.
+    let start = chrono::Utc::now()
+        .timestamp_nanos_opt()
+        .ok_or("Timestamp out of range")? as u64;
+    let start = start / 1_000_000_000 * 1_000_000_000 + 123;
+    let timestamp = |ns: u64| {
+        chrono::DateTime::from_timestamp_nanos(ns as i64)
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+    };
+    let request: ExportTraceServiceRequest = serde_json::from_value(json!({"resourceSpans":[
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","one")]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000001", "name":"parent", "kind":2,
+            "startTimeUnixNano":start.to_string(), "endTimeUnixNano":(start+2000).to_string()
+         }]}]},
+        {"resource":{"attributes":[make_string_attr("service.name","checkout"), make_string_attr("service.instance.id","two"), {"key":"resource.bytes","value":{"bytesValue":"AQID/w=="}}]},
+         "scopeSpans":[{"scope":{"name":"sdk","version":"1.0","attributes":[make_string_attr("scope.key","value"), {"key":"scope.bytes","value":{"bytesValue":"AQID/w=="}}]},"spans":[{
+            "traceId":"000000000000000000000000000000ab", "spanId":"0000000000000002", "parentSpanId":"0000000000000001", "name":"child", "kind":3,
+            "traceState":"vendor=value", "startTimeUnixNano":(start+1000).to_string(), "endTimeUnixNano":(start+1999).to_string(),
+            "attributes":[make_int_attr("http.status_code",500),make_bool_attr("failed",true),
+                {"key":"bytes","value":{"bytesValue":"AQID/w=="}},
+                {"key":"integers","value":{"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}}},
+                {"key":"nested","value":{"arrayValue":{"values":[{"intValue":"9223372036854775807"},{"kvlistValue":{"values":[make_string_attr("key","value")]}}]}}}],
+            "events":[{"name":"exception","timeUnixNano":(start+1011).to_string(),"attributes":[make_string_attr("message","failure")]}],
+            "links":[{"traceId":"000000000000000000000000000000cd","spanId":"0000000000000003","traceState":"link=value","attributes":[make_bool_attr("remote",true)]}],
+            "status":{"code":2,"message":"failure"}
+         }, {
+            "traceId":"000000000000000000000000000000cd", "spanId":"0000000000000003", "name":"boundary", "kind":2,
+            "startTimeUnixNano":(start+2000).to_string(), "endTimeUnixNano":(start+3000).to_string()
+         }]}]}
+    ]}))?;
+    for pipeline in [
+        "greptime_trace_v0",
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME,
+        GREPTIME_INTERNAL_TRACE_PIPELINE_V2_NAME,
+    ] {
+        let table = format!("jaeger_api_v3_{pipeline}");
+        let response = send_req(
+            &client,
+            vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("application/x-protobuf"),
+                ),
+                (
+                    HeaderName::from_static("x-greptime-pipeline-name"),
+                    HeaderValue::from_str(pipeline)?,
+                ),
+                (
+                    HeaderName::from_static("x-greptime-trace-table-name"),
+                    HeaderValue::from_str(&table)?,
+                ),
+            ],
+            "/v1/otlp/v1/traces",
+            request.encode_to_vec(),
+            false,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        for (path, expected) in [
+            ("services", json!({"services":["checkout"]})),
+            (
+                "operations?service=checkout&span_kind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+            (
+                "operations?service=checkout&spanKind=client",
+                json!({"operations":[{"name":"child","spanKind":"client"}]}),
+            ),
+        ] {
+            let response = client
+                .get(&format!("/v1/jaeger/api/v3/{path}"))
+                .header("x-greptime-trace-table-name", &table)
+                .send()
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                serde_json::from_str::<Value>(&response.text().await)?,
+                expected
+            );
+        }
+        for flushed in [false, true] {
+            if flushed {
+                let response = client
+                    .post("/v1/sql")
+                    .form(&[("sql", format!("ADMIN FLUSH_TABLE('{table}')"))])
+                    .send()
+                    .await;
+                assert_eq!(response.status(), StatusCode::OK);
+            }
+            let response = client.get(&format!(
+                "/v1/jaeger/api/v3/trace-summaries?query.serviceName=checkout&query.startTimeMin={}&query.startTimeMax={}",
+                timestamp(start+1000), timestamp(start+2000),
+            )).header("x-greptime-trace-table-name", &table).send().await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: Value = serde_json::from_str(&response.text().await)?;
+            assert_eq!(
+                body,
+                json!({"summaries":[{
+                    "traceId":"000000000000000000000000000000ab",
+                    "rootServiceName":"checkout", "rootOperationName":"parent",
+                    "minStartTimeUnixNano":start.to_string(), "maxEndTimeUnixNano":(start+2000).to_string(),
+                    "spanCount":2, "errorSpanCount":1, "orphanSpanCount":0,
+                    "services":[{"name":"checkout", "spanCount":2, "errorSpanCount":1}],
+                }]})
+            );
+            for path in [
+                "traces/00000000000000AB".to_string(),
+                format!(
+                    "traces/00000000000000AB?startTime={}",
+                    timestamp(start + 1000)
+                ),
+                format!("traces/00000000000000AB?endTime={}", timestamp(start + 500)),
+                format!(
+                    "traces/00000000000000AB?start_time={}&end_time={}",
+                    timestamp(start + 500),
+                    timestamp(start + 999)
+                ),
+                format!(
+                    "traces?query.startTimeMin={}&query.startTimeMax={}&query.searchDepth=0",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000)
+                ),
+                format!(
+                    "traces?query.service_name=checkout&query.operation_name=child&query.start_time_min={}&query.start_time_max={}&query.num_traces=1&query.duration_min=999ns&query.duration_max=999ns&query.attributes={}",
+                    timestamp(start + 1000),
+                    timestamp(start + 2000),
+                    encode(r#"{"http.status_code":"500","failed":"true"}"#)
+                ),
+            ] {
+                let response = client
+                    .get(&format!("/v1/jaeger/api/v3/{path}"))
+                    .header("x-greptime-trace-table-name", &table)
+                    .send()
+                    .await;
+                let status = response.status();
+                let body: Value = serde_json::from_str(&response.text().await)?;
+                assert_eq!(status, StatusCode::OK, "{pipeline}: {path}: {body}");
+                let resources = body["result"]["resourceSpans"]
+                    .as_array()
+                    .ok_or("Missing resource spans")?;
+                let spans: Vec<_> = resources
+                    .iter()
+                    .flat_map(|r| r["scopeSpans"][0]["spans"].as_array().unwrap())
+                    .collect();
+                assert_eq!(spans.len(), 2, "{body}");
+                assert!(
+                    spans
+                        .iter()
+                        .all(|span| span["traceId"] == "000000000000000000000000000000ab")
+                );
+                let child = spans
+                    .iter()
+                    .find(|span| span["name"] == "child")
+                    .ok_or("Missing child span")?;
+                assert_eq!(child["startTimeUnixNano"], (start + 1000).to_string());
+                assert_eq!(child["endTimeUnixNano"], (start + 1999).to_string());
+                assert_eq!(child["parentSpanId"], "0000000000000001");
+                assert_eq!(child["kind"], 3);
+                assert_eq!(child["status"]["code"], 2);
+                assert_eq!(child["traceState"], "vendor=value");
+                assert_eq!(
+                    child["events"][0]["timeUnixNano"],
+                    (start + 1011).to_string()
+                );
+                assert_eq!(child["links"][0]["traceState"], "link=value");
+                assert_eq!(
+                    child["links"][0]["attributes"][0]["value"]["boolValue"],
+                    true
+                );
+                let nested = child["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|attr| attr["key"] == "nested")
+                    .unwrap();
+                assert_eq!(
+                    nested["value"]["arrayValue"]["values"][0]["intValue"],
+                    "9223372036854775807"
+                );
+                let attribute = |values: &Value, key: &str| {
+                    values
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|attr| attr["key"] == key)
+                        .unwrap()["value"]
+                        .clone()
+                };
+                assert_eq!(
+                    attribute(&child["attributes"], "integers"),
+                    json!({"arrayValue":{"values":[{"intValue":"1"},{"intValue":"2"},{"intValue":"3"},{"intValue":"255"}]}})
+                );
+                if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                    assert_eq!(
+                        attribute(&child["attributes"], "bytes"),
+                        json!({"bytesValue":"AQID/w=="})
+                    );
+                }
+                for resource in resources {
+                    let span = &resource["scopeSpans"][0]["spans"][0];
+                    let attrs = resource["resource"]["attributes"].as_array().unwrap();
+                    let instance = attrs
+                        .iter()
+                        .find(|attr| attr["key"] == "service.instance.id")
+                        .unwrap();
+                    assert_eq!(
+                        instance["value"]["stringValue"],
+                        if span["name"] == "parent" {
+                            "one"
+                        } else {
+                            "two"
+                        }
+                    );
+                    let scope_attrs = &resource["scopeSpans"][0]["scope"]["attributes"];
+                    assert_eq!(
+                        attribute(scope_attrs, "scope.key"),
+                        json!({"stringValue":"value"})
+                    );
+                    if pipeline == GREPTIME_INTERNAL_TRACE_PIPELINE_V1_NAME {
+                        assert_eq!(
+                            attribute(scope_attrs, "scope.bytes"),
+                            json!({"bytesValue":"AQID/w=="})
+                        );
+                        if span["name"] == "child" {
+                            assert_eq!(
+                                attribute(&resource["resource"]["attributes"], "resource.bytes"),
+                                json!({"bytesValue":"AQID/w=="})
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // Legacy clients continue receiving Jaeger JSON at the old URL.
+        let response = client
+            .get("/v1/jaeger/api/traces/000000000000000000000000000000ab")
+            .header("x-greptime-trace-table-name", &table)
+            .send()
+            .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value = serde_json::from_str(&response.text().await)?;
+        assert_eq!(body["data"][0]["spans"].as_array().unwrap().len(), 2);
+    }
+    guard.remove_all().await;
+    Ok(())
 }
 
 pub async fn test_jaeger_query_api(store_type: StorageType) {
