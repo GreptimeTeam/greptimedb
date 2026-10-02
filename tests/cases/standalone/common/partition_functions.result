@@ -1,0 +1,440 @@
+CREATE TABLE prefix_partition (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX, v INT)
+PARTITION ON COLUMNS (host) (
+  substring(host, 1, 1) < 'm',
+  substring(host, 1, 1) >= 'm'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE prefix_partition;
+
++------------------+-------------------------------------------------+
+| Table            | Create Table                                    |
++------------------+-------------------------------------------------+
+| prefix_partition | CREATE TABLE IF NOT EXISTS "prefix_partition" ( |
+|                  |   "host" STRING NULL,                           |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                   |
+|                  |   "v" INT NULL,                                 |
+|                  |   TIME INDEX ("ts"),                            |
+|                  |   PRIMARY KEY ("host")                          |
+|                  | )                                               |
+|                  | PARTITION ON COLUMNS ("host") (                 |
+|                  |   substring("host", 1, 1) < 'm',                |
+|                  |   substring("host", 1, 1) >= 'm'                |
+|                  | )                                               |
+|                  | ENGINE=mito                                     |
+|                  |                                                 |
++------------------+-------------------------------------------------+
+
+INSERT INTO prefix_partition VALUES ('abc', 1, 1), ('xyz', 2, 2), ('中🙂', 3, 3), (NULL, 4, 4), ('', 5, 5);
+
+Affected Rows: 5
+
+SELECT * FROM prefix_partition ORDER BY ts;
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+| abc  | 1970-01-01T00:00:00.001 | 1 |
+| xyz  | 1970-01-01T00:00:00.002 | 2 |
+| 中🙂 | 1970-01-01T00:00:00.003 | 3 |
+|      | 1970-01-01T00:00:00.004 | 4 |
+|      | 1970-01-01T00:00:00.005 | 5 |
++------+-------------------------+---+
+
+SELECT * FROM prefix_partition WHERE host = 'abc';
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+| abc  | 1970-01-01T00:00:00.001 | 1 |
++------+-------------------------+---+
+
+SELECT * FROM prefix_partition WHERE host >= 'm' ORDER BY ts;
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+| xyz  | 1970-01-01T00:00:00.002 | 2 |
+| 中🙂 | 1970-01-01T00:00:00.003 | 3 |
++------+-------------------------+---+
+
+SELECT * FROM prefix_partition WHERE host IS NULL;
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+|      | 1970-01-01T00:00:00.004 | 4 |
++------+-------------------------+---+
+
+ADMIN FLUSH_TABLE('prefix_partition');
+
++---------------------------------------+
+| ADMIN FLUSH_TABLE('prefix_partition') |
++---------------------------------------+
+| 0                                     |
++---------------------------------------+
+
+SELECT * FROM prefix_partition ORDER BY ts;
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+| abc  | 1970-01-01T00:00:00.001 | 1 |
+| xyz  | 1970-01-01T00:00:00.002 | 2 |
+| 中🙂 | 1970-01-01T00:00:00.003 | 3 |
+|      | 1970-01-01T00:00:00.004 | 4 |
+|      | 1970-01-01T00:00:00.005 | 5 |
++------+-------------------------+---+
+
+DELETE FROM prefix_partition WHERE host = 'abc';
+
+Affected Rows: 1
+
+SELECT * FROM prefix_partition ORDER BY ts;
+
++------+-------------------------+---+
+| host | ts                      | v |
++------+-------------------------+---+
+| xyz  | 1970-01-01T00:00:00.002 | 2 |
+| 中🙂 | 1970-01-01T00:00:00.003 | 3 |
+|      | 1970-01-01T00:00:00.004 | 4 |
+|      | 1970-01-01T00:00:00.005 | 5 |
++------+-------------------------+---+
+
+DROP TABLE prefix_partition;
+
+Affected Rows: 0
+
+CREATE TABLE hash_partition (host STRING, idc STRING, ts TIMESTAMP TIME INDEX, v INT, PRIMARY KEY(host, idc))
+PARTITION ON COLUMNS (host, idc) (
+  hash(host, idc) < '8',
+  hash(host, idc) >= '8'
+);
+
+Affected Rows: 0
+
+SHOW CREATE TABLE hash_partition;
+
++----------------+-----------------------------------------------+
+| Table          | Create Table                                  |
++----------------+-----------------------------------------------+
+| hash_partition | CREATE TABLE IF NOT EXISTS "hash_partition" ( |
+|                |   "host" STRING NULL,                         |
+|                |   "idc" STRING NULL,                          |
+|                |   "ts" TIMESTAMP(3) NOT NULL,                 |
+|                |   "v" INT NULL,                               |
+|                |   TIME INDEX ("ts"),                          |
+|                |   PRIMARY KEY ("host", "idc")                 |
+|                | )                                             |
+|                | PARTITION ON COLUMNS ("host", "idc") (        |
+|                |   hash("host", "idc") < '8',                  |
+|                |   hash("host", "idc") >= '8'                  |
+|                | )                                             |
+|                | ENGINE=mito                                   |
+|                |                                               |
++----------------+-----------------------------------------------+
+
+INSERT INTO hash_partition VALUES ('a', 'bc', 1, 1), ('ab', 'c', 2, 2), ('中', '🙂', 3, 3), (NULL, 'dc', 4, 4), ('', '', 5, 5);
+
+Affected Rows: 5
+
+SELECT * FROM hash_partition ORDER BY ts;
+
++------+-----+-------------------------+---+
+| host | idc | ts                      | v |
++------+-----+-------------------------+---+
+| a    | bc  | 1970-01-01T00:00:00.001 | 1 |
+| ab   | c   | 1970-01-01T00:00:00.002 | 2 |
+| 中   | 🙂  | 1970-01-01T00:00:00.003 | 3 |
+|      | dc  | 1970-01-01T00:00:00.004 | 4 |
+|      |     | 1970-01-01T00:00:00.005 | 5 |
++------+-----+-------------------------+---+
+
+SELECT * FROM hash_partition WHERE host = 'a';
+
++------+-----+-------------------------+---+
+| host | idc | ts                      | v |
++------+-----+-------------------------+---+
+| a    | bc  | 1970-01-01T00:00:00.001 | 1 |
++------+-----+-------------------------+---+
+
+SELECT * FROM hash_partition WHERE host IS NULL;
+
++------+-----+-------------------------+---+
+| host | idc | ts                      | v |
++------+-----+-------------------------+---+
+|      | dc  | 1970-01-01T00:00:00.004 | 4 |
++------+-----+-------------------------+---+
+
+ADMIN FLUSH_TABLE('hash_partition');
+
++-------------------------------------+
+| ADMIN FLUSH_TABLE('hash_partition') |
++-------------------------------------+
+| 0                                   |
++-------------------------------------+
+
+SELECT * FROM hash_partition ORDER BY ts;
+
++------+-----+-------------------------+---+
+| host | idc | ts                      | v |
++------+-----+-------------------------+---+
+| a    | bc  | 1970-01-01T00:00:00.001 | 1 |
+| ab   | c   | 1970-01-01T00:00:00.002 | 2 |
+| 中   | 🙂  | 1970-01-01T00:00:00.003 | 3 |
+|      | dc  | 1970-01-01T00:00:00.004 | 4 |
+|      |     | 1970-01-01T00:00:00.005 | 5 |
++------+-----+-------------------------+---+
+
+DELETE FROM hash_partition WHERE host = 'ab';
+
+Affected Rows: 1
+
+SELECT * FROM hash_partition ORDER BY ts;
+
++------+-----+-------------------------+---+
+| host | idc | ts                      | v |
++------+-----+-------------------------+---+
+| a    | bc  | 1970-01-01T00:00:00.001 | 1 |
+| 中   | 🙂  | 1970-01-01T00:00:00.003 | 3 |
+|      | dc  | 1970-01-01T00:00:00.004 | 4 |
+|      |     | 1970-01-01T00:00:00.005 | 5 |
++------+-----+-------------------------+---+
+
+DROP TABLE hash_partition;
+
+Affected Rows: 0
+
+CREATE TABLE nested_partition (host STRING PRIMARY KEY, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (host) (
+  substring(hash(substring(host, 1)), 1, 1) < '8',
+  substring(hash(substring(host, 1)), 1, 1) >= '8'
+);
+
+Affected Rows: 0
+
+INSERT INTO nested_partition VALUES ('abc', 1), ('xyz', 2), (NULL, 3);
+
+Affected Rows: 3
+
+SELECT * FROM nested_partition ORDER BY ts;
+
++------+-------------------------+
+| host | ts                      |
++------+-------------------------+
+| abc  | 1970-01-01T00:00:00.001 |
+| xyz  | 1970-01-01T00:00:00.002 |
+|      | 1970-01-01T00:00:00.003 |
++------+-------------------------+
+
+SHOW CREATE TABLE nested_partition;
+
++------------------+------------------------------------------------------+
+| Table            | Create Table                                         |
++------------------+------------------------------------------------------+
+| nested_partition | CREATE TABLE IF NOT EXISTS "nested_partition" (      |
+|                  |   "host" STRING NULL,                                |
+|                  |   "ts" TIMESTAMP(3) NOT NULL,                        |
+|                  |   TIME INDEX ("ts"),                                 |
+|                  |   PRIMARY KEY ("host")                               |
+|                  | )                                                    |
+|                  | PARTITION ON COLUMNS ("host") (                      |
+|                  |   substring(hash(substring("host", 1)), 1, 1) < '8', |
+|                  |   substring(hash(substring("host", 1)), 1, 1) >= '8' |
+|                  | )                                                    |
+|                  | ENGINE=mito                                          |
+|                  |                                                      |
++------------------+------------------------------------------------------+
+
+DROP TABLE nested_partition;
+
+Affected Rows: 0
+
+CREATE TABLE invalid_function (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (host) (hash(host) < '8', hash(host) > '8');
+
+Error: 1004(InvalidArguments), Checkpoint `hash("host")=8` is not covered
+
+CREATE TABLE invalid_function (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (host) (substring(host, 1, -1) < 'm', substring(host, 1, -1) >= 'm');
+
+Error: 1004(InvalidArguments), Invalid partition rule: substring length must be non-negative
+
+CREATE TABLE invalid_function (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (host) (hash(ts) < '8', hash(ts) >= '8');
+
+Error: 2000(InvalidSyntax), Invalid SQL, error: Column "ts" in rule expr is not referenced in PARTITION ON
+
+CREATE TABLE invalid_function (host STRING, ts TIMESTAMP TIME INDEX)
+PARTITION ON COLUMNS (host) (hash(host) < '9', hash(host) >= '8');
+
+Error: 1004(InvalidArguments), Checkpoint `hash("host")=8` is overlapped
+
+CREATE TABLE dynamic_substring (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length))
+PARTITION ON COLUMNS (host, length) (
+  substring(host, 1, length) < NULL OR substring(host, 1, length) >= NULL
+);
+
+Affected Rows: 0
+
+INSERT INTO dynamic_substring VALUES ('abc', -1, 1);
+
+Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: negative count not allowed: -1
+
+INSERT INTO dynamic_substring VALUES ('abc', 2, 2);
+
+Affected Rows: 1
+
+SELECT * FROM dynamic_substring ORDER BY ts;
+
++------+--------+-------------------------+
+| host | length | ts                      |
++------+--------+-------------------------+
+| abc  | 2      | 1970-01-01T00:00:00.002 |
++------+--------+-------------------------+
+
+DROP TABLE dynamic_substring;
+
+Affected Rows: 0
+
+CREATE TABLE guarded_substring (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length))
+PARTITION ON COLUMNS (host, length) (
+  host < 'm' AND substring(host, 1, length) < 'm',
+  host < 'm' AND substring(host, 1, length) >= 'm',
+  host >= 'm'
+);
+
+Affected Rows: 0
+
+INSERT INTO guarded_substring VALUES ('z', -1, 1);
+
+Affected Rows: 1
+
+CREATE TABLE substring_source (host STRING, length BIGINT, ts TIMESTAMP TIME INDEX, PRIMARY KEY(host, length));
+
+Affected Rows: 0
+
+INSERT INTO substring_source VALUES ('a', 1, 2), ('z', -1, 3), (NULL, -1, 4);
+
+Affected Rows: 3
+
+INSERT INTO guarded_substring SELECT * FROM substring_source;
+
+Affected Rows: 3
+
+INSERT INTO guarded_substring VALUES ('a', -1, 5);
+
+Error: 1004(InvalidArguments), Failed to evaluate partition function: Execution error: negative count not allowed: -1
+
+SELECT * FROM guarded_substring ORDER BY ts;
+
++------+--------+-------------------------+
+| host | length | ts                      |
++------+--------+-------------------------+
+| z    | -1     | 1970-01-01T00:00:00.001 |
+| a    | 1      | 1970-01-01T00:00:00.002 |
+| z    | -1     | 1970-01-01T00:00:00.003 |
+|      | -1     | 1970-01-01T00:00:00.004 |
++------+--------+-------------------------+
+
+DROP TABLE substring_source;
+
+Affected Rows: 0
+
+DROP TABLE guarded_substring;
+
+Affected Rows: 0
+
+CREATE TABLE integer_hash_routes (tenant_id BIGINT, device_id BIGINT UNSIGNED, host STRING, ts TIMESTAMP TIME INDEX, v INT, PRIMARY KEY(tenant_id, device_id, host))
+PARTITION ON COLUMNS (tenant_id, device_id, host) (
+  hash(tenant_id, device_id, host) < '8',
+  hash(tenant_id, device_id, host) >= '8'
+);
+
+Affected Rows: 0
+
+INSERT INTO integer_hash_routes VALUES (42, 42, 'a', 1, 1), (-1, 18446744073709551615, 'b', 2, 2), (-9223372036854775808, 0, '中', 3, 3), (NULL, 42, 'a', 4, 4), (42, NULL, 'a', 5, 5), (42, 42, NULL, 6, 6);
+
+Affected Rows: 6
+
+ADMIN FLUSH_TABLE('integer_hash_routes');
+
++------------------------------------------+
+| ADMIN FLUSH_TABLE('integer_hash_routes') |
++------------------------------------------+
+| 0                                        |
++------------------------------------------+
+
+SHOW CREATE TABLE integer_hash_routes;
+
++---------------------+-----------------------------------------------------------+
+| Table               | Create Table                                              |
++---------------------+-----------------------------------------------------------+
+| integer_hash_routes | CREATE TABLE IF NOT EXISTS "integer_hash_routes" (        |
+|                     |   "tenant_id" BIGINT NULL,                                |
+|                     |   "device_id" BIGINT UNSIGNED NULL,                       |
+|                     |   "host" STRING NULL,                                     |
+|                     |   "ts" TIMESTAMP(3) NOT NULL,                             |
+|                     |   "v" INT NULL,                                           |
+|                     |   TIME INDEX ("ts"),                                      |
+|                     |   PRIMARY KEY ("tenant_id", "device_id", "host")          |
+|                     | )                                                         |
+|                     | PARTITION ON COLUMNS ("tenant_id", "device_id", "host") ( |
+|                     |   hash("tenant_id", "device_id", "host") < '8',           |
+|                     |   hash("tenant_id", "device_id", "host") >= '8'           |
+|                     | )                                                         |
+|                     | ENGINE=mito                                               |
+|                     |                                                           |
++---------------------+-----------------------------------------------------------+
+
+SELECT * FROM integer_hash_routes ORDER BY ts;
+
++----------------------+----------------------+------+-------------------------+---+
+| tenant_id            | device_id            | host | ts                      | v |
++----------------------+----------------------+------+-------------------------+---+
+| 42                   | 42                   | a    | 1970-01-01T00:00:00.001 | 1 |
+| -1                   | 18446744073709551615 | b    | 1970-01-01T00:00:00.002 | 2 |
+| -9223372036854775808 | 0                    | 中   | 1970-01-01T00:00:00.003 | 3 |
+|                      | 42                   | a    | 1970-01-01T00:00:00.004 | 4 |
+| 42                   |                      | a    | 1970-01-01T00:00:00.005 | 5 |
+| 42                   | 42                   |      | 1970-01-01T00:00:00.006 | 6 |
++----------------------+----------------------+------+-------------------------+---+
+
+INSERT INTO integer_hash_routes VALUES (42, 42, 'a', 1, 10), (-1, 18446744073709551615, 'b', 2, 20), (-9223372036854775808, 0, '中', 3, 30), (NULL, 42, 'a', 4, 40), (42, NULL, 'a', 5, 50), (42, 42, NULL, 6, 60);
+
+Affected Rows: 6
+
+SELECT * FROM integer_hash_routes ORDER BY ts;
+
++----------------------+----------------------+------+-------------------------+----+
+| tenant_id            | device_id            | host | ts                      | v  |
++----------------------+----------------------+------+-------------------------+----+
+| 42                   | 42                   | a    | 1970-01-01T00:00:00.001 | 10 |
+| -1                   | 18446744073709551615 | b    | 1970-01-01T00:00:00.002 | 20 |
+| -9223372036854775808 | 0                    | 中   | 1970-01-01T00:00:00.003 | 30 |
+|                      | 42                   | a    | 1970-01-01T00:00:00.004 | 40 |
+| 42                   |                      | a    | 1970-01-01T00:00:00.005 | 50 |
+| 42                   | 42                   |      | 1970-01-01T00:00:00.006 | 60 |
++----------------------+----------------------+------+-------------------------+----+
+
+DELETE FROM integer_hash_routes WHERE tenant_id = -1;
+
+Affected Rows: 1
+
+SELECT * FROM integer_hash_routes ORDER BY ts;
+
++----------------------+-----------+------+-------------------------+----+
+| tenant_id            | device_id | host | ts                      | v  |
++----------------------+-----------+------+-------------------------+----+
+| 42                   | 42        | a    | 1970-01-01T00:00:00.001 | 10 |
+| -9223372036854775808 | 0         | 中   | 1970-01-01T00:00:00.003 | 30 |
+|                      | 42        | a    | 1970-01-01T00:00:00.004 | 40 |
+| 42                   |           | a    | 1970-01-01T00:00:00.005 | 50 |
+| 42                   | 42        |      | 1970-01-01T00:00:00.006 | 60 |
++----------------------+-----------+------+-------------------------+----+
+
+DROP TABLE integer_hash_routes;
+
+Affected Rows: 0
+
