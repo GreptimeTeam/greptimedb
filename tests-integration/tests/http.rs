@@ -2894,6 +2894,7 @@ enable = true
 [otlp]
 enable = true
 trace_ingest_chunk_size = 512
+trace_aux_cache_capacity = 100000
 experimental_enable_resource_info = true
 
 [prom_store]

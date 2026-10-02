@@ -22,23 +22,160 @@ use api::v1::{
 };
 use common_error::ext::ErrorExt;
 use common_error::status_code::StatusCode;
+use common_query::WriteCompletion;
 use datatypes::prelude::ConcreteDataType;
 use datatypes::schema::{
     ColumnSchema as DatatypesColumnSchema, SchemaBuilder as DatatypesSchemaBuilder,
 };
 use opentelemetry_proto::tonic::common::v1::any_value::Value as OtlpValue;
 use opentelemetry_proto::tonic::common::v1::{AnyValue, ArrayValue, KeyValue};
-use servers::otlp::trace::SERVICE_NAME_COLUMN;
 use servers::otlp::trace::attributes::Attributes;
 use servers::otlp::trace::span::{SpanEvents, SpanLinks, TraceSpan};
 use servers::otlp::trace::v1::{TraceBinaryType, TraceRetryColumn};
+use servers::otlp::trace::{SERVICE_NAME_COLUMN, TraceAuxData};
+use table::table_name::TableName;
 
 use super::{
-    ChunkFailureReaction, Instance, TraceChunkRetry, TraceChunkSchemaState, TraceFailureMessages,
-    TraceRequestSchema, TraceRequestSchemaPlan, TraceSpanMetadata, TraceTablePreAlter, chunk_owned,
-    wrap_trace_alter_failure,
+    ChunkFailureReaction, Instance, TraceAuxCache, TraceChunkRetry, TraceChunkSchemaState,
+    TraceFailureMessages, TraceRequestSchema, TraceRequestSchemaPlan, TraceSpanMetadata,
+    TraceTablePreAlter, chunk_owned, wrap_trace_alter_failure,
 };
 use crate::metrics::OTLP_TRACES_FAILURE_COUNT;
+
+fn trace_aux_data(service: &str, span: &str, kind: &str) -> TraceAuxData {
+    TraceAuxData {
+        services: HashSet::from([service.to_string()]),
+        operations: HashSet::from([(service.to_string(), span.to_string(), kind.to_string())]),
+    }
+}
+
+#[tokio::test]
+async fn test_trace_aux_waits_for_successful_chunk_completions() {
+    let (success_tx, success_rx) = tokio::sync::oneshot::channel();
+    let (failure_tx, failure_rx) = tokio::sync::oneshot::channel();
+    let completion = |receiver: tokio::sync::oneshot::Receiver<bool>| {
+        WriteCompletion::new(async move {
+            if receiver.await.unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(common_error::ext::BoxedError::new(
+                    servers::error::InternalSnafu {
+                        err_msg: "main write failed",
+                    }
+                    .build(),
+                ))
+            }
+        })
+    };
+    let mut confirmed = Box::pin(super::confirmed_trace_aux_data(vec![
+        (
+            trace_aux_data("good", "span", "server"),
+            vec![completion(success_rx)],
+        ),
+        (
+            trace_aux_data("bad", "span", "server"),
+            vec![completion(failure_rx)],
+        ),
+    ]));
+    assert!(futures::poll!(confirmed.as_mut()).is_pending());
+    success_tx.send(true).unwrap();
+    assert!(futures::poll!(confirmed.as_mut()).is_pending());
+    // A lost completion sender must not count as successful storage.
+    drop(failure_tx);
+    let aux = confirmed.await;
+    assert_eq!(aux.services, HashSet::from(["good".to_string()]));
+    assert_eq!(
+        aux.operations,
+        trace_aux_data("good", "span", "server").operations
+    );
+}
+
+#[test]
+fn test_trace_aux_cache_confirmed_writes() {
+    let cache = TraceAuxCache::new(100);
+    let table = TableName::new("greptime", "public", "traces");
+    let mut data = trace_aux_data("svc", "span", "server");
+    let pending = cache.filter(table.clone(), &mut data);
+    assert_eq!(pending.len(), 2);
+
+    // Preparing a write must not suppress a retry after failure or cancellation.
+    let mut retry = trace_aux_data("svc", "span", "server");
+    assert_eq!(cache.filter(table.clone(), &mut retry).len(), 2);
+    cache.record(pending);
+
+    let mut repeated = trace_aux_data("svc", "span", "server");
+    assert!(
+        cache
+            .clone()
+            .filter(table.clone(), &mut repeated)
+            .is_empty()
+    );
+    assert!(repeated.is_empty());
+
+    for (span, kind) in [("new_span", "server"), ("span", "client")] {
+        let mut data = trace_aux_data("svc", span, kind);
+        assert_eq!(cache.filter(table.clone(), &mut data).len(), 1);
+        assert!(data.services.is_empty());
+        assert_eq!(data.operations.len(), 1);
+    }
+
+    let mut other_service = trace_aux_data("other", "span", "server");
+    assert_eq!(cache.filter(table, &mut other_service).len(), 2);
+
+    for other_table in [
+        TableName::new("other", "public", "traces"),
+        TableName::new("greptime", "other", "traces"),
+        TableName::new("greptime", "public", "other"),
+    ] {
+        let mut data = trace_aux_data("svc", "span", "server");
+        assert_eq!(cache.filter(other_table, &mut data).len(), 2);
+    }
+}
+
+#[test]
+fn test_trace_aux_cache_service_and_operation_are_independent() {
+    let cache = TraceAuxCache::new(100);
+    let table = TableName::new("greptime", "public", "traces");
+    let mut data = trace_aux_data("svc", "span", "server");
+    let pending = cache.filter(table.clone(), &mut data);
+    cache.record(pending);
+    cache.entries.invalidate(&(
+        std::sync::Arc::new(table.clone()),
+        super::TraceAuxEntry::Service("svc".into()),
+    ));
+
+    let mut data = trace_aux_data("svc", "span", "server");
+    assert_eq!(cache.filter(table, &mut data).len(), 1);
+    assert_eq!(data.services.len(), 1);
+    assert!(data.operations.is_empty());
+}
+
+#[test]
+fn test_trace_aux_cache_eviction_allows_rewrite() {
+    let cache = TraceAuxCache::new(1);
+    let table = TableName::new("greptime", "public", "traces");
+    let mut data = trace_aux_data("svc", "span", "server");
+    cache.record(cache.filter(table.clone(), &mut data));
+    cache.entries.run_pending_tasks();
+    assert_eq!(cache.entries.entry_count(), 1);
+
+    let mut data = trace_aux_data("svc", "span", "server");
+    assert_eq!(cache.filter(table, &mut data).len(), 1);
+    assert_eq!(data.services.len() + data.operations.len(), 1);
+}
+
+#[test]
+fn test_trace_aux_cache_zero_capacity_disables_caching() {
+    let cache = TraceAuxCache::new(0);
+    let table = TableName::new("greptime", "public", "traces");
+    let mut data = trace_aux_data("svc", "span", "server");
+    cache.record(cache.filter(table.clone(), &mut data));
+
+    let mut repeated = trace_aux_data("svc", "span", "server");
+    assert_eq!(cache.filter(table, &mut repeated).len(), 2);
+    assert_eq!(repeated.services.len(), 1);
+    assert_eq!(repeated.operations.len(), 1);
+}
 
 #[test]
 fn test_chunk_owned() {

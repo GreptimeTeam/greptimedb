@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use TimeUnit as ArrowTimeUnit;
     use client::{DEFAULT_CATALOG_NAME, OutputData};
@@ -25,6 +26,7 @@ mod test {
         TimestampNanosecondType, TimestampSecondType,
     };
     use frontend::instance::Instance;
+    use frontend::service_config::BatcherOptions;
     use opentelemetry_proto::tonic::collector::trace::v1::ExportTraceServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::collector::metrics::v1::ExportMetricsServiceRequest;
     use otel_arrow_rust::proto::opentelemetry::common::v1::any_value::Value as Val;
@@ -39,13 +41,350 @@ mod test {
     use otel_arrow_rust::proto::opentelemetry::resource::v1::Resource;
     use pipeline::{GreptimePipelineParams, PipelineWay};
     use serde_json::json;
+    use servers::batcher::BatchingProtocol;
     use servers::query_handler::OpenTelemetryProtocolHandler;
     use servers::query_handler::sql::SqlQueryHandler;
     use session::context::QueryContext;
     use session::protocol_ctx::{OtlpMetricCtx, ProtocolCtx};
+    use store_api::region_engine::RegionEngine;
 
     use crate::standalone::GreptimeDbStandaloneBuilder;
     use crate::tests;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trace_aux_cache() {
+        check_trace_aux_cache(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trace_aux_cache_with_batching_v0_v1() {
+        check_trace_aux_cache(true).await;
+    }
+
+    #[test]
+    fn test_trace_aux_async_completion() {
+        temp_env::with_var("PENDING_ROWS_BATCH_SYNC", Some("false"), || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(check_trace_aux_async_completion());
+        });
+    }
+
+    async fn check_trace_aux_async_completion() {
+        let standalone = GreptimeDbStandaloneBuilder::new("trace_aux_async_completion")
+            .with_table_batcher(BatcherOptions {
+                protocols: vec![BatchingProtocol::Otlp],
+                pending_rows_flush_interval: Duration::from_secs(3600),
+                max_batch_rows: 2,
+                ..Default::default()
+            })
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        // V2 bulk ingestion has a separate Variant/Struct conversion failure.
+        for version in 0..=1 {
+            let table_name = format!("trace_aux_async_v{version}");
+            let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            context.set_extension(table::requests::TRACE_TABLE_PARTITIONS_HINT_KEY, "1");
+            context.set_batching_enabled(true);
+            let ctx = Arc::new(context);
+            let request: ExportTraceServiceRequest = serde_json::from_value(json!({
+                "resourceSpans": [{
+                    "resource": {"attributes": [
+                        {"key": "service.name", "value": {"stringValue": "svc"}}
+                    ]},
+                    "scopeSpans": [{"spans": [{
+                        "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                        "spanId": "9630f2916e2f7909",
+                        "name": "operation",
+                        "kind": 2,
+                        "startTimeUnixNano": "1736480942444376000",
+                        "endTimeUnixNano": "1736480942444499000"
+                    }]}]
+                }]
+            }))
+            .unwrap();
+            let write = async || {
+                let outcome = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    instance.traces(
+                        instance.clone(),
+                        request.clone(),
+                        if version == 0 {
+                            PipelineWay::OtlpTraceDirectV0
+                        } else {
+                            PipelineWay::OtlpTraceDirectV1
+                        },
+                        GreptimePipelineParams::default(),
+                        table_name.clone(),
+                        ctx.clone(),
+                    ),
+                )
+                .await
+                .expect("async trace ingestion must return before the batch flush")
+                .unwrap();
+                assert_eq!((outcome.accepted_spans, outcome.rejected_spans), (1, 0));
+                assert!(outcome.error_message.is_none());
+            };
+            write().await;
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*) = 0 FROM {table_name}"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+            for suffix in ["_services", "_operations"] {
+                assert!(
+                    instance
+                        .catalog_manager()
+                        .table(
+                            DEFAULT_CATALOG_NAME,
+                            "public",
+                            &format!("{table_name}{suffix}"),
+                            None
+                        )
+                        .await
+                        .unwrap()
+                        .is_none()
+                );
+            }
+
+            // The second submission deterministically triggers the main flush.
+            // Each auxiliary table still has one row, below the batching threshold.
+            write().await;
+            tokio::time::timeout(Duration::from_secs(30), async {
+                loop {
+                    // Auxiliary tables can be created in either order.
+                    if instance
+                        .catalog_manager()
+                        .table(
+                            DEFAULT_CATALOG_NAME,
+                            "public",
+                            &format!("{table_name}_operations"),
+                            None,
+                        )
+                        .await
+                        .unwrap()
+                        .is_some()
+                        && instance
+                            .catalog_manager()
+                            .table(
+                                DEFAULT_CATALOG_NAME,
+                                "public",
+                                &format!("{table_name}_services"),
+                                None,
+                            )
+                            .await
+                            .unwrap()
+                            .is_some()
+                    {
+                        let output = instance
+                            .do_query(
+                                &format!(
+                                    "SELECT (SELECT COUNT(*) FROM {table_name}_services) > 0 \
+                             AND (SELECT COUNT(*) FROM {table_name}_operations) > 0"
+                                ),
+                                ctx.clone(),
+                            )
+                            .await
+                            .remove(0)
+                            .unwrap();
+                        let OutputData::Stream(stream) = output.data else {
+                            panic!("expected query stream")
+                        };
+                        let batches = RecordBatches::try_collect(stream).await.unwrap().take();
+                        if batches[0].column(0).as_boolean().value(0) {
+                            break;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("confirmed main writes must trigger direct auxiliary writes");
+            assert_trace_v2_query(
+                instance,
+                &format!("SELECT COUNT(*) > 0 FROM {table_name}"),
+                ctx.clone(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    async fn check_trace_aux_cache(batching: bool) {
+        let standalone = GreptimeDbStandaloneBuilder::new("trace_aux_cache")
+            .with_table_batcher(if batching {
+                BatcherOptions {
+                    protocols: vec![BatchingProtocol::Otlp],
+                    // Two main spans trigger a flush, while each auxiliary table
+                    // has only one row and would wait an hour if batched.
+                    pending_rows_flush_interval: Duration::from_secs(3600),
+                    max_batch_rows: 2,
+                    ..Default::default()
+                }
+            } else {
+                BatcherOptions::default()
+            })
+            .build()
+            .await;
+        let instance = standalone.fe_instance();
+        let cloned_instance = Arc::new(instance.as_ref().clone());
+
+        // V2 bulk writes currently fail on Variant/Struct schema conversion
+        // before reaching auxiliary ingestion; cover V2 with direct main writes.
+        let max_version = if batching { 1 } else { 2 };
+        for version in 0..=max_version {
+            let table_name = format!("trace_aux_v{version}");
+            let mut context = QueryContext::with(DEFAULT_CATALOG_NAME, "public");
+            context.set_extension(
+                common_catalog::consts::TRACE_TABLE_NAME_SESSION_KEY,
+                &table_name,
+            );
+            context.set_extension(table::requests::TRACE_TABLE_PARTITIONS_HINT_KEY, "1");
+            context.set_batching_enabled(batching);
+            let ctx = Arc::new(context);
+            let mut request: ExportTraceServiceRequest = serde_json::from_value(json!({
+                "resourceSpans": [{
+                    "resource": {"attributes": [
+                        {"key": "service.name", "value": {"stringValue": "svc"}}
+                    ]},
+                    "scopeSpans": [{"spans": [{
+                        "traceId": "c05d7a4ec8e1f231f02ed6e8da8655b4",
+                        "spanId": "9630f2916e2f7909",
+                        "name": "operation",
+                        "kind": 2,
+                        "startTimeUnixNano": "1736480942444376000",
+                        "endTimeUnixNano": "1736480942444499000"
+                    }]}]
+                }]
+            }))
+            .unwrap();
+            if batching {
+                let spans = &mut request.resource_spans[0].scope_spans[0].spans;
+                spans.push(spans[0].clone());
+            }
+            let accepted_spans = if batching { 2 } else { 1 };
+            let write = async |frontend: &Arc<Instance>, request| {
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    frontend.traces(
+                        frontend.clone(),
+                        request,
+                        match version {
+                            0 => PipelineWay::OtlpTraceDirectV0,
+                            1 => PipelineWay::OtlpTraceDirectV1,
+                            _ => PipelineWay::OtlpTraceDirectV2,
+                        },
+                        GreptimePipelineParams::default(),
+                        table_name.clone(),
+                        ctx.clone(),
+                    ),
+                )
+                .await
+                .expect("auxiliary writes must not wait for the batch flush interval")
+                .unwrap()
+            };
+            let sequences = async || {
+                let mut sequences = Vec::new();
+                for suffix in ["", "_services", "_operations"] {
+                    let table = instance
+                        .catalog_manager()
+                        .table(
+                            DEFAULT_CATALOG_NAME,
+                            "public",
+                            &format!("{table_name}{suffix}"),
+                            None,
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let route = instance
+                        .partition_manager()
+                        .find_physical_table_route(table.table_info().table_id())
+                        .await
+                        .unwrap();
+                    assert_eq!(route.region_routes.len(), 1);
+                    let region_id = route.region_routes[0].region.id;
+                    sequences.push(
+                        standalone
+                            .mito_engine
+                            .get_committed_sequence(region_id)
+                            .await
+                            .unwrap(),
+                    );
+                }
+                sequences
+            };
+
+            // An incompatible auxiliary column fails after the main span is
+            // accepted. No candidate key may be cached from the failed batch.
+            instance
+                .do_query(
+                    &format!(
+                        "CREATE TABLE {table_name}_operations (\
+                         \"timestamp\" TIMESTAMP(9) TIME INDEX, service_name STRING, \
+                         span_name STRING, span_kind BIGINT)"
+                    ),
+                    ctx.clone(),
+                )
+                .await
+                .remove(0)
+                .unwrap();
+            let failed_aux = write(instance, request.clone()).await;
+            assert_eq!(
+                (failed_aux.accepted_spans, failed_aux.rejected_spans),
+                (accepted_spans, 0)
+            );
+            assert!(
+                failed_aux
+                    .error_message
+                    .unwrap()
+                    .contains("Auxiliary trace tables")
+            );
+
+            instance
+                .do_query(&format!("DROP TABLE {table_name}_operations"), ctx.clone())
+                .await
+                .remove(0)
+                .unwrap();
+            let retry = write(instance, request.clone()).await;
+            assert_eq!(
+                (retry.accepted_spans, retry.rejected_spans),
+                (accepted_spans, 0)
+            );
+            assert!(retry.error_message.is_none(), "{retry:?}");
+            let before = sequences().await;
+            assert!(before.iter().all(|sequence| *sequence > 0));
+
+            // Storage sequences, unlike row counts in an upsert table, prove
+            // the writes were skipped. Cloned Instances must share the cache.
+            let warm = write(&cloned_instance, request.clone()).await;
+            assert_eq!(
+                (warm.accepted_spans, warm.rejected_spans),
+                (accepted_spans, 0)
+            );
+            assert!(warm.error_message.is_none(), "{warm:?}");
+            let after = sequences().await;
+            assert!(after[0] > before[0]);
+            assert_eq!(after[1..], before[1..], "v{version}");
+
+            request.resource_spans[0].scope_spans[0].spans[0].name = "new_operation".into();
+            let new_operation = write(instance, request).await;
+            assert_eq!(
+                (new_operation.accepted_spans, new_operation.rejected_spans),
+                (accepted_spans, 0)
+            );
+            assert!(new_operation.error_message.is_none(), "{new_operation:?}");
+            let new_sequences = sequences().await;
+            assert!(new_sequences[0] > after[0]);
+            assert_eq!(new_sequences[1], after[1]);
+            assert!(new_sequences[2] > after[2]);
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_trace_v2_on_standalone() -> Result<(), Box<dyn std::error::Error>> {
