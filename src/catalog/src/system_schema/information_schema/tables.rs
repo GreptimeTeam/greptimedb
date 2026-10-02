@@ -402,8 +402,12 @@ impl InformationSchemaTablesBuilder {
         // use mariadb default table version number here
         self.version.push(Some(11));
         self.table_comment.push(table_info.desc.as_deref());
+        // Credentials supplied as table options (e.g. an external table's
+        // `secret_access_key`) must not be exposed here: this column is
+        // readable by anyone who can query `information_schema`. Render the
+        // options with those values masked, the way `SHOW CREATE TABLE` does.
         self.create_options
-            .push(Some(table_info.meta.options.to_string().as_ref()));
+            .push(Some(table_info.meta.options.to_redacted_string().as_ref()));
         self.create_time
             .push(Some(table_info.meta.created_on.timestamp().into()));
 
