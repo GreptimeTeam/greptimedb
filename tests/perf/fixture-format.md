@@ -58,6 +58,26 @@ warmup = 0
 iterations = 1
 ```
 
+### Value distributions
+
+Tag columns use `cardinality` and produce one label per series. Double field
+columns accept either a NULL-free wave:
+
+```toml
+distribution = { kind = "deterministic_wave", min = 0.0, max = 100.0 }
+```
+
+or a wave with periodic NULLs:
+
+```toml
+distribution = { kind = "nullable_wave", min = 0.0, max = 100.0, null_every = 4 }
+```
+
+`null_every` must be greater than zero. `nullable_wave` writes NULL on every
+`null_every`-th sample of each series and wave values everywhere else; the cadence
+is counted in per-series samples, not generated rows. Do not use a row-based
+cadence: it can leave individual series entirely NULL or entirely NULL-free.
+
 ### Query kinds
 
 `kind = "prom_http"` runs a Prometheus range query by POSTing form fields to

@@ -214,6 +214,27 @@ fn wave_value(min: f64, max: f64, row: usize) -> f64 {
     min + span * (0.5 - 0.5 * (std::f64::consts::TAU * phase).cos())
 }
 
+/// Position of the generated row inside its own series sample sequence.
+///
+/// [Distribution::NullableWave] counts its null cadence in these positions so that
+/// the null pattern is deterministic per series instead of per generated row.
+fn series_sample_index(
+    layout: &LayoutConfig,
+    sst_idx: usize,
+    base_row: usize,
+    row: usize,
+) -> usize {
+    let series_count = layout.series_count.get();
+    match layout.series_layout.as_str() {
+        // Rows of one series are `series_count` generated rows apart.
+        "round_robin" | "timestamp_major" => (base_row + row) / series_count,
+        // One series per SST, repeated across SSTs when there are more SSTs than
+        // series.
+        "per_sst" => (sst_idx / series_count) * layout.rows_per_sst + row,
+        other => panic!("unsupported series_layout {other}"),
+    }
+}
+
 fn generate_record_batch(
     table: &TableConfig,
     metadata: &RegionMetadataRef,
@@ -237,17 +258,33 @@ fn generate_record_batch(
                 }
                 columns.push(Arc::new(b.finish()) as ArrayRef);
             }
-            ("field", "DOUBLE") => {
-                let (min, max) = match col.distribution.as_ref() {
-                    Some(Distribution::DeterministicWave { min, max }) => (*min, *max),
-                    _ => (0.0, 1.0),
-                };
-                columns.push(Arc::new(Float64Array::from(
-                    (0..rows)
-                        .map(|r| wave_value(min, max, base_row + r))
-                        .collect::<Vec<_>>(),
-                )) as ArrayRef);
-            }
+            ("field", "DOUBLE") => match col.distribution.as_ref() {
+                Some(Distribution::NullableWave {
+                    min,
+                    max,
+                    null_every,
+                }) => {
+                    columns.push(Arc::new(Float64Array::from_iter((0..rows).map(|r| {
+                        let sample_index = series_sample_index(layout, sst_idx, base_row, r);
+                        if sample_index.is_multiple_of(null_every.get()) {
+                            None
+                        } else {
+                            Some(wave_value(*min, *max, base_row + r))
+                        }
+                    }))) as ArrayRef);
+                }
+                distribution => {
+                    let (min, max) = match distribution {
+                        Some(Distribution::DeterministicWave { min, max }) => (*min, *max),
+                        _ => (0.0, 1.0),
+                    };
+                    columns.push(Arc::new(Float64Array::from(
+                        (0..rows)
+                            .map(|r| wave_value(min, max, base_row + r))
+                            .collect::<Vec<_>>(),
+                    )) as ArrayRef);
+                }
+            },
             ("field", "UINT64") => columns.push(Arc::new(UInt64Array::from(
                 (0..rows).map(|r| (base_row + r) as u64).collect::<Vec<_>>(),
             )) as ArrayRef),
@@ -734,6 +771,151 @@ mod tests {
                 assert!(actual.iter().any(|row| row.3 == "host2"));
                 assert!(actual.iter().any(|row| row.3 == "host10"));
             }
+        }
+    }
+
+    /// The nullable range-function case keeps per-series NULL positions and wave
+    /// values distinct from its dense control.
+    #[test]
+    fn nullable_wave_keeps_null_positions_and_dense_control() {
+        let mut case: CaseFile = toml::from_str(include_str!(
+            "../../../../../tests/perf/query_cases/promql_nullable_range_fn/case.toml"
+        ))
+        .expect("nullable range-function case should parse");
+        let scenario = match &mut case.scenario {
+            Scenario::DirectReadableSst(scenario) => scenario,
+            _ => unreachable!("nullable range-function case is a direct SST case"),
+        };
+        scenario.layout.series_count = NonZeroUsize::new(2).expect("2 is nonzero");
+        scenario.layout.rows_per_sst = 8;
+        scenario.layout.sst_count = 1;
+
+        let sst_idx = 3;
+        let base_row = sst_idx * scenario.layout.rows_per_sst;
+        for table in &scenario.tables {
+            let metadata = Arc::new(build_region_metadata(table, RegionId::from(43)));
+            let batch = generate_record_batch(table, &metadata, &scenario.layout, sst_idx, 1003);
+            let values = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("fixture value column")
+                .iter()
+                .collect::<Vec<Option<f64>>>();
+            let (min, max, null_positions) = match table
+                .columns
+                .iter()
+                .find(|column| column.name == "value")
+                .expect("fixture case has a value field")
+                .distribution
+                .as_ref()
+            {
+                Some(Distribution::NullableWave { min, max, .. }) => (*min, *max, &[0][..]),
+                Some(Distribution::DeterministicWave { min, max }) => (*min, *max, &[][..]),
+                other => panic!("unexpected value distribution in {}: {other:?}", table.name),
+            };
+
+            for (series, samples) in values.chunks(4).enumerate() {
+                assert_eq!(
+                    null_positions,
+                    samples
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(position, value)| value.is_none().then_some(position))
+                        .collect::<Vec<_>>(),
+                    "{} series {series} NULL positions",
+                    table.name
+                );
+                for (sample, value) in samples.iter().enumerate() {
+                    if null_positions.contains(&sample) {
+                        continue;
+                    }
+                    assert_eq!(
+                        Some(wave_value(min, max, base_row + sample * 2 + series)),
+                        *value,
+                        "{} series {series} sample {sample} wave value",
+                        table.name
+                    );
+                }
+            }
+        }
+    }
+
+    /// NULL cadence must continue across unaligned SST boundaries rather than
+    /// restarting in each SST.
+    #[test]
+    fn nullable_wave_continues_across_unaligned_ssts() {
+        let mut case: CaseFile = toml::from_str(include_str!(
+            "../../../../../tests/perf/query_cases/promql_nullable_range_fn/case.toml"
+        ))
+        .expect("nullable range-function case should parse");
+        let scenario = match &mut case.scenario {
+            Scenario::DirectReadableSst(scenario) => scenario,
+            _ => unreachable!("nullable range-function case is a direct SST case"),
+        };
+        scenario.layout.series_count = NonZeroUsize::new(2).expect("2 is nonzero");
+        scenario.layout.rows_per_sst = 6;
+        scenario.layout.sst_count = 3;
+        let table = scenario
+            .tables
+            .iter()
+            .find(|table| table.name == "nullable_table")
+            .expect("nullable range-function case has a nullable_table");
+        let value = table
+            .columns
+            .iter()
+            .find(|column| column.name == "value")
+            .expect("fixture case has a value field");
+        let null_every = match value.distribution.as_ref() {
+            Some(Distribution::NullableWave { null_every, .. }) => null_every.get(),
+            other => panic!("nullable_table must use nullable_wave, found {other:?}"),
+        };
+        let samples_per_series = scenario.layout.rows_per_sst / scenario.layout.series_count.get();
+
+        let metadata = Arc::new(build_region_metadata(table, RegionId::from(43)));
+        let mut null_positions: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        for sst_idx in 0..scenario.layout.sst_count {
+            let batch = generate_record_batch(
+                table,
+                &metadata,
+                &scenario.layout,
+                sst_idx,
+                1003 + sst_idx as u64,
+            );
+            let values = batch
+                .column(2)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .expect("fixture value column")
+                .iter()
+                .collect::<Vec<Option<f64>>>();
+            let hosts = string_values(&batch, 0);
+            let instances = string_values(&batch, 1);
+            for (chunk_index, chunk) in values.chunks(samples_per_series).enumerate() {
+                let series = (
+                    hosts[chunk_index * samples_per_series].clone(),
+                    instances[chunk_index * samples_per_series].clone(),
+                );
+                let positions = null_positions.entry(series).or_default();
+                for (position, value) in chunk.iter().enumerate() {
+                    if value.is_none() {
+                        positions.push(sst_idx * samples_per_series + position);
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            scenario.layout.series_count.get(),
+            null_positions.len(),
+            "every series must be represented"
+        );
+        for (series, positions) in &null_positions {
+            assert_eq!(
+                &[0, null_every, null_every * 2],
+                positions.as_slice(),
+                "{series:?} NULL positions must continue across SSTs"
+            );
         }
     }
 }

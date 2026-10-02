@@ -548,6 +548,15 @@ pub(super) enum Distribution {
     },
     #[serde(rename = "deterministic_wave")]
     DeterministicWave { min: f64, max: f64 },
+    /// Wave values with periodic NULLs: every `null_every`-th sample of each
+    /// series is NULL. The cadence is counted in samples of the series rather
+    /// than in generated rows.
+    #[serde(rename = "nullable_wave")]
+    NullableWave {
+        min: f64,
+        max: f64,
+        null_every: NonZeroUsize,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize)]
