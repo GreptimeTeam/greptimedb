@@ -19,7 +19,10 @@ use common_memory_manager::OnExhaustedPolicy;
 use common_options::memory::MemoryOptions;
 use common_telemetry::logging::{LoggingOptions, SlowQueryOptions, TracingOptions};
 use common_wal::config::DatanodeWalConfig;
-use datanode::config::{DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig};
+use datanode::config::{
+    DatanodeOptions, ProcedureConfig, RegionEngineConfig, StorageConfig,
+    deserialize_region_engine_options,
+};
 use file_engine::config::EngineConfig as FileEngineConfig;
 use flow::FlowConfig;
 use frontend::frontend::FrontendOptions;
@@ -71,6 +74,7 @@ pub struct StandaloneOptions {
     pub logging: LoggingOptions,
     pub user_provider: Option<String>,
     /// Options for different store engines.
+    #[serde(deserialize_with = "deserialize_region_engine_options")]
     pub region_engine: Vec<RegionEngineConfig>,
     pub tracing: TracingOptions,
     pub init_regions_in_background: bool,
@@ -375,5 +379,29 @@ flow_notification_queue_capacity = 17
 
         assert_eq!(options.frontend_options().query.parallelism, 4);
         assert_eq!(options.datanode_options().query.parallelism, 4);
+    }
+
+    #[test]
+    fn test_region_engine_defaults_match_datanode() {
+        // `region_engine` on both `StandaloneOptions` and `DatanodeOptions` is
+        // deserialized by the shared helper
+        // `datanode::config::deserialize_region_engine_options`, which merges
+        // object-shaped (environment variable) overrides onto
+        // `DatanodeOptions::default().region_engine`.
+        //
+        // `deserialize_with` takes a plain fn pointer, so that merge base is
+        // hardcoded, and it is only the right base for `StandaloneOptions`
+        // while the two default lists agree. If you are here because you
+        // intentionally diverged standalone's defaults, do NOT just relax this
+        // assertion: parameterize the helper's merge base (e.g. an inner fn
+        // taking the base list, with a thin wrapper per options struct),
+        // otherwise the standalone environment-variable path would silently
+        // merge onto the datanode list instead.
+        assert_eq!(
+            StandaloneOptions::default().region_engine,
+            DatanodeOptions::default().region_engine,
+            "standalone and datanode region engine defaults must stay in sync; \
+             see deserialize_region_engine_options"
+        );
     }
 }
