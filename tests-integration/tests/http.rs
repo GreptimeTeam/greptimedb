@@ -3319,6 +3319,187 @@ async fn test_prometheus_skip_wal(distributed: bool) {
     check_http_skip_wal("prometheus", &cases, distributed).await;
 }
 
+// Run against the real HTTP header middleware, both with and without the
+// pending-rows batcher. These paths create physical metric tables separately.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_prometheus_remote_write_float_encoding_hint() {
+    common_telemetry::init_default_ut_logging();
+    for batched in [false, true] {
+        let (app, mut guard) = if batched {
+            setup_test_prom_app_with_frontend_batched(
+                StorageType::File,
+                "prometheus_bss_hint_batched",
+            )
+            .await
+        } else {
+            setup_test_prom_app_with_frontend(StorageType::File, "prometheus_bss_hint_direct").await
+        };
+        let client = TestClient::new(app).await;
+        let request = WriteRequest {
+            timeseries: prom_store::mock_timeseries(),
+            ..Default::default()
+        };
+        let compressed = prom_store::snappy_compress(&request.encode_to_vec()).unwrap();
+        let url = "/v1/prometheus/write?physical_table=bss_hinted_physical";
+
+        let res = client
+            .post(url)
+            .header("Content-Encoding", "snappy")
+            .header(
+                "x-greptime-hints",
+                "experimental_sst_float_field_encoding=byte_stream_split",
+            )
+            .body(compressed.clone())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "batched={batched}");
+        wait_for_data(
+            &client,
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'bss_hinted_physical' AND create_options LIKE '%experimental_sst_float_field_encoding=byte_stream_split%'",
+            "[[1]]",
+        )
+        .await;
+        wait_for_data(&client, "SELECT count(*) FROM metric1", "[[2]]").await;
+        // The option belongs to the physical SST, not to the logical table.
+        validate_data(
+            "prometheus_bss_hint_logical_table",
+            &client,
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'metric1' AND create_options LIKE '%experimental_sst_float_field_encoding=%'",
+            "[[0]]",
+        )
+        .await;
+        flush_table(&client, "metric1").await;
+        validate_data(
+            "prometheus_bss_hint_rows_after_flush",
+            &client,
+            "SELECT count(*) FROM metric1",
+            "[[2]]",
+        )
+        .await;
+
+        // The hint is a first-create preference, not an ALTER or a required
+        // effective encoding on later writes to an existing physical table.
+        let mut next_request = request.clone();
+        next_request.timeseries[0].samples = vec![Sample {
+            value: 9.5,
+            timestamp: 4_000,
+        }];
+        let next_payload = prom_store::snappy_compress(&next_request.encode_to_vec()).unwrap();
+        let res = client
+            .post(url)
+            .header("Content-Encoding", "snappy")
+            .header(
+                "x-greptime-hints",
+                "experimental_sst_float_field_encoding=invalid",
+            )
+            .body(next_payload.clone())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "batched={batched}");
+        wait_for_data(&client, "SELECT count(*) FROM metric1", "[[3]]").await;
+        validate_data(
+            "prometheus_bss_hint_still_enabled",
+            &client,
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'bss_hinted_physical' AND create_options LIKE '%experimental_sst_float_field_encoding=byte_stream_split%'",
+            "[[1]]",
+        )
+        .await;
+
+        // When the request selects a different, missing physical name, existing
+        // logical metrics still write to their original table; do not reject
+        // their samples because the hint for a potential NEW table is invalid.
+        next_request.timeseries[0].samples[0].timestamp = 5_000;
+        let next_payload = prom_store::snappy_compress(&next_request.encode_to_vec()).unwrap();
+        let res = client
+            .post("/v1/prometheus/write?physical_table=bss_unused_physical")
+            .header("Content-Encoding", "snappy")
+            .header(
+                "x-greptime-hints",
+                "experimental_sst_float_field_encoding=invalid",
+            )
+            .body(next_payload)
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "batched={batched}");
+        wait_for_data(&client, "SELECT count(*) FROM metric1", "[[4]]").await;
+        validate_data(
+            "prometheus_bss_hint_no_unused_table",
+            &client,
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'bss_unused_physical'",
+            "[[0]]",
+        )
+        .await;
+
+        // Skipping creation of an unused physical must still align an existing
+        // logical table's millisecond samples to its own microsecond index.
+        let res = client
+            .get(
+                "/v1/sql?db=public&sql=CREATE TABLE bss_microsecond_physical \
+                 (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+                 TIME INDEX (greptime_timestamp)) \
+                 ENGINE = metric WITH ('physical_metric_table' = 'true')",
+            )
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let res = client
+            .get(
+                "/v1/sql?db=public&sql=CREATE TABLE bss_microsecond_logical \
+                 (greptime_timestamp TIMESTAMP(6) NOT NULL, greptime_value DOUBLE NULL, \
+                 \"job\" STRING NULL, TIME INDEX (greptime_timestamp), PRIMARY KEY (\"job\")) \
+                 ENGINE = metric WITH ('on_physical_table' = 'bss_microsecond_physical')",
+            )
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let mut microsecond_request = next_request.clone();
+        microsecond_request.timeseries[0].labels[0].value = "bss_microsecond_logical".to_string();
+        microsecond_request.timeseries[0].samples[0].timestamp = 6_000;
+        microsecond_request.timeseries.truncate(1);
+        let res = client
+            .post("/v1/prometheus/write?physical_table=bss_unused_physical")
+            .header("Content-Encoding", "snappy")
+            .header(
+                "x-greptime-hints",
+                "experimental_sst_float_field_encoding=invalid",
+            )
+            .body(prom_store::snappy_compress(&microsecond_request.encode_to_vec()).unwrap())
+            .send()
+            .await;
+        assert_eq!(res.status(), StatusCode::NO_CONTENT, "batched={batched}");
+        wait_for_data(
+            &client,
+            "SELECT greptime_timestamp, greptime_value FROM bss_microsecond_logical ORDER BY greptime_timestamp",
+            "[[6000000,9.5]]",
+        )
+        .await;
+
+        // A malformed option on a NEW physical table must not be accepted.
+        let mut invalid_request = request.clone();
+        invalid_request.timeseries[0].labels[0].value = "fresh_invalid_metric".to_string();
+        invalid_request.timeseries.truncate(1);
+        let res = client
+            .post("/v1/prometheus/write?physical_table=bss_invalid_physical")
+            .header("Content-Encoding", "snappy")
+            .header(
+                "x-greptime-hints",
+                "experimental_sst_float_field_encoding=invalid",
+            )
+            .body(prom_store::snappy_compress(&invalid_request.encode_to_vec()).unwrap())
+            .send()
+            .await;
+        assert_ne!(res.status(), StatusCode::NO_CONTENT, "batched={batched}");
+        validate_data(
+            "prometheus_bss_hint_invalid_create",
+            &client,
+            "SELECT count(*) FROM information_schema.tables WHERE table_name = 'bss_invalid_physical' OR table_name = 'fresh_invalid_metric'",
+            "[[0]]",
+        )
+        .await;
+        guard.remove_all().await;
+    }
+}
+
 pub async fn test_prometheus_remote_write(store_type: StorageType) {
     common_telemetry::init_default_ut_logging();
     let (app, mut guard) =
