@@ -15,19 +15,19 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use api::v1::meta::{HeartbeatRequest, Role};
+use api::v1::meta::{HeartbeatRequest, Peer, Role};
 use common_meta::datanode::{DatanodeStatKey, DatanodeStatValue, Stat};
 use common_meta::instruction::CacheIdent;
-use common_meta::key::node_address::{NodeAddressKey, NodeAddressValue};
-use common_meta::key::{MetadataKey, MetadataValue};
-use common_meta::peer::Peer;
+use common_meta::key::MetadataKey;
+use common_meta::key::node_address::NodeAddressKey;
 use common_meta::rpc::store::PutRequest;
-use common_telemetry::{error, info, warn};
+use common_telemetry::{error, warn};
 use dashmap::DashMap;
 use snafu::ResultExt;
 use tokio::sync::Mutex;
 
 use crate::error::{self, Result};
+use crate::handler::node_address::{self, NodeAddressUpdater};
 use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
 use crate::metasrv::Context;
 
@@ -74,6 +74,7 @@ const DEFAULT_FLUSH_STATS_FACTOR: usize = 3;
 pub struct CollectStatsHandler {
     stats_cache: DashMap<DatanodeStatKey, Arc<Mutex<EpochStats>>>,
     flush_stats_factor: usize,
+    address_updater: NodeAddressUpdater,
 }
 
 impl Default for CollectStatsHandler {
@@ -87,6 +88,7 @@ impl CollectStatsHandler {
         Self {
             flush_stats_factor: flush_stats_factor.unwrap_or(DEFAULT_FLUSH_STATS_FACTOR),
             stats_cache: DashMap::default(),
+            address_updater: NodeAddressUpdater::default(),
         }
     }
 }
@@ -119,6 +121,7 @@ impl HeartbeatHandler for CollectStatsHandler {
 
         let key: Vec<u8> = key.into();
 
+        let current_epoch = current_stat.node_epoch;
         let refresh = if let Some(epoch) = epoch_stats.epoch() {
             match current_stat.node_epoch.cmp(&epoch) {
                 Ordering::Greater => {
@@ -146,11 +149,13 @@ impl HeartbeatHandler for CollectStatsHandler {
             true
         };
 
-        // Need to refresh the [datanode -> address] mapping
-        if refresh {
-            // Safety: `epoch_stats.stats` is not empty
-            let last = epoch_stats.stats.last().unwrap();
-            rewrite_node_address(ctx, last).await;
+        // Keep address updates and statistics in the original per-node order.
+        // Address acknowledgement is independent of the statistics epoch so a
+        // failed save can be retried by the next heartbeat of the same epoch.
+        if epoch_stats.epoch() == Some(current_epoch)
+            && let Some(stat) = epoch_stats.stats.last()
+        {
+            update_datanode_address(&self.address_updater, ctx, stat).await;
         }
 
         if !refresh && epoch_stats.len() < self.flush_stats_factor {
@@ -178,48 +183,26 @@ impl HeartbeatHandler for CollectStatsHandler {
     }
 }
 
-async fn rewrite_node_address(ctx: &Context, stat: &Stat) {
-    let peer = Peer {
-        id: stat.id,
-        addr: stat.addr.clone(),
-    };
-    let key = NodeAddressKey::with_datanode(peer.id).to_bytes();
-    if let Ok(value) = NodeAddressValue::new(peer.clone()).try_as_raw_value() {
-        let put = PutRequest {
-            key,
-            value,
-            prev_kv: false,
-        };
-
-        match ctx.leader_cached_kv_backend.put(put).await {
-            Ok(_) => {
-                info!(
-                    "Successfully updated datanode `NodeAddressValue`: {:?}",
-                    peer
-                );
-                // broadcast invalidating cache
-                let cache_idents = stat
-                    .table_ids()
-                    .into_iter()
-                    .map(CacheIdent::TableId)
-                    .collect::<Vec<_>>();
-                if let Err(e) = ctx
-                    .cache_invalidator
-                    .invalidate(&Default::default(), &cache_idents)
-                    .await
-                {
-                    error!(e; "Failed to invalidate {} `NodeAddressKey` cache, peer: {:?}", cache_idents.len(), peer);
-                }
-            }
-            Err(e) => {
-                error!(e; "Failed to update datanode `NodeAddressValue`: {:?}", peer);
-            }
-        }
-    } else {
-        warn!(
-            "Failed to serialize datanode `NodeAddressValue`: {:?}",
-            peer
-        );
+/// Applies datanode-specific address and table-cache updates. The caller keeps
+/// its statistics lock so notifications and statistics retain their ordering.
+async fn update_datanode_address(updater: &NodeAddressUpdater, ctx: &Context, stat: &Stat) {
+    let updated = updater
+        .update_if_needed((Role::Datanode, stat.id), stat.node_epoch, || async {
+            let peer = Peer { id: stat.id, addr: stat.addr.clone() };
+            let key = NodeAddressKey::with_datanode(stat.id).to_bytes();
+            node_address::save_node_address(ctx, key, peer).await
+        })
+        .await
+        .inspect_err(|e| {
+            error!(e; "Failed to update datanode address, node: {}, address: {}", stat.id, stat.addr);
+        });
+    if let Ok(true) = updated {
+        let cache_idents = stat
+            .table_ids()
+            .into_iter()
+            .map(CacheIdent::TableId)
+            .collect::<Vec<_>>();
+        node_address::invalidate_address_caches(ctx, stat.id, &cache_idents).await;
     }
 }
 
@@ -552,5 +535,127 @@ mod tests {
             };
             handler.handle(&req, &mut ctx, &mut acc).await.unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn test_persistence_failure_retries_but_notification_failure_does_not() {
+        use crate::handler::collect_stats_handler::CollectStatsHandler;
+        use crate::handler::test_utils::FailingCacheInvalidator;
+        use crate::handler::{HandleControl, HeartbeatAccumulator, HeartbeatHandler};
+        use crate::service::store::cached_kv::LeaderCachedKvBackend;
+        use api::v1::meta::HeartbeatRequest;
+        use common_meta::key::MetadataValue;
+        use common_meta::key::node_address::NodeAddressValue;
+        use common_meta::kv_backend::test_util::MockKvBackendBuilder;
+        use common_meta::rpc::store::PutResponse;
+        let mut ctx = TestEnv::new().ctx();
+        let puts = Arc::new(std::sync::Mutex::new(Vec::<PutRequest>::new()));
+        let backend = MockKvBackendBuilder::default()
+            .put_fn(Arc::new({
+                let puts = puts.clone();
+                move |req: PutRequest| {
+                    let mut puts = puts.lock().unwrap();
+                    puts.push(req);
+                    if puts.len() == 1 {
+                        return common_meta::error::UnexpectedSnafu {
+                            err_msg: "injected persistence failure",
+                        }
+                        .fail();
+                    }
+                    Ok(PutResponse::default())
+                }
+            }) as _)
+            .build()
+            .unwrap();
+        ctx.leader_cached_kv_backend =
+            Arc::new(LeaderCachedKvBackend::with_always_leader(Arc::new(backend)));
+        let invalidator = Arc::new(FailingCacheInvalidator::default());
+        ctx.cache_invalidator = invalidator.clone();
+        let handler = CollectStatsHandler::default();
+        let mut stat = Stat {
+            id: 101,
+            addr: "dn-original".into(),
+            node_epoch: 7,
+            ..Default::default()
+        };
+        let req = HeartbeatRequest::default();
+
+        // A backend error must not interrupt subsequent heartbeat handlers.
+        assert!(matches!(
+            handler
+                .handle(
+                    &req,
+                    &mut ctx,
+                    &mut HeartbeatAccumulator {
+                        stat: Some(stat.clone()),
+                        ..Default::default()
+                    }
+                )
+                .await
+                .unwrap(),
+            HandleControl::Continue
+        ));
+        assert_eq!(puts.lock().unwrap().len(), 1);
+        assert_eq!(invalidator.attempts(), 0);
+
+        let stats_key: Vec<u8> = common_meta::datanode::DatanodeStatKey { node_id: 101 }.into();
+        assert!(ctx.in_memory.get(&stats_key).await.unwrap().is_some());
+
+        // Same epoch retries persistence using the current heartbeat's address.
+        stat.addr = "dn-retry".into();
+        handler
+            .handle(
+                &req,
+                &mut ctx,
+                &mut HeartbeatAccumulator {
+                    stat: Some(stat.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        {
+            let puts = puts.lock().unwrap();
+            assert_eq!(puts.len(), 2);
+            assert_eq!(puts[1].key, NodeAddressKey::with_datanode(101).to_bytes());
+            assert_eq!(
+                NodeAddressValue::try_from_raw_value(&puts[1].value)
+                    .unwrap()
+                    .peer
+                    .addr,
+                "dn-retry"
+            );
+        }
+        assert_eq!(invalidator.attempts(), 1);
+
+        // Notification remains best-effort: its failure neither rewrites nor retries.
+        handler
+            .handle(
+                &req,
+                &mut ctx,
+                &mut HeartbeatAccumulator {
+                    stat: Some(stat.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(puts.lock().unwrap().len(), 2);
+        assert_eq!(invalidator.attempts(), 1);
+
+        stat.node_epoch = 8;
+        handler
+            .handle(
+                &req,
+                &mut ctx,
+                &mut HeartbeatAccumulator {
+                    stat: Some(stat.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(puts.lock().unwrap().len(), 3);
+        assert_eq!(invalidator.attempts(), 2);
     }
 }
