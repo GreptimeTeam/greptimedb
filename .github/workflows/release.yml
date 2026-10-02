@@ -578,7 +578,17 @@ jobs:
 
   release-cn-artifacts:
     name: Release artifacts to CN region
-    if: ${{ inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule' }}
+    # A non-blocking query regression failure must not skip downstream releases.
+    if: |
+      always() &&
+      (inputs.release_images || github.event_name == 'push' || github.event_name == 'schedule') &&
+      needs.allocate-runners.result == 'success' &&
+      needs.build-linux-amd64-artifacts.result == 'success' &&
+      needs.build-linux-arm64-artifacts.result == 'success' &&
+      needs.build-linux-riscv64-artifacts.result == 'success' &&
+      needs.build-macos-artifacts.result == 'success' &&
+      needs.build-windows-artifacts.result == 'success' &&
+      needs.release-images-to-dockerhub.result == 'success'
     needs: [ # The job have to wait for all the artifacts are built.
       allocate-runners,
       build-linux-amd64-artifacts,
@@ -736,7 +746,21 @@ jobs:
 
   bump-downstream-repo-versions:
     name: Bump downstream repo versions
-    if: ${{ github.event_name == 'schedule' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref_type == 'tag' && !contains(github.ref_name, 'nightly')) && (needs.allocate-runners.outputs.is-current-version-stable == 'true' && needs.allocate-runners.outputs.is-current-version-latest == 'true') }}
+    # A non-blocking query regression failure must not skip downstream updates.
+    if: |
+      always() &&
+      needs.allocate-runners.result == 'success' &&
+      needs.publish-github-release.result == 'success' &&
+      (
+        github.event_name == 'schedule' ||
+        (
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+          github.ref_type == 'tag' &&
+          !contains(github.ref_name, 'nightly') &&
+          needs.allocate-runners.outputs.is-current-version-stable == 'true' &&
+          needs.allocate-runners.outputs.is-current-version-latest == 'true'
+        )
+      )
     needs: [allocate-runners, publish-github-release]
     runs-on: ubuntu-latest
     # Permission reference: https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs
