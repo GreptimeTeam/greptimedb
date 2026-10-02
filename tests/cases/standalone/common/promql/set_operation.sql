@@ -33,6 +33,38 @@ create table vector_matching_a(
 insert into vector_matching_a values
     (3000000, "x", 10);
 
+-- Set operators preserve complete LHS samples; a missing or empty RHS has no matches.
+-- PromQL semantics: absent RHS => AND empty, UNLESS all LHS samples.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} and unknown_metric;
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless unknown_metric;
+
+-- A present metric with no samples in this evaluation window is distinct from a missing table.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless cpu_count;
+
+-- Different nonempty label sets do not match by intersecting their labels.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless sum by (job) (http_requests{g="production"});
+
+-- Explicit matching can use a key absent from one operand; it is empty on that side.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless on(instance) sum(http_requests{g="production"});
+
+-- ignoring(g) leaves instance/job as match keys, so each canary series is retained.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g) sum(http_requests{g="production"});
+
+-- A live vector unless its aggregate produces no matching full label set.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless sum(http_requests);
+
+-- OR is a control: it should retain the left values and add the non-overlapping RHS.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="production"};
+
 -- eval instant at 50m http_requests{group="canary"} and http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300
 -- 	http_requests{group="canary", instance="0", job="app-server"} 700

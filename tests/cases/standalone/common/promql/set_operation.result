@@ -42,6 +42,110 @@ insert into vector_matching_a values
 
 Affected Rows: 1
 
+-- Set operators preserve complete LHS samples; a missing or empty RHS has no matches.
+-- PromQL semantics: absent RHS => AND empty, UNLESS all LHS samples.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} and unknown_metric;
+
++----+-----+----------+---+----------------+
+| ts | job | instance | g | greptime_value |
++----+-----+----------+---+----------------+
++----+-----+----------+---+----------------+
+
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless unknown_metric;
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- A present metric with no samples in this evaluation window is distinct from a missing table.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless cpu_count;
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- Different nonempty label sets do not match by intersecting their labels.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless sum by (job) (http_requests{g="production"});
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- Explicit matching can use a key absent from one operand; it is empty on that side.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless on(instance) sum(http_requests{g="production"});
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- ignoring(g) leaves instance/job as match keys, so each canary series is retained.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless ignoring(g) sum(http_requests{g="production"});
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- A live vector unless its aggregate produces no matching full label set.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} unless sum(http_requests);
+
++---------------------+-----+----------+--------+----------------+
+| ts                  | job | instance | g      | greptime_value |
++---------------------+-----+----------+--------+----------------+
+| 1970-01-01T00:50:00 | api | 0        | canary | 300.0          |
+| 1970-01-01T00:50:00 | api | 1        | canary | 400.0          |
+| 1970-01-01T00:50:00 | app | 0        | canary | 700.0          |
+| 1970-01-01T00:50:00 | app | 1        | canary | 800.0          |
++---------------------+-----+----------+--------+----------------+
+
+-- OR is a control: it should retain the left values and add the non-overlapping RHS.
+-- SQLNESS SORT_RESULT 3 1
+tql eval (3000, 3000, '1s') http_requests{g="canary"} or http_requests{g="production"};
+
++---------------------+------------+----------------+----------+-----+
+| ts                  | g          | greptime_value | instance | job |
++---------------------+------------+----------------+----------+-----+
+| 1970-01-01T00:50:00 | canary     | 300.0          | 0        | api |
+| 1970-01-01T00:50:00 | canary     | 400.0          | 1        | api |
+| 1970-01-01T00:50:00 | canary     | 700.0          | 0        | app |
+| 1970-01-01T00:50:00 | canary     | 800.0          | 1        | app |
+| 1970-01-01T00:50:00 | production | 100.0          | 0        | api |
+| 1970-01-01T00:50:00 | production | 200.0          | 1        | api |
+| 1970-01-01T00:50:00 | production | 500.0          | 0        | app |
+| 1970-01-01T00:50:00 | production | 600.0          | 1        | app |
++---------------------+------------+----------------+----------+-----+
+
 -- eval instant at 50m http_requests{group="canary"} and http_requests{instance="0"}
 -- 	http_requests{group="canary", instance="0", job="api-server"} 300
 -- 	http_requests{group="canary", instance="0", job="app-server"} 700
