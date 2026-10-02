@@ -39,6 +39,9 @@ remote datanodes via `operator`/`client`.
 - **SQL query** (`instance.rs`): `do_query_inner` handles parsing, interceptors,
   permission checks, timeout/cancellation, and delegates planning/execution to
   `StatementExecutor`. Distributed scans enter through `region_query.rs`.
+- **Logical-table batch DDL** (`instance.rs`): dedicated SQL handler → bounded
+  parse/interception → all-member permissions → operator CREATE preparation →
+  one logical-table batch procedure. Keep pre-submission validation side-effect free.
 - **Insert** (`instance/grpc.rs`): `handle_inserts` / `handle_row_inserts` →
   `check_permission` → `operator`'s `Inserter` (schema validation, optional
   auto-create, partition routing, meter admission) → local `RegionServer`

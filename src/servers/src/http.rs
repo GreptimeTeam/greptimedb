@@ -681,7 +681,12 @@ impl HttpServerBuilder {
     }
 
     pub fn with_sql_handler(self, sql_handler: ServerSqlQueryHandlerRef) -> Self {
-        let sql_router = HttpServer::route_sql(ApiState { sql_handler });
+        let batch_body_limit = if self.options.body_limit.0 == 0 {
+            4 * 1024 * 1024
+        } else {
+            (self.options.body_limit.0 as usize).min(4 * 1024 * 1024)
+        };
+        let sql_router = HttpServer::route_sql(ApiState { sql_handler }, batch_body_limit);
 
         Self {
             router: self
@@ -1390,15 +1395,23 @@ impl HttpServer {
             .with_state(log_state)
     }
 
-    fn route_sql<S>(api_state: ApiState) -> Router<S> {
+    fn route_sql<S>(api_state: ApiState, batch_body_limit: usize) -> Router<S> {
         Router::new()
             .route(
                 "/capabilities",
-                routing::get(|| async {
-                    axum::Json(
-                        serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1}),
-                    )
+                routing::get(|State(state): State<ApiState>| async move {
+                    let mut capabilities =
+                        serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1});
+                    if state.sql_handler.supports_metric_batch_ddl() {
+                        capabilities["metric_batch_ddl"] = serde_json::json!(1);
+                    }
+                    axum::Json(capabilities)
                 }),
+            )
+            .route(
+                "/ddl/logical-tables",
+                routing::post(handler::create_logical_tables)
+                    .layer(DefaultBodyLimit::max(batch_body_limit)),
             )
             .route(
                 "/sql",
@@ -1939,6 +1952,15 @@ mod test {
                 client.get("/v1/capabilities").send().await.status(),
                 StatusCode::UNAUTHORIZED
             );
+            assert_eq!(
+                client
+                    .post("/v1/ddl/logical-tables")
+                    .form(&[("sql", "SELECT 1")])
+                    .send()
+                    .await
+                    .status(),
+                StatusCode::UNAUTHORIZED
+            );
             let response = client
                 .get("/v1/capabilities")
                 .header("Authorization", "Basic dXNlcjpwYXNzd29yZA==")
@@ -1949,6 +1971,84 @@ mod test {
                 response.json::<serde_json::Value>().await,
                 serde_json::json!({"metric_packed_import": 1, "metric_packed_export": 1})
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn logical_ddl_form_limits_and_unsupported_handler() {
+        use axum::body::{Body, to_bytes};
+        use tower::ServiceExt;
+
+        async fn post_form(app: Router, body: String) -> (StatusCode, serde_json::Value) {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method(Method::POST)
+                        .uri("/v1/ddl/logical-tables")
+                        .header("Content-Type", "application/x-www-form-urlencoded")
+                        .body(Body::from(body))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let status = response.status();
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            (status, serde_json::from_slice(&body).unwrap())
+        }
+
+        for limit in [0, 64] {
+            let (tx, _rx) = mpsc::channel(1);
+            let server = HttpServerBuilder::new(HttpOptions {
+                body_limit: ReadableSize(limit),
+                ..Default::default()
+            })
+            .with_sql_handler(Arc::new(DummyInstance { _tx: tx }))
+            .build();
+            let app = server.build(server.make_app()).unwrap();
+            let client = TestClient::new(app.clone()).await;
+            assert_eq!(
+                client.get("/v1/ddl/logical-tables").send().await.status(),
+                StatusCode::METHOD_NOT_ALLOWED
+            );
+            let small = client
+                .post("/v1/ddl/logical-tables")
+                .form(&[("sql", "CREATE TABLE t")])
+                .send()
+                .await;
+            assert_eq!(
+                small.json::<serde_json::Value>().await["code"],
+                common_error::status_code::StatusCode::Unsupported as u32
+            );
+            let (_, body) = post_form(
+                app.clone(),
+                if limit == 0 {
+                    format!("sql={}", "%20".repeat(1024 * 1024))
+                } else {
+                    "sql=".to_string() + &" ".repeat(65)
+                },
+            )
+            .await;
+            let code = body["code"].clone();
+            assert_eq!(
+                code,
+                if limit == 0 {
+                    common_error::status_code::StatusCode::Unsupported as u32
+                } else {
+                    common_error::status_code::StatusCode::InvalidArguments as u32
+                }
+            );
+            for body in [
+                format!("sql={}", "x".repeat(1024 * 1024 + 1)),
+                format!("sql={}", "%C3%A9".repeat(512 * 1024 + 1)),
+                format!("sql=CREATE+TABLE+t&padding={}", "x".repeat(4 * 1024 * 1024)),
+            ] {
+                let (status, body) = post_form(app.clone(), body).await;
+                assert_eq!(status, StatusCode::BAD_REQUEST);
+                assert_eq!(
+                    body["code"],
+                    common_error::status_code::StatusCode::InvalidArguments as u32
+                );
+            }
         }
     }
 

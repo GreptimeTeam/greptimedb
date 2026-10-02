@@ -229,6 +229,80 @@ pub async fn sql(
     resp.with_execution_time(start.elapsed().as_millis() as u64)
 }
 
+/// Form parameters for the bounded logical-table DDL operation.
+#[derive(Deserialize)]
+pub struct LogicalTableDdl {
+    sql: Option<String>,
+    db: Option<String>,
+}
+
+/// Creates one batch of Metric logical tables using the normal v1 response.
+pub async fn create_logical_tables(
+    State(state): State<ApiState>,
+    Extension(mut query_ctx): Extension<QueryContext>,
+    form: std::result::Result<Form<LogicalTableDdl>, FormRejection>,
+) -> HttpResponse {
+    let start = Instant::now();
+    let form = match form {
+        Ok(Form(form)) => form,
+        Err(_) => {
+            return HttpResponse::Error(ErrorResponse::from_error_message(
+                StatusCode::InvalidArguments,
+                "invalid or oversized form body".to_string(),
+            ));
+        }
+    };
+    let Some(sql) = form.sql else {
+        return HttpResponse::Error(ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "sql parameter is required.".to_string(),
+        ));
+    };
+    if sql.len() > crate::query_handler::sql::MAX_LOGICAL_TABLE_DDL_BYTES {
+        return HttpResponse::Error(ErrorResponse::from_error_message(
+            StatusCode::InvalidArguments,
+            "logical-table DDL exceeds 1 MiB".to_string(),
+        ));
+    }
+    if let Some(db) = form.db {
+        let (catalog, schema) = parse_catalog_and_schema_from_db_string(&db);
+        query_ctx.set_current_catalog(&catalog);
+        query_ctx.set_current_schema(&schema);
+    }
+    query_ctx.set_channel(Channel::HttpSql);
+    let query_ctx = Arc::new(query_ctx);
+    if let Some((status, msg)) = validate_schema(state.sql_handler.clone(), query_ctx.clone()).await
+    {
+        return HttpResponse::Error(ErrorResponse::from_error_message(status, msg));
+    }
+    let outputs = match state
+        .sql_handler
+        .create_logical_tables(&sql, query_ctx)
+        .await
+    {
+        Ok(outputs)
+            if outputs
+                .iter()
+                .all(|output| matches!(output.data, OutputData::AffectedRows(0))) =>
+        {
+            outputs.into_iter().map(Ok).collect()
+        }
+        other => {
+            let status = match other {
+                Err(error) => error.status_code(),
+                Ok(_) => StatusCode::Internal,
+            };
+            return HttpResponse::Error(
+                ErrorResponse::from_error_message(status, "logical-table batch failed".to_string())
+                    .with_execution_time(start.elapsed().as_millis() as u64),
+            );
+        }
+    };
+    GreptimedbV1Response::from_output(outputs)
+        .await
+        .with_execution_time(start.elapsed().as_millis() as u64)
+}
+
 /// Limits each statement's response before collecting batches and converting rows.
 fn limit_output_rows(output: Output, limit: usize) -> Result<Output> {
     let mut remaining = limit;
