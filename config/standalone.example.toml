@@ -886,7 +886,7 @@ schedule_compaction_after_edit = true
 default_flat_format = true
 
 ## Whether to enable the experimental two-phase mode for eligible metric series scans.
-experimental_series_scan_v2 = true
+experimental_series_scan_v2 = false
 
 ## The options for index in Mito engine.
 [region_engine.mito.index]
