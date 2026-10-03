@@ -26,8 +26,18 @@ on:
           - M
         default: S
         required: true
+      compare_greptimedb:
+        description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
+        type: boolean
+        default: false
+        required: false
+      baseline_greptimedb_tag:
+        description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
+        type: string
+        default: v1.2.1
+        required: false
       greptimedb_tag:
-        description: Docker Hub greptime/greptimedb tag
+        description: Candidate Docker Hub greptime/greptimedb tag
         type: string
         default: latest
         required: true
@@ -46,9 +56,9 @@ on:
         type: string
         required: false
       runtime_image:
-        description: Aliyun runtime image (tag or digest reference)
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260917-8111034e@sha256:ce9dee2abb1e70f907a09ea01854904a91cc97748b0c4ef6f33d9ec34044bec0
+        default: auto
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -89,12 +99,14 @@ on:
 permissions:
   contents: read
 env:
+  COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   PROFILE: ${{ inputs.dataset }}
   GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   CLICKHOUSE_TAG: ${{ inputs.clickhouse_tag }}
   VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
   O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:e4528c7bb06a@sha256:5ff78311fc48719855c633b067590c4e1c495b0676b0b1ad5420818c047a3079' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:e4528c7bb06a@sha256:5ff78311fc48719855c633b067590c4e1c495b0676b0b1ad5420818c047a3079' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -118,6 +130,12 @@ jobs:
         with:
           path: greptimedb
           persist-credentials: false
+      - name: Validate version comparison
+        env:
+          RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
+        run: |
+          python3 greptimedb/tests/perf/test_benchmark_version_comparison.py
+          python3 greptimedb/.github/scripts/benchmark-version-comparison.py validate
       - name: Resolve CI runner
         id: runner
         run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
@@ -126,6 +144,12 @@ jobs:
           python3 greptimedb/tests/perf/test_aliyun_ecs_runner_scripts.py
           python3 greptimedb/tests/perf/test_ci_runner_scripts.py
           python3 greptimedb/tests/perf/test_agent_observability_summary.py
+      - name: Check runtime supports shared version-comparison data
+        if: inputs.compare_greptimedb
+        run: |
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
+          docker run --rm --entrypoint grep "$RUNTIME_IMAGE" -q -- '--data-root)' /opt/o11ybench/scripts/run-agent-observability.sh \
+            || { echo 'Comparison requires a runtime with --data-root support'; exit 1; }
       - name: Validate requested benchmark
         id: inputs
         shell: bash
@@ -262,11 +286,11 @@ jobs:
         run: |
           set -euo pipefail
           actual=
-          [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
+          [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
           images='{}'
           resolve_image() {
             local target=$1 reference=$2 variable=$3 metadata resolved revision
-            docker pull "$reference"
+            bash greptimedb/.github/scripts/pull-benchmark-image.sh "$reference"
             metadata=$(docker image inspect "$reference")
             resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
             if [[ "$target" == runtime ]]; then
@@ -289,6 +313,9 @@ jobs:
               victorialogs) resolve_image "$target" "victoriametrics/victoria-logs:$VICTORIALOGS_TAG" VICTORIALOGS_IMAGE ;;
             esac
           done
+          if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+            resolve_image greptimedb-baseline "greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG" BASELINE_GREPTIMEDB_IMAGE
+          fi
           jq -n --arg sha "$actual" --arg targets "$TARGETS" --arg profile "$PROFILE" \
             --arg cpus "$DB_CPUS" --arg memory "$DB_MEMORY" --argjson images "$images" \
             --arg provider "$PROVIDER" --arg instance_type "$INSTANCE_TYPE" --argjson disk_gib "$SYSTEM_DISK_GIB" \
@@ -312,6 +339,15 @@ jobs:
             --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE" \
             --root "$ARTIFACT_ROOT" --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY"
           cp "$MANIFEST_PATH" "$ARTIFACT_ROOT/run-manifest.json"
+      - name: Load and benchmark baseline GreptimeDB
+        id: baseline_greptimedb
+        if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.compare_greptimedb }}
+        run: |-
+          GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage target --execute \
+            --owner "$OWNER-base" --runtime-image "$RESOLVED_RUNTIME_IMAGE" --root "$ARTIFACT_ROOT/baseline" --data-root "$ARTIFACT_ROOT" \
+            --profile "$PROFILE" --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+            --target greptimedb --image "$BASELINE_GREPTIMEDB_IMAGE" \
+            --greptimedb-http-port "$GREPTIMEDB_HTTP_PORT" --greptimedb-grpc-port "$GREPTIMEDB_GRPC_PORT"
       - name: Load and benchmark greptimedb
         id: greptimedb
         if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
@@ -357,6 +393,13 @@ jobs:
             GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage cleanup --execute \
               --owner "$OWNER" --root "$ARTIFACT_ROOT"
           fi
+      - name: Clean up baseline containers
+        if: always() && inputs.compare_greptimedb
+        run: |-
+          if [[ -f o11ybench/scripts/run-agent-observability.sh ]]; then
+            GITHUB_STEP_SUMMARY= bash o11ybench/scripts/run-agent-observability.sh --stage cleanup --execute \
+              --owner "$OWNER-base" --root "$ARTIFACT_ROOT/baseline"
+          fi
       - name: Benchmark summary
         if: always()
         run: |
@@ -367,6 +410,16 @@ jobs:
         run: |
           python3 greptimedb/.github/scripts/agent-observability-summary.py \
             --root "$ARTIFACT_ROOT" --targets "$TARGETS" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+      - name: Baseline load / lifecycle summary
+        if: always() && inputs.compare_greptimedb
+        run: |
+          echo '## Baseline GreptimeDB' >> "$GITHUB_STEP_SUMMARY"
+          python3 greptimedb/.github/scripts/agent-observability-summary.py \
+            --root "$ARTIFACT_ROOT/baseline" --targets greptimedb --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+      - name: GreptimeDB version comparison
+        if: always() && inputs.compare_greptimedb
+        run: |
+          python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind agent --root "$ARTIFACT_ROOT" >> "$GITHUB_STEP_SUMMARY"
       - name: Upload results (no dataset)
         if: always()
         uses: actions/upload-artifact@v4

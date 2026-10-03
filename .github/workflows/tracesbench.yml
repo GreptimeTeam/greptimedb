@@ -2,6 +2,36 @@ name: Tracesbench
 on:
   workflow_dispatch:
     inputs:
+      run_greptimedb:
+        description: Run GreptimeDB
+        type: boolean
+        default: true
+        required: false
+      run_victoriatraces:
+        description: Run VictoriaTraces
+        type: boolean
+        default: false
+        required: false
+      run_tempo:
+        description: Run Tempo
+        type: boolean
+        default: false
+        required: false
+      compare_greptimedb:
+        description: Compare baseline and candidate sequentially on the same host (adds one full GreptimeDB run)
+        type: boolean
+        default: false
+        required: false
+      baseline_greptimedb_tag:
+        description: Baseline Docker Hub greptime/greptimedb tag; required when comparison is enabled
+        type: string
+        default: v1.2.1
+        required: false
+      greptimedb_tag:
+        description: Candidate Docker Hub greptime/greptimedb tag
+        type: string
+        default: latest
+        required: true
       dataset:
         description: Dataset profile (main is experimental; native queries may exceed memory limits)
         type: choice
@@ -9,9 +39,9 @@ on:
         default: sanity
         required: true
       runtime_image:
-        description: Aliyun runtime image (tag or digest reference)
+        description: 'Runtime image: auto = AWS ECR Public or Aliyun ACR by provider; explicit tag/digest overrides'
         type: string
-        default: greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:20260928-4e52d0b0@sha256:39d2d87593788e0c47a54768f6323679b8e03d7dc72a8158a9b22cf29f883baa
+        default: auto
         required: true
       provider:
         description: Cloud provider for the benchmark runner
@@ -20,7 +50,7 @@ on:
         default: Aliyun
         required: true
       instance_type:
-        description: 'Instance type; auto = Aliyun: ecs.c9i.2xlarge, AWS: c7i.2xlarge (both 8 vCPU / 16 GiB). Enter a specific type to override.'
+        description: 'Instance type; auto = Aliyun: ecs.g9i.2xlarge, AWS: m7i.2xlarge (both 8 vCPU / 32 GiB). Enter a specific type to override.'
         type: string
         default: auto
         required: true
@@ -45,33 +75,46 @@ on:
         default: 8
         required: true
       db_cpus:
-        description: CPU limit per DB container
+        description: CPU limit per DB container (default 8 vCPU)
         type: string
         default: '8'
         required: true
       db_memory:
-        description: Memory limit per DB container
+        description: Memory limit per DB container (default 32 GiB; shared host also runs the runtime and runner)
         type: string
-        default: 16g
+        default: 32g
+        required: true
+      load_workers:
+        description: CPU workers for parallel import reading/parsing across all engines (separate from write concurrency)
+        type: number
+        default: 4
+        required: true
+      query_timeout_seconds:
+        description: Timeout per query request in seconds (correctness, warmup and measurement; 1..3600)
+        type: number
+        default: 300
         required: true
       runtime_cpus:
-        description: CPU limit per runtime container
+        description: CPU limit per runtime container (0 = unrestricted)
         type: string
-        default: '2'
+        default: '0'
         required: true
       runtime_memory:
-        description: Memory limit per runtime container (separate from DB memory)
+        description: Memory limit per runtime container (0 = unrestricted; separate from DB memory)
         type: string
-        default: 4g
+        default: '0'
         required: true
 permissions:
   contents: read
 env:
+  COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+  BASELINE_GREPTIMEDB_TAG: ${{ inputs.baseline_greptimedb_tag }}
   DATASET: ${{ inputs.dataset }}
+  GREPTIMEDB_TAG: ${{ inputs.greptimedb_tag }}
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -79,12 +122,18 @@ env:
   JANITOR_TTL_HOURS: ${{ inputs.janitor_ttl_hours }}
   DB_CPUS: ${{ inputs.db_cpus }}
   DB_MEMORY: ${{ inputs.db_memory }}
+  QUERY_TIMEOUT_SECONDS: ${{ inputs.query_timeout_seconds }}
+  LOAD_WORKERS: ${{ inputs.load_workers }}
 jobs:
   validate:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
       instance_type: ${{ steps.runner.outputs.instance_type }}
+      targets: ${{ steps.inputs.outputs.targets }}
+      greptimedb: ${{ steps.inputs.outputs.greptimedb }}
+      victoriatraces: ${{ steps.inputs.outputs.victoriatraces }}
+      tempo: ${{ steps.inputs.outputs.tempo }}
       system_disk_gib: ${{ steps.runtime.outputs.system_disk_gib }}
       runtime_image: ${{ steps.runtime.outputs.runtime_image }}
       o11ybench_ref: ${{ steps.runtime.outputs.o11ybench_ref }}
@@ -93,9 +142,44 @@ jobs:
       with:
         path: greptimedb
         persist-credentials: false
+    - name: Validate selected targets
+      id: inputs
+      env:
+        greptimedb: ${{ inputs.run_greptimedb }}
+        victoriatraces: ${{ inputs.run_victoriatraces }}
+        tempo: ${{ inputs.run_tempo }}
+      run: |
+        set -euo pipefail
+        selected=
+        for target in greptimedb victoriatraces tempo; do
+          enabled=${!target}
+          [[ "$enabled" == true || "$enabled" == false ]]
+          printf '%s=%s\n' "$target" "$enabled" >> "$GITHUB_OUTPUT"
+          if [[ "$enabled" == true ]]; then selected="${selected:+$selected,}$target"; fi
+        done
+        [[ -n "$selected" ]] || { echo 'Select at least one database' >&2; exit 1; }
+        if [[ "$greptimedb" == true ]]; then
+          [[ "$GREPTIMEDB_TAG" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]] || { echo 'Invalid GreptimeDB image tag' >&2; exit 1; }
+        fi
+        printf 'targets=%s\n' "$selected" >> "$GITHUB_OUTPUT"
+    - name: Validate version comparison
+      env:
+        RUN_GREPTIMEDB: ${{ inputs.run_greptimedb }}
+      run: |
+        python3 greptimedb/tests/perf/test_benchmark_version_comparison.py
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py validate
     - name: Resolve CI runner
       id: runner
-      run: python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$REQUESTED_INSTANCE_TYPE"
+      run: |
+        set -euo pipefail
+        instance_type="$REQUESTED_INSTANCE_TYPE"
+        if [[ "$instance_type" == auto ]]; then
+          case "$PROVIDER" in
+            Aliyun) instance_type=ecs.g9i.2xlarge ;;
+            AWS) instance_type=m7i.2xlarge ;;
+          esac
+        fi
+        python3 greptimedb/.github/scripts/ci-runner-config.py --provider "$PROVIDER" --instance-type "$instance_type"
     - name: Validate budgets and shared runtime
       id: runtime
       run: |
@@ -115,19 +199,34 @@ jobs:
         ((BENCHMARK_TIMEOUT_MINUTES <= 360 && JANITOR_TTL_HOURS <= 168))
         ((JANITOR_TTL_HOURS * 60 >= BENCHMARK_TIMEOUT_MINUTES + 120))
         [[ "$DB_CPUS" =~ ^[1-9][0-9]*$ && "$DB_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
-        [[ "$RUNTIME_CPUS" =~ ^[1-9][0-9]*$ && "$RUNTIME_MEMORY" =~ ^[1-9][0-9]*[mMgG]$ ]]
-        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* ]]
-        docker pull "$RUNTIME_IMAGE"
+        [[ "$RUNTIME_CPUS" =~ ^(0|[1-9][0-9]*)$ && "$RUNTIME_MEMORY" =~ ^(0|[1-9][0-9]*[mMgG])$ ]]
+        [[ "$QUERY_TIMEOUT_SECONDS" =~ ^[1-9][0-9]{0,3}$ ]]
+        ((QUERY_TIMEOUT_SECONDS <= 3600))
+        [[ "$LOAD_WORKERS" =~ ^[1-9][0-9]{0,2}$ ]]
+        ((LOAD_WORKERS <= 256))
+        runtime_limits=()
+        [[ "$RUNTIME_CPUS" == 0 ]] || runtime_limits+=(--cpus "$RUNTIME_CPUS")
+        [[ "$RUNTIME_MEMORY" == 0 ]] || runtime_limits+=(--memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY")
+        [[ "$RUNTIME_IMAGE" == *.cr.aliyuncs.com/* || "$RUNTIME_IMAGE" == public.ecr.aws/* ]]
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
         metadata=$(docker image inspect "$RUNTIME_IMAGE")
         resolved=$(jq -er '.[0].RepoDigests[0]' <<< "$metadata")
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          docker run --rm "$resolved" scripts/run_tracesbench_docker.py --help | grep -q -- '--data-root' \
+            || { echo 'Comparison requires a runtime with --data-root support'; exit 1; }
+        fi
         revision=$(jq -er '.[0].Config.Labels["org.opencontainers.image.revision"]' <<< "$metadata")
         [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
         # Refuse runtimes without the trace runner and its validated dataset/report contract.
-        help=$(docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/run_tracesbench_docker.py --help)
+        help=$(docker run --rm "${runtime_limits[@]}" "$resolved" scripts/run_tracesbench_docker.py --help)
         grep -F -- '--dataset {sanity,preflight,main}' <<< "$help"
         grep -F -- '--runtime-cpus' <<< "$help"
         grep -F -- '--runtime-memory' <<< "$help"
-        docker run --rm --cpus "$RUNTIME_CPUS" --memory "$RUNTIME_MEMORY" --memory-swap "$RUNTIME_MEMORY" "$resolved" scripts/check_run_tracesbench_docker.py
+        grep -F -- '--query-timeout-seconds' <<< "$help"
+        grep -F -- '--load-workers' <<< "$help"
+        grep -F -- '--targets' <<< "$help"
+        grep -F -- '--greptimedb-image' <<< "$help"
+        docker run --rm "${runtime_limits[@]}" "$resolved" scripts/check_run_tracesbench_docker.py
         printf 'runtime_image=%s\no11ybench_ref=%s\nsystem_disk_gib=%s\n' "$resolved" "$revision" "$SYSTEM_DISK_GIB" >> "$GITHUB_OUTPUT"
   provision:
     needs: validate
@@ -190,6 +289,7 @@ jobs:
     runs-on: ${{ needs.provision.outputs.label }}
     timeout-minutes: ${{ fromJSON(format('{0}', inputs.benchmark_timeout_minutes)) }}
     env:
+      TARGETS: ${{ needs.validate.outputs.targets }}
       RESOLVED_RUNTIME_IMAGE: ${{ needs.validate.outputs.runtime_image }}
       RESOLVED_O11YBENCH_REF: ${{ needs.validate.outputs.o11ybench_ref }}
       RUN_ROOT: ${{ inputs.benchmark_root }}/tracesbench-${{ github.run_id }}-${{ github.run_attempt }}
@@ -224,36 +324,71 @@ jobs:
           available=$(df -Pk "$path" | awk 'NR == 2 {print $4}')
           ((available >= minimum_gib * 1024 * 1024)) || { echo "Need at least $minimum_gib GiB free on $path"; exit 1; }
         done
-        docker pull "$RESOLVED_RUNTIME_IMAGE"
+        bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RESOLVED_RUNTIME_IMAGE"
         docker image inspect "$RESOLVED_RUNTIME_IMAGE" > "$METADATA_ROOT/runtime-image.json"
         test "$(jq -r '.[0].Config.Labels["org.opencontainers.image.revision"]' "$METADATA_ROOT/runtime-image.json")" = "$RESOLVED_O11YBENCH_REF"
-    # Preserve the pinned catalog images and require all three targets in the report.
+    - name: Pull database images before generating data
+      run: |
+        set -euo pipefail
+        IFS=, read -ra targets <<< "$TARGETS"
+        for target in "${targets[@]}"; do
+          if [[ "$target" == greptimedb ]]; then
+            image="greptime/greptimedb:$GREPTIMEDB_TAG"
+          else
+            image=$(jq -er '.target_identity.image | select(test("@sha256:[a-f0-9]{64}$"))' \
+              "o11ybench/workloads/tracesbench/catalogs/$target.json")
+          fi
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$image"
+          docker image inspect "$image" > "$METADATA_ROOT/$target-image.json"
+          if [[ "$target" == greptimedb ]]; then
+            resolved=$(jq -er '.[0].RepoDigests[0] | select(test("@sha256:[a-f0-9]{64}$"))' "$METADATA_ROOT/$target-image.json")
+            printf 'GREPTIMEDB_IMAGE=%s\n' "$resolved" >> "$GITHUB_ENV"
+          fi
+        done
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          image="greptime/greptimedb:$BASELINE_GREPTIMEDB_TAG"
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$image"
+          docker image inspect "$image" > "$METADATA_ROOT/greptimedb-baseline-image.json"
+          resolved=$(jq -er '.[0].RepoDigests[0] | select(test("@sha256:[a-f0-9]{64}$"))' "$METADATA_ROOT/greptimedb-baseline-image.json")
+          printf 'BASELINE_GREPTIMEDB_IMAGE=%s\n' "$resolved" >> "$GITHUB_ENV"
+        fi
     - name: Generate selected dataset once
+      id: generate
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage generate \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
-    - name: GreptimeDB load, correctness and benchmark
+    - name: Baseline GreptimeDB load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' && inputs.compare_greptimedb }}
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 --greptimedb-image "$BASELINE_GREPTIMEDB_IMAGE" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
+          --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
+          --root "$RUN_ROOT/baseline" --data-root "$RUN_ROOT" --owner "$OWNER-base" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: GreptimeDB load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.greptimedb == 'true' }}
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target greptimedb --port 14000 --greptimedb-image "$GREPTIMEDB_IMAGE" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: VictoriaTraces load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.victoriatraces == 'true' }}
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target victoriatraces --port 19428 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Tempo load, correctness and benchmark
+      if: ${{ !cancelled() && steps.generate.outcome == 'success' && needs.validate.outputs.tempo == 'true' }}
       run: |
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage target --target tempo --port 13200 \
-          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" \
+          --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Validate and render report
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report \
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
@@ -262,6 +397,27 @@ jobs:
         python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Clean up baseline containers
+      if: always() && steps.runtime.outcome == 'success' && inputs.compare_greptimedb
+      run: |
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage cleanup \
+          --root "$RUN_ROOT/baseline" --owner "$OWNER-base" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
+    - name: Benchmark summary
+      if: always()
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section benchmark >> "$GITHUB_STEP_SUMMARY"
+    - name: Load / lifecycle summary
+      if: always()
+      run: python3 greptimedb/.github/scripts/tracesbench-summary.py --root "$RUN_ROOT" --targets "$TARGETS" --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+    - name: Baseline load / lifecycle summary
+      if: always() && inputs.compare_greptimedb
+      run: |
+        echo '## Baseline GreptimeDB' >> "$GITHUB_STEP_SUMMARY"
+        python3 greptimedb/.github/scripts/tracesbench-summary.py \
+          --root "$RUN_ROOT/baseline" --targets greptimedb --section lifecycle >> "$GITHUB_STEP_SUMMARY"
+    - name: GreptimeDB version comparison
+      if: always() && inputs.compare_greptimedb
+      run: |
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind traces --root "$RUN_ROOT" >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |
@@ -269,11 +425,15 @@ jobs:
         if [[ -d "$METADATA_ROOT" ]]; then
           rsync -a --no-owner --no-group "$METADATA_ROOT" "$RUNNER_TEMP/tracesbench-artifacts/"
         fi
-        for entry in runs report report.json report.md; do
+        for entry in runs report report.json report.md version-comparison.json version-comparison.md; do
           if [[ -e "$RUN_ROOT/$entry" ]]; then
             rsync -a --no-owner --no-group "$RUN_ROOT/$entry" "$RUNNER_TEMP/tracesbench-artifacts/"
           fi
         done
+        if [[ -d "$RUN_ROOT/baseline/runs" ]]; then
+          mkdir -p "$RUNNER_TEMP/tracesbench-artifacts/baseline"
+          rsync -a --no-owner --no-group "$RUN_ROOT/baseline/runs" "$RUNNER_TEMP/tracesbench-artifacts/baseline/"
+        fi
     - name: Upload HTML and results (no corpus)
       if: always()
       uses: actions/upload-artifact@v4
