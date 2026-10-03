@@ -51,12 +51,8 @@ impl BloomFilterIndexCache {
             INDEX_TYPE_BLOOM_FILTER_INDEX,
             bloom_filter_index_metadata_weight,
             bloom_filter_index_content_weight,
+            |key| key.0,
         )
-    }
-
-    /// Removes all cached entries for the given `file_id`.
-    pub fn invalidate_file(&self, file_id: FileId) {
-        self.invalidate_if(move |key| key.0 == file_id);
     }
 }
 

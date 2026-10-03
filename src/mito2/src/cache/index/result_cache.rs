@@ -21,6 +21,7 @@ use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use store_api::storage::{ColumnId, FileId};
 
+use crate::cache::file_keys::{FileKeys, Tracked, insert_tracked};
 use crate::metrics::{CACHE_BYTES, CACHE_EVICTION, CACHE_HIT, CACHE_MISS};
 use crate::sst::index::fulltext_index::applier::builder::{
     FulltextQuery, FulltextRequest, FulltextTerm,
@@ -36,7 +37,8 @@ const INDEX_RESULT_TYPE: &str = "index_result";
 /// Row groups can be partially searched. Row groups that not contained in `RowGroupSelection` are not searched.
 /// User can retrieve the partial results and handle uncontained row groups required by the predicate subsequently.
 pub struct IndexResultCache {
-    cache: Cache<(PredicateKey, FileId), Arc<RowGroupSelection>>,
+    cache: Cache<(PredicateKey, FileId), Tracked<Arc<RowGroupSelection>>>,
+    keys: Arc<FileKeys<(PredicateKey, FileId)>>,
 }
 
 impl IndexResultCache {
@@ -51,11 +53,17 @@ impl IndexResultCache {
             }
         }
 
+        let keys: Arc<FileKeys<(PredicateKey, FileId)>> = Arc::new(FileKeys::default());
+        let listener_keys = keys.clone();
         let cache = Cache::builder()
             .max_capacity(capacity)
-            .weigher(Self::index_result_cache_weight)
-            .eviction_listener(|k, v, cause| {
-                let size = Self::index_result_cache_weight(&k, &v);
+            .weigher(|k, v: &Tracked<Arc<RowGroupSelection>>| {
+                Self::index_result_cache_weight(k, &v.1)
+                    .saturating_add(std::mem::size_of::<u64>() as u32)
+            })
+            .eviction_listener(move |k, v: Tracked<Arc<RowGroupSelection>>, cause| {
+                listener_keys.remove(k.1, &*k, v.0);
+                let size = Self::index_result_cache_weight(&k, &v.1);
                 CACHE_BYTES
                     .with_label_values(&[INDEX_RESULT_TYPE])
                     .sub(size.into());
@@ -63,9 +71,8 @@ impl IndexResultCache {
                     .with_label_values(&[INDEX_RESULT_TYPE, to_str(cause)])
                     .inc();
             })
-            .support_invalidation_closures()
             .build();
-        Self { cache }
+        Self { cache, keys }
     }
 
     /// Puts a query result into the cache.
@@ -77,7 +84,10 @@ impl IndexResultCache {
         CACHE_BYTES
             .with_label_values(&[INDEX_RESULT_TYPE])
             .add(size.into());
-        self.cache.insert(key, result);
+        let registered = key.clone();
+        insert_tracked(&self.cache, key, result, |generation| {
+            self.keys.add(file_id, registered, generation)
+        });
     }
 
     /// Gets a query result from the cache.
@@ -85,7 +95,10 @@ impl IndexResultCache {
     /// Note: the returned `RowGroupSelection` only contains the row groups that are searched.
     ///       Caller should handle the uncontained row groups required by the predicate subsequently.
     pub fn get(&self, key: &PredicateKey, file_id: FileId) -> Option<Arc<RowGroupSelection>> {
-        let res = self.cache.get(&(key.clone(), file_id));
+        let res = self
+            .cache
+            .get(&(key.clone(), file_id))
+            .map(|(_, selection)| selection);
         if res.is_some() {
             CACHE_HIT.with_label_values(&[INDEX_RESULT_TYPE]).inc();
         } else {
@@ -101,9 +114,9 @@ impl IndexResultCache {
 
     /// Removes cached results for the given file.
     pub fn invalidate_file(&self, file_id: FileId) {
-        self.cache
-            .invalidate_entries_if(move |(_, cached_file_id), _| *cached_file_id == file_id)
-            .expect("cache should support invalidation closures");
+        for key in self.keys.take(file_id) {
+            self.cache.invalidate(&key);
+        }
     }
 }
 
