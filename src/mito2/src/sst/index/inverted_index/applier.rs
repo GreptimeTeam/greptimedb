@@ -135,7 +135,7 @@ pub(crate) struct InvertedIndexApplier {
     puffin_metadata_cache: Option<PuffinMetadataCacheRef>,
 
     /// All collected predicates.
-    predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+    predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
 
     /// Default apply plan built from all collected predicates.
     default_plan: SstApplyPlan,
@@ -159,7 +159,7 @@ impl InvertedIndexApplier {
         path_type: PathType,
         store: ObjectStore,
         puffin_manager_factory: PuffinManagerFactory,
-        predicates: BTreeMap<ColumnId, Vec<Predicate>>,
+        predicates: BTreeMap<IndexTarget, Vec<Predicate>>,
         expected_predicate_col_types: BTreeMap<ColumnId, ConcreteDataType>,
     ) -> Result<Self> {
         let default_plan = Self::build_apply_plan(&predicates)?;
@@ -221,8 +221,16 @@ impl InvertedIndexApplier {
         let start = Instant::now();
 
         let context = SearchContext {
-            // Encountering a non-existing column indicates that it doesn't match predicates.
-            index_not_found_strategy: IndexNotFoundStrategy::ReturnEmpty,
+            // Missing JSON targets mean no usable index, not absence of matching data.
+            index_not_found_strategy: if self
+                .predicates
+                .keys()
+                .any(|target| matches!(target, IndexTarget::JsonPath { .. }))
+            {
+                IndexNotFoundStrategy::Ignore
+            } else {
+                IndexNotFoundStrategy::ReturnEmpty
+            },
         };
 
         let mut cache_miss = 0;
@@ -367,7 +375,14 @@ impl InvertedIndexApplier {
         let mut compatible_predicates = BTreeMap::new();
         let mut has_type_mismatch = false;
 
-        for (col_id, expected) in &self.expected_predicate_col_types {
+        for (target, predicates) in &self.predicates {
+            let IndexTarget::ColumnId(col_id) = target else {
+                compatible_predicates.insert(target.clone(), predicates.clone());
+                continue;
+            };
+            let Some(expected) = self.expected_predicate_col_types.get(col_id) else {
+                continue;
+            };
             if let Some(sst_col) = sst_metadata.column_by_id(*col_id)
                 && sst_col.column_schema.data_type != *expected
             {
@@ -375,9 +390,7 @@ impl InvertedIndexApplier {
                 continue;
             }
 
-            if let Some(predicates) = self.predicates.get(col_id) {
-                compatible_predicates.insert(*col_id, predicates.clone());
-            }
+            compatible_predicates.insert(target.clone(), predicates.clone());
         }
 
         if compatible_predicates.is_empty() {
@@ -393,17 +406,17 @@ impl InvertedIndexApplier {
     }
 
     fn build_apply_plan(
-        predicates_by_col: &BTreeMap<ColumnId, Vec<Predicate>>,
+        predicates_by_target: &BTreeMap<IndexTarget, Vec<Predicate>>,
     ) -> Result<SstApplyPlan> {
-        let predicates = predicates_by_col
+        let predicates = predicates_by_target
             .iter()
-            .map(|(col_id, preds)| (format!("{}", IndexTarget::ColumnId(*col_id)), preds.clone()))
+            .map(|(target, preds)| (target.to_string(), preds.clone()))
             .collect();
 
         let index_applier =
             PredicatesIndexApplier::try_from(predicates).context(BuildIndexApplierSnafu)?;
 
-        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_col.clone()));
+        let predicate_key = PredicateKey::new_inverted(Arc::new(predicates_by_target.clone()));
         Ok(SstApplyPlan {
             predicate_key,
             index_applier: Arc::new(index_applier),
@@ -441,7 +454,7 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
@@ -473,7 +486,7 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],
@@ -525,7 +538,7 @@ mod tests {
 
         let mut predicates = BTreeMap::new();
         predicates.insert(
-            1,
+            IndexTarget::ColumnId(1),
             vec![Predicate::RegexMatch(RegexMatchPredicate {
                 pattern: "foo".to_string(),
             })],

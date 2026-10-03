@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use index::bloom_filter::applier::InListPredicate;
 use index::inverted_index::search::predicate::{Predicate, RangePredicate};
+use index::target::IndexTarget;
 use moka::notification::RemovalCause;
 use moka::sync::Cache;
 use store_api::storage::{ColumnId, FileId};
@@ -132,7 +133,7 @@ impl PredicateKey {
     }
 
     /// Creates a new inverted index key.
-    pub fn new_inverted(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new_inverted(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         Self::Inverted(InvertedIndexKey::new(predicates))
     }
 
@@ -216,27 +217,36 @@ impl BloomFilterKey {
 /// Key for inverted index queries.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct InvertedIndexKey {
-    predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>,
+    predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>,
     mem_usage: usize,
 }
 
 impl InvertedIndexKey {
     /// Creates a new inverted index key with the given predicates.
     /// Calculates memory usage based on the type and size of predicates.
-    pub fn new(predicates: Arc<BTreeMap<ColumnId, Vec<Predicate>>>) -> Self {
+    pub fn new(predicates: Arc<BTreeMap<IndexTarget, Vec<Predicate>>>) -> Self {
         let mem_usage = predicates
-            .values()
-            .map(|predicates| {
-                predicates
-                    .iter()
-                    .map(|predicate| match predicate {
-                        Predicate::InList(predicate) => {
-                            predicate.list.iter().map(|list| list.len()).sum::<usize>()
-                        }
-                        Predicate::Range(_) => size_of::<RangePredicate>(),
-                        Predicate::RegexMatch(predicate) => predicate.pattern.len(),
-                    })
-                    .sum::<usize>()
+            .iter()
+            .map(|(target, predicates)| {
+                let target_size = size_of::<IndexTarget>()
+                    + match target {
+                        IndexTarget::ColumnId(_) => 0,
+                        IndexTarget::JsonPath { path, .. } => path
+                            .iter()
+                            .map(|part| size_of::<String>() + part.len())
+                            .sum(),
+                    };
+                target_size
+                    + predicates
+                        .iter()
+                        .map(|predicate| match predicate {
+                            Predicate::InList(predicate) => {
+                                predicate.list.iter().map(|list| list.len()).sum::<usize>()
+                            }
+                            Predicate::Range(_) => size_of::<RangePredicate>(),
+                            Predicate::RegexMatch(predicate) => predicate.pattern.len(),
+                        })
+                        .sum::<usize>()
             })
             .sum();
 
@@ -285,6 +295,31 @@ mod tests {
         FulltextQuery, FulltextRequest, FulltextTerm,
     };
     use crate::sst::parquet::row_selection::RowGroupSelection;
+
+    #[test]
+    fn test_inverted_cache_separates_json_paths_and_types() {
+        use datatypes::data_type::ConcreteDataType;
+        let key = |path: &str, ty| {
+            PredicateKey::new_inverted(Arc::new(BTreeMap::from([(
+                IndexTarget::json_path(1, vec![path.into()], ty).unwrap(),
+                vec![Predicate::Range(RangePredicate {
+                    range: Range {
+                        lower: None,
+                        upper: None,
+                    },
+                })],
+            )])))
+        };
+        let a = key("a", ConcreteDataType::int64_datatype());
+        let b = key("b", ConcreteDataType::int64_datatype());
+        let typed = key("a", ConcreteDataType::uint64_datatype());
+        let cache = IndexResultCache::new(10000);
+        let file = FileId::random();
+        cache.put(a.clone(), file, Arc::new(RowGroupSelection::new(10, 10)));
+        assert!(cache.get(&a, file).is_some());
+        assert!(cache.get(&b, file).is_none());
+        assert!(cache.get(&typed, file).is_none());
+    }
 
     #[test]
     fn test_cache_basic_operations() {
@@ -467,7 +502,7 @@ mod tests {
                 upper: None,
             },
         });
-        predicates3.insert(1, vec![predicate3]);
+        predicates3.insert(IndexTarget::ColumnId(1), vec![predicate3]);
         let key3 = PredicateKey::new_inverted(Arc::new(predicates3));
         let selection3 = Arc::new(RowGroupSelection::from_row_ranges(
             vec![(0, vec![5..15])],

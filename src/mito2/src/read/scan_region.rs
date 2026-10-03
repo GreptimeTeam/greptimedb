@@ -824,6 +824,16 @@ impl ScanRegion {
             ),
             self.access_layer.puffin_manager_factory().clone(),
         )
+        .with_ignored_column_ids(
+            self.version
+                .options
+                .index_options
+                .inverted_index
+                .ignore_column_ids
+                .iter()
+                .copied()
+                .collect(),
+        )
         .with_file_cache(file_cache)
         .with_inverted_index_cache(inverted_index_cache)
         .with_puffin_metadata_cache(puffin_metadata_cache)
