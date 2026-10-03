@@ -20,7 +20,7 @@ use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field, TimeUnit as
 use datafusion::catalog::MemTable;
 use datafusion::datasource::provider_as_source;
 use datafusion_common::TableReference;
-use datafusion_expr::LogicalPlanBuilder;
+use datafusion_expr::{LogicalPlan, LogicalPlanBuilder};
 use datatypes::schema::{ColumnDefaultConstraint, ColumnSchema, Schema, SchemaBuilder};
 use store_api::storage::{ConcreteDataType, TableId};
 use table::metadata::{TableInfo, TableInfoBuilder, TableMetaBuilder};
@@ -194,8 +194,53 @@ fn stateless_distinct_preserves_direct_column_lineage() {
     let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
     assert_eq!(output[0].name, "dis");
     assert_eq!(lineage, vec![Some(0)]);
-    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0], &plan);
     assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+}
+
+#[test]
+fn stateless_distinct_without_source_pk_uses_distinct_output_as_key() {
+    let source = Arc::new(Schema::new(vec![ColumnSchema::new(
+        "v",
+        ConcreteDataType::int32_datatype(),
+        true,
+    )]));
+    let provider = MemTable::try_new(
+        Arc::new(datafusion::arrow::datatypes::Schema::new(vec![Field::new(
+            "v",
+            ArrowDataType::Int32,
+            true,
+        )])),
+        vec![vec![]],
+    )
+    .unwrap();
+    let plan = LogicalPlanBuilder::scan(
+        TableReference::bare("source"),
+        provider_as_source(Arc::new(provider)),
+        None,
+    )
+    .unwrap()
+    .project(vec![datafusion_expr::col("v")])
+    .unwrap()
+    .distinct()
+    .unwrap()
+    .build()
+    .unwrap();
+
+    let (output, lineage) = super::output_column_schemas(&plan, &source).unwrap();
+    let relation = super::relation_desc_from_output(&output, &lineage, &[], &plan);
+    assert_eq!(relation.typ.keys.len(), 1);
+    assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
+
+    // Non-DISTINCT plans keep the empty-key behavior.
+    let project_plan = match &plan {
+        LogicalPlan::Distinct(datafusion_expr::logical_plan::Distinct::All(input)) => {
+            input.as_ref().clone()
+        }
+        _ => panic!("expected distinct plan"),
+    };
+    let relation = super::relation_desc_from_output(&output, &lineage, &[], &project_plan);
+    assert!(relation.typ.keys.is_empty());
 }
 
 #[test]
@@ -220,7 +265,7 @@ fn stateless_normalizes_dictionary_output_type() {
     assert_eq!(output[0].data_type, ConcreteDataType::string_datatype());
     assert_eq!(lineage, vec![Some(0)]);
 
-    let relation = super::relation_desc_from_output(&output, &lineage, &[0]);
+    let relation = super::relation_desc_from_output(&output, &lineage, &[0], &plan);
     assert_eq!(relation.typ.keys[0].column_indices, vec![0]);
 }
 

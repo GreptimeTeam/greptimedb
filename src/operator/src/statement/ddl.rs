@@ -128,7 +128,6 @@ struct DdlSubmitOptions {
     timeout: Duration,
 }
 
-#[cfg(not(feature = "enterprise"))]
 const ALLOWED_FLOW_OPTIONS: [&str; 2] = [
     DEFER_ON_MISSING_SOURCE_KEY,
     FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY,
@@ -173,7 +172,6 @@ fn parse_ddl_options(options: &OptionMap) -> Result<DdlSubmitOptions> {
     Ok(DdlSubmitOptions { wait, timeout })
 }
 
-#[cfg(not(feature = "enterprise"))]
 fn supported_flow_options() -> String {
     ALLOWED_FLOW_OPTIONS.join(", ")
 }
@@ -223,9 +221,6 @@ fn validate_and_normalize_flow_options(
                 DEFER_ON_MISSING_SOURCE_KEY | FLOW_EXPERIMENTAL_ENABLE_INCREMENTAL_READ_KEY => {
                     normalize_flow_bool_option(&key, &value)?
                 }
-                #[cfg(feature = "enterprise")]
-                _ => value,
-                #[cfg(not(feature = "enterprise"))]
                 _ => {
                     return InvalidSqlSnafu {
                         err_msg: format!(
@@ -3286,7 +3281,6 @@ mod test {
         );
     }
 
-    #[cfg(not(feature = "enterprise"))]
     #[test]
     fn test_validate_and_normalize_flow_options_unknown_option() {
         let err = validate_and_normalize_flow_options(
@@ -3355,18 +3349,10 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         let expr =
             expr_helper::to_create_flow_task_expr(create_flow, &QueryContext::arc()).unwrap();
 
-        #[cfg(not(feature = "enterprise"))]
-        {
-            let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
-            assert!(
-                err.to_string()
-                    .contains("unknown flow option 'access_key_id'")
-            );
-        }
-        #[cfg(feature = "enterprise")]
-        assert_eq!(
-            validate_and_normalize_flow_options(expr.flow_options, None).unwrap(),
-            HashMap::from([("access_key_id".to_string(), "['true']".to_string())])
+        let err = validate_and_normalize_flow_options(expr.flow_options, None).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unknown flow option 'access_key_id'")
         );
     }
 
@@ -3468,7 +3454,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
         assert!(err.to_string().contains("reserved for internal use"));
     }
 
-    #[cfg(not(feature = "enterprise"))]
     #[test]
     fn test_schedule_keys_rejected_as_unknown_options() {
         for key in [
@@ -3488,31 +3473,6 @@ SELECT max(c1), min(c2) FROM schema_2.table_2;";
                     .contains(&format!("unknown flow option '{key}'"))
             );
         }
-    }
-
-    #[cfg(feature = "enterprise")]
-    #[test]
-    fn test_schedule_keys_preserved() {
-        let options = HashMap::from([
-            ("eval_interval_anchor".to_string(), "anchor".to_string()),
-            ("eval_interval_start".to_string(), "start".to_string()),
-            (
-                "eval_interval_missed_tick_policy".to_string(),
-                "missed".to_string(),
-            ),
-            (
-                "eval_interval_catchup_max_runs".to_string(),
-                "runs".to_string(),
-            ),
-            (
-                "eval_interval_catchup_max_lag".to_string(),
-                "lag".to_string(),
-            ),
-        ]);
-        assert_eq!(
-            validate_and_normalize_flow_options(options.clone(), Some(300)).unwrap(),
-            options
-        );
     }
 
     #[test]
