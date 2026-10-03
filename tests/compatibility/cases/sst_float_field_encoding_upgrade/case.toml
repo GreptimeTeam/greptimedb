@@ -1,5 +1,5 @@
 name = "sst_float_field_encoding_upgrade"
-reason = "Verify newer binaries can read default-encoded Mito SSTs containing FLOAT and DOUBLE fields written by older binaries."
+reason = "Verify newer binaries can read default-encoded Mito SSTs containing FLOAT and DOUBLE fields written by older binaries, then persist byte-stream-split and default option transitions."
 introduced_by = "experimental_sst_float_field_encoding"
 topologies = ["distributed", "standalone"]
 from_range = ["*"]

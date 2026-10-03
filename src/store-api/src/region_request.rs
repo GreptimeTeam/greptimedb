@@ -60,8 +60,9 @@ use crate::metadata::{
 use crate::metric_engine_consts::PHYSICAL_TABLE_METADATA_KEY;
 use crate::metrics;
 use crate::mito_engine_options::{
-    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, MAX_ROW_GROUP_ROW_COUNT,
-    MAX_ROW_GROUP_ROW_COUNT_LIMIT, PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
+    APPEND_MODE_KEY, AUTO_FLUSH_INTERVAL_KEY, EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
+    FloatFieldEncoding, MAX_ROW_GROUP_ROW_COUNT, MAX_ROW_GROUP_ROW_COUNT_LIMIT,
+    PRESERVE_ROW_SEQUENCE, SKIP_WAL_KEY, SST_FORMAT_KEY, TTL_KEY,
     TWCS_ACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_ACTIVE_WINDOW_TRIGGER_FILE_NUM,
     TWCS_INACTIVE_WINDOW_L1_MERGE_TRIGGER, TWCS_INACTIVE_WINDOW_TRIGGER_FILE_NUM,
     TWCS_MAX_OUTPUT_FILE_SIZE, TWCS_TIME_WINDOW, TWCS_TRIGGER_FILE_NUM, WRITE_BUFFER_SIZE_KEY,
@@ -1593,6 +1594,8 @@ pub enum SetRegionOption {
     // Modifying the max number of rows in a parquet row group.
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
+    /// Modifying the encoding for direct floating-point field columns in Parquet SSTs.
+    FloatFieldEncoding(FloatFieldEncoding),
     // Whether to skip writing new WAL entries.
     SkipWal(bool),
 }
@@ -1607,6 +1610,7 @@ enum SetRegionOptionSerde {
     AutoFlushInterval(Option<Duration>),
     MaxRowGroupRowCount(Option<usize>),
     PreserveRowSequence(bool),
+    FloatFieldEncoding(FloatFieldEncoding),
     SkipWal(bool),
 }
 
@@ -1629,6 +1633,7 @@ impl Serialize for SetRegionOption {
             Self::AutoFlushInterval(value) => SetRegionOptionSerde::AutoFlushInterval(*value),
             Self::MaxRowGroupRowCount(value) => SetRegionOptionSerde::MaxRowGroupRowCount(*value),
             Self::PreserveRowSequence(value) => SetRegionOptionSerde::PreserveRowSequence(*value),
+            Self::FloatFieldEncoding(value) => SetRegionOptionSerde::FloatFieldEncoding(*value),
             Self::SkipWal(value) => SetRegionOptionSerde::SkipWal(*value),
         };
         option.serialize(serializer)
@@ -1658,6 +1663,7 @@ impl From<SetRegionOptionSerde> for SetRegionOption {
             SetRegionOptionSerde::AutoFlushInterval(value) => Self::AutoFlushInterval(value),
             SetRegionOptionSerde::MaxRowGroupRowCount(value) => Self::MaxRowGroupRowCount(value),
             SetRegionOptionSerde::PreserveRowSequence(value) => Self::PreserveRowSequence(value),
+            SetRegionOptionSerde::FloatFieldEncoding(value) => Self::FloatFieldEncoding(value),
             SetRegionOptionSerde::SkipWal(value) => Self::SkipWal(value),
         }
     }
@@ -1744,6 +1750,12 @@ impl TryFrom<&PbOption> for SetRegionOption {
                     .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
                 Ok(Self::PreserveRowSequence(preserve))
             }
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING => {
+                let encoding = value
+                    .parse::<FloatFieldEncoding>()
+                    .map_err(|_| InvalidSetRegionOptionRequestSnafu { key, value }.build())?;
+                Ok(Self::FloatFieldEncoding(encoding))
+            }
             SKIP_WAL_KEY => {
                 let skip_wal = value
                     .parse::<bool>()
@@ -1783,6 +1795,9 @@ impl From<&UnsetRegionOption> for SetRegionOption {
             UnsetRegionOption::MaxRowGroupRowCount => SetRegionOption::MaxRowGroupRowCount(None),
             UnsetRegionOption::WriteBufferSize => SetRegionOption::WriteBufferSize(None),
             UnsetRegionOption::PreserveRowSequence => SetRegionOption::PreserveRowSequence(false),
+            UnsetRegionOption::FloatFieldEncoding => {
+                SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::default())
+            }
         }
     }
 }
@@ -1803,6 +1818,7 @@ impl TryFrom<&str> for UnsetRegionOption {
             TWCS_TIME_WINDOW => Ok(Self::TwcsTimeWindow),
             MAX_ROW_GROUP_ROW_COUNT => Ok(Self::MaxRowGroupRowCount),
             PRESERVE_ROW_SEQUENCE => Ok(Self::PreserveRowSequence),
+            EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING => Ok(Self::FloatFieldEncoding),
             _ => InvalidUnsetRegionOptionRequestSnafu { key }.fail(),
         }
     }
@@ -1821,6 +1837,7 @@ pub enum UnsetRegionOption {
     WriteBufferSize,
     PreserveRowSequence,
     TwcsActiveWindowL1MergeTrigger,
+    FloatFieldEncoding,
 }
 
 impl UnsetRegionOption {
@@ -1837,6 +1854,7 @@ impl UnsetRegionOption {
             Self::TwcsTimeWindow => TWCS_TIME_WINDOW,
             Self::MaxRowGroupRowCount => MAX_ROW_GROUP_ROW_COUNT,
             Self::PreserveRowSequence => PRESERVE_ROW_SEQUENCE,
+            Self::FloatFieldEncoding => EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING,
         }
     }
 }
@@ -2248,6 +2266,38 @@ mod tests {
             value: "not_a_duration".to_string(),
         };
         assert!(SetRegionOption::try_from(&pb).is_err());
+    }
+
+    #[test]
+    fn test_set_region_option_float_field_encoding_try_from() {
+        for (value, encoding) in [
+            ("default", FloatFieldEncoding::Default),
+            ("byte_stream_split", FloatFieldEncoding::ByteStreamSplit),
+        ] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                value: value.to_string(),
+            };
+            assert_eq!(
+                SetRegionOption::FloatFieldEncoding(encoding),
+                SetRegionOption::try_from(&option).unwrap()
+            );
+        }
+
+        for value in ["", "invalid"] {
+            let option = PbOption {
+                key: EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING.to_string(),
+                value: value.to_string(),
+            };
+            assert!(SetRegionOption::try_from(&option).is_err());
+        }
+
+        let unset = UnsetRegionOption::try_from(EXPERIMENTAL_SST_FLOAT_FIELD_ENCODING).unwrap();
+        assert_eq!(UnsetRegionOption::FloatFieldEncoding, unset);
+        assert_eq!(
+            SetRegionOption::FloatFieldEncoding(FloatFieldEncoding::Default),
+            SetRegionOption::from(&unset)
+        );
     }
 
     #[test]
