@@ -41,6 +41,7 @@ use crate::metrics::{
 use crate::read::dedup::{DedupMetrics, DedupMetricsReport};
 use crate::read::flat_merge::{MergeMetrics, MergeMetricsReport};
 use crate::read::pruner::PartitionPruner;
+use crate::read::pruner::Readahead;
 use crate::read::range::{RangeMeta, RowGroupIndex};
 use crate::read::scan_region::StreamContext;
 use crate::read::{BoxedRecordBatchStream, ScannerMetrics};
@@ -1464,6 +1465,7 @@ pub(crate) async fn scan_flat_file_ranges(
         read_type,
         ranges,
         init_per_file_metrics,
+        partition_pruner.readahead(),
     ))
 }
 
@@ -1515,12 +1517,13 @@ pub(crate) fn filter_flat_batch_by_sequence(
     skip_all,
     fields(read_type = read_type, range_count = ranges.len())
 )]
-pub fn build_flat_file_range_scan_stream(
+pub(crate) fn build_flat_file_range_scan_stream(
     stream_ctx: Arc<StreamContext>,
     part_metrics: PartitionMetrics,
     read_type: &'static str,
     ranges: SmallVec<[FileRange; 2]>,
     mut per_file_metrics: Option<HashMap<RegionFileId, FileScanMetrics>>,
+    readahead: Option<Readahead>,
 ) -> impl Stream<Item = Result<RecordBatch>> {
     try_stream! {
         let fetch_metrics = if part_metrics.explain_verbose() {
@@ -1532,7 +1535,14 @@ pub fn build_flat_file_range_scan_stream(
             fetch_metrics: fetch_metrics.clone(),
             ..Default::default()
         };
-        for range in ranges {
+        let mut ranges = ranges.into_iter().map(Some).collect::<Vec<_>>();
+        let mut readahead_next = 0;
+        for range_idx in 0..ranges.len() {
+            if let Some(readahead) = &readahead {
+                readahead.fill_window(&mut ranges, range_idx, &mut readahead_next);
+            }
+            // Dropping the range after reading it releases its prefetched bytes.
+            let range = ranges[range_idx].take().unwrap();
             let build_reader_start = Instant::now();
             let Some(mut reader) = range
                 .flat_reader(

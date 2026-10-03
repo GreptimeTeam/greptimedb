@@ -91,6 +91,7 @@ pub(crate) async fn build_range_index(
                     row_group_id,
                     Some(row_selection),
                     Some(&fetch_metrics),
+                    None,
                 ))
                 .await?;
             let mut reader = FlatPruneReader::new_with_row_group_reader(
@@ -147,6 +148,7 @@ pub(crate) async fn build_series_index(
                     row_group_id,
                     Some(row_selection),
                     Some(&fetch_metrics),
+                    None,
                 )).await?;
                 let mut reader = FlatPruneReader::new_with_row_group_reader(
                     context.clone(),

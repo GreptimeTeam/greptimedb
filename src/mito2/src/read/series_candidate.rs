@@ -45,7 +45,7 @@ use crate::error::{
     UnexpectedSnafu,
 };
 use crate::read::BoxedRecordBatchStream;
-use crate::read::pruner::{PartitionPruner, Pruner};
+use crate::read::pruner::{PartitionPruner, Pruner, Readahead};
 use crate::read::range::RowGroupIndex;
 use crate::read::range_cache::{
     build_candidate_range_cache_key, cache_flat_range_stream, cached_flat_range_stream,
@@ -61,7 +61,7 @@ use crate::sst::parquet::format::PrimaryKeyArray;
 use crate::sst::parquet::prefilter::{
     CachedPrimaryKeyFilter, build_primary_key_filter, prefilter_flat_batch_by_primary_key,
 };
-use crate::sst::parquet::reader::ReaderMetrics;
+use crate::sst::parquet::reader::{PrefetchColumns, ReaderMetrics};
 use crate::sst::parquet::row_group::ParquetFetchMetrics;
 
 /// Builds candidate metric series from the ranges assigned to a [`SeriesScan`](super::series_scan::SeriesScan).
@@ -73,6 +73,7 @@ pub(crate) struct SeriesCandidateScanner {
     coverage: Arc<SeriesIndexCoverage>,
     range_semaphore: Arc<Semaphore>,
     memory_pool: Arc<dyn MemoryPool>,
+    readahead: Readahead,
     metrics_set: ExecutionPlanMetricsSet,
     part_metrics: PartitionMetrics,
 }
@@ -124,6 +125,7 @@ impl SeriesCandidateScanner {
                 PartitionPruner::new(pruner, &all_ranges).excluding_files(&coverage.covered_files),
             )
         };
+        let readahead = Readahead::new(&stream_ctx.input, PrefetchColumns::PrimaryKey);
         Ok(Self {
             stream_ctx,
             partitions,
@@ -132,6 +134,7 @@ impl SeriesCandidateScanner {
             coverage,
             range_semaphore,
             memory_pool,
+            readahead,
             metrics_set,
             part_metrics,
         })
@@ -151,6 +154,7 @@ impl SeriesCandidateScanner {
             coverage: self.coverage.clone(),
             range_semaphore: self.range_semaphore.clone(),
             memory_pool: self.memory_pool.clone(),
+            readahead: self.readahead.clone(),
             metrics_set: self.metrics_set.clone(),
             part_metrics: self.part_metrics.clone(),
         };
@@ -349,6 +353,7 @@ struct SeriesCandidateRangeBuilder {
     partition_pruner: Arc<PartitionPruner>,
     range_semaphore: Arc<Semaphore>,
     memory_pool: Arc<dyn MemoryPool>,
+    readahead: Readahead,
     metrics_set: ExecutionPlanMetricsSet,
     part_metrics: PartitionMetrics,
 }
@@ -469,6 +474,7 @@ impl SeriesCandidateRangeBuilder {
                 )
             });
             let part_metrics = self.part_metrics.clone();
+            let readahead = self.readahead.clone();
             let raw = Box::pin(try_stream! {
                 let fetch_metrics = part_metrics
                     .explain_verbose()
@@ -477,7 +483,14 @@ impl SeriesCandidateRangeBuilder {
                     fetch_metrics: fetch_metrics.clone(),
                     ..Default::default()
                 };
-                for range in ranges {
+                // Row groups of a file are read one after another, each waiting a storage
+                // round trip without readahead.
+                let mut ranges = ranges.into_iter().map(Some).collect::<Vec<_>>();
+                let mut readahead_next = 0;
+                for range_idx in 0..ranges.len() {
+                    readahead.fill_window(&mut ranges, range_idx, &mut readahead_next);
+                    // Dropping the range after reading it releases its prefetched bytes.
+                    let range = ranges[range_idx].take().unwrap();
                     let build_start = Instant::now();
                     let Some(mut reader) = range
                         .primary_key_reader(fetch_metrics.as_deref())
