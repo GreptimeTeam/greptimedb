@@ -52,9 +52,10 @@ impl HeartbeatHandler for RegionFailureHandler {
             return Ok(HandleControl::Continue);
         };
 
+        // Never blocks: the region lease has already been decided earlier in the
+        // chain, so a busy supervisor must not withhold the heartbeat response.
         self.heartbeat_acceptor
-            .accept(DatanodeHeartbeat::from(stat))
-            .await;
+            .accept(DatanodeHeartbeat::from(stat));
 
         Ok(HandleControl::Continue)
     }
