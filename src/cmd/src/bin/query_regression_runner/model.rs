@@ -230,6 +230,15 @@ pub(super) struct Query {
     /// setting yet still measures the same query without it.
     #[serde(default)]
     pub(super) candidate_session_sql: Vec<String>,
+    /// Opts the candidate direct-SST target into waiting for its tables' leader/size reports
+    /// before any measurements. Defaults to false; the base target never waits.
+    #[serde(default)]
+    pub(super) require_region_statistics: bool,
+    /// An operator that a separate candidate `EXPLAIN ANALYZE` must execute remotely, not in
+    /// stage 0. Failure aborts all candidate measurements. Only SQL queries are supported;
+    /// the preflight uses the same session prefix but proves only its own execution.
+    #[serde(default)]
+    pub(super) candidate_remote_operator: Option<String>,
     #[serde(default)]
     pub(super) warmup: usize,
     #[serde(default = "one")]
@@ -300,6 +309,8 @@ mod tests {
                 .into_iter()
                 .map(ToString::to_string)
                 .collect(),
+            require_region_statistics: false,
+            candidate_remote_operator: None,
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
@@ -340,5 +351,32 @@ mod tests {
     fn query_deserializes_without_session_sql() {
         let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
         assert!(query.candidate_session_sql.is_empty());
+    }
+
+    #[test]
+    fn query_defaults_to_not_requiring_region_statistics() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert!(!query.require_region_statistics);
+        let opted_in: Query = serde_json::from_value(json!({
+            "query": "SELECT 1",
+            "require_region_statistics": true,
+        }))
+        .unwrap();
+        assert!(opted_in.require_region_statistics);
+    }
+
+    #[test]
+    fn query_defaults_to_no_candidate_remote_operator() {
+        let query: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        assert!(query.candidate_remote_operator.is_none());
+        let configured: Query = serde_json::from_value(json!({
+            "query": "SELECT 1",
+            "candidate_remote_operator": "HashJoinExec",
+        }))
+        .unwrap();
+        assert_eq!(
+            Some("HashJoinExec"),
+            configured.candidate_remote_operator.as_deref()
+        );
     }
 }
