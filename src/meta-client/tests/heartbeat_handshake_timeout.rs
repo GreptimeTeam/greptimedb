@@ -112,7 +112,7 @@ async fn create_client(send_first_heartbeat_response: bool) -> MetaClientRef {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heartbeat_handshake_succeeds_when_the_server_responds() {
+async fn test_heartbeat_handshake_succeeds_when_the_server_responds() {
     let client = create_client(true).await;
 
     tokio::time::timeout(HEARTBEAT_TIMEOUT, client.heartbeat())
@@ -122,7 +122,7 @@ async fn heartbeat_handshake_succeeds_when_the_server_responds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn heartbeat_handshake_times_out_when_the_stream_stays_silent() {
+async fn test_heartbeat_handshake_times_out_when_the_stream_stays_silent() {
     let client = create_client(false).await;
 
     let result = tokio::time::timeout(2 * HEARTBEAT_TIMEOUT, client.heartbeat())
