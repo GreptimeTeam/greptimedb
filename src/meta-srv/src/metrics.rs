@@ -48,9 +48,9 @@ lazy_static! {
     ///  Heartbeat received by metasrv.
     pub static ref METRIC_META_HEARTBEAT_RECV: IntCounterVec =
         register_int_counter_vec!("greptime_meta_heartbeat_recv", "heartbeats received by metasrv", &["pusher_key"]).unwrap();
-    /// Heartbeats dropped by metasrv.
+    /// Heartbeats metasrv could not hand to the region supervisor.
     pub static ref METRIC_META_HEARTBEAT_DROPPED: IntCounterVec =
-        register_int_counter_vec!("greptime_meta_heartbeat_dropped", "heartbeats dropped by metasrv", &["reason"]).unwrap();
+        register_int_counter_vec!("greptime_meta_heartbeat_dropped", "heartbeats not handed to the region supervisor", &["reason"]).unwrap();
     /// The migration execute histogram.
     pub static ref METRIC_META_REGION_MIGRATION_EXECUTE: HistogramVec =
         register_histogram_vec!("greptime_meta_region_migration_execute", "meta region migration execute", &["state"]).unwrap();
