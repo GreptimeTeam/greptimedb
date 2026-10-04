@@ -769,7 +769,11 @@ mod tests {
         }))
         .unwrap();
         // The default query of a direct-SST case never waits.
-        assert!(!waits_for_region_statistics(true, true, &[plain.clone()]));
+        assert!(!waits_for_region_statistics(
+            true,
+            true,
+            std::slice::from_ref(&plain)
+        ));
         assert!(!waits_for_region_statistics(true, true, &[]));
         // An opted-in query waits on the candidate target only.
         assert!(waits_for_region_statistics(
