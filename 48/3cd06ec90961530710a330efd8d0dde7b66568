@@ -1,0 +1,41 @@
+src/metric-engine/src/engine/bulk_insert.rs
+  s_f48675a217605d::t_6c59d63c8759a4 357-358,361-367,373,425-439,458-462,470
+src/metric-engine/src/engine/put.rs
+  s_f48675a217605d::t_75ceb80d86bf8f 937-940,943-952,1020-1034,1056-1060,1066,1074
+src/metric-engine/src/test_util.rs
+  s_473c1a6130a8d1::t_500ab899276379 124-134
+src/mito2/src/engine/scan_test.rs
+  s_473c1a6130a8d1::t_9b7300321ac490 2883
+src/mito2/src/engine/skip_wal_test.rs
+  s_473c1a6130a8d1::t_ab30cb4a86b957 963,982,1098
+src/mito2/src/memtable/version.rs
+  s_473c1a6130a8d1::t_088ecddbddf9e5 44,46,57,61-63,120,150-151,164,218,227,231-233,236-237,311-312,322,331,333,340-341,345-346,351,353-354,358,366,371,381,394-395,404,407,415-416
+src/mito2/src/region_write_ctx.rs
+  s_473c1a6130a8d1::t_d89be75585b55b 85,145,179,279-280,287,375,841,907,930,955,968
+src/mito2/src/worker/handle_close.rs
+  s_473c1a6130a8d1::t_728140fdf72b89 39,43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "483cd06ec90961530710a330efd8d0dde7b66568",
+  "prompts": {},
+  "sessions": {
+    "s_473c1a6130a8d1": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10576-3b1f-72a0-b3aa-e242470bfb1d",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    },
+    "s_f48675a217605d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a10591-343d-7313-aea9-25457abca166",
+        "model": "unknown"
+      },
+      "human_author": "WenyXu <wenymedia@gmail.com>"
+    }
+  }
+}
