@@ -423,6 +423,7 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
         let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
+            .with_serializer_registry(Arc::new(DefaultSerializer))
             .with_catalog_list(catalog_list)
             .build();
         // Re-register after the build to avoid Greptime UDF alias collisions.
@@ -1492,6 +1493,32 @@ mod tests {
             err.contains("Illegal access to catalog"),
             "unexpected error: {err}"
         );
+    }
+
+    /// Manually built states need ordinary extension decoding without an engine catalog.
+    #[tokio::test]
+    async fn test_serializer_decode_manual_state_keeps_extension_registry() {
+        let state = SessionStateBuilder::new().with_default_features().build();
+        let decoder = DefaultPlanDecoder::new(state, &QueryContext::arc()).unwrap();
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesNormalize::new(
+                0,
+                "number",
+                false,
+                Vec::new(),
+                merge_scan(numbers_scan(), false),
+            )),
+        });
+        let request_catalog = Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+            MemTable::try_new(NumbersTable::schema().arrow_schema().clone(), vec![vec![]]).unwrap(),
+        )));
+        let decoded = decoder
+            .decode(encode_plan(&plan), request_catalog, false)
+            .await
+            .unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+        assert_eq!(decoded.schema().as_arrow(), plan.schema().as_arrow());
     }
 
     /// `MergeScan` decodes under an ordinary single-input extension parent.
