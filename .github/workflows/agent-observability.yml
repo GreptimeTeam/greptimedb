@@ -106,7 +106,7 @@ env:
   CLICKHOUSE_TAG: ${{ inputs.clickhouse_tag }}
   VICTORIALOGS_TAG: ${{ inputs.victorialogs_tag }}
   O11YBENCH_REF: ${{ inputs.o11ybench_ref }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:e4528c7bb06a@sha256:5ff78311fc48719855c633b067590c4e1c495b0676b0b1ad5420818c047a3079' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:e4528c7bb06a@sha256:5ff78311fc48719855c633b067590c4e1c495b0676b0b1ad5420818c047a3079' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -150,6 +150,10 @@ jobs:
           bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
           docker run --rm --entrypoint grep "$RUNTIME_IMAGE" -q -- '--data-root)' /opt/o11ybench/scripts/run-agent-observability.sh \
             || { echo 'Comparison requires a runtime with --data-root support'; exit 1; }
+      - name: Validate dataset admission in runtime
+        run: |
+          bash greptimedb/.github/scripts/pull-benchmark-image.sh "$RUNTIME_IMAGE"
+          docker run --rm "$RUNTIME_IMAGE" scripts/logbench_agent_observability_measured.py --preflight-profile "$PROFILE"
       - name: Validate requested benchmark
         id: inputs
         shell: bash

@@ -114,7 +114,7 @@ env:
   RUNTIME_CPUS: ${{ inputs.runtime_cpus }}
   RUNTIME_MEMORY: ${{ inputs.runtime_memory }}
   BENCHMARK_ROOT: ${{ inputs.benchmark_root }}
-  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:b43785b56f42@sha256:e38811eb68caf3682ba56f5591a3e8e27e78e7983a923abb29fa2d7cd8fdbd46' }}
+  RUNTIME_IMAGE: ${{ inputs.runtime_image != 'auto' && inputs.runtime_image || inputs.provider == 'AWS' && 'public.ecr.aws/i8k6a5e1/greptime/o11ybenchruntime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' || 'greptime-registry.cn-hangzhou.cr.aliyuncs.com/tools/o11ybench-runtime:bc8fb1318d1e@sha256:52859b448649914ffc72871bbcab5cdad9fee89f590400008864c818944f7f7a' }}
   PROVIDER: ${{ inputs.provider }}
   REQUESTED_INSTANCE_TYPE: ${{ inputs.instance_type }}
   SYSTEM_DISK_GIB: ${{ inputs.system_disk_gib }}
@@ -386,9 +386,19 @@ jobs:
           --db-cpus "$DB_CPUS" --db-memory "$DB_MEMORY" --query-timeout-seconds "$QUERY_TIMEOUT_SECONDS" --load-workers "$LOAD_WORKERS" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
-    - name: Validate and render report
+    - name: GreptimeDB version comparison
+      if: always() && inputs.compare_greptimedb
       run: |
-        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" \
+        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind traces --root "$RUN_ROOT" >> "$GITHUB_STEP_SUMMARY"
+    - name: Validate and render report
+      env:
+        COMPARE_GREPTIMEDB: ${{ inputs.compare_greptimedb }}
+      run: |
+        comparison_args=()
+        if [[ "$COMPARE_GREPTIMEDB" == true ]]; then
+          comparison_args+=(--version-comparison "$RUN_ROOT/version-comparison.json")
+        fi
+        python3 o11ybench/scripts/run_tracesbench_docker.py --stage report --targets "$TARGETS" "${comparison_args[@]}" \
           --dataset "$DATASET" --runtime-cpus "$RUNTIME_CPUS" --runtime-memory "$RUNTIME_MEMORY" \
           --root "$RUN_ROOT" --owner "$OWNER" --runtime-image "$RESOLVED_RUNTIME_IMAGE"
     - name: Clean up owned containers
@@ -414,10 +424,6 @@ jobs:
         echo '## Baseline GreptimeDB' >> "$GITHUB_STEP_SUMMARY"
         python3 greptimedb/.github/scripts/tracesbench-summary.py \
           --root "$RUN_ROOT/baseline" --targets greptimedb --section lifecycle >> "$GITHUB_STEP_SUMMARY"
-    - name: GreptimeDB version comparison
-      if: always() && inputs.compare_greptimedb
-      run: |
-        python3 greptimedb/.github/scripts/benchmark-version-comparison.py report --kind traces --root "$RUN_ROOT" >> "$GITHUB_STEP_SUMMARY"
     - name: Stage benchmark artifacts
       if: always()
       run: |
