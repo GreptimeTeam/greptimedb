@@ -121,6 +121,28 @@ validation, warmup, and measurement requests of that query. Only the candidate
 target runs them, so a base build that does not know the setting measures the
 same query with the default behavior.
 
+For a statistics-dependent rewrite, the query may also set:
+
+```toml
+require_region_statistics = true
+candidate_remote_operator = "HashJoinExec"
+```
+
+`require_region_statistics` defaults to `false`. If any query opts in, the
+candidate direct-SST target waits for every case table's leader reports with
+non-zero disk size in `information_schema.region_statistics` before any timed
+samples. Timeout or request failure aborts all measurements on that target.
+Base targets and candidate cases without the flag do not wait.
+
+`candidate_remote_operator` defaults to unset and supports SQL queries only.
+Before any measurements, the candidate runs a separate `EXPLAIN ANALYZE` with
+the query's session prefix. Its TEXT DistAnalyze rows must have valid `stage`,
+`node`, and non-empty `plan` values (apart from the null/null `Total rows:`
+trailer), with the exact operator token absent from stage 0 and present in a
+positive stage. Failure aborts all candidate measurements. The complete preflight
+sample is retained in validation; it proves only that execution, not the plans
+of later timed requests. The base target does not run this preflight.
+
 `[scenario]` is required. Other scenario variants are intentionally unsupported
 for now, but `scenario.kind` leaves room for future `write_then_query` and
 `cache_warm_query` configuration.

@@ -23,12 +23,12 @@ use crate::query_regression_runner::model::{Measurement, Query, QueryResult, Sce
 use crate::query_regression_runner::plan::{load_plan, normalize_scenario};
 use crate::query_regression_runner::sql::{
     extract_rows, http_post_multi_statement_sql, http_post_prom_range_query, http_post_sql,
-    row_u64, sql_ident, sql_string,
+    row_u64, row_value, sql_ident, sql_string,
 };
 use crate::query_regression_runner::{MeasureArgs, Result};
 
-/// How long the measurement of a direct-SST case waits for the region statistics of its tables
-/// to settle before it measures anything.
+/// How long a candidate run waits for the region statistics of the case tables when a query opts
+/// in with `require_region_statistics`.
 ///
 /// Datanodes report the role and the size of their regions on every heartbeat (`interval` of the
 /// heartbeat options, three seconds by default) and a region is reported as a leader with a
@@ -38,6 +38,8 @@ use crate::query_regression_runner::{MeasureArgs, Result};
 const REGION_STATS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Poll interval of [`wait_for_region_statistics`].
 const REGION_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+/// Validation phase of the separate executed-plan preflight of a candidate query.
+const EXECUTED_PLAN_PREFLIGHT: &str = "executed_plan_preflight";
 
 pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
     if !args.http_timeout.is_finite() || args.http_timeout < 0.0 {
@@ -65,13 +67,16 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         .timeout(Duration::from_secs_f64(args.http_timeout))
         .build()?;
     let direct_fixture = matches!(scenario_kind(&plan), Some("direct_readable_sst"));
+    // Only the candidate target waits for region statistics, and only when a query of the case
+    // opts in: the base target does not need the reports, and a case without such a query keeps
+    // measuring immediately.
     let base = run_target(
         args.base_http_port,
         &tables,
         &configured_queries,
         &client,
         false,
-        direct_fixture,
+        waits_for_region_statistics(false, direct_fixture, &configured_queries),
     )
     .await;
     let candidate_target = run_target(
@@ -80,7 +85,7 @@ pub(super) async fn run_measure(args: MeasureArgs) -> Result<()> {
         &configured_queries,
         &client,
         true,
-        direct_fixture,
+        waits_for_region_statistics(true, direct_fixture, &configured_queries),
     )
     .await;
     let thresholds = enforce_thresholds(&configured_queries, &base, &candidate_target)?;
@@ -165,6 +170,15 @@ fn scenario_kind(plan: &Value) -> Option<&str> {
     plan.get("scenario")?.get("kind")?.as_str()
 }
 
+/// Whether a run of `queries` on a target waits for the region statistics of the case tables
+/// before it measures anything.
+///
+/// Only candidate direct-SST cases with an opted-in query wait; base targets and candidate
+/// cases without an opted-in query do not wait.
+fn waits_for_region_statistics(candidate: bool, direct_fixture: bool, queries: &[Query]) -> bool {
+    candidate && direct_fixture && queries.iter().any(|query| query.require_region_statistics)
+}
+
 /// The region statistics of `table`: `(regions, ready_regions)`, where a ready region has an
 /// ordinary leader report with a non-zero disk size.
 ///
@@ -185,11 +199,11 @@ async fn region_statistics(client: &Client, port: u16, db: &str, table: &str) ->
     http_post_sql(client, port, &sql, db).await
 }
 
-/// Waits until every table of a direct-SST case has one leader report with a non-zero size per
-/// region, and returns the samples of the last round plus an error sample when the statistics did
-/// not settle in time.
+/// Waits until every table of the case has one leader report with a non-zero size per region, and
+/// returns the samples of the last round plus an error sample when the statistics did not settle
+/// in time.
 ///
-/// The measurement of a case that depends on those statistics would otherwise start before the
+/// The measurement of a query that depends on those statistics would otherwise start before the
 /// datanode reported them and silently measure the plan the case is not about.
 async fn wait_for_region_statistics(
     client: &Client,
@@ -262,6 +276,121 @@ fn parse_region_statistics(body: &Value) -> Option<(u64, u64)> {
     ))
 }
 
+/// The `executed_plan_preflight` validation error of `query`, with the HTTP response of the
+/// separate preflight request when one was made.
+fn preflight_failure(query: &Query, error: &str, sample: Option<&Value>) -> Value {
+    json!({
+        "query": query.name,
+        "phase": EXECUTED_PLAN_PREFLIGHT,
+        "error": error,
+        "response": sample.and_then(|sample| sample.get("response")),
+    })
+}
+
+/// A target result that failed before its measurement loops: the validation samples so far and
+/// no measurement at all.
+fn failed_before_measurement(validation: Vec<Value>, validation_errors: Vec<Value>) -> QueryResult {
+    QueryResult {
+        validation,
+        validation_errors,
+        measurements: Vec::new(),
+        status: "failed".to_string(),
+    }
+}
+
+/// The `EXPLAIN ANALYZE` clone of a candidate query that must run `candidate_remote_operator`
+/// remotely, or the reason it cannot be checked. `Ok(None)` for a query without the field; the
+/// operator is matched as a token, so an empty pattern is rejected because it would match every
+/// plan.
+fn candidate_preflight(query: &Query) -> std::result::Result<Option<(Query, &str)>, &'static str> {
+    let Some(operator) = query.candidate_remote_operator.as_deref().map(str::trim) else {
+        return Ok(None);
+    };
+    if !matches!(query.kind.as_deref(), None | Some("sql")) {
+        return Err("candidate_remote_operator needs a plain sql query");
+    }
+    if operator.is_empty() {
+        return Err("candidate_remote_operator must not be empty");
+    }
+    let mut explain = query.clone();
+    explain.query = format!("EXPLAIN ANALYZE {}", query.query);
+    Ok(Some((explain, operator)))
+}
+
+/// Tags a preflight sample with its phase and returns the error of an executed TEXT DistAnalyze
+/// output that does not keep `operator` out of stage 0 and in a later stage. Anything
+/// unrecognized fails closed.
+fn executed_plan_preflight(sample: &mut Value, operator: &str) -> Option<String> {
+    sample
+        .as_object_mut()
+        .expect("HTTP samples are objects")
+        .insert(
+            "phase".to_string(),
+            Value::String(EXECUTED_PLAN_PREFLIGHT.to_string()),
+        );
+    if !sample["ok"].as_bool().unwrap_or(false) {
+        return Some("EXPLAIN ANALYZE request failed".to_string());
+    }
+    let mut stages = Vec::new();
+    for row in &extract_rows(&sample["response"]) {
+        match plan_row(row) {
+            Ok(Some((stage, plan))) => stages.push((stage, plan_has_operator(plan, operator))),
+            Ok(None) => {}
+            Err(error) => return Some(error),
+        }
+    }
+    if !stages.iter().any(|(stage, _)| *stage == 0) {
+        return Some("executed plan has no stage 0".to_string());
+    }
+    if stages
+        .iter()
+        .any(|(stage, matched)| *stage == 0 && *matched)
+    {
+        return Some(format!("stage 0 still runs {operator} on the frontend"));
+    }
+    if !stages.iter().any(|(stage, matched)| *stage > 0 && *matched) {
+        return Some(format!("no remote stage runs {operator}"));
+    }
+    None
+}
+
+/// The `(stage, plan)` of one executed TEXT DistAnalyze row, or `Ok(None)` for the explicit
+/// null/null `Total rows:` trailer row. A row with a missing, non-null, or unparseable stage or
+/// node, or without non-empty plan text, is malformed.
+fn plan_row(row: &Value) -> std::result::Result<Option<(u64, &str)>, String> {
+    // Only a row whose `stage` and `node` are explicitly null is the trailer; a row with missing
+    // fields or values that merely fail to parse must not pass as one.
+    if row_value(row, 0, "stage") == Some(&Value::Null)
+        && row_value(row, 1, "node") == Some(&Value::Null)
+        && row_value(row, 2, "plan")
+            .and_then(Value::as_str)
+            .is_some_and(|plan| plan.trim_start().starts_with("Total rows:"))
+    {
+        return Ok(None);
+    }
+    match (
+        row_u64(row, 0, "stage"),
+        row_u64(row, 1, "node"),
+        row_value(row, 2, "plan").and_then(Value::as_str),
+    ) {
+        // An empty plan can never hold an operator, so it would fake a clean stage 0 or a remote
+        // stage and must not pass as a plan row.
+        (Ok(stage), Ok(_), Some(plan)) if !plan.trim().is_empty() => Ok(Some((stage, plan))),
+        _ => Err(format!("malformed executed plan row {row}")),
+    }
+}
+
+/// Whether any line of `plan` starts with exactly `operator` as its own token, e.g.
+/// `HashJoinExec:` or a bare `HashJoinExec`. Mentioning the name inside a parameter or a
+/// predicate does not match.
+fn plan_has_operator(plan: &str, operator: &str) -> bool {
+    plan.lines().any(|line| {
+        line.trim().strip_prefix(operator).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(':') || rest.starts_with(char::is_whitespace)
+        })
+    })
+}
+
 async fn run_target(
     port: u16,
     tables: &[Table],
@@ -280,6 +409,8 @@ async fn run_target(
             end: None,
             step: None,
             candidate_session_sql: Vec::new(),
+            require_region_statistics: false,
+            candidate_remote_operator: None,
             warmup: 0,
             iterations: 1,
             thresholds: Map::new(),
@@ -291,10 +422,12 @@ async fn run_target(
     let mut validation_errors = Vec::new();
     if wait_for_region_stats {
         let (stats, error) = wait_for_region_statistics(client, port, tables).await;
-        if let Some(error) = error {
-            validation_errors.push(error);
-        }
         validation.extend(stats);
+        if let Some(error) = error {
+            // Measuring now would silently time the plan the case is not about.
+            validation_errors.push(error);
+            return failed_before_measurement(validation, validation_errors);
+        }
     }
     for table in tables {
         let sql = format!("SHOW CREATE TABLE {}", sql_ident(&table.name));
@@ -325,6 +458,31 @@ async fn run_target(
         }));
     }
     validation.push(first);
+
+    // The candidate target only measures a query that expects a remote operator once its
+    // executed plan was checked: the preflight is one separate `EXPLAIN ANALYZE` request with
+    // the same session prefix, kept in `validation`, and any failure reports the query without a
+    // timed sample. It proves this execution ran the operator remotely, not the timed requests.
+    if candidate {
+        for query in &queries {
+            let (explain, operator) = match candidate_preflight(query) {
+                Ok(Some(preflight)) => preflight,
+                Ok(None) => continue,
+                Err(reason) => {
+                    validation_errors.push(preflight_failure(query, reason, None));
+                    return failed_before_measurement(validation, validation_errors);
+                }
+            };
+            let mut sample = post_query(client, port, &explain, db, true).await;
+            let error = executed_plan_preflight(&mut sample, operator)
+                .map(|error| preflight_failure(query, &error, Some(&sample)));
+            validation.push(sample);
+            if let Some(error) = error {
+                validation_errors.push(error);
+                return failed_before_measurement(validation, validation_errors);
+            }
+        }
+    }
 
     let mut measurements = Vec::with_capacity(queries.len());
     for query in &queries {
@@ -603,6 +761,38 @@ mod tests {
     }
 
     #[test]
+    fn region_statistics_wait_is_candidate_only_and_query_opt_in() {
+        let plain: Query = serde_json::from_value(json!({"query": "SELECT 1"})).unwrap();
+        let opted_in: Query = serde_json::from_value(json!({
+            "query": "SELECT 1",
+            "require_region_statistics": true,
+        }))
+        .unwrap();
+        // The default query of a direct-SST case never waits.
+        assert!(!waits_for_region_statistics(true, true, &[plain.clone()]));
+        assert!(!waits_for_region_statistics(true, true, &[]));
+        // An opted-in query waits on the candidate target only.
+        assert!(waits_for_region_statistics(
+            true,
+            true,
+            std::slice::from_ref(&opted_in)
+        ));
+        assert!(!waits_for_region_statistics(
+            false,
+            true,
+            std::slice::from_ref(&opted_in)
+        ));
+        // No query can make a run of another scenario kind wait.
+        assert!(!waits_for_region_statistics(
+            true,
+            false,
+            std::slice::from_ref(&opted_in)
+        ));
+        // One opted-in query is enough when a case mixes queries.
+        assert!(waits_for_region_statistics(true, true, &[plain, opted_in]));
+    }
+
+    #[test]
     fn threshold_rejects_unknown_keys_and_zero_base() {
         let query = Query {
             name: Some("q".to_string()),
@@ -612,6 +802,8 @@ mod tests {
             end: None,
             step: None,
             candidate_session_sql: Vec::new(),
+            require_region_statistics: false,
+            candidate_remote_operator: None,
             warmup: 0,
             iterations: 1,
             thresholds: Map::from_iter([
@@ -646,5 +838,231 @@ mod tests {
             "base median latency is missing or zero"
         );
         assert_eq!(results[1]["reason"], "unsupported threshold");
+    }
+
+    #[test]
+    fn candidate_preflight_explains_only_the_candidate_and_rejects_bad_config() {
+        let configured = |kind: Option<&str>, operator: Option<&str>, prefix: &[&str]| {
+            serde_json::from_value::<Query>(json!({
+                "query": "SELECT 1",
+                "kind": kind,
+                "candidate_session_sql": prefix,
+                "candidate_remote_operator": operator,
+            }))
+            .unwrap()
+        };
+        // An unconfigured query is never checked.
+        assert!(matches!(
+            candidate_preflight(&configured(None, None, &[])),
+            Ok(None)
+        ));
+        // The preflight carries the candidate session prefix, and the query itself is untouched.
+        let query = configured(
+            Some("sql"),
+            Some(" HashJoinExec "),
+            &["SET experimental_dist_join = true"],
+        );
+        let (explain, operator) = candidate_preflight(&query).unwrap().unwrap();
+        assert_eq!("HashJoinExec", operator);
+        assert_eq!(
+            "SET experimental_dist_join = true;\nEXPLAIN ANALYZE SELECT 1",
+            explain.request_sql(true)
+        );
+        assert_eq!("EXPLAIN ANALYZE SELECT 1", explain.request_sql(false));
+        assert_eq!("SELECT 1", query.query);
+        // An operator without a kind defaults to a plain SQL query.
+        assert!(candidate_preflight(&configured(None, Some("HashJoinExec"), &[])).is_ok());
+        assert_eq!(
+            Err("candidate_remote_operator must not be empty"),
+            candidate_preflight(&configured(Some("sql"), Some(" "), &[])).map(|_| ())
+        );
+        assert_eq!(
+            Err("candidate_remote_operator needs a plain sql query"),
+            candidate_preflight(&configured(Some("prom_http"), Some("HashJoinExec"), &[]))
+                .map(|_| ())
+        );
+    }
+
+    #[test]
+    fn executed_plan_preflight_fails_closed() {
+        let native = |rows: Value| {
+            json!({
+                "ok": true,
+                "response": {"output": [{"records": {
+                    "schema": {"column_schemas": [
+                        {"name": "stage", "data_type": "UInt32"},
+                        {"name": "node", "data_type": "UInt32"},
+                        {"name": "plan", "data_type": "Utf8"}
+                    ]},
+                    "rows": rows,
+                    "total_rows": 3
+                }}]}
+            })
+        };
+        let cases = [
+            (
+                "a remote join passes",
+                native(json!([
+                    [0, 0, "SortExec: fetch=10\n  MergeScanExec: peer_id=1"],
+                    [1, 0, "HashJoinExec: mode=CollectLeft"],
+                    [null, null, "Total rows: 10"],
+                ])),
+                None,
+            ),
+            (
+                "object rows pass as well",
+                json!({"ok": true, "response": {"data": [
+                    {"stage": 0, "node": 0, "plan": "MergeScanExec: peer_id=1"},
+                    {"stage": 1, "node": 3, "plan": "  HashJoinExec: mode=CollectLeft"},
+                ]}}),
+                None,
+            ),
+            (
+                "a failed request fails closed",
+                json!({"ok": false, "error": "HTTP 500"}),
+                Some("EXPLAIN ANALYZE request failed"),
+            ),
+            (
+                "a join in stage 0 fails closed",
+                native(json!([
+                    [
+                        0,
+                        0,
+                        "HashJoinExec: mode=Partitioned\n  MergeScanExec: peer_id=1"
+                    ],
+                    [1, 0, "RegionScanExec: region_id=1"],
+                    [null, null, "Total rows: 10"],
+                ])),
+                Some("stage 0 still runs HashJoinExec"),
+            ),
+            (
+                "a plan without a remote stage fails closed",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [null, null, "Total rows: 10"],
+                ])),
+                Some("no remote stage runs HashJoinExec"),
+            ),
+            (
+                "a plan without stage 0 fails closed",
+                native(json!([[1, 0, "HashJoinExec: mode=CollectLeft"]])),
+                Some("executed plan has no stage 0"),
+            ),
+            (
+                "a malformed stage fails closed",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    ["stage one", 0, "HashJoinExec: mode=CollectLeft"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "a malformed node fails closed",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [1, "node one", "HashJoinExec: mode=CollectLeft"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "a half-empty stage row fails closed",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [1, null, "HashJoinExec: mode=CollectLeft"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "an unrecognized row without a stage fails closed",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [null, null, "some totals"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "a plan row without plan text fails closed",
+                native(json!([[0, 0, null]])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "a non-null bad stage and node do not pass as trailer",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [1, 0, "HashJoinExec: mode=CollectLeft"],
+                    ["stage one", "node one", "Total rows: 10"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "missing stage and node fields do not pass as trailer",
+                json!({"ok": true, "response": {"data": [
+                    {"stage": 0, "node": 0, "plan": "MergeScanExec: peer_id=1"},
+                    {"stage": 1, "node": 2, "plan": "HashJoinExec: mode=CollectLeft"},
+                    {"plan": "Total rows: 10"},
+                ]}}),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "an empty frontend plan does not pass as a clean stage 0",
+                native(json!([
+                    [0, 0, ""],
+                    [1, 0, "HashJoinExec: mode=CollectLeft"],
+                ])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "an empty remote plan does not pass as a remote stage",
+                native(json!([[0, 0, "MergeScanExec: peer_id=1"], [1, 0, "   "],])),
+                Some("malformed executed plan row"),
+            ),
+            (
+                "the name inside a parameter does not match",
+                native(json!([
+                    [0, 0, "FilterExec: note = 'HashJoinExec: not an operator'"],
+                    [1, 0, "RegionScanExec: region_id=1"],
+                    [null, null, "Total rows: 1"],
+                ])),
+                Some("no remote stage runs HashJoinExec"),
+            ),
+            (
+                "a longer name does not match",
+                native(json!([
+                    [0, 0, "MergeScanExec: peer_id=1"],
+                    [1, 0, "HashJoinExecExtra: mode=CollectLeft"],
+                    [null, null, "Total rows: 10"],
+                ])),
+                Some("no remote stage runs HashJoinExec"),
+            ),
+        ];
+        for (name, mut sample, expected) in cases {
+            let error = executed_plan_preflight(&mut sample, "HashJoinExec");
+            assert_eq!(
+                Some("executed_plan_preflight"),
+                sample["phase"].as_str(),
+                "{name}"
+            );
+            match expected {
+                Some(expected) => {
+                    let error = error.unwrap_or_default();
+                    assert!(error.contains(expected), "{name}: unexpected {error:?}");
+                }
+                None => assert!(error.is_none(), "{name}: unexpected {error:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn failure_before_measurement_reports_no_measurement() {
+        let result = failed_before_measurement(
+            vec![json!({"sql": "EXPLAIN ANALYZE SELECT 1", "phase": "executed_plan_preflight"})],
+            vec![
+                json!({"phase": "executed_plan_preflight", "error": "no remote stage runs HashJoinExec"}),
+            ],
+        );
+        assert_eq!("failed", result.status);
+        assert!(result.measurements.is_empty());
+        assert_eq!(1, result.validation.len());
+        assert_eq!(1, result.validation_errors.len());
     }
 }
