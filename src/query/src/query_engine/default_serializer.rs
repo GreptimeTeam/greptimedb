@@ -1501,7 +1501,7 @@ mod tests {
         let plan = LogicalPlan::Extension(Extension {
             node: Arc::new(SeriesNormalize::new(
                 0,
-                "number".to_string(),
+                "number",
                 false,
                 Vec::new(),
                 outer.clone(),
