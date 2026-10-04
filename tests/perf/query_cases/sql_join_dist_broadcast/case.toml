@@ -15,8 +15,11 @@
 # with rows instead of regions.
 #
 # Both tables also have to be reported as leaders with a non-zero disk size
-# before the rewrite can fire: `query_regression_runner measure` waits for that
-# in `information_schema.region_statistics` before it measures a direct-SST case.
+# before the rewrite can fire. `require_region_statistics = true` opts this
+# query into waiting for that in `information_schema.region_statistics` before
+# the candidate target measures it; no other query or target needs the wait.
+# The wait only makes the statistics available in time, so the query also pins
+# the rewrite with `candidate_remote_operator` below.
 
 [case]
 name = "sql_join_dist_broadcast"
@@ -120,6 +123,13 @@ query = "SELECT f.host, d.zone, avg(f.value * d.weight) AS score FROM sql_join_d
 # statements; the base target measures the same query with the default rewrite
 # behavior.
 candidate_session_sql = ["SET experimental_dist_join = true"]
+# Before it measures, the candidate target runs one separate EXPLAIN ANALYZE
+# request of this query and fails it without a timed sample unless the executed
+# plan keeps HashJoinExec out of the frontend stage and runs it in a later one.
+candidate_remote_operator = "HashJoinExec"
+# Wait for both tables' leader/size reports before any candidate measurements.
+# A failed wait or preflight aborts the candidate target without timed samples.
+require_region_statistics = true
 warmup = 1
 iterations = 3
 
