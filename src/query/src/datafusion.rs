@@ -1862,6 +1862,9 @@ mod tests {
     /// The physical table id a logical candidate table resolves to in the route gating test.
     const LOGICAL_PHYSICAL_TABLE_ID: TableId = 1026;
 
+    /// The table id of the table an aliased self-join joins with itself.
+    const SELF_JOIN_TABLE_ID: TableId = 1027;
+
     /// An information extension with fixed region statistics and a counter of its `region_stats`
     /// calls.
     #[derive(Debug)]
@@ -1988,6 +1991,42 @@ mod tests {
             .unwrap()
             .build()
             .unwrap()
+    }
+
+    /// The shape of [`dist_join_test_plan`] with the given tables under the aliases `a` and `b`:
+    /// an aliased self-join passes the same table id twice.
+    fn dist_join_aliased_test_plan(left: (TableId, &str), right: (TableId, &str)) -> LogicalPlan {
+        LogicalPlanBuilder::from(dist_join_test_scan("a", left.0, left.1))
+            .join_on(
+                dist_join_test_scan("b", right.0, right.1),
+                JoinType::Inner,
+                vec![col("a.number").eq(col("b.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap()
+    }
+
+    /// The statistics the engine derives from [`dist_join_reports`] and [`dist_join_test_routes`]:
+    /// the probe table with 10_000 bytes in two regions and the build table with 1_000 bytes in
+    /// one.
+    fn dist_join_test_stats() -> BTreeMap<TableId, crate::dist_plan::DistJoinTableStats> {
+        BTreeMap::from([
+            (
+                PROBE_TABLE_ID,
+                crate::dist_plan::DistJoinTableStats {
+                    total_bytes: 10_000,
+                    region_count: 2,
+                },
+            ),
+            (
+                BUILD_TABLE_ID,
+                crate::dist_plan::DistJoinTableStats {
+                    total_bytes: 1_000,
+                    region_count: 1,
+                },
+            ),
+        ])
     }
 
     /// A query context with or without the session opt-in of the rewrite.
@@ -2175,25 +2214,7 @@ mod tests {
         let plan = dist_join_test_plan();
 
         let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
-        assert_eq!(
-            BTreeMap::from([
-                (
-                    PROBE_TABLE_ID,
-                    crate::dist_plan::DistJoinTableStats {
-                        total_bytes: 10_000,
-                        region_count: 2,
-                    }
-                ),
-                (
-                    BUILD_TABLE_ID,
-                    crate::dist_plan::DistJoinTableStats {
-                        total_bytes: 1_000,
-                        region_count: 1,
-                    }
-                ),
-            ]),
-            stats.tables
-        );
+        assert_eq!(dist_join_test_stats(), stats.tables);
         assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
         assert_eq!(
             1,
@@ -2426,5 +2447,109 @@ mod tests {
 
         assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
         assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// An aliased self-join prices one table against itself, which can never satisfy
+    /// `N * B < B`: the engine resolves no route and fetches no statistics for it, and the
+    /// EXPLAIN of the same query keeps the existing plan.
+    #[tokio::test]
+    async fn test_dist_join_stats_self_join_keeps_plan() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan =
+            dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (PROBE_TABLE_ID, "probe"));
+
+        assert!(query_engine.dist_join_stats(&ctx, &plan).await.is_none());
+        assert_eq!(
+            0,
+            calls.load(Ordering::SeqCst),
+            "a self-join must not fetch any statistics"
+        );
+
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            !nests_join_in_merge_scan(&explained),
+            "the self-join must keep its two MergeScan boundaries, got:\n{explained}"
+        );
+        assert_eq!(0, calls.load(Ordering::SeqCst));
+    }
+
+    /// The aliases of the two sides do not change the candidate: the same shape over two tables is
+    /// priced, the heuristic favors the build side, and the EXPLAIN shows the nested rewrite.
+    #[tokio::test]
+    async fn test_dist_join_stats_aliased_tables_stay_candidates() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let engine = dist_join_engine(dist_join_reports(), calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let mut ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let plan =
+            dist_join_aliased_test_plan((PROBE_TABLE_ID, "probe"), (BUILD_TABLE_ID, "build"));
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(dist_join_test_stats(), stats.tables);
+        assert!(stats.favors_right_build(PROBE_TABLE_ID, BUILD_TABLE_ID));
+        assert_eq!(1, calls.load(Ordering::SeqCst));
+
+        let explained = explain_logical_plan(query_engine, &mut ctx, &plan).await;
+        assert!(
+            nests_join_in_merge_scan(&explained),
+            "the EXPLAIN must show the nested rewrite, got:\n{explained}"
+        );
+        assert_eq!(2, calls.load(Ordering::SeqCst));
+    }
+
+    /// A rejected self-join does not stop the traversal of the plan: the legitimate join next to
+    /// it is still priced, the self-join table gets no statistics, and the query still comes from
+    /// one `region_stats` call.
+    #[tokio::test]
+    async fn test_dist_join_stats_self_join_next_to_candidate() {
+        common_telemetry::init_default_ut_logging();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut routes = dist_join_test_routes();
+        routes.push(dist_join_physical_route(SELF_JOIN_TABLE_ID, &[1]));
+        let mut reports = dist_join_reports();
+        reports.push(region_stat(
+            RegionId::new(SELF_JOIN_TABLE_ID, 1),
+            2_000,
+            RegionRole::Leader,
+        ));
+        let engine = dist_join_engine_with_routes(routes, reports, calls.clone(), true).await;
+        let query_engine = engine
+            .as_any()
+            .downcast_ref::<DatafusionQueryEngine>()
+            .unwrap();
+        let ctx = query_engine.engine_context(dist_join_query_ctx(true));
+        let self_join =
+            dist_join_aliased_test_plan((SELF_JOIN_TABLE_ID, "logs"), (SELF_JOIN_TABLE_ID, "logs"));
+        let plan = LogicalPlanBuilder::from(self_join)
+            .join_on(
+                dist_join_test_plan(),
+                JoinType::Inner,
+                vec![col("a.number").eq(col("probe.number"))],
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let stats = query_engine.dist_join_stats(&ctx, &plan).await.unwrap();
+        assert_eq!(
+            dist_join_test_stats(),
+            stats.tables,
+            "the rejected self-join must not be priced"
+        );
+        assert_eq!(1, calls.load(Ordering::SeqCst));
     }
 }
