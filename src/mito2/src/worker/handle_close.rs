@@ -36,16 +36,12 @@ impl<S: LogStore> RegionWorkerLoop<S> {
 
         info!("Try to close region {}, worker: {}", region_id, self.id);
 
-        // If the close request asks for a flush, or the region skips WAL,
-        // and has data in memtable and region is flushable (like, not in follower state),
-        // we should flush it before closing to ensure durability.
-        if (request.flush_on_close || region.skip_wal())
-            && !region
-                .version_control
-                .current()
-                .version
-                .memtables
-                .is_empty()
+        // Unlogged writes cannot be recovered from WAL, so flush them before closing.
+        // Followers cannot flush; explicit flush-on-close and region WAL options
+        // retain their existing behavior.
+        let version = region.version();
+        if (request.flush_on_close || region.skip_wal() || version.memtables.has_unlogged_writes())
+            && !version.memtables.is_empty()
             && region.is_flushable()
         {
             info!("Region {} has pending data, waiting for flush", region_id);
@@ -69,7 +65,7 @@ impl<S: LogStore> RegionWorkerLoop<S> {
             return;
         }
 
-        // WAL configured or memtable is empty, flush is not necessary.
+        // No close-time flush is required, or the region cannot flush.
         self.remove_region(region_id).await;
         info!("Region {} closed, worker: {}", region_id, self.id);
         sender.send(Ok(0))

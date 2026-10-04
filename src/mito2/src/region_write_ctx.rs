@@ -70,8 +70,19 @@ impl Drop for WriteNotify {
     }
 }
 
+/// Source of writes installed into memtables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WriteSource {
+    Request,
+    WalReplay,
+}
+
 /// Context to keep region metadata and buffer write requests.
 pub(crate) struct RegionWriteCtx {
+    /// Source of the buffered writes.
+    source: WriteSource,
+    /// Whether accepted non-empty writes bypass WAL. WAL replay never sets this flag.
+    has_unlogged_writes: bool,
     /// Id of region to write.
     region_id: RegionId,
     /// Version of the region while creating the context.
@@ -120,6 +131,7 @@ impl RegionWriteCtx {
         version_control: &VersionControlRef,
         provider: Provider,
         written_bytes: Option<Arc<AtomicU64>>,
+        source: WriteSource,
     ) -> RegionWriteCtx {
         let VersionControlData {
             version,
@@ -129,6 +141,8 @@ impl RegionWriteCtx {
         } = version_control.current();
 
         RegionWriteCtx {
+            source,
+            has_unlogged_writes: false,
             region_id,
             version,
             version_control: version_control.clone(),
@@ -162,6 +176,7 @@ impl RegionWriteCtx {
             self.next_sequence = sequence;
         }
         let num_rows = rows.as_ref().map(|rows| rows.rows.len()).unwrap_or(0);
+        self.has_unlogged_writes |= num_rows > 0 && self.is_unlogged_write(skip_wal);
         let mutation = Mutation {
             op_type,
             sequence: self.next_sequence,
@@ -255,8 +270,29 @@ impl RegionWriteCtx {
         self.next_entry_id
     }
 
-    /// Consumes mutations and writes them into mutable memtable.
-    pub(crate) async fn write_memtable(&mut self) {
+    /// Installs ordinary and bulk writes, then publishes their sequence and entry ID.
+    pub(crate) async fn write_memtables(&mut self) {
+        if self.failed {
+            return;
+        }
+        // A failed installation may leave some rows in memory.
+        if self.has_unlogged_writes {
+            self.version.memtables.mutable.mark_unlogged_writes();
+        }
+        self.write_mutations().await;
+        self.write_bulk().await;
+        self.publish_sequence_and_entry_id();
+    }
+
+    fn is_unlogged_write(&self, request_skip_wal: bool) -> bool {
+        self.source == WriteSource::Request
+            && (request_skip_wal
+                || self.provider == Provider::Noop
+                || self.version.options.skip_wal)
+    }
+
+    /// Consumes mutations and writes them into mutable memtables.
+    async fn write_mutations(&mut self) {
         debug_assert_eq!(self.wal_notifiers.len(), self.wal_entry.mutations.len());
 
         if self.failed {
@@ -336,6 +372,7 @@ impl RegionWriteCtx {
             self.wal_entry.bulk_entries.push(entry);
         }
 
+        self.has_unlogged_writes |= bulk.num_rows() > 0 && self.is_unlogged_write(skip_wal);
         self.bulk_notifiers
             .push(WriteNotify::new(sender, bulk.num_rows()));
 
@@ -344,7 +381,7 @@ impl RegionWriteCtx {
         true
     }
 
-    pub(crate) async fn write_bulk(&mut self) {
+    async fn write_bulk(&mut self) {
         if self.failed || self.bulk_parts.is_empty() {
             return;
         }
@@ -398,10 +435,10 @@ impl RegionWriteCtx {
     }
 
     /// Publishes the assigned sequences and entry id to the region's committed
-    /// watermark. Only call after both [`write_memtable`](Self::write_memtable)
+    /// watermark. Only call after both [`write_mutations`](Self::write_mutations)
     /// and [`write_bulk`](Self::write_bulk) have completed; a failed context
     /// must not publish.
-    pub(crate) fn publish_sequence_and_entry_id(&self) {
+    fn publish_sequence_and_entry_id(&self) {
         if self.failed {
             return;
         }
@@ -576,6 +613,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         for (op_type, skip, num_rows) in [
             (OpType::Put, skip_wal, 2),
@@ -657,6 +695,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         ctx.push_mutation(
             OpType::Delete as i32,
@@ -693,6 +732,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         let (tx, rx) = oneshot::channel();
         ctx.push_mutation(
@@ -736,6 +776,7 @@ mod tests {
             &version_control,
             Provider::raft_engine_provider(region_id.as_u64()),
             None,
+            WriteSource::Request,
         );
         // Alternate policies in one context, retaining all parts for the memtable.
         for skip in [skip_wal, false, skip_wal] {
@@ -772,8 +813,13 @@ mod tests {
         let builder = VersionControlBuilder::new();
         let region_id = builder.region_id();
         let version_control = Arc::new(builder.build());
-        let mut ctx =
-            RegionWriteCtx::new(region_id, &version_control, Provider::noop_provider(), None);
+        let mut ctx = RegionWriteCtx::new(
+            region_id,
+            &version_control,
+            Provider::noop_provider(),
+            None,
+            WriteSource::Request,
+        );
         let (tx, rx) = oneshot::channel();
 
         assert!(ctx.push_bulk(OptionOutputTx::from(tx), new_bulk_part(), None, skip_wal));
@@ -789,6 +835,142 @@ mod tests {
 
         let result = rx.blocking_recv().unwrap();
         assert!(result.is_err(), "bulk notifier should report WAL error");
+    }
+
+    #[tokio::test]
+    async fn test_unlogged_writes_source_and_policy() {
+        use api::v1::helper::{tag_column_schema, time_index_column_schema};
+        use api::v1::value::ValueData;
+        use api::v1::{ColumnDataType, Row, Value};
+
+        for source in [WriteSource::Request, WriteSource::WalReplay] {
+            for skip_wal in [false, true] {
+                for bulk in [false, true] {
+                    for fail_before_install in [false, true] {
+                        let builder = VersionControlBuilder::new();
+                        let region_id = builder.region_id();
+                        let version_control = Arc::new(builder.build());
+                        let mut ctx = RegionWriteCtx::new(
+                            region_id,
+                            &version_control,
+                            Provider::raft_engine_provider(region_id.as_u64()),
+                            None,
+                            source,
+                        );
+                        let (tx, rx) = oneshot::channel();
+                        if bulk {
+                            let mut part = new_bulk_part();
+                            part.fill_missing_columns(&ctx.version.metadata).unwrap();
+                            assert!(ctx.push_bulk(OptionOutputTx::from(tx), part, None, skip_wal));
+                        } else {
+                            ctx.push_mutation(
+                                OpType::Put as i32,
+                                Some(Rows {
+                                    schema: vec![
+                                        time_index_column_schema(
+                                            "ts",
+                                            ColumnDataType::TimestampMillisecond,
+                                        ),
+                                        tag_column_schema("tag_0", ColumnDataType::String),
+                                    ],
+                                    rows: vec![Row {
+                                        values: vec![
+                                            crate::test_util::ts_ms_value(0),
+                                            Value {
+                                                value_data: Some(ValueData::StringValue(
+                                                    "a".to_string(),
+                                                )),
+                                            },
+                                        ],
+                                    }],
+                                }),
+                                None,
+                                OptionOutputTx::from(tx),
+                                None,
+                                skip_wal,
+                            );
+                        }
+                        if fail_before_install {
+                            ctx.set_error(Arc::new(
+                                UnexpectedSnafu {
+                                    reason: "WAL append failed".to_string(),
+                                }
+                                .build(),
+                            ));
+                        }
+                        ctx.write_memtables().await;
+                        assert_eq!(
+                            version_control
+                                .current()
+                                .version
+                                .memtables
+                                .has_unlogged_writes(),
+                            source == WriteSource::Request && skip_wal && !fail_before_install,
+                            "source={source:?}, skip_wal={skip_wal}, bulk={bulk}, failed={fail_before_install}",
+                        );
+                        assert_eq!(
+                            version_control.committed_sequence(),
+                            if fail_before_install {
+                                0
+                            } else if bulk {
+                                2
+                            } else {
+                                1
+                            }
+                        );
+                        drop(ctx);
+                        assert_eq!(rx.await.unwrap().is_err(), fail_before_install);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_unlogged_writes_region_policy_and_empty_requests() {
+        for source in [WriteSource::Request, WriteSource::WalReplay] {
+            for noop in [false, true] {
+                for region_skip_wal in [false, true] {
+                    let builder = VersionControlBuilder::new();
+                    let region_id = builder.region_id();
+                    let mut version = builder.build_version();
+                    version.options.skip_wal = region_skip_wal;
+                    let version_control =
+                        Arc::new(crate::region::version::VersionControl::new(version));
+                    let provider = if noop {
+                        Provider::Noop
+                    } else {
+                        Provider::raft_engine_provider(region_id.as_u64())
+                    };
+                    let mut ctx =
+                        RegionWriteCtx::new(region_id, &version_control, provider, None, source);
+                    ctx.push_mutation(
+                        OpType::Put as i32,
+                        None,
+                        None,
+                        OptionOutputTx::none(),
+                        None,
+                        true,
+                    );
+                    assert!(!ctx.has_unlogged_writes);
+                    ctx.push_mutation(
+                        OpType::Put as i32,
+                        Some(Rows {
+                            schema: vec![],
+                            rows: vec![api::v1::Row::default()],
+                        }),
+                        None,
+                        OptionOutputTx::none(),
+                        None,
+                        false,
+                    );
+                    assert_eq!(
+                        ctx.has_unlogged_writes,
+                        source == WriteSource::Request && (noop || region_skip_wal)
+                    );
+                }
+            }
+        }
     }
 
     fn new_bulk_part() -> BulkPart {

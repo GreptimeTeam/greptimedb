@@ -56,7 +56,7 @@ use store_api::metric_engine_consts::PRIMARY_KEY_ENCODING;
 use store_api::region_engine::{PrepareRequest, RegionEngine, RegionScanner};
 use store_api::region_request::{
     AlterKind, RegionAlterRequest, RegionBulkInsertsRequest, RegionCompactRequest,
-    RegionPutRequest, RegionRequest, SetRegionOption,
+    RegionOpenRequest, RegionPutRequest, RegionRequest, SetRegionOption,
 };
 use store_api::storage::consts::PRIMARY_KEY_COLUMN_NAME;
 use store_api::storage::{
@@ -2782,13 +2782,21 @@ fn build_bulk_insert_request(
 
 #[tokio::test]
 async fn test_bulk_skip_wal_recovery() {
-    check_bulk_skip_wal_recovery(false, false).await;
-    check_bulk_skip_wal_recovery(false, true).await;
-    check_bulk_skip_wal_recovery(true, false).await;
-    check_bulk_skip_wal_recovery(true, true).await;
+    check_bulk_skip_wal_recovery(false, false, false).await;
+    check_bulk_skip_wal_recovery(false, true, false).await;
+    check_bulk_skip_wal_recovery(true, false, false).await;
+    check_bulk_skip_wal_recovery(true, true, false).await;
 }
 
-async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
+#[tokio::test]
+async fn test_bulk_skip_wal_close_recovery() {
+    check_bulk_skip_wal_recovery(false, false, true).await;
+    check_bulk_skip_wal_recovery(false, true, true).await;
+    check_bulk_skip_wal_recovery(true, false, true).await;
+    check_bulk_skip_wal_recovery(true, true, true).await;
+}
+
+async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool, close: bool) {
     let mut env = TestEnv::new().await;
     let engine = env.create_engine(MitoConfig::default()).await;
     let region_id = RegionId::new(1, 1);
@@ -2839,7 +2847,41 @@ async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
             u64::from(!skip_wal)
         );
     }
-    reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+    let engine = if close {
+        reopen_region(&engine, region_id, table_dir, false, HashMap::new()).await;
+        assert_eq!(
+            region.version().flushed_sequence,
+            if flush || skip_wal { 4 } else { 0 }
+        );
+        engine
+    } else {
+        // Stopping the engine directly exercises recovery without close-time flush.
+        let engine = env.reopen_engine(engine, MitoConfig::default()).await;
+        engine
+            .handle_request(
+                region_id,
+                RegionRequest::Open(RegionOpenRequest {
+                    engine: String::new(),
+                    table_dir,
+                    path_type: store_api::region_request::PathType::Bare,
+                    options: HashMap::new(),
+                    skip_wal_replay: false,
+                    checkpoint: None,
+                    requirements: Default::default(),
+                }),
+            )
+            .await
+            .unwrap();
+        engine
+    };
+    assert!(
+        !engine
+            .get_region(region_id)
+            .unwrap()
+            .version()
+            .memtables
+            .has_unlogged_writes()
+    );
     let stream = engine
         .scan_to_stream(region_id, ScanRequest::default())
         .await
@@ -2851,7 +2893,7 @@ async fn check_bulk_skip_wal_recovery(skip_wal: bool, flush: bool) {
             .iter()
             .map(|b| b.num_rows())
             .sum::<usize>(),
-        if skip_wal && !flush { 0 } else { 4 }
+        if skip_wal && !flush && !close { 0 } else { 4 }
     );
 }
 
