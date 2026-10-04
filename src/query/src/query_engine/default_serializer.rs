@@ -12,7 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -22,14 +21,14 @@ use common_function::function::FunctionContext;
 use common_function::function_registry::FUNCTION_REGISTRY;
 use common_query::error::RegisterUdfSnafu;
 use common_query::logical_plan::SubstraitPlanDecoder;
-use datafusion::catalog::CatalogProviderList;
-use datafusion::common::DataFusionError;
+use datafusion::catalog::{CatalogProviderList, TableProvider};
+use datafusion::common::{DFSchema, DataFusionError, TableReference, not_impl_err, substrait_err};
 use datafusion::error::Result;
 use datafusion::execution::context::SessionState;
 use datafusion::execution::registry::SerializerRegistry;
 use datafusion::execution::{FunctionRegistry, SessionStateBuilder};
-use datafusion::logical_expr::LogicalPlan;
-use datafusion_expr::UserDefinedLogicalNode;
+use datafusion::logical_expr::{Extension, LogicalPlan};
+use datafusion_expr::{Expr, UserDefinedLogicalNode};
 use greptime_proto::substrait_extension::MergeScan as PbMergeScan;
 use promql::functions::{
     AbsentOverTime, AvgOverTime, Changes, CountOverTime, Delta, Deriv, DoubleExponentialSmoothing,
@@ -49,8 +48,13 @@ use promql::functions::{
 use prost::Message;
 use session::context::{QueryContext, QueryContextRef};
 use snafu::ResultExt;
+use substrait::df_logical_plan::consumer::{DefaultSubstraitConsumer, SubstraitConsumer};
+use substrait::error::{DecodeDfPlanSnafu, DecodeRelSnafu};
 use substrait::extension_serializer::ExtensionSerializer;
-use substrait::{DFLogicalSubstraitConvertor, SubstraitPlan};
+use substrait::substrait_proto_df::proto::{
+    ExtensionLeafRel, ExtensionMultiRel, ExtensionSingleRel, Plan, Type,
+};
+use substrait::{DFLogicalSubstraitConvertor, Extensions, SubstraitPlan};
 
 use crate::dist_plan::MergeScanLogicalPlan;
 use crate::query_engine::QueryEngineState;
@@ -90,7 +94,7 @@ impl SerializerRegistry for DefaultSerializer {
         bytes: &[u8],
     ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
         if name == MergeScanLogicalPlan::name() {
-            // `DefaultSerializer` has no session state; use `MergeScanAwareSerializer` to decode.
+            // This registry has no session state; the query engine decodes `MergeScan` payloads.
             Err(DataFusionError::Substrait(format!(
                 "Unsupported plan node: {name}"
             )))
@@ -100,25 +104,16 @@ impl SerializerRegistry for DefaultSerializer {
     }
 }
 
-/// [`ExtensionSerializer`] with the session state required to decode [`MergeScanLogicalPlan`].
-struct MergeScanAwareSerializer {
-    /// Request state used to decode nested `MergeScan` payloads.
-    session_state: SessionState,
+/// Async `MergeScan` payload decoding over DataFusion's default Substrait consumer.
+struct MergeScanSubstraitConsumer<'a> {
+    inner: DefaultSubstraitConsumer<'a>,
+    /// State of the level being decoded; payload states are rebuilt from it.
+    session_state: &'a SessionState,
     /// Engine catalog for payload tables; absent for manually built session states.
     catalog_manager: Option<CatalogManagerRef>,
 }
 
-impl fmt::Debug for MergeScanAwareSerializer {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // `dyn CatalogManager` is not `Debug`.
-        f.debug_struct("MergeScanAwareSerializer")
-            .field("session_state", &self.session_state)
-            .field("has_catalog_manager", &self.catalog_manager.is_some())
-            .finish()
-    }
-}
-
-impl MergeScanAwareSerializer {
+impl MergeScanSubstraitConsumer<'_> {
     fn query_ctx(&self) -> QueryContextRef {
         self.session_state
             .config()
@@ -126,9 +121,7 @@ impl MergeScanAwareSerializer {
             .unwrap_or_else(QueryContext::arc)
     }
 
-    /// Rebuilds state for recursive payload decoding with request catalog/schema defaults.
-    ///
-    /// Re-register Greptime functions after each build to preserve bindings over DataFusion aliases.
+    /// Rebuilds payload state with request defaults and re-registers Greptime function bindings.
     fn payload_state(&self, catalog_list: Arc<dyn CatalogProviderList>) -> Result<SessionState> {
         let query_ctx = self.query_ctx();
         let mut config = self.session_state.config().clone();
@@ -140,10 +133,6 @@ impl MergeScanAwareSerializer {
 
         let mut state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_config(config)
-            .with_serializer_registry(Arc::new(Self {
-                session_state: self.session_state.clone(),
-                catalog_manager: self.catalog_manager.clone(),
-            }))
             .with_catalog_list(catalog_list)
             .build();
         register_greptime_functions(&mut state, &query_ctx).map_err(DataFusionError::from)?;
@@ -155,80 +144,154 @@ impl MergeScanAwareSerializer {
     ///
     /// Do not fall back after an engine-catalog failure: it can bind payload tables to the request
     /// region with the wrong schema. Manually built states lack that catalog and use the request list.
-    fn decode_payload(&self, payload: Vec<u8>) -> Result<LogicalPlan> {
-        if let Some(catalog_manager) = &self.catalog_manager {
+    async fn decode_payload(&self, payload: Vec<u8>) -> Result<LogicalPlan> {
+        let state = if let Some(catalog_manager) = &self.catalog_manager {
             let engine_catalog = Arc::new(
                 catalog::table_source::dummy_catalog::DummyCatalogList::new_with_query_ctx(
                     catalog_manager.clone(),
                     self.query_ctx(),
                 ),
             );
-            return decode_sub_plan(payload, self.payload_state(engine_catalog)?);
-        }
+            self.payload_state(engine_catalog)?
+        } else {
+            self.payload_state(self.session_state.catalog_list().clone())?
+        };
 
-        decode_sub_plan(
-            payload,
-            self.payload_state(self.session_state.catalog_list().clone())?,
-        )
+        decode_plan(Bytes::from(payload), state)
+            .await
+            .map_err(|e| DataFusionError::External(Box::new(e)))
     }
 }
 
-impl SerializerRegistry for MergeScanAwareSerializer {
-    fn serialize_logical_plan(&self, node: &dyn UserDefinedLogicalNode) -> Result<Vec<u8>> {
-        DefaultSerializer.serialize_logical_plan(node)
+#[async_trait::async_trait]
+impl SubstraitConsumer for MergeScanSubstraitConsumer<'_> {
+    async fn resolve_table_ref(
+        &self,
+        table_ref: &TableReference,
+    ) -> Result<Option<Arc<dyn TableProvider>>> {
+        self.inner.resolve_table_ref(table_ref).await
     }
 
-    fn deserialize_logical_plan(
+    fn get_extensions(&self) -> &Extensions {
+        self.inner.get_extensions()
+    }
+
+    fn get_function_registry(&self) -> &impl FunctionRegistry {
+        self.inner.get_function_registry()
+    }
+
+    fn push_outer_schema(&self, schema: Arc<DFSchema>) {
+        self.inner.push_outer_schema(schema)
+    }
+
+    fn pop_outer_schema(&self) {
+        self.inner.pop_outer_schema()
+    }
+
+    fn get_outer_schema(&self, steps_out: usize) -> Option<Arc<DFSchema>> {
+        self.inner.get_outer_schema(steps_out)
+    }
+
+    fn push_lambda_parameters(
         &self,
-        name: &str,
-        bytes: &[u8],
-    ) -> Result<Arc<dyn UserDefinedLogicalNode>> {
-        if name != MergeScanLogicalPlan::name() {
-            return DefaultSerializer.deserialize_logical_plan(name, bytes);
+        lambda_parameters: &[Type],
+        input_schema: &DFSchema,
+    ) -> Result<Vec<String>> {
+        self.inner
+            .push_lambda_parameters(lambda_parameters, input_schema)
+    }
+
+    fn pop_lambda_parameters(&self) {
+        self.inner.pop_lambda_parameters()
+    }
+
+    fn lambda_variable(&self, steps_out: usize, field_idx: usize) -> Result<Expr> {
+        self.inner.lambda_variable(steps_out, field_idx)
+    }
+
+    async fn consume_extension_leaf(&self, rel: &ExtensionLeafRel) -> Result<LogicalPlan> {
+        // Unknown and detail-less leaves keep the default consumer's errors.
+        let Some(detail) = rel.detail.as_ref() else {
+            return self.inner.consume_extension_leaf(rel).await;
+        };
+        if detail.type_url != MergeScanLogicalPlan::name() {
+            return self.inner.consume_extension_leaf(rel).await;
         }
 
-        let merge_scan = PbMergeScan::decode(bytes).map_err(|e| {
+        let merge_scan = PbMergeScan::decode(detail.value.as_ref()).map_err(|e| {
             DataFusionError::Substrait(format!("Failed to decode the MergeScan plan node: {e}"))
         })?;
 
-        let input = self.decode_payload(merge_scan.input)?;
+        let input = self.decode_payload(merge_scan.input).await?;
 
         // `PbMergeScan` lacks `partition_cols`; decoded plans lose this optimization and may repartition.
-        Ok(Arc::new(MergeScanLogicalPlan::new(
-            input,
-            merge_scan.is_placeholder,
-            Default::default(),
-        )))
+        Ok(
+            MergeScanLogicalPlan::new(input, merge_scan.is_placeholder, Default::default())
+                .into_logical_plan(),
+        )
+    }
+
+    // Keep child dispatch on this consumer; delegating the parent bypasses async MergeScan decoding.
+    async fn consume_extension_single(&self, rel: &ExtensionSingleRel) -> Result<LogicalPlan> {
+        let Some(detail) = &rel.detail else {
+            return substrait_err!("Unexpected empty detail in ExtensionSingleRel");
+        };
+        let plan = self
+            .session_state
+            .serializer_registry()
+            .deserialize_logical_plan(&detail.type_url, &detail.value)?;
+        let Some(input_rel) = &rel.input else {
+            return substrait_err!(
+                "ExtensionSingleRel missing input rel, try using ExtensionLeafRel instead"
+            );
+        };
+        let input_plan = self.consume_rel(input_rel).await?;
+        let plan = plan.with_exprs_and_inputs(plan.expressions(), vec![input_plan])?;
+        Ok(LogicalPlan::Extension(Extension { node: plan }))
+    }
+
+    // Multi-input extension children likewise need this consumer's dispatch.
+    async fn consume_extension_multi(&self, rel: &ExtensionMultiRel) -> Result<LogicalPlan> {
+        let Some(detail) = &rel.detail else {
+            return substrait_err!("Unexpected empty detail in ExtensionMultiRel");
+        };
+        let plan = self
+            .session_state
+            .serializer_registry()
+            .deserialize_logical_plan(&detail.type_url, &detail.value)?;
+        let mut inputs = Vec::with_capacity(rel.inputs.len());
+        for input in &rel.inputs {
+            let input_plan = self.consume_rel(input).await?;
+            inputs.push(input_plan);
+        }
+        let plan = plan.with_exprs_and_inputs(plan.expressions(), inputs)?;
+        Ok(LogicalPlan::Extension(Extension { node: plan }))
     }
 }
 
-/// Bridges synchronous serializer callbacks to asynchronous payload decoding.
-///
-/// Nested `MergeScan` payloads recurse through this bridge, so plain nested `block_on` is invalid.
-/// Multi-thread runtimes use `block_in_place`; current-thread or absent runtimes use a fresh thread.
-/// The latter assumes catalog resolution does not require the caller runtime and has no cancellation.
-fn decode_sub_plan(sub_plan: Vec<u8>, session_state: SessionState) -> Result<LogicalPlan> {
-    let decode = async move {
-        DFLogicalSubstraitConvertor
-            .decode(Bytes::from(sub_plan), session_state)
-            .await
-            .map_err(|e| DataFusionError::External(Box::new(e)))
+/// Decode with async MergeScan handling, preserving the default consumer's extension checks.
+async fn decode_plan(bytes: Bytes, state: SessionState) -> substrait::error::Result<LogicalPlan> {
+    let plan = Plan::decode(bytes).context(DecodeRelSnafu)?;
+    let extensions = Extensions::try_from(&plan.extensions).context(DecodeDfPlanSnafu)?;
+    if !extensions.type_variations.is_empty() {
+        return not_impl_err!("Type variation extensions are not supported")
+            .context(DecodeDfPlanSnafu);
+    }
+
+    // Payloads need the engine catalog rather than the request's region-bound catalog.
+    let catalog_manager = state
+        .config()
+        .get_extension::<QueryEngineState>()
+        .map(|engine_state| engine_state.catalog_manager().clone());
+    let consumer = MergeScanSubstraitConsumer {
+        inner: DefaultSubstraitConsumer::new(&extensions, &state),
+        session_state: &state,
+        catalog_manager,
     };
 
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(decode))
-        }
-        _ => std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|e| DataFusionError::External(Box::new(e)))?;
-            runtime.block_on(decode)
-        })
-        .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
-    }
+    DFLogicalSubstraitConvertor
+        .decode_with_consumer(&plan, &state, &consumer)
+        .await
 }
 
 /// The datafusion `[LogicalPlan]` decoder.
@@ -359,26 +422,13 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
         catalog_list: Arc<dyn CatalogProviderList>,
         optimize: bool,
     ) -> common_query::error::Result<LogicalPlan> {
-        let session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
+        let mut session_state = SessionStateBuilder::new_from_existing(self.session_state.clone())
             .with_catalog_list(catalog_list)
-            .build();
-
-        // Payloads need the engine catalog rather than the request's region-bound catalog.
-        let catalog_manager = session_state
-            .config()
-            .get_extension::<QueryEngineState>()
-            .map(|engine_state| engine_state.catalog_manager().clone());
-        let mut session_state = SessionStateBuilder::new_from_existing(session_state.clone())
-            .with_serializer_registry(Arc::new(MergeScanAwareSerializer {
-                session_state,
-                catalog_manager,
-            }))
             .build();
         // Re-register after the build to avoid Greptime UDF alias collisions.
         register_greptime_functions(&mut session_state, &self.query_ctx)?;
 
-        let logical_plan = DFLogicalSubstraitConvertor
-            .decode(message, session_state)
+        let logical_plan = decode_plan(message, session_state)
             .await
             .map_err(BoxedError::new)
             .context(common_query::error::DecodePlanSnafu)?;
@@ -395,21 +445,34 @@ impl SubstraitPlanDecoder for DefaultPlanDecoder {
 
 #[cfg(test)]
 mod tests {
-    use catalog::RegisterTableRequest;
+    use std::any::Any;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use catalog::error::{QueryAccessDeniedSnafu, Result as CatalogResult};
+    use catalog::{CatalogManager, RegisterTableRequest};
     use common_catalog::consts::{DEFAULT_CATALOG_NAME, DEFAULT_SCHEMA_NAME, NUMBERS_TABLE_ID};
+    use common_function::aggrs::aggr_wrapper::StateWrapper;
+    use common_function::aggrs::aggr_wrapper::fix_order::FixStateUdafOrderingAnalyzer;
+    use common_query::logical_plan::SubstraitPlanDecoderRef;
     use common_query::native_histogram::native_histogram_value_type;
     use common_time::Timezone;
     use datafusion::catalog::TableProvider;
     use datafusion::datasource::MemTable;
     use datafusion::logical_expr::Extension;
-    use datafusion_expr::expr::{Cast, ScalarFunction};
-    use datafusion_expr::{Expr, LogicalPlanBuilder, LogicalTableSource, ScalarUDF, col, lit};
+    use datafusion::optimizer::AnalyzerRule;
+    use datafusion_expr::expr::{AggregateFunction, Cast, InSubquery, ScalarFunction, Sort};
+    use datafusion_expr::{
+        AggregateUDF, Expr, LogicalPlanBuilder, LogicalTableSource, ScalarUDF, Subquery, col, lit,
+    };
     use datatypes::arrow::datatypes::{
         DataType as ArrowDataType, Field, Schema, SchemaRef, TimeUnit,
     };
     use datatypes::data_type::DataType;
-    use promql::extension_plan::RangeManipulate;
+    use futures::stream::BoxStream;
+    use promql::extension_plan::{RangeManipulate, SeriesNormalize, UnionDistinctOn};
     use session::context::QueryContext;
+    use table::TableRef;
+    use table::metadata::{TableId, TableInfoRef};
     use table::table::numbers::{NUMBERS_TABLE_NAME, NumbersTable};
 
     use super::*;
@@ -1047,5 +1110,628 @@ mod tests {
 
             assert_only_function_is_greptime_date_format(merge_scan.input(), &query_ctx);
         }
+    }
+
+    /// Registers a `numbers` table in a memory catalog manager.
+    fn numbers_catalog_manager() -> CatalogManagerRef {
+        let catalog_manager = catalog::memory::new_memory_catalog_manager().unwrap();
+        catalog_manager
+            .register_table_sync(RegisterTableRequest {
+                catalog: DEFAULT_CATALOG_NAME.to_string(),
+                schema: DEFAULT_SCHEMA_NAME.to_string(),
+                table_name: NUMBERS_TABLE_NAME.to_string(),
+                table_id: NUMBERS_TABLE_ID,
+                table: NumbersTable::table(NUMBERS_TABLE_ID),
+            })
+            .unwrap();
+        catalog_manager
+    }
+
+    /// Scan plan over the `numbers` schema shared by the fixtures below.
+    fn numbers_scan() -> LogicalPlan {
+        LogicalPlanBuilder::scan(
+            NUMBERS_TABLE_NAME,
+            Arc::new(LogicalTableSource::new(
+                NumbersTable::schema().arrow_schema().clone(),
+            )),
+            None,
+        )
+        .unwrap()
+        .build()
+        .unwrap()
+    }
+
+    fn merge_scan(input: LogicalPlan, is_placeholder: bool) -> LogicalPlan {
+        MergeScanLogicalPlan::new(input, is_placeholder, Default::default()).into_logical_plan()
+    }
+
+    fn encode_plan(plan: &LogicalPlan) -> Bytes {
+        DFLogicalSubstraitConvertor
+            .encode(plan, DefaultSerializer)
+            .unwrap()
+    }
+
+    fn plan_decoder(engine: &dyn crate::QueryEngine) -> SubstraitPlanDecoderRef {
+        engine
+            .engine_context(QueryContext::arc())
+            .new_plan_decoder()
+            .unwrap()
+    }
+
+    /// Request catalog that resolves any table to a provider the payload must not use.
+    fn request_catalog_list() -> Arc<dyn CatalogProviderList> {
+        Arc::new(DummyCatalogList::with_table_provider(Arc::new(
+            mock_table_provider(1.into()),
+        )))
+    }
+
+    /// How [`InterceptingCatalogManager`] resolves payload tables.
+    enum TableResolution {
+        /// Fails with the frontend's cross-catalog access error.
+        AccessDenied,
+        /// Resolves once another task on the caller runtime signals.
+        AwaitSignal {
+            notify: Arc<tokio::sync::Notify>,
+            entered: Arc<AtomicBool>,
+        },
+        /// Never resolves, holding `live` until the caller drops the decode future.
+        Pending {
+            live: Arc<AtomicUsize>,
+            entered: Arc<AtomicBool>,
+        },
+    }
+
+    /// Engine catalog manager that takes over `table` resolution while delegating the rest.
+    struct InterceptingCatalogManager {
+        inner: CatalogManagerRef,
+        resolution: TableResolution,
+    }
+
+    #[async_trait::async_trait]
+    impl CatalogManager for InterceptingCatalogManager {
+        fn as_any(&self) -> &dyn Any {
+            self.inner.as_any()
+        }
+
+        async fn catalog_names(&self) -> CatalogResult<Vec<String>> {
+            self.inner.catalog_names().await
+        }
+
+        async fn schema_names(
+            &self,
+            catalog: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> CatalogResult<Vec<String>> {
+            self.inner.schema_names(catalog, query_ctx).await
+        }
+
+        async fn table_names(
+            &self,
+            catalog: &str,
+            schema: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> CatalogResult<Vec<String>> {
+            self.inner.table_names(catalog, schema, query_ctx).await
+        }
+
+        async fn catalog_exists(&self, catalog: &str) -> CatalogResult<bool> {
+            self.inner.catalog_exists(catalog).await
+        }
+
+        async fn schema_exists(
+            &self,
+            catalog: &str,
+            schema: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> CatalogResult<bool> {
+            self.inner.schema_exists(catalog, schema, query_ctx).await
+        }
+
+        async fn table_exists(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> CatalogResult<bool> {
+            self.inner
+                .table_exists(catalog, schema, table, query_ctx)
+                .await
+        }
+
+        async fn table(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table_name: &str,
+            query_ctx: Option<&QueryContext>,
+        ) -> CatalogResult<Option<TableRef>> {
+            match &self.resolution {
+                TableResolution::AccessDenied => QueryAccessDeniedSnafu {
+                    catalog: catalog.to_string(),
+                    schema: schema.to_string(),
+                }
+                .fail(),
+                TableResolution::AwaitSignal { notify, entered } => {
+                    entered.store(true, Ordering::SeqCst);
+                    notify.notified().await;
+                    self.inner
+                        .table(catalog, schema, table_name, query_ctx)
+                        .await
+                }
+                TableResolution::Pending { live, entered } => {
+                    entered.store(true, Ordering::SeqCst);
+                    let _guard = LiveGuard::new(live);
+                    std::future::pending::<()>().await;
+                    unreachable!("pending resolution never completes")
+                }
+            }
+        }
+
+        async fn table_info_by_id(&self, table_id: TableId) -> CatalogResult<Option<TableInfoRef>> {
+            self.inner.table_info_by_id(table_id).await
+        }
+
+        async fn tables_by_ids(
+            &self,
+            catalog: &str,
+            schema: &str,
+            table_ids: &[TableId],
+        ) -> CatalogResult<Vec<TableRef>> {
+            self.inner.tables_by_ids(catalog, schema, table_ids).await
+        }
+
+        fn tables<'a>(
+            &'a self,
+            catalog: &'a str,
+            schema: &'a str,
+            query_ctx: Option<&'a QueryContext>,
+        ) -> BoxStream<'a, CatalogResult<TableRef>> {
+            self.inner.tables(catalog, schema, query_ctx)
+        }
+    }
+
+    /// Counts live payload resolutions, so a dropped decode leaves no work behind.
+    struct LiveGuard(Arc<AtomicUsize>);
+
+    impl LiveGuard {
+        fn new(live: &Arc<AtomicUsize>) -> Self {
+            let live = live.clone();
+            live.fetch_add(1, Ordering::SeqCst);
+            Self(live)
+        }
+    }
+
+    impl Drop for LiveGuard {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn engine_with_intercepting_catalog(
+        resolution: TableResolution,
+    ) -> Arc<dyn crate::QueryEngine> {
+        let catalog_manager: CatalogManagerRef = Arc::new(InterceptingCatalogManager {
+            inner: numbers_catalog_manager(),
+            resolution,
+        });
+        QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine()
+    }
+
+    /// Decoding must not need a Tokio runtime: the public path is only `async`.
+    #[test]
+    fn test_serializer_decode_nested_merge_scan_without_tokio_runtime() {
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let plan = merge_scan(merge_scan(numbers_scan(), false), true);
+        let bytes = encode_plan(&plan);
+
+        let decoded = futures::executor::block_on(plan_decoder(engine.as_ref()).decode(
+            bytes,
+            request_catalog_list(),
+            false,
+        ))
+        .unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 2);
+    }
+
+    /// Payload decoding must not block a multi-thread runtime either.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_serializer_decode_deeply_nested_merge_scan_without_blocking() {
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let plan = merge_scan(
+            merge_scan(
+                LogicalPlanBuilder::from(merge_scan(numbers_scan(), false))
+                    .filter(col("number").lt(lit(10u32)))
+                    .unwrap()
+                    .build()
+                    .unwrap(),
+                false,
+            ),
+            false,
+        );
+        let bytes = encode_plan(&plan);
+
+        let decoded = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 3);
+    }
+
+    /// A payload lookup parked on a caller-runtime task must keep the decode async.
+    ///
+    /// The engine catalog resolves only once a task spawned on this runtime signals it, so a
+    /// blocking bridge would deadlock the test instead of decoding.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_serializer_decode_merge_scan_awaits_caller_runtime_task() {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(AtomicBool::new(false));
+        let engine = engine_with_intercepting_catalog(TableResolution::AwaitSignal {
+            notify: notify.clone(),
+            entered: entered.clone(),
+        });
+        let plan = merge_scan(numbers_scan(), false);
+        let bytes = encode_plan(&plan);
+
+        let decoder = plan_decoder(engine.as_ref());
+        let mut decode = Box::pin(decoder.decode(bytes, request_catalog_list(), false));
+        // First poll reaches the payload table lookup, which waits for the signal below.
+        assert!(futures::poll!(decode.as_mut()).is_pending());
+        assert!(entered.load(Ordering::SeqCst));
+
+        let signal = tokio::spawn(async move {
+            notify.notify_waiters();
+        });
+        tokio::task::yield_now().await;
+        let decoded = decode.await.unwrap();
+        signal.await.unwrap();
+
+        assert_eq!(decoded.to_string(), plan.to_string());
+    }
+
+    /// Dropping a decode parked on the catalog cancels it; no detached job keeps running.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_serializer_decode_dropped_pending_payload_leaves_no_job() {
+        let live = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(AtomicBool::new(false));
+        let engine = engine_with_intercepting_catalog(TableResolution::Pending {
+            live: live.clone(),
+            entered: entered.clone(),
+        });
+        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
+
+        let decoder = plan_decoder(engine.as_ref());
+        {
+            let mut decode = Box::pin(decoder.decode(bytes, request_catalog_list(), false));
+            assert!(futures::poll!(decode.as_mut()).is_pending());
+            assert_eq!(live.load(Ordering::SeqCst), 1);
+            assert!(entered.load(Ordering::SeqCst));
+        }
+
+        assert_eq!(
+            live.load(Ordering::SeqCst),
+            0,
+            "dropping the decode future must cancel its payload work"
+        );
+    }
+
+    /// A payload table missing from the engine catalog must not fall back to the request catalog.
+    #[tokio::test]
+    async fn test_serializer_decode_payload_missing_in_engine_catalog() {
+        // The engine catalog deliberately has no `numbers` table.
+        let catalog_manager: CatalogManagerRef =
+            catalog::memory::new_memory_catalog_manager().unwrap();
+        let engine = QueryEngineFactory::new(
+            catalog_manager,
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
+
+        let err = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
+
+        let err = format!("{err:?}");
+        assert!(
+            err.contains("Table not found: greptime.public.numbers"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A payload table denied by the engine catalog must not fall back to the request catalog.
+    #[tokio::test]
+    async fn test_serializer_decode_payload_access_denied_in_engine_catalog() {
+        let engine = engine_with_intercepting_catalog(TableResolution::AccessDenied);
+        let bytes = encode_plan(&merge_scan(numbers_scan(), false));
+
+        let err = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
+
+        let err = format!("{err:?}");
+        assert!(
+            err.contains("Illegal access to catalog"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// `MergeScan` decodes under an ordinary single-input extension parent.
+    #[tokio::test]
+    async fn test_serializer_decode_merge_scan_under_series_normalize() {
+        let outer = merge_scan(numbers_scan(), false);
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(SeriesNormalize::new(
+                0,
+                "number".to_string(),
+                false,
+                Vec::new(),
+                outer.clone(),
+            )),
+        });
+        let bytes = encode_plan(&plan);
+
+        let decoded = plan_decoder(
+            QueryEngineFactory::new(
+                numbers_catalog_manager(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            )
+            .query_engine()
+            .as_ref(),
+        )
+        .decode(bytes, request_catalog_list(), false)
+        .await
+        .unwrap();
+
+        let LogicalPlan::Extension(extension) = &decoded else {
+            panic!("Expect a SeriesNormalize plan, got: {decoded}");
+        };
+        let normalize = extension
+            .node
+            .as_any()
+            .downcast_ref::<SeriesNormalize>()
+            .expect("Expect a SeriesNormalize plan node");
+        assert_eq!(normalize.inputs()[0].to_string(), outer.to_string());
+    }
+
+    /// `MergeScan` decodes under an ordinary multi-input extension parent.
+    #[tokio::test]
+    async fn test_serializer_decode_merge_scan_under_union_distinct_on() {
+        let left = merge_scan(numbers_scan(), false);
+        let right = merge_scan(numbers_scan(), true);
+        let plan = LogicalPlan::Extension(Extension {
+            node: Arc::new(
+                UnionDistinctOn::try_new(left.clone(), right.clone(), vec![], 0).unwrap(),
+            ),
+        });
+        let bytes = encode_plan(&plan);
+
+        let decoded = plan_decoder(
+            QueryEngineFactory::new(
+                numbers_catalog_manager(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            )
+            .query_engine()
+            .as_ref(),
+        )
+        .decode(bytes, request_catalog_list(), false)
+        .await
+        .unwrap();
+
+        let LogicalPlan::Extension(extension) = &decoded else {
+            panic!("Expect a UnionDistinctOn plan, got: {decoded}");
+        };
+        let union = extension
+            .node
+            .as_any()
+            .downcast_ref::<UnionDistinctOn>()
+            .expect("Expect a UnionDistinctOn plan node");
+        assert_eq!(union.inputs()[0].to_string(), left.to_string());
+        assert_eq!(union.inputs()[1].to_string(), right.to_string());
+    }
+
+    /// `MergeScan` inside a subquery still decodes through the wrapper consumer.
+    ///
+    /// Correlated outer references cannot be covered here: the in-repo Substrait producer
+    /// rejects `Expr::OuterReferenceColumn`, so no supported helper can build such a plan.
+    #[tokio::test]
+    async fn test_serializer_decode_merge_scan_inside_subquery() {
+        let inner = merge_scan(numbers_scan(), false);
+        let payload = LogicalPlanBuilder::from(numbers_scan())
+            .filter(Expr::InSubquery(InSubquery::new(
+                Box::new(col("number")),
+                Subquery {
+                    subquery: Arc::new(inner.clone()),
+                    outer_ref_columns: vec![],
+                    spans: Default::default(),
+                },
+                false,
+            )))
+            .unwrap()
+            .build()
+            .unwrap();
+        let plan = merge_scan(payload.clone(), false);
+        let bytes = encode_plan(&plan);
+
+        let decoded = plan_decoder(
+            QueryEngineFactory::new(
+                numbers_catalog_manager(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                QueryOptions::default(),
+            )
+            .query_engine()
+            .as_ref(),
+        )
+        .decode(bytes, request_catalog_list(), false)
+        .await
+        .unwrap();
+
+        assert_eq!(decoded.to_string().matches("MergeScan [").count(), 2);
+        assert!(
+            decoded.to_string().contains("IN (<subquery>)"),
+            "expect the decoded subquery filter, got: {decoded}"
+        );
+    }
+
+    /// Recursive payload decoding must restore ordered state aggregates, including their schema.
+    #[tokio::test]
+    async fn test_serializer_decode_payload_keeps_state_udaf_ordering() {
+        let last_value = (*datafusion::functions_aggregate::first_last::last_value_udaf()).clone();
+        let state_udaf = AggregateUDF::new_from_impl(StateWrapper::new(last_value).unwrap());
+        let aggr_expr = Expr::AggregateFunction(AggregateFunction::new_udf(
+            Arc::new(state_udaf),
+            vec![col("number")],
+            false,
+            None,
+            vec![Sort::new(col("number"), true, true)],
+            None,
+        ));
+        let payload = LogicalPlanBuilder::from(numbers_scan())
+            .aggregate(Vec::<Expr>::new(), vec![aggr_expr])
+            .unwrap()
+            .build()
+            .unwrap();
+        let bytes = encode_plan(&payload);
+        let encoded = Plan::decode(bytes.clone()).unwrap();
+        let extensions = Extensions::try_from(&encoded.extensions).unwrap();
+        let catalog_manager = numbers_catalog_manager();
+        let engine = QueryEngineFactory::new(
+            catalog_manager.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let state = engine.engine_context(QueryContext::arc()).state().clone();
+        let consumer = MergeScanSubstraitConsumer {
+            inner: DefaultSubstraitConsumer::new(&extensions, &state),
+            session_state: &state,
+            catalog_manager: Some(catalog_manager),
+        };
+        let decoded = consumer.decode_payload(bytes.to_vec()).await.unwrap();
+
+        let fixed_payload = FixStateUdafOrderingAnalyzer {}
+            .analyze(payload.clone(), &Default::default())
+            .unwrap();
+        assert_ne!(
+            fixed_payload.schema().as_arrow(),
+            payload.schema().as_arrow()
+        );
+        assert_eq!(
+            decoded.schema().as_arrow(),
+            fixed_payload.schema().as_arrow()
+        );
+        let LogicalPlan::Aggregate(aggregate) = &decoded else {
+            panic!("Expected an aggregate payload, got: {decoded}");
+        };
+        let Expr::AggregateFunction(function) = &aggregate.aggr_expr[0] else {
+            panic!("Expected a state aggregate, got: {:?}", aggregate.aggr_expr);
+        };
+        assert!(function.func.inner().is::<StateWrapper>());
+        assert_eq!(function.params.order_by.len(), 1);
+        let ArrowDataType::Struct(fields) = decoded.schema().field(0).data_type() else {
+            panic!("Expected the ordered aggregate state type");
+        };
+        assert_eq!(fields.len(), 3);
+        assert_eq!(fields[1].name(), "number");
+        assert!(fields[1].is_nullable());
+    }
+
+    /// Type variation extensions keep being rejected while decoding.
+    #[tokio::test]
+    async fn test_serializer_decode_rejects_type_variations() {
+        use substrait::substrait_proto_df::proto::extensions::SimpleExtensionDeclaration;
+        use substrait::substrait_proto_df::proto::extensions::simple_extension_declaration::{
+            ExtensionTypeVariation, MappingType,
+        };
+
+        let engine = QueryEngineFactory::new(
+            numbers_catalog_manager(),
+            None,
+            None,
+            None,
+            None,
+            false,
+            QueryOptions::default(),
+        )
+        .query_engine();
+        let encoded = encode_plan(&merge_scan(numbers_scan(), false));
+        let mut substrait_plan = Plan::decode(encoded).unwrap();
+        substrait_plan.extensions.push(SimpleExtensionDeclaration {
+            mapping_type: Some(MappingType::ExtensionTypeVariation(
+                ExtensionTypeVariation {
+                    extension_urn_reference: u32::MAX,
+                    type_variation_anchor: 1,
+                    name: "u!variation".to_string(),
+                },
+            )),
+        });
+        let bytes = Bytes::from(substrait_plan.encode_to_vec());
+
+        let err = plan_decoder(engine.as_ref())
+            .decode(bytes, request_catalog_list(), false)
+            .await
+            .unwrap_err();
+
+        let err = format!("{err:?}");
+        assert!(
+            err.contains("Type variation extensions are not supported"),
+            "unexpected error: {err}"
+        );
     }
 }
